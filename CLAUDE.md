@@ -212,7 +212,8 @@ reviewable.
 
 - Linux, 4 CPUs and 15 GB RAM: **at most two concurrent lanes**, each with
   `CARGO_BUILD_JOBS=2` and its own `CARGO_TARGET_DIR` under the session scratchpad, deleted when
-  the lane is done. `/dev/shm` is RAM: use it only when free memory clearly allows.
+  the lane is done. **Build on disk, not `/dev/shm`**: `/dev/shm` is RAM shared by every lane, and
+  three lane targets there once exhausted memory and got a compiler killed.
 - No macOS, no Tart. Docker only for the PostgreSQL contract stage and the store lab (images
   from `mirror.gcr.io`, pinned by digest; ADR 0035): start `dockerd` first, and a missing daemon
   fails the stage closed. Provider tests use the in-memory fake and `mayfly-fake-tart`;

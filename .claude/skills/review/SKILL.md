@@ -65,7 +65,7 @@ arm (plan §6 rule 6).
 
 **Event sourcing** (plan §5, fnd §6): `AggregateStore::save` is the only caller of
 `Journal::append`, pinned by an architecture rule; one transaction holds expected-revision
-checks, events, synchronous projections, outbox rows, the command receipt and the inbox entry
+checks, events (including `DirectiveIssued`), inline projections, dispatch marks, the command receipt (a refusal bound to its read revision) and the inbox entry
 (a partial commit visible to any reader is HIGH); reactors are notified only after commit,
 idempotent and never replayed; `with_version_retry` retries only `WrongExpectedVersion`. Events
 are past tense, `EVENT_TYPE` + `SCHEMA_VERSION`, registered, with a golden fixture per version;
@@ -102,9 +102,10 @@ transaction **before** `DeleteMessage` (ack after commit); a redelivered message
 `min(C, TotalAssignedJobs + warm_registered)`, never counting messages or adding
 `TotalRunningJobs`; the poller never waits on VM work; 401/403/429 and Retry-After honoured.
 
-**Outbox and relay** (plan §5.4): the outbox stores a `SecretHandle`, never a JIT config;
-resends reuse the `directive_id`; backoff jitter comes through a port; a timeout records
-`Unknown`.
+**Directives and delivery** (plan §5.4, ADR 0034): a directive is a `DirectiveIssued` event (no
+outbox table) carrying a `SecretHandle`, never a JIT config; durable consumers progress by
+per-stream checkpoints with fenced leases, at least once, never skipping; resends reuse the
+`directive_id`; backoff jitter comes through a port; a timeout records `Unknown`.
 
 **Secrets** (plan §13, D13): `Secret<T>` with redacting `Debug`/`Display` and no `Serialize`;
 no secret in the journal, outbox, logs, metrics, status, diagnostics, argv, a child's env, a

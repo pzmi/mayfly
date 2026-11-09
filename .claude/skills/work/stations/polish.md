@@ -12,7 +12,7 @@ Read `CLAUDE.md` first. Delete comments that:
 
 1. restate the code (`// set the value`)
 2. reference a ticket or a task (`// added for KER-04`)
-3. record who uses the code (`// used by the outbox relay`)
+3. record who uses the code (`// used by the directive consumer`)
 4. mirror a doc comment or add nothing beyond the names
 5. narrate obvious control flow
 6. are commented-out code
