@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 927bb909b7124bb7410e0786e8767b5c3831f024abfccfe25a57cc7b1465baaf # shrinks to inputs = PlanInputs { report: Some(ReportedCapacity { total: Resources { memory_bytes: 18253611008, disk_bytes: 186831077376 }, foreign: Resources { memory_bytes: 0, disk_bytes: 0 }, base: Resources { memory_bytes: 0, disk_bytes: 0 }, vm_slots: 2, foreign_vms: 0, macos_guests: 0, foreign_macos_guests: 0 }), reserves: Resources { memory_bytes: 0, disk_bytes: 0 }, admission_open: true, leases: [LeaseInput { pool: PoolName("p0"), holds: Footprint { resources: Resources { memory_bytes: 0, disk_bytes: 0 }, vms: 1, macos_guests: 1 }, quarantined: false }], pools: [PoolInput { pool: PoolName("p0"), os: Linux, vm: Resources { memory_bytes: 0, disk_bytes: 0 }, open: true, max_running: 2, wanted: 1 }] }

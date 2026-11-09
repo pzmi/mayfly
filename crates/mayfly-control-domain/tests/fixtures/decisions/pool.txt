@@ -1,0 +1,57 @@
+# pool: refusal codes, then the outcome of each determinism case
+code already_draining
+code already_paused
+code decommissioned
+code image_not_verified
+code not_configured
+code not_drained
+code not_draining
+code not_paused
+code not_tripped
+code operator_only
+code stale_revision
+code stale_run
+case already_draining refused already_draining
+case already_paused refused already_paused
+case complete_pool_drain accepted
+  pool_drain_completed/v1 {}
+case configure_pool accepted
+  pool_epoch_advanced/v1 {"epoch":1}
+  pool_configured/v1 {"revision":1,"tier":"trusted","os":"macos","vm_resources":{"memory_bytes":8589934592,"disk_bytes":64424509440},"max_running":2,"min_prepared":0,"breaker_threshold":2,"breaker_window":600000}
+case count_failure accepted
+  attempt_failure_counted/v1 {"attempt_id":"0000000000000000000000000000a001","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","stage":"boot","at":1000}
+case decommission accepted
+  pool_decommissioned/v1 {}
+case decommissioned refused decommissioned
+case failure_outside_window_does_not_trip accepted
+  attempt_failure_counted/v1 {"attempt_id":"0000000000000000000000000000a002","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","stage":"boot","at":700000}
+case failure_trips_breaker accepted
+  attempt_failure_counted/v1 {"attempt_id":"0000000000000000000000000000a002","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","stage":"boot","at":2000}
+  pool_breaker_tripped/v1 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","failures":2,"at":2000}
+case image_not_verified refused image_not_verified
+case newer_epoch_is_recorded accepted
+  pool_epoch_advanced/v1 {"epoch":2}
+  pool_paused/v1 {}
+case not_configured refused not_configured
+case not_drained refused not_drained
+case not_draining refused not_draining
+case not_paused refused not_paused
+case not_tripped refused not_tripped
+case operator_only refused operator_only
+case operator_resets_breaker accepted
+  pool_breaker_reset/v1 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","operator_uid":501}
+case pause_pool accepted
+  pool_paused/v1 {}
+case pin_image accepted
+  image_pinned/v1 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","previous":null,"verified_ref":"000000000000000000000000000000e1"}
+case reconfigure_pool accepted
+  pool_configured/v1 {"revision":2,"tier":"trusted","os":"macos","vm_resources":{"memory_bytes":8589934592,"disk_bytes":64424509440},"max_running":2,"min_prepared":0,"breaker_threshold":2,"breaker_window":600000}
+case resume_pool accepted
+  pool_resumed/v1 {}
+case same_attempt_counted_once accepted
+case same_pin_records_nothing accepted
+case stale_revision refused stale_revision
+case stale_run refused stale_run
+case start_pool_drain accepted
+  pool_drain_started/v1 {}
+case tripped_counts_nothing accepted

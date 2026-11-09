@@ -1,0 +1,13 @@
+{
+  "revision": 1,
+  "tier": "trusted",
+  "os": "linux",
+  "vm_resources": {
+    "memory_bytes": 8589934592,
+    "disk_bytes": 64424509440
+  },
+  "max_running": 2,
+  "min_prepared": 1,
+  "breaker_threshold": 2,
+  "breaker_window": 600000
+}

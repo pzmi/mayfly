@@ -149,6 +149,8 @@ xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro
 mayfly-domain = { proptest = ["std"] }
 # The protocol golden fixtures are JSON (ver section 4).
 mayfly-protocol = { serde_json = ["default"] }
+# Properties of the capacity policy and the Host aggregate over generated inputs (KER-05).
+mayfly-control-domain = { proptest = ["std"] }
 mayfly-adapter-sqlite = { tempfile = ["default"] }
 mayfly-control = { serde = ["default", "derive"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }

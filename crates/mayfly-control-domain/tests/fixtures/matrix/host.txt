@@ -1,0 +1,295 @@
+# host: every named state against every command: accepted events or the refusal code
+unregistered x register_host -> accepted host_epoch_advanced/v1 host_registered/v1
+unregistered x record_newer_report -> refused not_registered
+unregistered x record_stale_report -> refused not_registered
+unregistered x apply_newer_terms -> refused not_registered
+unregistered x reserve_macos -> refused not_registered
+unregistered x reserve_linux -> refused not_registered
+unregistered x grant_activation -> refused not_registered
+unregistered x quarantine_running -> refused not_registered
+unregistered x quarantine_stopped -> refused not_registered
+unregistered x release_vm_deleted -> refused not_registered
+unregistered x release_never_started -> refused not_registered
+unregistered x disk_low -> refused not_registered
+unregistered x disk_ok -> refused not_registered
+unregistered x close_recovering -> refused not_registered
+unregistered x open_recovering -> refused not_registered
+unregistered x start_drain -> refused not_registered
+unregistered x cancel_drain -> refused not_registered
+unregistered x complete_drain -> refused not_registered
+unregistered x force_host -> refused not_registered
+unregistered x force_pool -> refused not_registered
+unregistered x stale_run -> refused not_registered
+registered x register_host -> refused already_registered
+registered x record_newer_report -> accepted capacity_report_applied/v1
+registered x record_stale_report -> accepted capacity_report_applied/v1
+registered x apply_newer_terms -> accepted pool_terms_applied/v1
+registered x reserve_macos -> refused no_capacity_report
+registered x reserve_linux -> refused no_capacity_report
+registered x grant_activation -> refused no_lease
+registered x quarantine_running -> refused no_lease
+registered x quarantine_stopped -> refused no_lease
+registered x release_vm_deleted -> refused no_lease
+registered x release_never_started -> refused no_lease
+registered x disk_low -> accepted disk_low_water_crossed/v1
+registered x disk_ok -> accepted, no event
+registered x close_recovering -> accepted admission_closed/v1
+registered x open_recovering -> accepted, no event
+registered x start_drain -> accepted host_drain_started/v1
+registered x cancel_drain -> refused not_draining
+registered x complete_drain -> refused not_draining
+registered x force_host -> refused not_draining
+registered x force_pool -> refused unknown_pool
+registered x stale_run -> refused stale_run
+reported x register_host -> refused already_registered
+reported x record_newer_report -> accepted capacity_report_applied/v1
+reported x record_stale_report -> accepted, no event
+reported x apply_newer_terms -> accepted pool_terms_applied/v1
+reported x reserve_macos -> refused unknown_pool
+reported x reserve_linux -> refused unknown_pool
+reported x grant_activation -> refused no_lease
+reported x quarantine_running -> refused no_lease
+reported x quarantine_stopped -> refused no_lease
+reported x release_vm_deleted -> refused no_lease
+reported x release_never_started -> refused no_lease
+reported x disk_low -> accepted disk_low_water_crossed/v1
+reported x disk_ok -> accepted, no event
+reported x close_recovering -> accepted admission_closed/v1
+reported x open_recovering -> accepted, no event
+reported x start_drain -> accepted host_drain_started/v1
+reported x cancel_drain -> refused not_draining
+reported x complete_drain -> refused not_draining
+reported x force_host -> refused not_draining
+reported x force_pool -> refused unknown_pool
+reported x stale_run -> refused stale_run
+open x register_host -> refused already_registered
+open x record_newer_report -> accepted capacity_report_applied/v1
+open x record_stale_report -> accepted, no event
+open x apply_newer_terms -> accepted pool_terms_applied/v1
+open x reserve_macos -> accepted slot_reserved/v1
+open x reserve_linux -> accepted slot_reserved/v1
+open x grant_activation -> refused no_lease
+open x quarantine_running -> refused no_lease
+open x quarantine_stopped -> refused no_lease
+open x release_vm_deleted -> refused no_lease
+open x release_never_started -> refused no_lease
+open x disk_low -> accepted disk_low_water_crossed/v1
+open x disk_ok -> accepted, no event
+open x close_recovering -> accepted admission_closed/v1
+open x open_recovering -> accepted, no event
+open x start_drain -> accepted host_drain_started/v1
+open x cancel_drain -> refused not_draining
+open x complete_drain -> refused not_draining
+open x force_host -> refused not_draining
+open x force_pool -> refused terms_open
+open x stale_run -> refused stale_run
+reserved x register_host -> refused already_registered
+reserved x record_newer_report -> accepted capacity_report_applied/v1
+reserved x record_stale_report -> accepted, no event
+reserved x apply_newer_terms -> accepted pool_terms_applied/v1
+reserved x reserve_macos -> accepted slot_reserved/v1
+reserved x reserve_linux -> accepted slot_reserved/v1
+reserved x grant_activation -> accepted lease_activated/v1
+reserved x quarantine_running -> accepted lease_quarantined/v1
+reserved x quarantine_stopped -> accepted lease_quarantined/v1
+reserved x release_vm_deleted -> accepted slot_released/v1
+reserved x release_never_started -> accepted slot_released/v1
+reserved x disk_low -> accepted disk_low_water_crossed/v1
+reserved x disk_ok -> accepted, no event
+reserved x close_recovering -> accepted admission_closed/v1
+reserved x open_recovering -> accepted, no event
+reserved x start_drain -> accepted host_drain_started/v1
+reserved x cancel_drain -> refused not_draining
+reserved x complete_drain -> refused not_draining
+reserved x force_host -> refused not_draining
+reserved x force_pool -> refused terms_open
+reserved x stale_run -> refused stale_run
+activated x register_host -> refused already_registered
+activated x record_newer_report -> accepted capacity_report_applied/v1
+activated x record_stale_report -> accepted, no event
+activated x apply_newer_terms -> accepted pool_terms_applied/v1
+activated x reserve_macos -> accepted slot_reserved/v1
+activated x reserve_linux -> accepted slot_reserved/v1
+activated x grant_activation -> refused already_activated
+activated x quarantine_running -> accepted lease_quarantined/v1
+activated x quarantine_stopped -> accepted lease_quarantined/v1
+activated x release_vm_deleted -> accepted slot_released/v1
+activated x release_never_started -> refused already_activated
+activated x disk_low -> accepted disk_low_water_crossed/v1
+activated x disk_ok -> accepted, no event
+activated x close_recovering -> accepted admission_closed/v1
+activated x open_recovering -> accepted, no event
+activated x start_drain -> accepted host_drain_started/v1
+activated x cancel_drain -> refused not_draining
+activated x complete_drain -> refused not_draining
+activated x force_host -> refused not_draining
+activated x force_pool -> refused terms_open
+activated x stale_run -> refused stale_run
+quarantined_running x register_host -> refused already_registered
+quarantined_running x record_newer_report -> accepted capacity_report_applied/v1
+quarantined_running x record_stale_report -> accepted, no event
+quarantined_running x apply_newer_terms -> accepted pool_terms_applied/v1
+quarantined_running x reserve_macos -> accepted slot_reserved/v1
+quarantined_running x reserve_linux -> accepted slot_reserved/v1
+quarantined_running x grant_activation -> refused quarantined
+quarantined_running x quarantine_running -> accepted, no event
+quarantined_running x quarantine_stopped -> accepted lease_quarantined/v1
+quarantined_running x release_vm_deleted -> accepted slot_released/v1
+quarantined_running x release_never_started -> refused quarantined
+quarantined_running x disk_low -> accepted disk_low_water_crossed/v1
+quarantined_running x disk_ok -> accepted, no event
+quarantined_running x close_recovering -> accepted admission_closed/v1
+quarantined_running x open_recovering -> accepted, no event
+quarantined_running x start_drain -> accepted host_drain_started/v1
+quarantined_running x cancel_drain -> refused not_draining
+quarantined_running x complete_drain -> refused not_draining
+quarantined_running x force_host -> refused not_draining
+quarantined_running x force_pool -> refused terms_open
+quarantined_running x stale_run -> refused stale_run
+quarantined_stopped x register_host -> refused already_registered
+quarantined_stopped x record_newer_report -> accepted capacity_report_applied/v1
+quarantined_stopped x record_stale_report -> accepted, no event
+quarantined_stopped x apply_newer_terms -> accepted pool_terms_applied/v1
+quarantined_stopped x reserve_macos -> accepted slot_reserved/v1
+quarantined_stopped x reserve_linux -> accepted slot_reserved/v1
+quarantined_stopped x grant_activation -> refused quarantined
+quarantined_stopped x quarantine_running -> accepted lease_quarantined/v1
+quarantined_stopped x quarantine_stopped -> accepted, no event
+quarantined_stopped x release_vm_deleted -> accepted slot_released/v1
+quarantined_stopped x release_never_started -> refused quarantined
+quarantined_stopped x disk_low -> accepted disk_low_water_crossed/v1
+quarantined_stopped x disk_ok -> accepted, no event
+quarantined_stopped x close_recovering -> accepted admission_closed/v1
+quarantined_stopped x open_recovering -> accepted, no event
+quarantined_stopped x start_drain -> accepted host_drain_started/v1
+quarantined_stopped x cancel_drain -> refused not_draining
+quarantined_stopped x complete_drain -> refused not_draining
+quarantined_stopped x force_host -> refused not_draining
+quarantined_stopped x force_pool -> refused terms_open
+quarantined_stopped x stale_run -> refused stale_run
+pool_full x register_host -> refused already_registered
+pool_full x record_newer_report -> accepted capacity_report_applied/v1
+pool_full x record_stale_report -> accepted, no event
+pool_full x apply_newer_terms -> accepted pool_terms_applied/v1
+pool_full x reserve_macos -> refused pool_full
+pool_full x reserve_linux -> refused pool_full
+pool_full x grant_activation -> accepted lease_activated/v1
+pool_full x quarantine_running -> accepted lease_quarantined/v1
+pool_full x quarantine_stopped -> accepted lease_quarantined/v1
+pool_full x release_vm_deleted -> accepted slot_released/v1
+pool_full x release_never_started -> accepted slot_released/v1
+pool_full x disk_low -> accepted disk_low_water_crossed/v1
+pool_full x disk_ok -> accepted, no event
+pool_full x close_recovering -> accepted admission_closed/v1
+pool_full x open_recovering -> accepted, no event
+pool_full x start_drain -> accepted host_drain_started/v1
+pool_full x cancel_drain -> refused not_draining
+pool_full x complete_drain -> refused not_draining
+pool_full x force_host -> refused not_draining
+pool_full x force_pool -> refused terms_open
+pool_full x stale_run -> refused stale_run
+disk_low x register_host -> refused already_registered
+disk_low x record_newer_report -> accepted capacity_report_applied/v1
+disk_low x record_stale_report -> accepted, no event
+disk_low x apply_newer_terms -> accepted pool_terms_applied/v1
+disk_low x reserve_macos -> refused admission_closed
+disk_low x reserve_linux -> refused admission_closed
+disk_low x grant_activation -> refused admission_closed
+disk_low x quarantine_running -> accepted lease_quarantined/v1
+disk_low x quarantine_stopped -> accepted lease_quarantined/v1
+disk_low x release_vm_deleted -> accepted slot_released/v1
+disk_low x release_never_started -> accepted slot_released/v1
+disk_low x disk_low -> accepted, no event
+disk_low x disk_ok -> accepted disk_recovered/v1
+disk_low x close_recovering -> accepted admission_closed/v1
+disk_low x open_recovering -> accepted, no event
+disk_low x start_drain -> accepted host_drain_started/v1
+disk_low x cancel_drain -> refused not_draining
+disk_low x complete_drain -> refused not_draining
+disk_low x force_host -> refused not_draining
+disk_low x force_pool -> refused terms_open
+disk_low x stale_run -> refused stale_run
+recovering x register_host -> refused already_registered
+recovering x record_newer_report -> accepted capacity_report_applied/v1
+recovering x record_stale_report -> accepted, no event
+recovering x apply_newer_terms -> accepted pool_terms_applied/v1
+recovering x reserve_macos -> refused admission_closed
+recovering x reserve_linux -> refused admission_closed
+recovering x grant_activation -> refused admission_closed
+recovering x quarantine_running -> accepted lease_quarantined/v1
+recovering x quarantine_stopped -> accepted lease_quarantined/v1
+recovering x release_vm_deleted -> accepted slot_released/v1
+recovering x release_never_started -> accepted slot_released/v1
+recovering x disk_low -> accepted disk_low_water_crossed/v1
+recovering x disk_ok -> accepted, no event
+recovering x close_recovering -> accepted, no event
+recovering x open_recovering -> accepted admission_opened/v1
+recovering x start_drain -> accepted host_drain_started/v1
+recovering x cancel_drain -> refused not_draining
+recovering x complete_drain -> refused not_draining
+recovering x force_host -> refused not_draining
+recovering x force_pool -> refused terms_open
+recovering x stale_run -> refused stale_run
+draining x register_host -> refused already_registered
+draining x record_newer_report -> accepted capacity_report_applied/v1
+draining x record_stale_report -> accepted, no event
+draining x apply_newer_terms -> accepted pool_terms_applied/v1
+draining x reserve_macos -> refused draining
+draining x reserve_linux -> refused draining
+draining x grant_activation -> refused draining
+draining x quarantine_running -> accepted lease_quarantined/v1
+draining x quarantine_stopped -> accepted lease_quarantined/v1
+draining x release_vm_deleted -> accepted slot_released/v1
+draining x release_never_started -> accepted slot_released/v1
+draining x disk_low -> accepted disk_low_water_crossed/v1
+draining x disk_ok -> accepted, no event
+draining x close_recovering -> accepted admission_closed/v1
+draining x open_recovering -> accepted, no event
+draining x start_drain -> refused already_draining
+draining x cancel_drain -> accepted host_drain_cancelled/v1
+draining x complete_drain -> refused leases_remaining
+draining x force_host -> accepted drain_forced/v1
+draining x force_pool -> refused terms_open
+draining x stale_run -> refused stale_run
+drained x register_host -> refused already_registered
+drained x record_newer_report -> accepted capacity_report_applied/v1
+drained x record_stale_report -> accepted, no event
+drained x apply_newer_terms -> accepted pool_terms_applied/v1
+drained x reserve_macos -> refused draining
+drained x reserve_linux -> refused draining
+drained x grant_activation -> refused no_lease
+drained x quarantine_running -> refused no_lease
+drained x quarantine_stopped -> refused no_lease
+drained x release_vm_deleted -> refused no_lease
+drained x release_never_started -> refused no_lease
+drained x disk_low -> accepted disk_low_water_crossed/v1
+drained x disk_ok -> accepted, no event
+drained x close_recovering -> accepted admission_closed/v1
+drained x open_recovering -> accepted, no event
+drained x start_drain -> refused already_draining
+drained x cancel_drain -> accepted host_drain_cancelled/v1
+drained x complete_drain -> refused not_draining
+drained x force_host -> refused not_draining
+drained x force_pool -> refused terms_open
+drained x stale_run -> refused stale_run
+terms_closed x register_host -> refused already_registered
+terms_closed x record_newer_report -> accepted capacity_report_applied/v1
+terms_closed x record_stale_report -> accepted, no event
+terms_closed x apply_newer_terms -> accepted pool_terms_applied/v1
+terms_closed x reserve_macos -> refused terms_changed
+terms_closed x reserve_linux -> refused terms_changed
+terms_closed x grant_activation -> refused terms_closed
+terms_closed x quarantine_running -> accepted lease_quarantined/v1
+terms_closed x quarantine_stopped -> accepted lease_quarantined/v1
+terms_closed x release_vm_deleted -> accepted slot_released/v1
+terms_closed x release_never_started -> accepted slot_released/v1
+terms_closed x disk_low -> accepted disk_low_water_crossed/v1
+terms_closed x disk_ok -> accepted, no event
+terms_closed x close_recovering -> accepted admission_closed/v1
+terms_closed x open_recovering -> accepted, no event
+terms_closed x start_drain -> accepted host_drain_started/v1
+terms_closed x cancel_drain -> refused not_draining
+terms_closed x complete_drain -> refused not_draining
+terms_closed x force_host -> refused not_draining
+terms_closed x force_pool -> accepted drain_forced/v1
+terms_closed x stale_run -> refused stale_run

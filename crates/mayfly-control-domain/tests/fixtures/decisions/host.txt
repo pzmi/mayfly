@@ -1,0 +1,97 @@
+# host: refusal codes, then the outcome of each determinism case
+code admission_closed
+code already_activated
+code already_draining
+code already_leased
+code already_registered
+code draining
+code insufficient_disk
+code insufficient_memory
+code leases_remaining
+code macos_guests
+code no_capacity_report
+code no_free_slot
+code no_lease
+code not_draining
+code not_registered
+code operator_only
+code pool_full
+code quarantine_held
+code quarantined
+code stale_run
+code stale_terms
+code terms_changed
+code terms_closed
+code terms_open
+code unknown_pool
+case admission_closed refused admission_closed
+case already_activated refused already_activated
+case already_draining refused already_draining
+case already_leased refused already_leased
+case already_registered refused already_registered
+case apply_terms accepted
+  pool_terms_applied/v1 {"pool":"pool0","revision":1,"open":true,"max_running":2,"tier":"trusted"}
+case cancel_drain accepted
+  host_drain_cancelled/v1 {}
+case close_admission accepted
+  admission_closed/v1 {"cause":"woke"}
+case complete_drain accepted
+  host_drain_completed/v1 {}
+case disk_low_closes accepted
+  disk_low_water_crossed/v1 {}
+case disk_recovers accepted
+  disk_recovered/v1 {}
+case draining refused draining
+case grant_activation accepted
+  lease_activated/v1 {"attempt_id":"0000000000000000000000000000a001"}
+case insufficient_disk refused insufficient_disk
+case insufficient_memory refused insufficient_memory
+case leases_remaining refused leases_remaining
+case macos_guests refused macos_guests
+case newer_epoch_is_recorded accepted
+  host_epoch_advanced/v1 {"epoch":2}
+  slot_reserved/v1 {"attempt_id":"0000000000000000000000000000a001","slot":0,"generation":1,"pool":"pool0","os":"macos","resources":{"memory_bytes":8589934592,"disk_bytes":64424509440}}
+case no_capacity_report refused no_capacity_report
+case no_free_slot refused no_free_slot
+case no_lease refused no_lease
+case not_draining refused not_draining
+case not_registered refused not_registered
+case open_admission accepted
+  admission_opened/v1 {"cause":"recovering"}
+case operator_forces_drain accepted
+  drain_forced/v1 {"scope":"host","operator_uid":501}
+case operator_only refused operator_only
+case pool_full refused pool_full
+case quarantine_held refused quarantine_held
+case quarantine_lease accepted
+  lease_quarantined/v1 {"attempt_id":"0000000000000000000000000000a001","holds":"full"}
+case quarantined refused quarantined
+case quarantined_vm_stopped accepted
+  lease_quarantined/v1 {"attempt_id":"0000000000000000000000000000a001","holds":"disk_and_slot"}
+case record_report accepted
+  capacity_report_applied/v1 {"report_id":1,"capacity":{"total":{"memory_bytes":34359738368,"disk_bytes":214748364800},"foreign":{"memory_bytes":0,"disk_bytes":0},"base":{"memory_bytes":0,"disk_bytes":42949672960},"vm_slots":4,"foreign_vms":0,"macos_guests":2,"foreign_macos_guests":0}}
+case register_host accepted
+  host_epoch_advanced/v1 {"epoch":1}
+  host_registered/v1 {"reserves":{"memory_bytes":4294967296,"disk_bytes":21474836480}}
+case release_never_started accepted
+  slot_released/v1 {"attempt_id":"0000000000000000000000000000a001","slot":0,"generation":1,"evidence":"attempt_never_started"}
+case release_on_deletion accepted
+  slot_released/v1 {"attempt_id":"0000000000000000000000000000a001","slot":0,"generation":1,"evidence":"vm_deleted"}
+case release_quarantined_on_absence accepted
+  slot_released/v1 {"attempt_id":"0000000000000000000000000000a001","slot":0,"generation":1,"evidence":"attempt_lost"}
+case reopen_drained accepted
+  host_drain_cancelled/v1 {}
+case reserve_next_slot accepted
+  slot_reserved/v1 {"attempt_id":"0000000000000000000000000000a002","slot":1,"generation":1,"pool":"pool0","os":"macos","resources":{"memory_bytes":8589934592,"disk_bytes":64424509440}}
+case reserve_slot accepted
+  slot_reserved/v1 {"attempt_id":"0000000000000000000000000000a001","slot":0,"generation":1,"pool":"pool0","os":"macos","resources":{"memory_bytes":8589934592,"disk_bytes":64424509440}}
+case same_holds_record_nothing accepted
+case stale_report_ignored accepted
+case stale_run refused stale_run
+case stale_terms refused stale_terms
+case start_drain accepted
+  host_drain_started/v1 {"deadline":3600000}
+case terms_changed refused terms_changed
+case terms_closed refused terms_closed
+case terms_open refused terms_open
+case unknown_pool refused unknown_pool

@@ -1,0 +1,7 @@
+{
+  "pool": "pool0",
+  "revision": 1,
+  "open": true,
+  "max_running": 2,
+  "tier": "trusted"
+}

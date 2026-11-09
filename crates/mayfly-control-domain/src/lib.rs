@@ -1,6 +1,6 @@
 //! `mayfly-control-domain` (control plane): the pure event-sourcing kernel and the aggregates
-//! (`Attempt` in [`attempt`]; `Host`, `Pool`, `ScaleSet` to follow), their commands, events and
-//! policies.
+//! (`Attempt` in [`attempt`], `Host` in [`host`], `Pool` in [`pool`]; `ScaleSet` to follow),
+//! their commands, events and policies (the capacity policy in [`capacity`]).
 //!
 //! Pure (fnd §2.3): no clock, randomness, ids, I/O or logging. Time and ids arrive in the
 //! [`Command`] envelope. `serde` is used for its traits and derive only; formats live in the
@@ -13,8 +13,11 @@
 
 mod aggregate;
 pub mod attempt;
+pub mod capacity;
 mod command;
 pub mod event;
+pub mod host;
+pub mod pool;
 mod registry;
 pub mod shape;
 

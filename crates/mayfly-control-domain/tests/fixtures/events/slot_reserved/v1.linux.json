@@ -1,0 +1,11 @@
+{
+  "attempt_id": "0000000000000000000000000000a001",
+  "slot": 1,
+  "generation": 3,
+  "pool": "pool0",
+  "os": "linux",
+  "resources": {
+    "memory_bytes": 8589934592,
+    "disk_bytes": 64424509440
+  }
+}

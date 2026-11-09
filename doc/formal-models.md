@@ -88,8 +88,9 @@ then, a model's task records the one it tried.
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
 | lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F) | KER-04, KER-04F |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
+| scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); simulation about 3 min per seed and relation | KER-05 |
 
-The planned models are listed in verification §6.1: `scheduling` (KER-05), `scaleset` (KER-06), `recovery` (KER-07) and `registration` (KER-09).
+The planned models are listed in verification §6.1: `scaleset` (KER-06), `recovery` (KER-07) and `registration` (KER-09).
 
 ### Simulation budget
 
@@ -216,6 +217,65 @@ ADR 0042) violates `refusedMeansNothingHappened` on the reconnect path of
 reach the 12-step path); entering a welcome at the floor (`>=` for `>`) makes Apalache report
 `[violation]` of `i17EpochsIncrease` at 5 steps; dropping the safe-mode hold makes simulation
 and Apalache report `[violation]` of `i29SafeModeHoldsKinds`.
+
+### scheduling
+
+One host and two pools (`linux` with 1-unit VMs, `macos` with 2-unit VMs and G3's two guest
+slots), three attempt ids and three slots. The data plane (`dp`, `vms`, `sent`) is the truth:
+foreign consumption, our VMs and the capacity reports it has sent, which the host applies late
+and out of order (`recordReport`: a newer `id` wins, an older one is ignored). The host
+(`host`, `leases`, `slotGen`, `terms`) is the journal: `reserve` takes the lowest free slot
+under its next generation if the pool's applied terms are open, the gate is open, the pool is
+under `max_running` (quarantined leases counted) and the VM fits the last report on every
+dimension it uses; `grant`, `quarantine`, `stopQuarantined` (a stopped quarantined lease
+shrinks to disk and slot), `release` (only on the VM's observed absence), the gate, the drain
+and `applyTerms` (policy P4, only at a newer revision) are its other commands. The pools
+(`pools`) pause, resume, count failures and trip (I27), and reset by an operator. `dpCreate`
+starts a lease's VM only if it fits the data plane's own ledger (I33); `foreignChanges` and
+`vmVanishes` are the world. `planOf` is `capacity::plan`: free capacity after every live
+lease, carved greedily in pool-name order up to each pool's headroom, and `reportedMaxOf`
+(only live runners while closed). `step` offers every stimulus; `admitStep` is the biased
+relation of verification §6: reports, terms, reservations, creates, quarantine and releases
+under changing foreign consumption, without the gate, drain and pool modes that close
+admission, so a walk fills the host and keeps it full.
+
+What the invariants are evidence of is as for `lifecycle`: the guards and transitions of the
+model, together, cannot reach a violating state; the Rust code is held to the same invariants
+by the tests named below until VER-01's conformance replay drives `Host` and `capacity::plan`
+with the model's traces. `carveOutAdmissible` ties the two halves: whatever the policy carves
+out, the host admits; it found that the first draft's admission refused a Linux VM while a
+newer report had shrunk the macOS slots below what the host held, though the policy carved
+one (model and code now check only the dimensions a VM uses).
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `i01OneSlotPerAttempt` | I01: no slot holds two live leases | `formal-verify`; `tests/host/properties.rs::should_strictly_increase_generations_per_slot_when_commands_are_random` |
+| `i02NoSharedSlotGeneration` | I02: no (slot, generation) is reserved twice | the same (mutant 2) |
+| `generationsMonotonic` | a slot's generation only grows; a lease's is its slot's last | the same |
+| `i03StartsWithinCapacity` | I03: every reservation fit the last applied report, every lease counted; every start fit the data plane's ledger | `formal-verify`; `tests/capacity.rs::should_admit_within_every_reported_limit_when_inputs_are_random` (mutant 1), `tests/host/properties.rs::should_allocate_within_the_last_report_when_commands_are_random` |
+| `allocationWithinReport` | the same, and an older report never replaces a newer one | `tests/host/rules.rs::should_never_allocate_beyond_the_newer_report_when_a_stale_one_arrives` |
+| `i33DataPlaneNeverOvercommits` | I33: the data plane starts nothing that does not fit its ledger, whatever the host allocated | `formal-verify`; the data plane's own tests arrive with KER-08 (mutant 24) |
+| `macosGuestsAtMostTwo` | G3: at most two running macOS guests, foreign included; no reservation counts a third | `tests/host/rules.rs::should_admit_two_macos_guests_at_most_when_foreign_guests_run`, `tests/capacity.rs::should_never_admit_a_third_macos_guest_when_inputs_are_random` |
+| `i07NeverAdvertiseMore` | I07: a pool's `reported_max` is within what it can deliver | `tests/capacity.rs::should_fit_every_carve_out_together_when_inputs_are_random` |
+| `i24CarveOutsFitTheHost` | I24: the carve-outs fit the host's free capacity together | the same |
+| `externalConsumptionShrinksAdmissible` | more foreign consumption never frees capacity or carves more | `tests/capacity.rs::should_never_admit_more_when_foreign_consumption_grows` |
+| `i08NothingAfterDrain` | I08: no reservation and no grant after drain start; the drain completes with no lease | `tests/host/rules.rs::should_admit_nothing_when_the_host_drains`, `tests/capacity.rs::should_admit_nothing_and_report_live_runners_when_admission_is_closed` |
+| `i26NoAdmissionWhileClosed`, `noGrantWhileClosed` | I26: no reservation and no grant with the gate or the pool's terms closed | `tests/host/rules.rs::should_refuse_a_grant_when_any_term_or_cause_is_closed` |
+| `i27BreakerBounded` | I27: failures bounded by the threshold, a tripped breaker published closed, nothing reserved under terms that show it | `tests/pool/rules.rs::should_trip_at_the_threshold_and_count_nothing_more_when_failures_repeat`, `should_close_the_terms_when_the_breaker_of_the_pin_trips` |
+| `i28QuarantineNeverAutoDeleted`, `quarantineHoldsCapacity` | I28: a quarantined VM is never deleted by automation, its lease released only on the VM's absence, counted against capacity and `max_running` | `tests/host/rules.rs::should_hold_capacity_when_a_lease_is_quarantined`, `tests/capacity.rs::should_hold_quarantined_capacity_when_inputs_are_random` |
+| `i13NoDuplicateClones` | I13: at most one VM is created per lease | `formal-verify` (the attempt's retries are `lifecycle`'s) |
+| `carveOutAdmissible` | whatever the policy carves out, the host admits | `tests/host/properties.rs::should_admit_every_planned_reservation_when_the_host_decides_them` |
+
+Tests (`quint test`, stage `formal-test`, all deterministic so each runs once):
+`fillsThenRefusesTest`, `generationsIncreaseTest`, `macosAtMostTwoTest`,
+`staleReportIgnoredTest`, `drainAdmitsNothingTest`, `quarantineHoldsCapacityTest`,
+`quarantineConsumesPoolTest`, `breakerTripsTest`, `pauseReportsLiveOnlyTest`,
+`dataPlaneRefusesWhatDoesNotFitTest`. Negative controls tried: removing the capacity guard of
+`reserve` (mutant 1) makes simulation of `admitStep` report `[violation]` of
+`allocationWithinReport`; reserving every slot at generation 1 (mutant 2) makes it report
+`i02NoSharedSlotGeneration`; dropping the gate guard of `grant` makes simulation of `step`
+report `noGrantWhileClosed`. Simulation runs at about 38 traces of 50 steps per second
+(TypeScript evaluator, 4-CPU sandbox).
 
 ## Promoting a counterexample
 

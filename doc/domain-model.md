@@ -532,6 +532,14 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   needs an operator", tier immutability per revision.
 - **Must not protect:** running counts and resource limits (Host), demand (Demand). A pool change
   reaches admission only through `PoolTermsApplied` on Host (P4).
+- **As built (KER-05):** `ConfigurePool` also carries the pool's guest OS and per-VM resources
+  (the capacity policy's shape of a pool's VM); `min_prepared` absent means 0 (ADR 0028);
+  `PinImage` carries the image's `ImageVerified` event as `verified_ref` and is refused without
+  it; a breaker counts one failure per attempt, only while closed, inside `breaker_window`;
+  `Decommission` needs `Drained`. The pool's terms (open = `Active`, a pin, and that pin's
+  breaker closed) are `pool::terms`, which P4 sends as `ApplyPoolTerms`. An accepted command
+  under a newer run epoch records `PoolEpochAdvanced` first, which is how `evolve` learns the
+  fence (I18). `draining_digests` is not kept: the reconciler derives it from the attempts.
 
 ### 6.3 `Host` [Fleet]
 
@@ -571,6 +579,20 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   image validity, epoch minting (HostRun), safe mode (effect boundary).
 - **Why the gate is here and not on HostRun:** I08/I26 must be decided in the same stream as the
   grant; mode changes are rare, so sharing the stream costs nothing.
+- **As built (KER-05):** a capacity report carries `total`, `foreign`, `base` (ours outside any
+  VM: image bases, pulls), `vm_slots`, `foreign_vms`, `macos_guests` and
+  `foreign_macos_guests`; `Host` admits within `total − foreign − base − reserves` minus every
+  live lease, on each dimension the new VM uses, with G3's two macOS guests applied whatever
+  the report says (`capacity::admissible`, `capacity::fit`). Slots are one table per host (a
+  slot number is unique across guest-OS classes; macOS is a limit over it). `ReserveSlot`
+  carries `terms_revision` and is refused unless it equals the applied one; a pool at
+  `max_running` refuses with `quarantine_held` when quarantined leases are among them.
+  `ReleaseSlot{evidence}` takes `vm_deleted`, `attempt_lost` or `attempt_never_started`, the
+  last only for a merely reserved lease. `QuarantineLease{vm_running: false}` shrinks the
+  lease to disk and slots. `ForceDrain` needs the host draining (scope host) or the pool's
+  terms closed (scope pool). `HostEpochAdvanced` records the run-epoch fence as for `Pool`.
+  `ForeignVmReported` is left to the data-plane observer (KER-08, CP-03): the report already
+  carries foreign consumption, which is all admission reads.
 
 ### 6.4 `Attempt` [Attempt]
 
