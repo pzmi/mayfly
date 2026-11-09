@@ -1,0 +1,11 @@
+{
+  "name": "mayfly-formal",
+  "private": true,
+  "description": "Quint models of mayfly (foundation.md section 6, verification.md section 6). Development only: the shipped binaries never need Node.",
+  "devDependencies": {
+    "@informalsystems/quint": "0.33.1"
+  },
+  "overrides": {
+    "adm-zip": "0.6.1"
+  }
+}

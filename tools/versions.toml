@@ -1,7 +1,8 @@
 # Pinned development tools (D15). `cargo xtask doctor` checks them, `cargo xtask
 # install-tools [tool...]` installs the ones it can. Versions are exact; bump them here only.
-# Only the tools a registered `check` stage needs are pinned: the task that adds a stage adds
-# its tool here (Quint and Apalache with FND-06).
+# Only the tools a registered stage needs are pinned: the task that adds a stage adds its tool
+# here. `doctor` checks the ones a `check` stage needs; `doctor --all` adds the rest (Java and
+# Apalache, which only the scheduled `formal-verify` lane needs).
 #
 # method = "cargo"   : cargo install --locked <crate>@<version>
 # method = "rustup"  : rustup toolchain install nightly-<date> --profile minimal
@@ -12,6 +13,8 @@
 # probe = [program, args...] is run to read the installed version; the output must contain
 # the exact version as a whitespace-separated token (a leading "v" is ignored), or, with
 # contains = true, as a substring.
+# sha256 = "<64 lowercase hex>": the digest of the release archive of a tool xtask downloads
+# itself; it refuses an archive that does not match.
 
 # The test stages (`unit-tests`, `integration-tests`) and `platform-tests`: the runner, with the
 # profiles of `.config/nextest.toml`.
@@ -57,3 +60,47 @@ version = "0.9.0"
 method = "manual"
 url = "https://github.com/koalaman/shellcheck/releases/tag/v0.9.0"
 probe = ["shellcheck", "--version"]
+
+# Node runs the Quint CLI (the `formal-typecheck` and `formal-test` stages, `formal-verify`);
+# development only, the shipped binaries never need it (fnd section 8). The pin is the major
+# line (22.x): the probe refuses any other, and CI installs 22 with a SHA-pinned
+# actions/setup-node in every job that runs Node, so a runner image that moves to a newer Node
+# cannot break the gate.
+[tools.node]
+version = "v22."
+method = "manual"
+url = "https://nodejs.org/en/download"
+probe = ["node", "--version"]
+contains = true
+
+# Node tools. Their versions are owned by the lockfiles. `doctor` runs `quint --version` from
+# `formal/node_modules` (never from PATH, never fetched: `npx --no`) and fails when it is
+# missing or another version; the stages do the same before they run it. Quint always runs with
+# `--backend typescript`, so its evaluator is the locked package and nothing is downloaded at
+# run time (fnd section 8.4).
+[tools.quint]
+version = "0.33.1"
+method = "lockfile"
+lockfile = "formal/package-lock.json"
+
+# Apalache is the version the pinned quint release downloads and is validated against; it is
+# run by the scheduled formal lane only (`cargo xtask formal-verify`, verification section 6.3).
+# Quint would download it unchecked, so `formal-verify` fetches the release tarball itself,
+# refuses it unless its SHA-256 equals `sha256` below, and unpacks it where Quint looks for it
+# (~/.quint/apalache-dist-<version>, or $QUINT_HOME) before Quint runs. `doctor` probes that
+# binary, not PATH. A new version needs a new hash, computed from the real download.
+[tools.apalache]
+version = "0.62.1"
+method = "manual"
+url = "https://github.com/apalache-mc/apalache/releases/tag/v0.62.1"
+probe = ["apalache-mc", "version"]
+sha256 = "38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6"
+
+# Apalache is a JVM tool: Java 21 or newer (class file version 65). `doctor` and `formal-verify`
+# check the major from `java -version` (`classify_java`); the probe below is what it runs.
+# CI installs Temurin 21 with a SHA-pinned actions/setup-java.
+[tools.java]
+version = "21"
+method = "manual"
+url = "https://adoptium.net/temurin/releases/?version=21"
+probe = ["java", "-version"]

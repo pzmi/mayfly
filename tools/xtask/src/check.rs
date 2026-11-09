@@ -2,14 +2,14 @@
 //!
 //! It composes the registered stages: the `quick` stages other than its tests (format check,
 //! architecture with its fixtures, Clippy), the macOS cross lint, the docs checks, everything
-//! `test` runs, then `security`. A stage
+//! `test` runs, the formal models (typecheck and Quint tests), then `security`. A stage
 //! that does not exist yet is absent, never skipped; one that cannot run because its pinned
 //! tool is missing shows `UNAVAILABLE` and fails the gate.
 
 use std::process::Command;
 
 use crate::process::{Stage, finish, run_report};
-use crate::{adr, coverage, quick, repo, security, test, tools};
+use crate::{adr, coverage, formal, quick, repo, security, test, tools};
 
 /// The product's target (D2): linted from Linux so a macOS-only compile error or warning is
 /// caught before the native `macos` job.
@@ -91,6 +91,7 @@ pub fn stages() -> Vec<Stage> {
     ));
     stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
     stages.extend(test::stages());
+    stages.extend(formal::stages());
     stages.push(coverage::coverage_stage());
     stages.push(coverage::changed_lines_stage());
     stages.extend(security::stages());
@@ -190,6 +191,8 @@ mod tests {
             "unit-tests",
             "integration-tests",
             "doctests",
+            "formal-typecheck",
+            "formal-test",
             "coverage",
             "changed-lines",
             "deny",

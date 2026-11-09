@@ -76,11 +76,57 @@ jobs:
       - name: Install Gitleaks, actionlint and shellcheck
         uses: ./.github/actions/install-scanners
 
+      # Node 22 is the line tools/versions.toml pins (its probe refuses any other major), and
+      # `doctor` checks the locked Quint in formal/node_modules too.
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Quint
+        run: npm ci --prefix formal
+
       - name: Pinned tools
         run: cargo xtask doctor
 
       - name: Static quality and docs
         run: cargo xtask check --only fmt-check,clippy,docs
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # The Quint models (verification.md section 6, D10): typecheck every formal/*.qnt and run each
+  # model's tests. Quint is locked by formal/package-lock.json; npx never fetches it, and a
+  # missing Node or Quint fails the stage (D15). The Apalache lane is formal.yml's.
+  formal:
+    name: Formal models (Quint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: formal
+
+      # Node 22 is the line tools/versions.toml pins (its probe refuses any other major).
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Quint
+        run: npm ci --prefix formal
+
+      - name: Formal models
+        run: cargo xtask check --only formal-typecheck,formal-test
 
       - name: Save caches (main only)
         uses: ./.github/actions/save-rust-cache
@@ -256,6 +302,7 @@ jobs:
       - static
       - cross
       - tests
+      - formal
       - macos
       - coverage
       - security

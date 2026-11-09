@@ -20,8 +20,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
-  # `formal/` (Quint, pinned by its package-lock.json) arrives with FND-06; until then Dependabot
-  # reports that this directory does not exist.
+  # `formal/` holds Quint, pinned by its package-lock.json (FND-06); a bump is its own commit.
   - package-ecosystem: "npm"
     directory: "/formal"
     schedule:

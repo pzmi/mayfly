@@ -1,0 +1,94 @@
+name: Formal
+
+# The Apalache lane of the Quint models (verification.md section 6.3, D10, D15): `quint verify`
+# through the Apalache release pinned in tools/versions.toml (bounded model checking of every
+# model's invariants) and a multi-seed simulation far larger than a per-push gate samples. The
+# blocking part, typecheck and the Quint tests, is the `formal` job of ci.yml; this lane is not
+# part of `cargo xtask check`. It runs on every change under formal/ (and to the xtask code
+# that drives it), weekly, and by hand. A red run is fixed, never muted.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "formal/**"
+      - "tools/versions.toml"
+      - "tools/xtask/src/formal*.rs"
+      - "tools/xtask/src/apalache.rs"
+      - ".github/workflows/formal.yml"
+  pull_request:
+    paths:
+      - "formal/**"
+      - "tools/versions.toml"
+      - "tools/xtask/src/formal*.rs"
+      - "tools/xtask/src/apalache.rs"
+      - ".github/workflows/formal.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    name: Formal verification (Apalache)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # target/ holds the downloaded Apalache tarball too; it is re-hashed before every use.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: formal-verify
+
+      # Node 22 is the line tools/versions.toml pins (its probe refuses any other major).
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      # Quint is locked by formal/package-lock.json; npx never fetches it.
+      - name: Install Quint
+        run: npm ci --prefix formal
+
+      # Apalache 0.62.1 requires Java 21 (tools/versions.toml), installed explicitly here.
+      - name: Set up Java for Apalache
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Show the JVM
+        run: java -version
+
+      # formal-verify fetches the pinned release itself, refuses it unless its SHA-256 equals the
+      # one in tools/versions.toml, and unpacks it into ~/.quint before Quint runs, so ~/.quint is
+      # never cached: what runs is always unpacked from a verified tarball. The base seed of the
+      # simulation is printed; QUINT_SEED=<seed> cargo xtask formal-verify repeats it. A missing
+      # JVM or Apalache fails here with what to install, never a skip.
+      - name: Verify
+        run: cargo xtask formal-verify
+
+      # The log of every run, Apalache's run directories with a counterexample as ITF and TLA+
+      # when it found one, and the ITF trace of a failing simulation.
+      - name: Keep the counterexamples of a failed run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: formal-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/formal-verify/
+          if-no-files-found: warn
+          retention-days: 30

@@ -35,8 +35,9 @@ const fn row(
 
 /// All rows. `quick` runs the stage rows `fmt-check`, `architecture`, `clippy`, `unit-tests`
 /// and `doctests`. `platform-tests` is a stage of `test` that `check` leaves out (the macOS CI
-/// job runs it). Stages that later tasks bring (formal, conformance, fuzz, mutation, release)
-/// are absent until those tasks register them.
+/// job runs it). `formal-verify` and its two stages are the scheduled Apalache lane, outside
+/// `check`. Stages that later tasks bring (conformance, fuzz, mutation, release) are absent
+/// until those tasks register them.
 pub const CATALOG: &[Check] = &[
     row(
         "fmt-check",
@@ -96,6 +97,41 @@ pub const CATALOG: &[Check] = &[
         "integration",
         "cargo xtask test --only platform-tests",
         "FND-04",
+        false,
+    ),
+    row(
+        "formal-typecheck",
+        "formal",
+        "npx --prefix formal --no -- quint typecheck <every formal/*.qnt>",
+        "FND-06",
+        true,
+    ),
+    row(
+        "formal-test",
+        "formal",
+        "npx --prefix formal --no -- quint test --backend typescript <every model of MODELS>",
+        "FND-06",
+        true,
+    ),
+    row(
+        "formal-verify",
+        "formal",
+        "cargo xtask formal-verify",
+        "FND-06",
+        false,
+    ),
+    row(
+        "formal-verify-bounded",
+        "formal",
+        "npx --prefix formal --no -- quint verify --step <relation> --invariants <all> --max-steps <depth> --apalache-version <pinned> formal/<model>.qnt",
+        "FND-06",
+        false,
+    ),
+    row(
+        "formal-verify-simulate",
+        "formal",
+        "npx --prefix formal --no -- quint run --backend typescript --step <relation> --invariants <all> --max-samples 5000 --max-steps 50 --seed <seed 1..3> formal/<model>.qnt",
+        "FND-06",
         false,
     ),
     row(

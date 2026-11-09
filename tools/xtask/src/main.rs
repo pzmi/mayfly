@@ -3,18 +3,21 @@
 //! Ported from site-preview (<https://github.com/pzmi/site-preview>, same owner, MIT OR
 //! Apache-2.0; mayfly D3) and cut to the foundation: the gate (`quick`, `check`), the
 //! architecture checker, the pinned-tool doctor, ADRs, `land` and the supply-chain stages.
-//! Later tasks register their own stages (the formal toolchain, conformance, fuzz, mutation,
-//! release); a stage that does not exist yet is absent from the
+//! The formal toolchain (FND-06) is in `formal`, `apalache` and `formal_verify`. Later tasks
+//! register their own stages (conformance, fuzz, mutation, release); a stage that does not exist yet is absent from the
 //! catalog, never a skipped row.
 
 mod action_pins;
 mod adr;
 mod adr_files;
+mod apalache;
 mod architecture;
 mod catalog;
 mod check;
 mod cli;
 mod coverage;
+mod formal;
+mod formal_verify;
 mod land;
 mod process;
 mod quick;
@@ -51,7 +54,10 @@ fn main() -> ExitCode {
             print!("{}", catalog::to_json(&catalog::all_rows()));
             0
         }
-        Command::Doctor { json } => tools::doctor(*json),
+        Command::Doctor { json, all } => tools::doctor(*json, *all),
+        Command::FormalTypecheck => formal::run_stage("formal-typecheck"),
+        Command::FormalTest => formal::run_stage("formal-test"),
+        Command::FormalVerify => formal_verify::run(),
         Command::InstallTools { tools } => tools::install(tools),
         Command::Adr { action } => match action {
             AdrAction::New {

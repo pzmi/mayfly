@@ -60,7 +60,18 @@ pub enum Command {
         /// Print the report as a JSON array instead of one line per tool.
         #[arg(long)]
         json: bool,
+        /// Also report every other pinned tool (Java and Apalache, which only `formal-verify`
+        /// needs).
+        #[arg(long)]
+        all: bool,
     },
+    /// Typecheck every Quint model in `formal/`.
+    FormalTypecheck,
+    /// Run the Quint tests of every registered model.
+    FormalTest,
+    /// Apalache bounded verification and a long multi-seed simulation of every registered
+    /// model (the scheduled lane; not part of `check`).
+    FormalVerify,
     /// Install pinned dev tools.
     InstallTools {
         /// Tools to install; all when empty.
@@ -137,6 +148,9 @@ impl Command {
             Self::Coverage { .. } => "coverage",
             Self::ListChecks => "list-checks",
             Self::Doctor { .. } => "doctor",
+            Self::FormalTypecheck => "formal-typecheck",
+            Self::FormalTest => "formal-test",
+            Self::FormalVerify => "formal-verify",
             Self::InstallTools { .. } => "install-tools",
             Self::Adr { .. } => "adr",
             Self::Land { .. } => "land",

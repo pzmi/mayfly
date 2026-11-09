@@ -36,6 +36,9 @@ pub struct Tool {
     pub contains: bool,
     /// Cargo features `cargo install` enables (cargo-about's binary needs `cli`).
     pub features: Option<String>,
+    /// The SHA-256 of the release archive, for a tool xtask downloads itself and verifies
+    /// before use (Apalache, foundation.md section 8.4); 64 lowercase hexadecimal digits.
+    pub sha256: Option<String>,
 }
 
 /// Result of checking one tool.
@@ -91,6 +94,14 @@ pub fn parse(text: &str) -> Result<Vec<Tool>, String> {
         if probe.is_empty() && !matches!(method, Method::Lockfile(_)) {
             return Err(format!("versions.toml: tools.{name}.probe missing"));
         }
+        let sha256 = t.get("sha256").and_then(toml::Value::as_str);
+        if let Some(digest) = sha256
+            && !is_sha256(digest)
+        {
+            return Err(format!(
+                "versions.toml: tools.{name}.sha256 must be 64 lowercase hexadecimal digits"
+            ));
+        }
         out.insert(
             name.clone(),
             Tool {
@@ -106,10 +117,16 @@ pub fn parse(text: &str) -> Result<Vec<Tool>, String> {
                     .get("features")
                     .and_then(toml::Value::as_str)
                     .map(str::to_owned),
+                sha256: sha256.map(str::to_owned),
             },
         );
     }
     Ok(out.into_values().collect())
+}
+
+/// Whether `text` is a SHA-256 digest as the manifest writes it: 64 lowercase hex digits.
+pub fn is_sha256(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The embedded manifest, parsed.
@@ -157,6 +174,10 @@ pub fn check_with_path(tool: &Tool, path: Option<&OsStr>) -> Status {
 pub fn install_hint(tool: &Tool) -> String {
     match &tool.method {
         Method::Cargo | Method::Rustup => format!("run 'cargo xtask install-tools {}'", tool.name),
+        Method::Manual(_) if tool.name == "apalache" => {
+            "run 'cargo xtask formal-verify': it fetches the pinned release and checks its SHA-256"
+                .to_owned()
+        }
         Method::Manual(url) => format!("install manually from {url}"),
         Method::Lockfile(file) => format!("run 'npm ci' for the lockfile {file}"),
     }
@@ -244,11 +265,28 @@ pub fn needed_by(stages: &[crate::process::Stage]) -> BTreeMap<&'static str, Vec
     out
 }
 
-/// How `doctor` checks a tool: runs its manifest probe (tests replace it).
-type Probe<'a> = &'a dyn Fn(&Tool) -> Status;
+/// How `doctor` checks a tool: `probe` runs a manifest probe, `special` answers for a tool a
+/// probe cannot judge (tests replace both).
+struct Probes<'a> {
+    probe: &'a dyn Fn(&Tool) -> Status,
+    /// `Some(result)` for a tool checked by its own rule: Quint (the locked package in
+    /// `formal/node_modules`, which no `PATH` probe sees) and Java (any release from the
+    /// pinned major on, which a version token cannot say). `Err` carries the finding's hint;
+    /// one starting with `wrong version` is a `Wrong` finding, any other a `Missing` one.
+    special: &'a dyn Fn(&str) -> Option<Result<(), String>>,
+}
+
+/// The tools `doctor` checks by their own rule rather than by a manifest probe.
+fn special(name: &str) -> Option<Result<(), String>> {
+    match name {
+        "quint" => Some(crate::formal::require_quint(&crate::formal::formal_dir())),
+        "java" => Some(crate::formal_verify::require_java()),
+        _ => None,
+    }
+}
 
 /// The finding for `name`, needed by `stages`.
-fn finding(name: &str, stages: Vec<&'static str>, tools: &[Tool], probe: Probe<'_>) -> Finding {
+fn finding(name: &str, stages: Vec<&'static str>, tools: &[Tool], probes: &Probes<'_>) -> Finding {
     let tool = tools.iter().find(|t| t.name == name);
     let version = tool.map(|t| t.version.clone()).unwrap_or_default();
     let row = |found, hint: String| Finding {
@@ -258,6 +296,20 @@ fn finding(name: &str, stages: Vec<&'static str>, tools: &[Tool], probe: Probe<'
         hint,
         stages: stages.clone(),
     };
+    if let Some(result) = (probes.special)(name) {
+        return match result {
+            Ok(()) => row(Found::Ok, String::new()),
+            Err(message) if message.starts_with("wrong version") => {
+                let seen = message
+                    .split_once("found '")
+                    .and_then(|(_, rest)| rest.split_once('\''))
+                    .map_or("", |(seen, _)| seen)
+                    .to_owned();
+                row(Found::Wrong(seen), message)
+            }
+            Err(message) => row(Found::Missing, message),
+        };
+    }
     let Some(tool) = tool else {
         return row(
             Found::Missing,
@@ -267,30 +319,33 @@ fn finding(name: &str, stages: Vec<&'static str>, tools: &[Tool], probe: Probe<'
     if let Method::Lockfile(file) = &tool.method {
         return row(Found::Unchecked, format!("version owned by {file}"));
     }
-    match probe(tool) {
+    match (probes.probe)(&doctor_probe(tool)) {
         Status::Ok => row(Found::Ok, String::new()),
         Status::Missing => row(Found::Missing, install_hint(tool)),
         Status::Wrong(seen) => row(Found::Wrong(seen), install_hint(tool)),
     }
 }
 
-/// The report: every tool `needs` names, by name, then every other pinned tool (a pin no
-/// `check` stage needs is reported too, so none hides from `doctor`).
+/// The report: every tool `needs` names, by name, then with `all` every other pinned tool (one
+/// no `check` stage needs: the Apalache lane's, so a laptop without a JVM can run the gate).
 fn findings(
     tools: &[Tool],
     needs: &BTreeMap<&'static str, Vec<&'static str>>,
-    probe: Probe<'_>,
+    all: bool,
+    probes: &Probes<'_>,
 ) -> Vec<Finding> {
     let mut out: Vec<Finding> = needs
         .iter()
-        .map(|(name, stages)| finding(name, stages.clone(), tools, probe))
+        .map(|(name, stages)| finding(name, stages.clone(), tools, probes))
         .collect();
-    out.extend(
-        tools
-            .iter()
-            .filter(|t| !needs.contains_key(t.name.as_str()))
-            .map(|t| finding(&t.name, Vec::new(), tools, probe)),
-    );
+    if all {
+        out.extend(
+            tools
+                .iter()
+                .filter(|t| !needs.contains_key(t.name.as_str()))
+                .map(|t| finding(&t.name, Vec::new(), tools, probes)),
+        );
+    }
     out
 }
 
@@ -344,10 +399,11 @@ fn render_json(findings: &[Finding]) -> String {
     format!("[\n{}\n]\n", rows.join(",\n"))
 }
 
-/// `cargo xtask doctor [--json]`: checks every pinned tool, first those a `check` stage needs,
-/// prints one line each (or JSON), and exits 1 when any is missing or at the wrong version.
+/// `cargo xtask doctor [--json] [--all]`: checks every tool a `check` stage needs (with `all`,
+/// every pinned tool), prints one line each (or JSON), and exits 1 when any is missing or at
+/// the wrong version (foundation.md section 8.2: a lane's tools are required of that lane).
 /// Run it first when the local gate and CI disagree.
-pub fn doctor(json: bool) -> i32 {
+pub fn doctor(json: bool, all: bool) -> i32 {
     let tools = match manifest() {
         Ok(tools) => tools,
         Err(err) => {
@@ -355,8 +411,11 @@ pub fn doctor(json: bool) -> i32 {
             return 1;
         }
     };
-    let probe = |tool: &Tool| check_with_path(tool, None);
-    let report = findings(&tools, &needed_by(&crate::check::stages()), &probe);
+    let probes = Probes {
+        probe: &|tool| check_with_path(tool, None),
+        special: &special,
+    };
+    let report = findings(&tools, &needed_by(&crate::check::stages()), all, &probes);
     if json {
         print!("{}", render_json(&report));
     } else {
@@ -369,6 +428,20 @@ pub fn doctor(json: bool) -> i32 {
     } else {
         0
     }
+}
+
+/// The tool as `doctor` probes it: Apalache is never looked up on `PATH` but at the place
+/// `formal-verify` unpacks the verified release and Quint runs it from
+/// ([`crate::formal_verify::apalache_binary`]), so `doctor` reports what the lane would use.
+fn doctor_probe(tool: &Tool) -> Tool {
+    let mut probed = tool.clone();
+    if tool.name == "apalache"
+        && let Some(binary) = crate::formal_verify::apalache_binary(&tool.version)
+        && let Some(program) = probed.probe.first_mut()
+    {
+        *program = binary.display().to_string();
+    }
+    probed
 }
 
 /// What `install` does for a Cargo or Rustup tool, given what the probe found.
@@ -492,9 +565,11 @@ mod tests {
         let needs = needed_by(&stages);
 
         // then
-        for want in ["actionlint", "cargo-deny", "gitleaks", "shellcheck"] {
+        for want in ["actionlint", "cargo-deny", "gitleaks", "node", "shellcheck"] {
             assert!(needs.contains_key(want), "{want} missing from {needs:?}");
         }
+        assert_eq!(needs["node"], ["formal-typecheck", "formal-test"]);
+        assert_eq!(needs["quint"], ["formal-typecheck", "formal-test"]);
         assert_eq!(needs["gitleaks"], ["secrets"]);
         assert_eq!(needs["actionlint"], ["workflows"]);
         assert_eq!(needs["shellcheck"], ["workflows"]);
@@ -518,9 +593,13 @@ mod tests {
             "gitleaks" => Status::Missing,
             _ => Status::Wrong("cargo-deny 0.1.0".into()),
         };
+        let probes = Probes {
+            probe: &probe,
+            special: &|_| None,
+        };
 
         // when
-        let report = findings(&tools, &needs, &probe);
+        let report = findings(&tools, &needs, true, &probes);
 
         // then
         let by = |name: &str| report.iter().find(|f| f.tool == name).unwrap();
@@ -547,13 +626,134 @@ mod tests {
         // given
         let needs = BTreeMap::from([("cargo-nope", vec!["x"])]);
         let probe = |_: &Tool| Status::Ok;
+        let probes = Probes {
+            probe: &probe,
+            special: &|_| None,
+        };
 
         // when
-        let report = findings(&[], &needs, &probe);
+        let report = findings(&[], &needs, false, &probes);
 
         // then
         assert_eq!(report[0].found, Found::Missing);
         assert!(report[0].hint.contains("add it to tools/versions.toml"));
+    }
+
+    #[test]
+    fn should_leave_out_the_tools_no_gate_stage_needs_when_all_is_not_asked() {
+        // given
+        let tools = manifest().unwrap();
+        let needs = BTreeMap::from([("node", vec!["formal-typecheck"])]);
+        let probes = Probes {
+            probe: &|_| Status::Ok,
+            special: &|_| None,
+        };
+
+        // when
+        let gate = findings(&tools, &needs, false, &probes);
+        let all = findings(&tools, &needs, true, &probes);
+
+        // then
+        assert_eq!(gate.len(), 1);
+        assert_eq!(all.len(), tools.len());
+        assert!(
+            all.iter()
+                .any(|f| f.tool == "apalache" && f.stages.is_empty())
+        );
+    }
+
+    #[test]
+    fn should_fail_doctor_closed_when_a_tool_with_its_own_rule_is_missing_or_wrong() {
+        // given
+        let tools = manifest().unwrap();
+        let needs = BTreeMap::from([("quint", vec!["formal-test"]), ("java", vec!["x"])]);
+        let probes = Probes {
+            probe: &|_| Status::Ok,
+            special: &|name| match name {
+                "quint" => Some(Err(
+                    "missing quint 0.33.1 in formal/node_modules: x".to_owned()
+                )),
+                "java" => Some(Err(
+                    "wrong version of java (found '17', want 21): y".to_owned()
+                )),
+                _ => None,
+            },
+        };
+
+        // when
+        let report = findings(&tools, &needs, false, &probes);
+
+        // then
+        let by = |name: &str| report.iter().find(|f| f.tool == name).unwrap();
+        assert_eq!(by("quint").found, Found::Missing);
+        assert!(by("quint").bad());
+        assert_eq!(by("java").found, Found::Wrong("17".into()));
+        assert!(by("java").bad());
+    }
+
+    #[test]
+    fn should_pin_node_quint_java_and_a_checksummed_apalache_when_the_manifest_is_read() {
+        // given
+        let tools = manifest().unwrap();
+
+        // when
+        let by = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+
+        // then
+        assert_eq!(by("quint").version, "0.33.1");
+        assert!(matches!(by("quint").method, Method::Lockfile(_)));
+        assert_eq!(by("apalache").version, "0.62.1");
+        assert!(
+            by("apalache").sha256.as_deref().is_some_and(is_sha256),
+            "{:?}",
+            by("apalache")
+        );
+        assert_eq!(by("java").version, "21");
+        assert!(by("node").version.starts_with("v22"));
+        assert!(
+            tools.iter().filter(|t| t.sha256.is_some()).count() == 1,
+            "only Apalache is downloaded by xtask"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_digest_when_it_is_not_lowercase_hex_sha256() {
+        // given
+        let manifest_with = |digest: &str| {
+            format!(
+                "[tools.x]\nversion = \"1\"\nmethod = \"manual\"\nurl = \"u\"\nprobe = [\"x\"]\nsha256 = \"{digest}\"\n"
+            )
+        };
+
+        // when
+        let upper = parse(&manifest_with(&"A".repeat(64)));
+        let short = parse(&manifest_with("abc"));
+        let good = parse(&manifest_with(&"a".repeat(64)));
+
+        // then
+        assert!(upper.unwrap_err().contains("sha256"));
+        assert!(short.is_err());
+        assert_eq!(good.unwrap()[0].sha256, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn should_probe_the_quint_home_binary_when_doctor_checks_apalache() {
+        // given
+        let apalache = manifest()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "apalache")
+            .unwrap();
+
+        // when
+        let probed = doctor_probe(&apalache);
+
+        // then
+        let expected = crate::formal_verify::apalache_binary(&apalache.version)
+            .map_or_else(|| apalache.probe[0].clone(), |p| p.display().to_string());
+        assert_eq!(probed.probe[0], expected);
+        assert_eq!(probed.probe[1..], apalache.probe[1..]);
+        assert_eq!(doctor_probe(&deny()), deny());
     }
 
     #[test]
@@ -600,7 +800,13 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         // then
-        assert!(matches!(cli.command, Command::Doctor { json: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                json: true,
+                all: false
+            }
+        ));
     }
 
     fn deny() -> Tool {

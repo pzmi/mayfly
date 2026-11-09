@@ -603,7 +603,7 @@ boundaries), not as an object model.
 | Workflow | Trigger | Content | Task |
 |:--|:--|:--|:--|
 | `ci.yml` | push to `main`, pull request, dispatch | the gate, split into jobs (7.2) | FND-04 |
-| `formal.yml` | nightly, on changes under `formal/`, dispatch | fresh-seed conformance, Apalache verification | FND-06, VER-07 |
+| `formal.yml` | weekly (VER-07 may move it to nightly), on changes under `formal/`, dispatch | Apalache verification (FND-06); fresh-seed conformance (VER-07) | FND-06, VER-07 |
 | `faultlab.yml` | weekly, dispatch | fault-lab core scenarios, then extended | VER-04 |
 | `mutation.yml` | nightly (curated + in-diff), weekly (full, sharded), dispatch | `mutants-curated`, `cargo-mutants` | VER-05 |
 | `fuzz.yml` | nightly, dispatch | each fuzz target for a time budget; crash inputs uploaded | VER-06 |
@@ -672,8 +672,9 @@ boundaries), not as an object model.
    `cargo-mutants`, `cargo-fuzz` and its nightly, `cargo-cyclonedx`, `gitleaks`, `actionlint`
    with `shellcheck`, Node (major), Quint (owned by `formal/package-lock.json`), Apalache (version
    and SHA-256), Java (major, for Apalache).
-2. `cargo xtask doctor [--json]` reports each tool as found, missing or wrong version, with the
-   install hint; it exits non-zero if any tool a requested lane needs is not right.
+2. `cargo xtask doctor [--json] [--all]` reports each tool as found, missing or wrong version, with
+   the install hint; it exits non-zero if any tool a `check` stage needs is not right, and with
+   `--all` for every pinned tool (Java and Apalache, which only `formal-verify` needs).
    `cargo xtask install-tools [tool…]` installs what can be installed.
 3. **Fail closed.** Every stage declares the tools it needs; a missing or wrong tool makes that
    stage fail with the hint. A stage is never reported as skipped-but-green (D15). When local and
@@ -703,7 +704,7 @@ its environment (§2.3).
 | `cargo xtask check --only <a,b>` | named stages in gate order through the same code; unknown name exits 2 listing valid ones | FND-02 |
 | `cargo xtask architecture` | policy, semantic rules, negative and positive fixtures, catalog completeness | FND-02 |
 | `cargo xtask list-checks` | the catalog as JSON: stage, level, command, owning task, `in_check`, plus one row per ARCH rule | FND-02 |
-| `cargo xtask doctor [--json]` | every pinned tool: found, missing, wrong | FND-02 |
+| `cargo xtask doctor [--json] [--all]` | every pinned tool a `check` stage needs (`--all`: every pinned tool): found, missing, wrong | FND-02, FND-06 |
 | `cargo xtask install-tools [tool…]` | install pinned tools | FND-02 |
 | `cargo xtask adr new "<title>" [--number N]` | allocate an ADR from the template and add its index row | FND-02 |
 | `cargo xtask adr index [--fix]` | check (or rewrite) the ADR index against the files | FND-02 |
@@ -712,7 +713,7 @@ its environment (§2.3).
 | `cargo xtask coverage [--changed-since <rev>]` | llvm-cov over in-process suites vs `coverage-floor.toml`; changed-line gate | FND-05 |
 | `cargo xtask formal-typecheck` / `formal-test` | typecheck every `.qnt`; run Quint scenario tests | FND-06 |
 | `cargo xtask conformance [--typecheck]` | all formal and replay stages: typecheck, scenarios, simulate, freshness, generate, replay, negative controls | VER-01 |
-| `cargo xtask formal-verify` | Apalache bounded verification of every model's `allInvariants` plus long multi-seed simulation | VER-07 |
+| `cargo xtask formal-verify` | Apalache bounded verification of every model's `allInvariants` plus long multi-seed simulation (FND-06); VER-07 adds the negative controls | FND-06, VER-07 |
 | `cargo xtask mutants-curated [--only <n>]` | apply each curated mutant in a scratch tree; require its named killer to fail | VER-05 |
 | `cargo xtask mutation [--in-diff <rev>] [--shard k/n]` | `cargo-mutants` over the configured scope | VER-05 |
 | `cargo xtask fuzz <target> [--time S] [--reproduce F]` | bounded fuzz run on the pinned nightly, or reproduce a crash | VER-06 |
@@ -725,7 +726,7 @@ its environment (§2.3).
 Stages of `check` in order (each a catalog row): `fmt-check`, `architecture`, `clippy`,
 `cross-check` (Clippy for `aarch64-apple-darwin`, every target, warnings denied), `docs` (the
 ADR index matches the ADR files, the same code as `cargo xtask adr index`), `unit-tests`,
-`integration-tests`, `doctests`, `e2e-tests`, `formal-typecheck`,
+`integration-tests`, `doctests`, `e2e-tests`, `formal-typecheck`, `formal-test`,
 `formal-scenarios`, `formal-simulate`, `formal-freshness`, `formal-generate`,
 `conformance-replay`, `conformance-controls`, `coverage`, `changed-lines`, `deny`, `deny-fuzz`,
 `secrets`, `workflows`, `action-pins`. A stage enters `check` in the commit of the task that
