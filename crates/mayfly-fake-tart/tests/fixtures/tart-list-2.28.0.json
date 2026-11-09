@@ -1,0 +1,29 @@
+[
+  {
+    "Source": "local",
+    "Name": "base",
+    "Disk": 50,
+    "Size": 25,
+    "Accessed": "<time>",
+    "Running": false,
+    "State": "stopped"
+  },
+  {
+    "Source": "local",
+    "Name": "vm1",
+    "Disk": 50,
+    "Size": 25,
+    "Accessed": "<time>",
+    "Running": false,
+    "State": "stopped"
+  },
+  {
+    "Source": "OCI",
+    "Name": "ghcr.io/acme/img:1",
+    "Disk": 50,
+    "Size": 25,
+    "Accessed": "<time>",
+    "Running": false,
+    "State": "stopped"
+  }
+]

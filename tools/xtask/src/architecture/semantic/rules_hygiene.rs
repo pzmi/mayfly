@@ -15,6 +15,11 @@ use super::{Context, Facts, RefKind, Site, first_hit};
 /// The `lint` an `[[exceptions.lints]]` entry names to approve a `#[macro_export]`.
 pub const MACRO_EXPORT: &str = "macro_export";
 
+/// The `lint` an `[[exceptions.lints]]` entry names to approve real-time waiting in one file of a
+/// test-only crate (a fake tool binary, whose delays are its behaviour, not a test's wait). It is
+/// honoured only in that crate's production code; a `tests/` file or a test module never gets it.
+pub const TEST_SLEEP: &str = "test_sleep";
+
 /// Macros that mark unfinished code, with the clippy lint an exception names.
 const UNFINISHED: &[(&str, &str)] = &[
     ("todo", "clippy::todo"),
@@ -75,7 +80,7 @@ impl<'a> Hygiene<'a> {
         self.unfinished(facts, &mut out);
         self.suppressions(facts, &mut out);
         self.macro_exports(facts, &mut out);
-        sleeps(facts, self.policy, &mut out);
+        self.sleeps(facts, &mut out);
         tests(facts, &mut out);
         platform_branches(facts, &mut out);
         out
@@ -446,28 +451,48 @@ fn rustflags(config: &toml::Table, rel: &str, out: &mut Vec<Diagnostic>) {
     }
 }
 
-fn sleeps(facts: &Facts, policy: &Policy, out: &mut Vec<Diagnostic>) {
-    let test_crate = policy
-        .workspace
-        .test_only
-        .as_ref()
-        .is_some_and(|t| t.contains(&facts.package));
-    for reference in &facts.references {
-        let test = reference.site.context == Context::Test || test_crate;
-        let poll_helper = facts.package == POLL_HELPER.0
-            && facts.in_package(&reference.site) == POLL_HELPER.1
-            && reference.site.context == Context::Production;
-        if !test || poll_helper {
-            continue;
-        }
-        if let Some(candidate) = first_hit(reference, SLEEPS) {
+impl Hygiene<'_> {
+    /// `ARCH-test-sleep`. A test-only crate's production code may wait in real time only in a file
+    /// an `[[exceptions.lints]]` entry (`lint = "test_sleep"`) approves with an existing ADR.
+    /// Pinned by `should_report_sleep_when_exception_is_missing_or_not_for_that_file`.
+    fn sleeps(&mut self, facts: &Facts, out: &mut Vec<Diagnostic>) {
+        let test_crate = self
+            .policy
+            .workspace
+            .test_only
+            .as_ref()
+            .is_some_and(|t| t.contains(&facts.package));
+        for reference in &facts.references {
+            let production = reference.site.context == Context::Production;
+            let test = !production || test_crate;
+            let poll_helper = facts.package == POLL_HELPER.0
+                && facts.in_package(&reference.site) == POLL_HELPER.1
+                && production;
+            if !test || poll_helper {
+                continue;
+            }
+            let Some(candidate) = first_hit(reference, SLEEPS) else {
+                continue;
+            };
+            let excepted = if test_crate && production {
+                self.excepted(&reference.site, TEST_SLEEP)
+            } else {
+                Err(String::new())
+            };
+            if excepted.is_ok() {
+                continue;
+            }
             out.push(Diagnostic::new(
                 Rule::TestSleep,
                 format!(
-                    "{} test code calls `{}`: wait on an event, an injected clock or `{}::poll::wait_until` instead",
+                    "{} test code calls `{}`: wait on an event, an injected clock or `{}::poll::wait_until` instead{}",
                     facts.package,
                     candidate,
-                    POLL_HELPER.0.replace('-', "_")
+                    POLL_HELPER.0.replace('-', "_"),
+                    match excepted {
+                        Err(reason) if !reason.is_empty() && test_crate => format!(" ({reason})"),
+                        _ => String::new(),
+                    }
                 ),
                 reference.site.at(),
             ));
@@ -656,6 +681,62 @@ mod tests {
             "{got:?}"
         );
         assert!(hygiene.finish().is_empty(), "{:?}", hygiene.finish());
+    }
+
+    #[test]
+    fn should_report_sleep_when_exception_is_missing_or_not_for_that_file() {
+        // given
+        let source = "pub fn wait() { std::thread::sleep(std::time::Duration::from_millis(1)); }\n";
+        let files = [("src/lib.rs", "pub mod wait;\n"), ("src/wait.rs", source)];
+        let fake = super::super::testing::facts_for("mayfly-fake-tart", &files);
+        let other = super::super::testing::facts_for("mayfly-fake-github", &files);
+        let production = super::super::testing::facts_for("mayfly-control", &files);
+        let mut policy = super::super::testing::policy();
+        policy.exceptions.lints.push(LintException {
+            path: "crates/mayfly-fake-tart/src/wait.rs".to_owned(),
+            lint: TEST_SLEEP.to_owned(),
+            adr: "0001".to_owned(),
+        });
+        let adr_exists = |adr: &str| adr == "0001";
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let got: Vec<String> = [&fake, &other, &production]
+            .into_iter()
+            .flat_map(|facts| super::super::testing::rendered(&hygiene.check(facts)))
+            .filter(|d| d.starts_with("ARCH-test-sleep"))
+            .collect();
+
+        // then
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("mayfly-fake-github"), "{got:?}");
+        assert!(hygiene.finish().is_empty(), "{:?}", hygiene.finish());
+    }
+
+    #[test]
+    fn should_report_unused_exception_when_the_excepted_file_does_not_sleep() {
+        // given
+        let fake = super::super::testing::facts_for(
+            "mayfly-fake-tart",
+            &[("src/lib.rs", "pub fn quiet() {}\n")],
+        );
+        let mut policy = super::super::testing::policy();
+        policy.exceptions.lints.push(LintException {
+            path: "crates/mayfly-fake-tart/src/lib.rs".to_owned(),
+            lint: TEST_SLEEP.to_owned(),
+            adr: "0001".to_owned(),
+        });
+        let adr_exists = |adr: &str| adr == "0001";
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let checked = hygiene.check(&fake);
+        let unused = super::super::testing::rendered(&hygiene.finish());
+
+        // then
+        assert!(checked.is_empty());
+        assert_eq!(unused.len(), 1, "{unused:?}");
+        assert!(unused[0].contains("matches no suppression"), "{unused:?}");
     }
 
     #[test]

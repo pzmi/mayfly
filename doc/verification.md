@@ -284,9 +284,11 @@ A `tart`-compatible binary (`--version`, `clone`, `run`, `ip`, `list --format js
 **fault file** in that directory: rules matched by command and VM name with an occurrence
 selector, each one of `delay_ms`, `hang`, `fail_before_effect`, `fail_after_effect`,
 `crash_after_effect` (exit by signal after the state change), or `exit_code`. It records each
-invocation (argv, environment variable names and values, stdin length and digest, never stdin
-itself) so secret-handling tests can prove the JIT config never appeared in argv or the
-environment. `exec` emulates a guest runner that "runs a job" for a duration the fault file
+invocation (argv, environment variable names, with values only for `TART_HOME` and the fake's own
+`MAYFLY_FAKE_*` controls, and the stdin length and digest, never stdin itself) so secret-handling
+tests can prove the JIT config never appeared in argv, in the variable names the child received,
+or in any state file. An environment value is never logged otherwise: a CI or operator
+environment can hold tokens. `exec` emulates a guest runner that "runs a job" for a duration the fault file
 chooses. Its output formats follow the real Tart versions pinned in the Tart JSON fixtures.
 
 ### 7.3 `mayfly-fake-github`

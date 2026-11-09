@@ -1,0 +1,15 @@
+schema = 1
+
+[workspace]
+production = ["mayfly-control"]
+
+[dependencies.normal]
+mayfly-control = []
+
+[[exceptions.lints]]
+path = "crates/mayfly-control/tests/wait.rs"
+lint = "test_sleep"
+adr = "0001"
+
+[semantic]
+absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]

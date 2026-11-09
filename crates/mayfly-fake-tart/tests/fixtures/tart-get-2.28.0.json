@@ -1,0 +1,12 @@
+{
+  "OS": "darwin",
+  "CPU": 4,
+  "Memory": 8192,
+  "Disk": 50,
+  "DiskFormat": "raw",
+  "Size": "25.000",
+  "Display": "1024x768",
+  "MACAddress": "<mac>",
+  "Running": false,
+  "State": "stopped"
+}

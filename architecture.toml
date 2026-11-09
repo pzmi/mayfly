@@ -137,11 +137,13 @@ xtask = []
 mayfly-domain = { serde = ["default", "derive"] }
 mayfly-control-domain = { serde = ["default", "derive"] }
 mayfly-testkit = { serde_json = ["default"] }
+mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], toml = ["default"] }
 xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
 
 [external.dev]
 mayfly-domain = { proptest = ["std"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
+mayfly-fake-tart = { tempfile = ["default"] }
 
 [external.build]
 
@@ -154,6 +156,12 @@ mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
 # `event_set!` declares a crate's event enum and its codec (ADR 0018); the control plane's
 # crates invoke it, so it is exported. Its body is checked as pure code where it is written and
 # names only `$crate` items, serde through `$crate::__serde`, and core/std value types.
+# The fake `tart` waits in real time (delays, guest jobs, `ip --wait`) in this one file (ADR 0023).
+[[exceptions.lints]]
+path = "crates/mayfly-fake-tart/src/wait.rs"
+lint = "test_sleep"
+adr = "0023"
+
 [[exceptions.lints]]
 path = "crates/mayfly-control-domain/src/event.rs"
 lint = "macro_export"

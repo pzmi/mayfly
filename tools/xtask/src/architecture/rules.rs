@@ -139,8 +139,8 @@ rules! {
         "An allow, expect or coverage(off) attribute lacks an [exceptions.lints] entry citing an existing ADR, or an entry matches nothing.",
         ["allow-with-missing-adr", "stale-lint-exception", "unjustified-allow"];
     TestSleep => "ARCH-test-sleep", "FND-02",
-        "Test code sleeps outside the bounded poll helper mayfly-testkit-shared/src/poll.rs.",
-        ["sleep-in-test"];
+        "Test code sleeps outside the bounded poll helper mayfly-testkit-shared/src/poll.rs, or a test-only crate waits in real time in a file no [[exceptions.lints]] entry (lint = \"test_sleep\") approves.",
+        ["sleep-in-test", "test-sleep-exception-in-test-file"];
     TestName => "ARCH-test-name", "FND-02",
         "A test function's name does not match should_<outcome>_when_<condition>, or a macro hides a test.",
         ["badly-named-proptest", "test-without-should"];
