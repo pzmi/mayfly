@@ -233,11 +233,11 @@ impl Finding {
     }
 }
 
-/// Every tool the `stages` declare (`needs`), with the stages needing each.
+/// Every tool the `stages` declare (`needs` and `and_needs`), with the stages needing each.
 pub fn needed_by(stages: &[crate::process::Stage]) -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut out: BTreeMap<&'static str, Vec<&'static str>> = BTreeMap::new();
     for stage in stages {
-        if let Some(tool) = stage.tool {
+        for tool in stage.tool.into_iter().chain(stage.also_tool) {
             out.entry(tool).or_default().push(stage.name);
         }
     }
@@ -492,10 +492,12 @@ mod tests {
         let needs = needed_by(&stages);
 
         // then
-        for want in ["cargo-deny", "gitleaks"] {
+        for want in ["actionlint", "cargo-deny", "gitleaks", "shellcheck"] {
             assert!(needs.contains_key(want), "{want} missing from {needs:?}");
         }
         assert_eq!(needs["gitleaks"], ["secrets"]);
+        assert_eq!(needs["actionlint"], ["workflows"]);
+        assert_eq!(needs["shellcheck"], ["workflows"]);
         let tools = manifest().unwrap();
         let unknown: Vec<_> = needs
             .keys()
@@ -674,7 +676,7 @@ mod tests {
 
         // then
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        for want in ["cargo-deny", "gitleaks"] {
+        for want in ["cargo-deny", "gitleaks", "actionlint", "shellcheck"] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }
     }

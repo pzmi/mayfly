@@ -1,8 +1,7 @@
 # Pinned development tools (D15). `cargo xtask doctor` checks them, `cargo xtask
 # install-tools [tool...]` installs the ones it can. Versions are exact; bump them here only.
 # Only the tools a registered `check` stage needs are pinned: the task that adds a stage adds
-# its tool here (cargo-nextest and cargo-llvm-cov with FND-05, actionlint and shellcheck with
-# FND-04, Quint and Apalache with FND-06).
+# its tool here (cargo-nextest and cargo-llvm-cov with FND-05, Quint and Apalache with FND-06).
 #
 # method = "cargo"   : cargo install --locked <crate>@<version>
 # method = "rustup"  : rustup toolchain install nightly-<date> --profile minimal
@@ -27,3 +26,20 @@ version = "8.30.1"
 method = "manual"
 url = "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
 probe = ["gitleaks", "version"]
+
+# The `workflows` stage: actionlint over `.github/workflows`. Install the release archive for the
+# platform; CI's `install-scanners` action pins the SHA-256 of the same release.
+[tools.actionlint]
+version = "1.7.12"
+method = "manual"
+url = "https://github.com/rhysd/actionlint/releases/tag/v1.7.12"
+probe = ["actionlint", "-version"]
+
+# actionlint runs shellcheck over every `run:` script and skips those checks without it, so the
+# `workflows` stage requires it too. The version is the one Ubuntu 24.04 packages; CI installs
+# the release binary through the install-scanners action, which pins its SHA-256.
+[tools.shellcheck]
+version = "0.9.0"
+method = "manual"
+url = "https://github.com/koalaman/shellcheck/releases/tag/v0.9.0"
+probe = ["shellcheck", "--version"]

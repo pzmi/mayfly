@@ -34,8 +34,9 @@ const fn row(
 }
 
 /// All rows. `quick` runs the stage rows `fmt-check`, `architecture`, `clippy`, `unit-tests`
-/// and `doctests`. Stages that later tasks bring (nextest, coverage, formal, conformance,
-/// workflows, fuzz, mutation, release) are absent until those tasks register them.
+/// and `doctests`. `platform-tests` is a stage of `test` that `check` leaves out (the macOS CI
+/// job runs it). Stages that later tasks bring (nextest, coverage, formal, conformance, fuzz,
+/// mutation, release) are absent until those tasks register them.
 pub const CATALOG: &[Check] = &[
     row(
         "fmt-check",
@@ -49,6 +50,13 @@ pub const CATALOG: &[Check] = &[
         "static",
         "cargo clippy --locked --workspace --all-targets -- -D warnings",
         "FND-02",
+        true,
+    ),
+    row(
+        "cross-check",
+        "static",
+        "cargo check --locked --workspace --target aarch64-apple-darwin (after a rustup target preflight)",
+        "FND-04",
         true,
     ),
     row(
@@ -83,6 +91,13 @@ pub const CATALOG: &[Check] = &[
     ),
     row("test", "integration", "cargo xtask test", "FND-02", false),
     row(
+        "platform-tests",
+        "integration",
+        "cargo xtask test --only platform-tests",
+        "FND-04",
+        false,
+    ),
+    row(
         "security",
         "security",
         "cargo xtask security",
@@ -103,6 +118,7 @@ pub const CATALOG: &[Check] = &[
         "FND-02",
         true,
     ),
+    row("workflows", "security", "actionlint", "FND-04", true),
     row(
         "action-pins",
         "security",

@@ -13,6 +13,9 @@ pub struct Stage {
     pub action: Action,
     /// Pinned tool that must be installed for the stage to run (checked by [`run_report`]).
     pub tool: Option<&'static str>,
+    /// A second pinned tool the stage needs (actionlint runs shellcheck over `run:` scripts and
+    /// skips them silently without it), checked the same way.
+    pub also_tool: Option<&'static str>,
 }
 
 /// How a stage runs.
@@ -47,6 +50,7 @@ impl Stage {
                 env: Vec::new(),
             },
             tool: None,
+            also_tool: None,
         }
     }
 
@@ -66,12 +70,20 @@ impl Stage {
         self
     }
 
+    /// Declares a second pinned tool this stage needs, with the same `UNAVAILABLE` outcome.
+    #[must_use]
+    pub fn and_needs(mut self, tool: &'static str) -> Self {
+        self.also_tool = Some(tool);
+        self
+    }
+
     /// Builds a stage that calls `run` in this process.
     pub fn in_process(name: &'static str, display: &'static str, run: fn() -> i32) -> Self {
         Self {
             name,
             action: Action::InProcess { display, run },
             tool: None,
+            also_tool: None,
         }
     }
 
@@ -137,7 +149,11 @@ pub fn run_report(stages: &[Stage], require: &dyn Fn(&str) -> Result<(), String>
         .iter()
         .map(|stage| {
             let start = Instant::now();
-            let missing = stage.tool.and_then(|tool| require(tool).err());
+            let missing = stage
+                .tool
+                .into_iter()
+                .chain(stage.also_tool)
+                .find_map(|tool| require(tool).err());
             let status = match missing {
                 Some(message) => {
                     eprintln!("xtask: stage {} UNAVAILABLE: {message}", stage.name);
@@ -250,6 +266,41 @@ mod tests {
         assert!(matches!(outcomes[0].status, Status::Unavailable(_)));
         assert!(table.contains("UNAVAILABLE"), "{table}");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn should_report_unavailable_when_the_second_tool_is_missing() {
+        // given
+        let stages = [sh("needs-two", "exit 0").needs("a").and_needs("b")];
+        let only_a = |tool: &str| {
+            if tool == "a" {
+                Ok(())
+            } else {
+                Err(format!("missing {tool}: install it"))
+            }
+        };
+
+        // when
+        let outcomes = run_report(&stages, &only_a);
+
+        // then
+        assert_eq!(
+            outcomes[0].status,
+            Status::Unavailable("missing b: install it".into())
+        );
+        assert_eq!(finish(&outcomes), 1);
+    }
+
+    #[test]
+    fn should_run_when_both_tools_are_present() {
+        // given
+        let stages = [sh("needs-two", "exit 0").needs("a").and_needs("b")];
+
+        // when
+        let outcomes = run_report(&stages, &present);
+
+        // then
+        assert_eq!(outcomes[0].status, Status::Passed);
     }
 
     #[test]

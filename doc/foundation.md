@@ -482,8 +482,8 @@ state.
    local and CI run the same code. Initial jobs: `architecture`; `static` (`doctor`, then
    fmt-check, clippy, docs checks); `tests` (unit, integration, doctests); `e2e`; `conformance`;
    `coverage` (coverage, changed-lines); `security` (deny, secrets, workflows, action-pins);
-   `macos` (native build and tests on arm64, `test --only platform-tests`); `cross` (`cargo check
-   --target aarch64-apple-darwin` from Linux).
+   `macos` (native build and tests on arm64, `test --only platform-tests`); `cross`
+   (`check --only cross-check`: `cargo check --target aarch64-apple-darwin` from Linux).
 2. **One aggregate job, `required`**, runs `if: always()`, needs every other job of `ci.yml`, and
    fails unless every result is `success` (skipped and cancelled fail).
 3. **Self-tests** in xtask parse `ci.yml` and fail when an `in_check` stage is in zero jobs or
@@ -572,8 +572,8 @@ landed exits 3 with "not available yet: introduced by <task>".
 | `cargo xtask faultlab replay <run-dir>` | re-run the saved scenario and seed on fresh state; succeed only if the verdict reproduces | VER-03 |
 | `cargo xtask release-check [--target T]` / `sbom` | package, extract and smoke the archive; produce the SBOM | OPS-03 |
 
-Stages of `check` in order (each a catalog row): `fmt-check`, `architecture`, `clippy`, `docs`,
-`unit-tests`, `integration-tests`, `doctests`, `e2e-tests`, `formal-typecheck`,
+Stages of `check` in order (each a catalog row): `fmt-check`, `architecture`, `clippy`,
+`cross-check`, `docs`, `unit-tests`, `integration-tests`, `doctests`, `e2e-tests`, `formal-typecheck`,
 `formal-scenarios`, `formal-simulate`, `formal-freshness`, `formal-generate`,
 `conformance-replay`, `conformance-controls`, `coverage`, `changed-lines`, `deny`, `deny-fuzz`,
 `secrets`, `workflows`, `action-pins`. A stage enters `check` in the commit of the task that

@@ -1,0 +1,56 @@
+name: Set up Rust for a CI job
+description: >-
+  Installs the toolchain from rust-toolchain.toml, restores the cargo registry, build output
+  and installed tools from the cache, and installs the pinned dev tools the job names. The
+  cache key names the runner OS and architecture (a macOS or arm64 entry never restores on
+  another platform). The cache is restored only; actions/cache/save runs in save-rust-cache, on main only, so a pull
+  request never writes an entry that would evict main's. A cache entry is a speedup
+  only: cargo fingerprints decide what is rebuilt, and the xtask checks the version of every
+  tool it runs. Run it after checkout.
+inputs:
+  job:
+    description: The job's cache namespace; each job restores and saves its own entry.
+    required: true
+  tools:
+    description: >-
+      Space-separated pinned tools for `cargo xtask install-tools` (tools/versions.toml). The
+      list is part of the cache key, so adding a tool saves a new ~/.cargo/bin instead of
+      reusing one cached without it.
+    required: false
+    default: ""
+outputs:
+  cache-key:
+    description: The exact key the cache is saved under.
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+  cache-hit:
+    description: "'true' when the exact key was restored."
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain from rust-toolchain.toml
+      shell: bash
+      run: rustup show active-toolchain || rustup toolchain install
+
+    - name: Restore cargo registry, build output and tools
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'tools/versions.toml') }}-${{ inputs.tools }}
+        restore-keys: |
+          ${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install pinned dev tools
+      if: inputs.tools != ''
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: |
+        read -r -a tools <<< "$TOOLS"
+        cargo xtask install-tools "${tools[@]}"

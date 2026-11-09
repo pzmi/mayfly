@@ -54,6 +54,32 @@ fn stages_with(developer_cases: Option<&str>) -> Vec<Stage> {
     ]
 }
 
+/// The `platform-tests` stage (FND-04): the product crates' unit and integration tests, run
+/// natively on macOS arm64 by the `macos` CI job, because the code under test is the operating
+/// system's (processes, sockets, signals).
+///
+/// It is `unit-tests` plus `integration-tests` minus what is not OS behaviour: `xtask`, whose
+/// security fixtures need cargo-deny, Gitleaks and actionlint (only the Linux jobs install them)
+/// and whose repository-policy tests read the Linux CI definition. It is not part of [`stages`]
+/// or of `check`: on Linux the two stages it repeats already run, so a local `check` would run
+/// everything twice. Reached only as `cargo xtask test --only platform-tests`. Pinned by
+/// `should_run_the_product_crates_natively_when_platform_stage_is_built`.
+fn platform_stage(developer_cases: Option<&str>) -> Stage {
+    Stage::new(
+        "platform-tests",
+        "cargo",
+        &[
+            "test",
+            "--workspace",
+            "--exclude",
+            "xtask",
+            "--locked",
+            "--tests",
+        ],
+    )
+    .env("PROPTEST_CASES", &proptest_cases(developer_cases))
+}
+
 /// The stages to run: all, or only the one named by `--only`. An unknown name is an error
 /// that lists the valid ones, never an empty green run.
 fn select(all: Vec<Stage>, only: Option<&str>) -> Result<Vec<Stage>, String> {
@@ -70,7 +96,14 @@ fn select(all: Vec<Stage>, only: Option<&str>) -> Result<Vec<Stage>, String> {
 
 /// Runs `test` (or one of its stages) and returns the exit code.
 pub fn run(only: Option<&str>) -> i32 {
-    match select(stages(), only) {
+    let all = if only == Some("platform-tests") {
+        vec![platform_stage(
+            std::env::var("PROPTEST_CASES").ok().as_deref(),
+        )]
+    } else {
+        stages()
+    };
+    match select(all, only) {
         Ok(stages) => finish(&run_report(&stages, &tools::require)),
         Err(err) => {
             eprintln!("xtask: {err}");
@@ -127,6 +160,35 @@ mod tests {
             assert!(debug.contains("\"--workspace\""), "{debug}");
             assert!(debug.contains("(\"PROPTEST_CASES\", \"1024\")"), "{debug}");
         }
+    }
+
+    #[test]
+    fn should_run_the_product_crates_natively_when_platform_stage_is_built() {
+        // given
+        let stage = platform_stage(None);
+
+        // when
+        let rendered = format!("{:?}", stage.action);
+
+        // then
+        assert_eq!(stage.name, "platform-tests");
+        for want in [
+            "\"--workspace\"",
+            "\"--exclude\", \"xtask\"",
+            "\"--locked\"",
+            "\"--tests\"",
+        ] {
+            assert!(rendered.contains(want), "{want} missing from {rendered}");
+        }
+        assert!(
+            rendered.contains("(\"PROPTEST_CASES\", \"1024\")"),
+            "{rendered}"
+        );
+        assert!(
+            stages().iter().all(|s| s.name != "platform-tests"),
+            "check must not run it a second time"
+        );
+        assert!(catalog::find("platform-tests").is_some_and(|c| !c.in_check));
     }
 
     #[test]

@@ -1,0 +1,42 @@
+name: Security
+
+# The blocking run of these stages is the `security` job of ci.yml; this workflow repeats it
+# weekly, because a new advisory can fail an unchanged tree.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  security:
+    name: Security stage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # Gitleaks scans the whole history
+
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install Gitleaks, actionlint and shellcheck
+        uses: ./.github/actions/install-scanners
+
+      - name: Install cargo-deny
+        run: cargo xtask install-tools cargo-deny
+
+      - name: Security stage
+        run: cargo xtask security

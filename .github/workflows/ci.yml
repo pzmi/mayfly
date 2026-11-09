@@ -1,0 +1,227 @@
+name: CI
+
+# The blocking gate, one job per lane of foundation.md section 7.2, each running
+# `cargo xtask check --only <stages>` so a job and the same command on a laptop run the same
+# stage code. `required` needs every job and is the one result to watch.
+# tools/xtask/src/check.rs (should_cover_each_in_check_stage_once_when_ci_jobs_are_read) fails
+# when an `in_check` stage of the catalog is in no job or in two, so no stage is dropped
+# silently. Every job installs only the tools its stages need.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  architecture:
+    name: Architecture and policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: architecture
+
+      - name: Architecture and policy
+        run: cargo xtask check --only architecture
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # `doctor` runs first and fails unless every tool a `check` stage needs is installed at its
+  # pinned version, so this job installs the whole gate toolset: CI's toolset is asserted the
+  # same way as a laptop's (foundation.md section 8).
+  static:
+    name: Static quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: static
+          tools: cargo-deny
+
+      - name: Install Gitleaks, actionlint and shellcheck
+        uses: ./.github/actions/install-scanners
+
+      - name: Pinned tools
+        run: cargo xtask doctor
+
+      - name: Static quality
+        run: cargo xtask check --only fmt-check,clippy
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # The product targets aarch64-apple-darwin (D2): a macOS-only compile error shows here, in a
+  # Linux minute, before the native `macos` job.
+  cross:
+    name: Cross check (aarch64-apple-darwin)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: cross
+
+      - name: Install the macOS target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Cross check
+        run: cargo xtask check --only cross-check
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # xtask's fixture tests run the real cargo-deny, Gitleaks and actionlint, so this job
+  # installs them.
+  tests:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: tests
+          tools: cargo-deny
+
+      - name: Install Gitleaks, actionlint and shellcheck
+        uses: ./.github/actions/install-scanners
+
+      - name: Tests
+        run: cargo xtask check --only unit-tests,integration-tests,doctests
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # The product crates' unit and integration tests on the native macOS arm64 runner, because
+  # the code under test is the operating system's: processes, sockets, signals (D2). It installs
+  # no scanners (they are Linux x86-64 only) and so runs `cargo xtask test --only
+  # platform-tests`, which leaves out the xtask package whose fixtures need them; every `check`
+  # stage stays in exactly one other job.
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: macos
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Platform tests
+        run: cargo xtask test --only platform-tests
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  security:
+    name: Security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the secrets stage scans the whole history
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: security
+          tools: cargo-deny
+
+      - name: Install Gitleaks, actionlint and shellcheck
+        uses: ./.github/actions/install-scanners
+
+      - name: Security
+        run: cargo xtask check --only deny,secrets,workflows,action-pins
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # The one result to watch (and, if the owner adds a ruleset, to require). It runs even when a
+  # needed job failed or was cancelled and fails then; a needed job that was skipped fails it
+  # too, so a job can never drop out of the gate by not running.
+  required:
+    name: Required
+    if: ${{ always() }}
+    needs:
+      - architecture
+      - static
+      - cross
+      - tests
+      - macos
+      - security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null

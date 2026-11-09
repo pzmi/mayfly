@@ -1,0 +1,51 @@
+name: Save the Rust cache of a CI job
+description: >-
+  Saves the cache that setup-rust restored, under the exact key it computed, on a push to main
+  and only when that key was not already there. Pull requests never save. Run it as
+  the last step of a job that succeeded.
+inputs:
+  key:
+    description: The `cache-key` output of setup-rust.
+    required: true
+  hit:
+    description: The `cache-hit` output of setup-rust.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Shrinks the entry before it counts against the repository's cache quota. The
+    # workspace crates' own outputs are dead weight: a fresh checkout has newer sources, so cargo
+    # rebuilds them anyway. Registry dependencies, the fingerprints of other crates and the
+    # installed tools stay. A missing `target` is not an error (the job built nothing); a failing
+    # `cargo metadata` is.
+    - name: Prune the workspace crates' build outputs
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -d target ]; then
+          echo 'no target directory; nothing to prune'
+          exit 0
+        fi
+        rm -rf target/nextest
+        find target -type d -name incremental -prune -exec rm -rf {} +
+        names="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')"
+        find target -type d \( -name .fingerprint -o -name build -o -name deps \) -prune -print0 |
+          while IFS= read -r -d '' dir; do
+            while IFS= read -r name; do
+              under="${name//-/_}"
+              rm -rf "$dir/$name"-* "$dir/$under"-* "$dir/lib$under"-*
+            done <<< "$names"
+          done
+
+    - name: Save cargo registry, build output and tools
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ inputs.key }}

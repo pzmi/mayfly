@@ -8,6 +8,10 @@
 //! the committed tree stays clean) must fail Gitleaks with the repository's own config, and the
 //! same repository without it must pass.
 //!
+//! Workflow lint: actionlint must reject a workflow with an invalid expression and one whose
+//! `run:` script shellcheck objects to (proving shellcheck is on `PATH`), and accept this
+//! repository's own workflows.
+//!
 //! The git source is a local repository, because the policy denies every git source and
 //! `cargo metadata` has to be able to resolve it offline.
 
@@ -219,5 +223,64 @@ fn should_pass_secret_scan_when_history_holds_no_secret() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn should_fail_workflow_lint_when_expression_is_invalid() {
+    // given
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dir = temp.path().join("repo");
+    fs::create_dir_all(dir.join(".github/workflows")).expect("create dir");
+    fs::write(
+        dir.join(".github/workflows/bad.yml"),
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n      \
+         - run: echo ${{ github.nonexistent_property }}\n",
+    )
+    .expect("write workflow");
+
+    // when
+    let out = run(&dir, "actionlint", &[]);
+
+    // then
+    assert!(!out.status.success(), "invalid workflow accepted");
+}
+
+#[test]
+fn should_fail_workflow_lint_when_a_run_script_has_a_shell_error() {
+    // given
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dir = temp.path().join("repo");
+    fs::create_dir_all(dir.join(".github/workflows")).expect("create dir");
+    fs::write(
+        dir.join(".github/workflows/unquoted.yml"),
+        "on: push\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n      \
+         - run: |\n          name=a\n          cat $name\n",
+    )
+    .expect("write workflow");
+
+    // when
+    let out = run(&dir, "actionlint", &[]);
+
+    // then
+    assert!(
+        !out.status.success(),
+        "shellcheck did not run over run: scripts"
+    );
+}
+
+#[test]
+fn should_pass_workflow_lint_when_the_repository_workflows_are_valid() {
+    // given
+    let root = repository_root();
+
+    // when
+    let out = run(&root, "actionlint", &[]);
+
+    // then
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
