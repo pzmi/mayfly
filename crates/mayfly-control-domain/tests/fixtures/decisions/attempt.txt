@@ -1,0 +1,95 @@
+# attempt: refusal codes, then the outcome of each determinism case
+code already_current
+code already_quarantined
+code already_retiring
+code already_started
+code busy
+code closed
+code directive_pending
+code jit_already_issued
+code job_already_bound
+code no_fresh_verification
+code no_grant
+code no_proof
+code no_retirement_requested
+code not_activating
+code not_adopted
+code not_listening
+code not_prepared
+code not_quarantined
+code not_started
+code not_terminal
+code nothing_to_issue
+code observation_mismatch
+code operator_only
+code outcome_unknown
+code quarantined
+code stale_run
+code terminal
+case adopt_orphans_handle accepted
+  attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
+  jit_handle_orphaned/v1 {"handle_id":"000000000000000000000000000005ec"}
+case already_current refused already_current
+case already_quarantined refused already_quarantined
+case already_retiring refused already_retiring
+case already_started refused already_started
+case begin_activation accepted
+  activation_started/v1 {"grant_ref":"0000000000000000000000000000e001"}
+case bind_job accepted
+  job_bound/v1 {"request_id":1}
+case busy refused busy
+case close_deleted accepted
+  attempt_closed/v1 {}
+case closed refused closed
+case delete_with_proof accepted
+  directive_issued/v1 {"directive_id":"0000000000000000000000000000d008","kind":{"delete_vm":{"proof":{"attempt_id":"0000000000000000000000000000a77e","host_id":"host0","slot":0,"generation":1,"vm_name":"mf-pool0-host0-s0-g1-0000a77e","instance_id":"0a:00:00:00:00:01"}}},"deadline":60000}
+case directive_pending refused directive_pending
+case guest_rejected_quarantines accepted
+  guest_rejected/v1 {"directive_id":"0000000000000000000000000000d003","reason":"challenge_failed"}
+  attempt_quarantined/v1 {"reason":"guest_identity_refused","vm":"running"}
+case issue_clone accepted
+  directive_issued/v1 {"directive_id":"0000000000000000000000000000d001","kind":"clone_vm","deadline":60000}
+case jit_already_issued refused jit_already_issued
+case job_already_bound refused job_already_bound
+case launch_runner accepted
+  directive_issued/v1 {"directive_id":"0000000000000000000000000000d005","kind":{"launch_runner":{"handle_id":"000000000000000000000000000005ec"}},"deadline":60000}
+case no_fresh_verification refused no_fresh_verification
+case no_grant refused no_grant
+case no_proof refused no_proof
+case no_retirement_requested refused no_retirement_requested
+case not_activating refused not_activating
+case not_adopted refused not_adopted
+case not_listening refused not_listening
+case not_prepared refused not_prepared
+case not_quarantined refused not_quarantined
+case not_started refused not_started
+case not_terminal refused not_terminal
+case nothing_to_issue refused nothing_to_issue
+case observation_mismatch refused observation_mismatch
+case operator_only refused operator_only
+case operator_resolves_quarantine accepted
+  attempt_retired/v1 {"reason":"quarantine_resolved"}
+case outcome_unknown refused outcome_unknown
+case quarantined refused quarantined
+case record_clone accepted
+  vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
+case record_jit_handle accepted
+  jit_handle_issued/v1 {"handle_id":"000000000000000000000000000005ec","registration_ref":"0000000000000000000000000000e002"}
+case retire_finished accepted
+  attempt_retired/v1 {"reason":"job_done"}
+case retirement_waits_for_deregistration accepted
+  retirement_requested/v1 {"reason":"surplus"}
+case stage_failure_backs_off accepted
+  directive_refused/v1 {"directive_id":"0000000000000000000000000000d001","reason":"effect_failed"}
+  attempt_backed_off/v1 {"stage":"clone","n":1}
+case stale_generation_ignored accepted
+  stale_observation_ignored/v1 {"observation_id":"000000000000000000000000000000b6","staleness":{"generation":{"observed":2}}}
+case stale_run refused stale_run
+case start_attempt accepted
+  attempt_started/v1 {"attempt_id":"0000000000000000000000000000a77e","host_id":"host0","slot":0,"generation":1,"vm_name":"mf-pool0-host0-s0-g1-0000a77e","pool":"pool0","image_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","retry_budget":2,"epoch":1}
+case terminal refused terminal
+case unknown_left_by_inventory accepted
+  vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
+case verification_prepares accepted
+  guest_verified/v1 {"nonce_ref":"0000000000000000000000000000d003","facts":{"os":"macos","uptime":30000}}
+  attempt_prepared/v1 {}

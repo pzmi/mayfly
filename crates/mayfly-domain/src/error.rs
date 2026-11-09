@@ -11,6 +11,8 @@ pub enum IdError {
     InvalidHexId,
     /// A generation of 0; generations start at 1.
     ZeroGeneration,
+    /// A provider instance id that is not `[0-9a-z:._-]{1,64}`.
+    InvalidInstanceId,
 }
 
 impl fmt::Display for IdError {
@@ -19,6 +21,7 @@ impl fmt::Display for IdError {
             Self::InvalidName => f.write_str("a name must match [a-z0-9]{1,16}"),
             Self::InvalidHexId => f.write_str("an id must be 32 lowercase hexadecimal digits"),
             Self::ZeroGeneration => f.write_str("a generation starts at 1"),
+            Self::InvalidInstanceId => f.write_str("an instance id must match [0-9a-z:._-]{1,64}"),
         }
     }
 }

@@ -157,6 +157,11 @@ hex_id!(
     CommandId
 );
 hex_id!(
+    /// A secret handle: the opaque, single-take reference to one JIT config held by the
+    /// control plane's broker, journaled by this id only (never the secret, plan §13).
+    SecretHandleId
+);
+hex_id!(
     /// One recorded event, unique across the whole journal through its event-id registry
     /// (plan §5.2, ADR 0021): the caller's id port mints it before the append, so a retried
     /// append cannot record the same fact twice (the journal contract's `duplicate_event_id`).

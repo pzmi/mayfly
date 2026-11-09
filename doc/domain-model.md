@@ -588,14 +588,17 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `WithdrawRetirement` (422), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
   `ResolveQuarantine{disposition}`, `Close`. (No `AssertOutcome`: OD10, ADR 0025.)
 - **Events:** `AttemptStarted`, `DirectiveIssued`, `DirectiveRefused{reason}`,
-  `DirectiveOutcomeUnknown`, `VmCloned{instance_id}`, `VmBooted`, `GuestVerified{facts, nonce_ref}`,
+  `DirectiveOutcomeUnknown`, `DirectiveObservedNotApplied` (a complete inventory shows an
+  `Unknown` effect did not happen: U1), `VmCloned{instance_id}`, `VmBooted`, `GuestVerified{facts, nonce_ref}`,
   `GuestRejected{reason}`, `AttemptPrepared`, `ActivationStarted`, `JitHandleIssued`,
   `JitHandleTaken`, `JitHandleOrphaned`, `RunnerLaunched`, `RunnerLaunchUnknown`, `JobBound`,
   `RunnerExited{code}`, `VmObservedStopped`, `AttemptBackedOff`, `RetirementRequested`,
   `RetirementWithdrawn`, `AttemptRetired{reason}`, `DiagnosticsExported{bytes, hash}`,
   `DiagnosticsLost{reason}`, `VmStopped`, `VmDeleted`, `AttemptLost{evidence}`,
   `AttemptQuarantined{reason, vm}`, `AttemptAdopted{epoch}`,
-  `StaleObservationIgnored{generation|epoch}` (sampled), `AttemptClosed`.
+  `StaleObservationIgnored{generation|epoch|directive}` (sampled), `AttemptClosed`. An operator's
+  resolution of the quarantine case is `AttemptRetired{quarantine_resolved}`: cleanup then stops
+  and deletes with proof (KER-04).
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
   nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per

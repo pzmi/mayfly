@@ -1,18 +1,21 @@
 //! The one registry of the control plane's aggregates, and through them of its events.
 
 use crate::aggregate::{AggregateRegistry, AggregateVisitor, DeterminismCases};
+use crate::attempt::Attempt;
 use crate::event::{EventKind, EventSet};
 
 /// Every aggregate of the control plane. An aggregate's events are registered by its
 /// `Event` set, so this list is also the event registry (plan §5.3): the golden harness walks
 /// it for fixtures and the determinism harness for cases.
 ///
-/// KER-04..06 add one `visitor.visit::<Aggregate>()` line each.
+/// Each aggregate adds one `visitor.visit::<Aggregate>()` line (`ARCH-aggregate-registered`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ControlAggregates;
 
 impl AggregateRegistry for ControlAggregates {
-    fn accept<V: AggregateVisitor>(_visitor: &mut V) {}
+    fn accept<V: AggregateVisitor>(visitor: &mut V) {
+        visitor.visit::<Attempt>();
+    }
 }
 
 /// Every event kind a registry decodes, current and legacy, in registration order. A journal

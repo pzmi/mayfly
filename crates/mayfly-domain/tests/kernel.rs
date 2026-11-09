@@ -2,8 +2,8 @@
 
 use mayfly_domain::{
     AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Fence, FenceError, Generation,
-    HostId, ImageDigest, Millis, ObservationId, OwnedVmName, PoolName, Resources, Sample, Slot,
-    VmNameClass, VmNameError, classify_vm_name,
+    HostId, ImageDigest, Millis, ObservationId, OwnedVmName, PoolName, ProviderInstanceId,
+    Resources, Sample, SecretHandleId, Slot, VmNameClass, VmNameError, classify_vm_name,
 };
 use proptest::prelude::*;
 use serde::Deserialize;
@@ -524,4 +524,35 @@ fn should_decode_its_own_text_when_a_sample_is_serialised() {
         String::from(OwnedVmName::sample()),
         "mf-pool0-host0-s0-g1-00000001"
     );
+}
+
+#[test]
+fn should_refuse_instance_id_when_it_is_malformed() {
+    // given
+    let too_long = "a".repeat(65);
+    // when
+    let refused: Vec<&str> = ["", "AA:BB", "a b", "a/b", "a;b", "é", too_long.as_str()]
+        .into_iter()
+        .filter(|bad| ProviderInstanceId::new(bad).is_err())
+        .collect();
+    let decoded: Result<ProviderInstanceId, DeError> =
+        ProviderInstanceId::deserialize(StrDeserializer::new("a$b"));
+    // then
+    assert_eq!(refused.len(), 7, "{refused:?}");
+    assert!(decoded.is_err());
+    assert!(ProviderInstanceId::new("0a:1b:2c:3d:4e:5f").is_ok());
+    assert!(ProviderInstanceId::new(&"0".repeat(64)).is_ok());
+}
+
+#[test]
+fn should_decode_its_own_text_when_an_attempt_sample_is_serialised() {
+    // given
+    let instance = ProviderInstanceId::sample();
+    let handle = SecretHandleId::sample();
+    // when
+    let decoded_instance = decoded_sample::<ProviderInstanceId>();
+    let decoded_handle = decoded_sample::<SecretHandleId>();
+    // then
+    assert_eq!(decoded_instance, Ok(instance));
+    assert_eq!(decoded_handle, Ok(handle));
 }

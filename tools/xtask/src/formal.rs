@@ -38,16 +38,22 @@ pub struct Model {
     pub steps: &'static [&'static str],
 }
 
-/// The registry of models (verification.md section 6). It holds the smoke model only: the
-/// real models arrive with the tasks that own them (`lifecycle` with KER-04, `scheduling` with
-/// KER-05, `scaleset` with KER-06, `recovery` with KER-07, `link` with KER-02). Registering a
+/// The registry of models (verification.md section 6). The real models arrive with the tasks
+/// that own them (`scheduling` with KER-05, `scaleset` with KER-06, `recovery` with KER-07,
+/// `link` with KER-02). Registering a
 /// model is one entry here and one entry in [`crate::formal_verify::BOUNDED`] per step
 /// relation; `should_register_every_model_file_when_formal_is_read` and
 /// `should_bound_every_step_relation_when_models_are_registered` fail when either is missing.
-pub const MODELS: &[Model] = &[Model {
-    file: "smoke.qnt",
-    steps: &["step"],
-}];
+pub const MODELS: &[Model] = &[
+    Model {
+        file: "smoke.qnt",
+        steps: &["step"],
+    },
+    Model {
+        file: "lifecycle.qnt",
+        steps: &["step", "serveStep"],
+    },
+];
 
 /// The backend flags of every `quint run` and `quint test`: the TypeScript evaluator in
 /// `formal/node_modules`, never the Rust one that Quint downloads at first use.

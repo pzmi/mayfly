@@ -86,9 +86,9 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep` | 8 steps each | about 45 s for `step`, 40 s for `serveStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04) | KER-04 |
 
-The planned models are listed in verification §6.1: `lifecycle` (KER-04), `scheduling`
-(KER-05), `scaleset` (KER-06), `recovery` (KER-07), `link` (KER-02) and `registration` (KER-09).
+The planned models are listed in verification §6.1: `scheduling` (KER-05), `scaleset` (KER-06), `recovery` (KER-07), `link` (KER-02) and `registration` (KER-09).
 
 ### Simulation budget
 
@@ -108,6 +108,48 @@ One counter that `increment`s up to `LIMIT = 3` and `reset`s to zero.
 Tests (`quint test`, stage `formal-test`): `climbsToLimitTest`, `resetReturnsToZeroTest`,
 `resetNeedsNonZeroTest`. Negative control tried: tightening the invariant to `count < LIMIT`
 makes `quint verify` report `[violation]` with a counterexample that reaches `count = 3`.
+
+### lifecycle
+
+One attempt stream (`a`), the provider's truth about its VM (`w`, with whether the pending
+directive has taken effect) and history for the invariants (`g`, read by no guard). Each action
+is one stimulus of the Rust aggregate `mayfly_control_domain::attempt`: `issueNext` is the
+saga's `IssueNext`; `replySucceeded`, `replyRefused`, `replyProofRefused`, `replyGuestRejected`,
+`replyLost` (`OutcomeUnknown`, the effect applied or not), `replyLaunchUnknown`,
+`inventoryPresent`, `inventoryAbsent`, `vmObservedStopped` and `runnerExited` are
+`RecordObservation` facts; `beginActivation`, `recordJitHandle`, `bindJob`,
+`requestRetirement`, `confirmRetirement`, `withdrawRetirement`, `quarantineCommand`, `adopt`,
+`resolveQuarantine` and `close` are commands; `vmReplacedOrRemoved` changes the provider behind
+the journal's back. A reply is merged with the execution of its effect, so a lost reply is the
+effect happening or not, then `Unknown`. `step` offers every stimulus at every state;
+`serveStep` is the biased relation of verification §6 (no policy retirement before the job ends,
+no interference with the provider), because a uniform random walk of `step` almost never strings
+the fifteen stimuli of the happy path together: `serveStep` reaches Busy, Finished and Closed in
+simulation, `step` does not.
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `i06CompletedNeverServesAgain` | I06: no job is bound and no activation begins after the attempt finished or was retired | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_return_to_prepared_when_a_runner_has_served` |
+| `busyNeverWarm` | no path from Listening, Busy or Finished back to Prepared | `formal-verify`; the same Rust test |
+| `i10UnknownLeavesOnlyOnObservation` | I10: when the pending outcome stops being `Unknown`, the last stimulus was an observation | `formal-verify`; `tests/attempt/lifecycle.rs::should_leave_unknown_only_on_an_observation_when_every_command_is_tried` (mutant 27) |
+| `i13NoDuplicateClones` | I13: no directive issued while one is pending, every clone targets the one (name, generation), clones bounded by the retry budget | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
+| `i14OneJob` | I14: at most one job is ever bound | `formal-verify`; `tests/attempt/lifecycle.rs::should_bind_one_job_when_a_second_is_offered` |
+| `i22JitMintedOnceAfterGrantAndVerification` | I22 (attempt half): a JIT handle only with the grant and a verification of the current epoch, at most one launch, no job once the JIT is presumed leaked | `formal-verify`; `tests/attempt/lifecycle.rs::should_refuse_a_jit_handle_when_activation_lacks_a_grant_or_a_fresh_verification`, `should_never_launch_again_when_a_launch_outcome_is_unknown` |
+| `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
+| `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
+| `quarantineNeverAutoDeleted` | I28: no `DeleteVm` while quarantined and unresolved | the same |
+| `retryKeepsNameAndGeneration` | every `CloneVm`, first or retried, targets the name and generation fixed at start | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
+
+Tests (`quint test`, stage `formal-test`, all deterministic): `happyPathTest`,
+`unknownCloneResolvedByInventoryTest`, `unknownCloneNotAppliedBacksOffTest`,
+`stageFailureBacksOffThenRetiresTest`, `guestRejectedIsQuarantinedTest`,
+`activationNeedsGrantAndFreshVerificationTest`, `launchUnknownNeverServesTest`,
+`busyServesOneJobTest`, `retirementWaitsForDeregistrationTest`,
+`replacedVmQuarantinesOnDeleteTest`. Negative controls tried: dropping the fresh-verification
+guard of `recordJitHandle` makes simulation of `serveStep` report `[violation]` of
+`i22JitMintedOnceAfterGrantAndVerification`; letting `requestRetirement` run while a directive
+is pending (mutant 27) makes simulation of `step` report `[violation]` of
+`i10UnknownLeavesOnlyOnObservation`.
 
 ## Promoting a counterexample
 

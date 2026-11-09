@@ -7,10 +7,10 @@ use std::fmt;
 
 use mayfly_control_domain::shape::Shape;
 use mayfly_control_domain::{
-    Aggregate, AggregateRegistry, AggregateVisitor, Command, DecodeError, DeterminismCase,
+    Actor, Aggregate, AggregateRegistry, AggregateVisitor, Command, DecodeError, DeterminismCase,
     DeterminismCases, DomainEvent, EventKind, EventSet, Expect, Rejection, event_set,
 };
-use mayfly_domain::{CommandId, Millis};
+use mayfly_domain::{CommandId, Epoch, Millis};
 use serde::{Deserialize, Serialize};
 
 thread_local! {
@@ -106,7 +106,13 @@ impl Rejection for DoorRejection {
 }
 
 pub fn command<B>(body: B) -> Command<B> {
-    Command::new(CommandId::from_u128(7), Millis::new(1_000), body)
+    Command::new(
+        CommandId::from_u128(7),
+        Millis::new(1_000),
+        Epoch::FIRST,
+        Actor::Startup,
+        body,
+    )
 }
 
 pub struct Door;

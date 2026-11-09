@@ -1,0 +1,5 @@
+{
+  "directive_id": "0000000000000000000000000000d001",
+  "kind": "verify_guest",
+  "deadline": 60000
+}

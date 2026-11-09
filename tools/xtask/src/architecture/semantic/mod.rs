@@ -36,6 +36,7 @@ mod rules_include;
 mod rules_purity;
 mod rules_runtime;
 mod rules_seams;
+mod rules_transition;
 mod rules_types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -442,6 +443,7 @@ pub fn check(
         out.extend(rules_include::check(facts, policy));
         out.extend(rules_runtime::check(facts, policy));
         out.extend(rules_cqrs::check(facts, policy));
+        out.extend(rules_transition::check(facts, policy));
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));

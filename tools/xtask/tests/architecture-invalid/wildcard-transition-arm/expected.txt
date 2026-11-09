@@ -1,0 +1,4 @@
+rule: ARCH-exhaustive-transition
+at: crates/mayfly-control-domain/src/lib.rs:18
+contains: `decide`
+only: true

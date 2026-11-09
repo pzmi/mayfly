@@ -54,7 +54,7 @@ use std::fmt;
 
 use mayfly_domain::{
     AttemptId, CommandId, DirectiveId, EventId, HostId, ImageDigest, ObservationId, OwnedVmName,
-    PoolName, Sample,
+    PoolName, ProviderInstanceId, Sample, SecretHandleId,
 };
 use serde::de::value::StrDeserializer;
 use serde::de::{
@@ -230,6 +230,8 @@ fn texts() -> Vec<String> {
         String::from(ObservationId::sample()),
         String::from(ImageDigest::sample()),
         String::from(OwnedVmName::sample()),
+        String::from(ProviderInstanceId::sample()),
+        String::from(SecretHandleId::sample()),
     ] {
         if !texts.contains(&text) {
             texts.push(text);

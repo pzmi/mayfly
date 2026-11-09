@@ -52,11 +52,23 @@ pub struct Bound {
 /// in the relation and the size of the state: a model's depth is the one that finishes in a few
 /// minutes on a hosted runner, recorded with its duration in `doc/formal-models.md`.
 /// Pinned by `should_bound_every_step_relation_when_models_are_registered`.
-pub const BOUNDED: &[Bound] = &[Bound {
-    file: "smoke.qnt",
-    step: "step",
-    steps: 6,
-}];
+pub const BOUNDED: &[Bound] = &[
+    Bound {
+        file: "smoke.qnt",
+        step: "step",
+        steps: 6,
+    },
+    Bound {
+        file: "lifecycle.qnt",
+        step: "step",
+        steps: 8,
+    },
+    Bound {
+        file: "lifecycle.qnt",
+        step: "serveStep",
+        steps: 8,
+    },
+];
 
 /// Seeds of the multi-seed simulation, derived from one printed base seed.
 pub const SIM_SEEDS: u32 = 3;

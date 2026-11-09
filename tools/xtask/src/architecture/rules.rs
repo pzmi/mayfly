@@ -183,6 +183,9 @@ rules! {
     AggregateRegistered => "ARCH-aggregate-registered", "ARCH-01",
         "An `impl Aggregate for X` in mayfly-control-domain production code has no visitor.visit::<X>() in ControlAggregates::accept, so the golden and determinism harnesses would skip it.",
         ["unregistered-aggregate"];
+    ExhaustiveTransition => "ARCH-exhaustive-transition", "KER-04",
+        "Production code of a [purity] pure crate matches with a catch-all arm (`_`, a bare binding, or `..` among a tuple's elements) inside a transition function (decide, evolve, step, or a decide_/evolve_/step_ helper), so a new state or stimulus would fall through instead of failing to compile.",
+        ["wildcard-transition-arm"];
     MacroExport => "ARCH-macro-export", "ARCH-02",
         "A production crate declares a #[macro_export] macro without an [[exceptions.lints]] entry (lint = \"macro_export\") citing an ADR: its body would expand in other crates, outside the rules that hold where it is written.",
         ["composition-exports-process-macro"];
