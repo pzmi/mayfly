@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  github.repository: is not a GitHub repository name (fix: use 1 to 100 letters, digits, `-`, `_` and `.`; give the name only, the owner is `organisation`)

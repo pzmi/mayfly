@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].cpu: expected an integer, found a string (fix: write it as `cpu = 4`)

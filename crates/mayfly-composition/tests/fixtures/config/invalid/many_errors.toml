@@ -1,0 +1,21 @@
+schema_version = 1
+state_dir = "relative"
+
+[github]
+organisation = "-bad-"
+installation_id = 0
+private_key = "SYNTHETIC-NOT-A-KEY"
+mode = "classic"
+
+[provider]
+kind = "qemu"
+
+[[pools]]
+name = "a"
+tier = "untrusted"
+guest_os = "freebsd"
+cpu = 0
+memory_mib = 8192
+max_running = 2
+allow_untrusted_prs = true
+runner_refresh_at = "25:00"

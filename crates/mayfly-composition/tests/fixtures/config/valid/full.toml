@@ -1,0 +1,41 @@
+# Every key of schema 1, with a non-default value for each.
+schema_version = 1
+state_dir = "/var/lib/mayfly"
+
+[github]
+organisation = "example-org"
+repository = "example-repo"
+app_client_id = "Iv1.0123456789abcdef"
+installation_id = 12345678
+private_key = "keychain:mayfly/app-key"
+
+[host]
+reserve_memory_mib = 8192
+reserve_disk_gib = 100
+
+[provider]
+kind = "tart"
+tart_home = "/var/lib/mayfly/tart"
+
+[[pools]]
+name = "mac"
+tier = "trusted"
+image_manifest = "/etc/mayfly/images/mac.toml"
+guest_os = "macos"
+cpu = 4
+memory_mib = 8192
+min_prepared = 1
+max_prepared_age = "2h"
+max_running = 2
+breaker_failures = 5
+breaker_window = "1h"
+runner_refresh_at = "03:30"
+
+[[pools]]
+name = "lin"
+tier = "trusted"
+image_manifest = "/etc/mayfly/images/lin.toml"
+guest_os = "linux"
+cpu = 2
+memory_mib = 4096
+max_running = 4

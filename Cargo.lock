@@ -405,6 +405,12 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-composition"
 version = "0.1.0"
+dependencies = [
+ "mayfly-domain",
+ "rustix",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "mayfly-conformance"

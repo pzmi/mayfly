@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].allow_untrusted_prs: untrusted pull-request code is not supported in v0.x (ADR 0027), and this switch is never honoured (fix: remove it and give each pool `tier = "trusted"`)

@@ -579,6 +579,11 @@ Homebrew and never updates itself; `brew uninstall` removes the program; `mayfly
 ownership proof of §8.4, its runner registrations) and Homebrew's caveat points to it. `mayfly
 restore <backup>` restores the automatic pre-migration backup (ADR 0043). Both are destructive
 operations run only by the owner or on the owner's explicit request, never by an agent.
+As built (RT-01, ADR 0046): unknown keys are refused at every level, every problem is reported
+with its field path and its fix, `[github]` takes `organisation` and, for testing, `repository`;
+`[host]` takes `reserve_memory_mib` and `reserve_disk_gib`; a pool's `breaker_failures` and
+`breaker_window` are its N and W and `runner_refresh_at` is `HH:MM`; exit codes are 78 (invalid
+config), 69 (lock refused) and 73 (state dir unusable).
 
 ---
 

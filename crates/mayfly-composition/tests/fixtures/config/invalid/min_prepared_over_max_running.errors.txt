@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].min_prepared: is larger than max_running: prepared VMs count against the pool's limit (fix: lower `min_prepared` or raise `max_running`)

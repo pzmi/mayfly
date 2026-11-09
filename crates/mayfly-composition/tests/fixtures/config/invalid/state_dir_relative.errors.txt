@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  state_dir: is not an absolute path (fix: use an absolute path, `state_dir = "/var/lib/mayfly"`; `~` and `..` are not expanded)

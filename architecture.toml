@@ -142,6 +142,9 @@ mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["defa
 # AggregateStore encodes events and refusals and hashes intent digests (ADR 0041).
 mayfly-control = { serde_json = ["default"], sha2 = ["default"] }
 mayfly-testkit = { serde_json = ["default"] }
+# The configuration is TOML read as a raw table (plan section 11); the state-dir lock is flock(2)
+# through rustix, safe, with no libc (plan section 13).
+mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
 mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], toml = ["default"] }
 xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], sha2 = ["default"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
 
@@ -152,6 +155,7 @@ mayfly-protocol = { serde_json = ["default"] }
 # Properties of the capacity policy and the Host aggregate over generated inputs (KER-05).
 mayfly-control-domain = { proptest = ["std"] }
 mayfly-adapter-sqlite = { tempfile = ["default"] }
+mayfly-composition = { tempfile = ["default"] }
 mayfly-control = { serde = ["default", "derive"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
 mayfly-fake-tart = { tempfile = ["default"] }

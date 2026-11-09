@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  github.mode: classic runner registration is not supported (ADR 0028): mayfly serves GitHub Runner Scale Sets only (fix: remove `mode`)

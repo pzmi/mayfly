@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  line 4, column 8: not valid TOML: unclosed table, expected `]` (fix: correct the TOML syntax at that position)

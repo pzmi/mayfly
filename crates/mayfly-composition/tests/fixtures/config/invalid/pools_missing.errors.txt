@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools: required, but absent (fix: add `[[pools]]`)

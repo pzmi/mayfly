@@ -10,3 +10,11 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+toml = "1.2.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

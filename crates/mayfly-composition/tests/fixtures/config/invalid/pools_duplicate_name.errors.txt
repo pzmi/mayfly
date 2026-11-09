@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[1].name: repeats the name of pools[0]; one pool is one scale set (ADR 0040) (fix: give each pool its own name)

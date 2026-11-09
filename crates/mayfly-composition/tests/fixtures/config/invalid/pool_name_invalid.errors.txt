@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].name: is not a pool name (fix: use 1 to 16 lowercase letters and digits: the name becomes the scale set label and part of every VM name)

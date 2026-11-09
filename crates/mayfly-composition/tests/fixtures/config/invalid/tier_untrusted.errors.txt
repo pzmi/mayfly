@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].tier: "untrusted" is not supported: v0.x serves the trusted tier only (ADR 0027) (fix: use `tier = "trusted"`)

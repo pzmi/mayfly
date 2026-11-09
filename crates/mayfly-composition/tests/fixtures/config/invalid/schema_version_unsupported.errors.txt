@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  schema_version: schema_version 2 is not readable by this build, which reads 1 (fix: start the file with `schema_version = 1`)
