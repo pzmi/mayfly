@@ -1,0 +1,5 @@
+rule: ARCH-sample-coverage
+at: crates/mayfly-domain/src/lib.rs:23
+contains: `ImageDigest`
+contains: does not implement Sample
+only: true

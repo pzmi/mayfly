@@ -67,7 +67,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0015](0015-owner-gated-real-world-lanes.md) | Owner-gated real-world lanes | Proposed |
 | [0016](0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox and fail-closed tools | Proposed. Amended by 0035 |
 | [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Proposed |
-| [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Proposed |
+| [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Proposed. Amended 2026-11-09 |
 | [0019](0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane separation over dev closures and policy-driven planes | Proposed |
 | [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Proposed |
 | [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Accepted. Amended by 0034 |

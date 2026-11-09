@@ -21,6 +21,7 @@ changed_line = 90
 # it, so each floor starts at the measured value rounded down and ratchets up toward 95 as tests
 # are added; it is never lowered. mayfly-protocol and mayfly-data-domain have no instrumented
 # line yet: their 95 floors join the file with their first code. mayfly-control-domain rose to 96
-# when KER-03G measured 96.16% (977 of 1016).
-mayfly-domain = 79
+# when KER-03G measured 96.16% (977 of 1016); mayfly-domain rose to 84 when ARCH-04 measured
+# 84.43% (255 of 302).
+mayfly-domain = 84
 mayfly-control-domain = 96

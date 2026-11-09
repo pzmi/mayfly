@@ -4,7 +4,7 @@ Date: YYYY-MM-DD
 
 ## Status
 
-Proposed | Accepted | Superseded by NNNN
+Proposed | Accepted | Rejected | Superseded by NNNN
 
 ## Context
 

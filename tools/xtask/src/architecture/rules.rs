@@ -189,6 +189,15 @@ rules! {
     NightlyFeatures => "ARCH-nightly-features", "ARCH-03",
         "Code writes #![feature(..)] (also through cfg_attr or inside a macro's tokens) or a macro 2.0 item (`macro name`): nightly-only constructs the pinned stable toolchain builds only under RUSTC_BOOTSTRAP.",
         ["feature-attribute", "macro-two-point-zero"];
+    EventPayloadSerde => "ARCH-event-payload-serde", "ARCH-04",
+        "Production code of mayfly-control-domain or mayfly-domain writes #[serde(..)] with try_from, from, into, with, deserialize_with, serialize_with, alias, other, untagged, tag, content, flatten or unparsable arguments (container, field or variant, also in macro tokens; a mayfly-domain struct may convert, an enum may not), or implements Serialize or Deserialize by hand: the event shape tracer would pass what it cannot see.",
+        ["event-payload-alias-field", "event-payload-flatten", "event-payload-try-from-enum"];
+    SampleCoverage => "ARCH-sample-coverage", "ARCH-04",
+        "A mayfly-domain type decoded through a non-integer #[serde(try_from)] (also one a macro declares) does not implement Sample, is not listed in texts() of mayfly-control-domain's src/shape.rs, or cannot be resolved from its macro.",
+        ["validated-type-without-sample"];
+    EventSetMacro => "ARCH-event-set-macro", "ARCH-04",
+        "Production code implements EventSet anywhere but the body of macro_rules! event_set in mayfly-control-domain/src/event.rs, so a set would lack the generated shape() and codec.",
+        ["event-set-by-hand"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

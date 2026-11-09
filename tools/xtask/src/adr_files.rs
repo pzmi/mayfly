@@ -16,12 +16,14 @@ pub(crate) const ADR_INDEX: &str = "doc/adr/README.md";
 /// Directory names never searched: build output, dependencies, work state.
 const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules", ".work"];
 
-/// The kinds of ADR status. What follows the kind (`(planner default)`, `. Amended by 0069`)
-/// is annotation.
+/// The kinds of ADR status (ADR 0001, amended 2026-11-09). What follows the kind (`(owner,
+/// 2026-11-09)`, `(planner default)`, `. Amended by 0069`) is annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StatusKind {
     Proposed,
     Accepted,
+    /// Considered and declined; kept so it is not proposed again.
+    Rejected,
     Superseded(String),
 }
 
@@ -30,6 +32,7 @@ impl StatusKind {
         match self {
             Self::Proposed => "Proposed".to_owned(),
             Self::Accepted => "Accepted".to_owned(),
+            Self::Rejected => "Rejected".to_owned(),
             Self::Superseded(by) => format!("Superseded by {by}"),
         }
     }
@@ -42,6 +45,7 @@ pub(crate) fn parse_status(text: &str) -> Result<StatusKind, String> {
     for (word, kind) in [
         ("Proposed", StatusKind::Proposed),
         ("Accepted", StatusKind::Accepted),
+        ("Rejected", StatusKind::Rejected),
     ] {
         if let Some(rest) = text.strip_prefix(word)
             && boundary(rest)
@@ -57,7 +61,7 @@ pub(crate) fn parse_status(text: &str) -> Result<StatusKind, String> {
         }
     }
     Err(format!(
-        "invalid status `{text}`: it must start with `Proposed`, `Accepted` or `Superseded by NNNN`"
+        "invalid status `{text}`: it must start with `Proposed`, `Accepted`, `Rejected` or `Superseded by NNNN`"
     ))
 }
 
@@ -215,6 +219,45 @@ mod tests {
         assert_eq!(kinds[3], Ok(StatusKind::Superseded("0032".into())));
         assert!(parse_status("Acceptedish").is_err());
         assert!(parse_status("Superseded by the next one").is_err());
+    }
+
+    #[test]
+    fn should_accept_rejected_and_decider_annotations_when_the_kind_leads() {
+        // given
+        let texts = [
+            "Rejected (owner, 2026-11-09)",
+            "Rejected (owner, 2026-11-09); amended 2026-11-10.",
+            "Accepted (owner, 2026-11-09); amended 2026-11-09.",
+        ];
+
+        // when
+        let kinds: Vec<_> = texts.iter().map(|t| parse_status(t)).collect();
+
+        // then
+        assert_eq!(
+            kinds,
+            [
+                Ok(StatusKind::Rejected),
+                Ok(StatusKind::Rejected),
+                Ok(StatusKind::Accepted)
+            ]
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_misspelt_status_when_it_only_resembles_a_kind() {
+        // given
+        let texts = ["Rejectd (owner, 2026-11-09)", "Rejectedish", "rejected"];
+
+        // when
+        let kinds: Vec<_> = texts.iter().map(|t| parse_status(t)).collect();
+
+        // then
+        assert!(kinds.iter().all(Result::is_err), "{kinds:?}");
+        assert!(
+            kinds[0].as_ref().is_err_and(|e| e.contains("`Rejected`")),
+            "{kinds:?}"
+        );
     }
 
     #[test]

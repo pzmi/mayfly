@@ -126,6 +126,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | ARCH-01 | Align the architecture policy with fnd §2–§3 | FND-04 | opus | |
 | ARCH-02 | Close the checker bypasses of the second FND-04 review | ARCH-01 | opus | |
 | ARCH-03 | Close the third FND-04 review's bypasses; checker threat model | ARCH-02 | opus | |
+| ARCH-04 | Architecture rules behind the event shape tracer; KER-03G leftovers | ARCH-03, KER-03 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences, ownership proof | FND-02 | sonnet | |
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | DEC-01 | Record the owner's decisions as ADRs and apply them to the documents | DDD-01 | opus | |
@@ -269,6 +270,9 @@ index shows it; the template's status placeholder lists it (`Proposed | Accepted
 Superseded by NNNN`, kept in step with `TEMPLATE_STATUS`); fixtures for `Rejected (owner,
 YYYY-MM-DD)`, `Accepted (owner, …); amended …` and a bad status.
 Accept: `cargo xtask adr index` clean; the new fixtures pass; a misspelt status still fails.
+Landed in the ARCH-04 commit (a small change beside the ADR 0018 amendment): `StatusKind::Rejected`,
+`TEMPLATE_STATUS` and `doc/adr/template.md` list `Rejected`, which already ends in the optional
+`## Alternatives considered`; `Accepted (owner, …)` already parsed as annotation.
 
 #### ARCH-01 Align the architecture policy with fnd §2–§3
 Cites: fnd §2.2, §3.1, §3.3. FND-02 ported site-preview's checker with the edges of the FND-02 card;
@@ -300,6 +304,27 @@ vocabulary. Landed: ARCH-include-macro, ARCH-pure-clippy-config (semantic `clipp
 pure crate), ARCH-macro-export, declaration checks in ARCH-plane-vocabulary, YAML-parsed CI
 lockstep, the xtask checkout preflight, shared-crate dev edges (ADR 0019 amended).
 Accept: each bypass has a negative fixture failing for its rule; `cargo xtask check` green.
+
+#### ARCH-04 Architecture rules behind the event shape tracer; KER-03G leftovers
+Cites: ADR 0018 (amended 2026-11-09, ARCH-04), fnd §3.3. The tracer passes, by design, what serde
+does not show it: an enum coded as a string or integer whose conversion accepts any value, a
+`#[serde(other)]` catch-all, an alias. Landed: `ARCH-event-payload-serde` (`mayfly-control-domain`
+and `mayfly-domain` production code writes no `#[serde(..)]` with `try_from`, `from`, `into`, `with`,
+`deserialize_with`, `serialize_with`, `alias`, `other`, `untagged`, `tag`, `content`, `flatten`
+or unparsable arguments, on containers, fields or variants, through `cfg_attr` and in macro
+tokens, and no hand-written `Serialize`/`Deserialize`; a `mayfly-domain` struct may convert, an
+enum may not; fixtures `event-payload-try-from-enum`,
+`event-payload-alias-field`, `event-payload-flatten`); `ARCH-sample-coverage` (every
+`mayfly-domain` type decoded through a non-integer container `try_from`, macro-declared ones
+resolved through their invocations, implements `Sample` and is in `shape.rs`'s `texts()`; fixture
+`validated-type-without-sample`); `ARCH-event-set-macro` (`impl EventSet for` only in the body
+of `macro_rules! event_set` in `src/event.rs`, or in test code; fixture `event-set-by-hand`).
+KER-03G leftovers: the field and variant names of the tracer's container identity pinned by a
+test (same name, length and visitor, different field list); `DirectiveId`, `EventId` and
+`ObservationId` in the value-type leaf test; the catch-all limitation in ADR 0018 and the shape
+module doc. FND-07 rides along.
+Accept: each rule fails its fixture and passes the workspace; the identity test fails when the
+names are dropped from `Identity`; `cargo xtask check` green.
 
 ### Phase 1 — kernel (pure crates, models first)
 

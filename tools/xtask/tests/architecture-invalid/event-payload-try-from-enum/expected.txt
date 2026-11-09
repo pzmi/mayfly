@@ -1,0 +1,4 @@
+rule: ARCH-event-payload-serde
+at: crates/mayfly-control-domain/src/lib.rs:12
+contains: `try_from` (decodes through a conversion)
+only: true

@@ -17,7 +17,7 @@ use crate::repo;
 const TEMPLATE: &str = "doc/adr/template.md";
 const TEMPLATE_TITLE: &str = "# NNNN. Title";
 const TEMPLATE_DATE: &str = "Date: YYYY-MM-DD";
-const TEMPLATE_STATUS: &str = "Proposed | Accepted | Superseded by NNNN";
+const TEMPLATE_STATUS: &str = "Proposed | Accepted | Rejected | Superseded by NNNN";
 const CONFLICT_MARKERS: &[&str] = &["<<<<<<<", "|||||||", "=======", ">>>>>>>"];
 
 /// What `adr new` was asked for.
@@ -410,7 +410,7 @@ fn civil_date(days: u64) -> String {
 mod tests {
     use super::*;
 
-    const TEMPLATE_TEXT: &str = "# NNNN. Title\n\nDate: YYYY-MM-DD\n\n## Status\n\nProposed | Accepted | Superseded by NNNN\n\n## Context\n\nWhy.\n";
+    const TEMPLATE_TEXT: &str = "# NNNN. Title\n\nDate: YYYY-MM-DD\n\n## Status\n\nProposed | Accepted | Rejected | Superseded by NNNN\n\n## Context\n\nWhy.\n";
 
     fn write(root: &Path, rel: &str, text: &str) {
         let path = root.join(rel);
@@ -507,6 +507,18 @@ mod tests {
 
         // then
         assert_eq!(shown, "Proposed. Amended 2026-10-14");
+    }
+
+    #[test]
+    fn should_show_rejected_and_its_amendment_date_when_the_owner_declined_it() {
+        // given
+        let text = "Rejected (owner, 2026-11-09); amended 2026-11-10.";
+
+        // when
+        let shown = status(parse_status(text).unwrap(), text);
+
+        // then
+        assert_eq!(shown, "Rejected. Amended 2026-11-10");
     }
 
     #[test]
@@ -667,7 +679,8 @@ mod tests {
     #[test]
     fn should_refuse_when_the_template_lacks_a_placeholder() {
         // given
-        let template = "# NNNN. Title\n\n## Status\n\nProposed | Accepted | Superseded by NNNN\n";
+        let template =
+            "# NNNN. Title\n\n## Status\n\nProposed | Accepted | Rejected | Superseded by NNNN\n";
 
         // when
         let rendered = render_template(template, 1, "T", "2026-10-14", "Proposed");

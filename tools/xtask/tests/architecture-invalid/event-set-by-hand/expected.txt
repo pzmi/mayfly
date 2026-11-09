@@ -1,0 +1,4 @@
+rule: ARCH-event-set-macro
+at: crates/mayfly-control-domain/src/lib.rs:10
+contains: `LampEvent`
+only: true

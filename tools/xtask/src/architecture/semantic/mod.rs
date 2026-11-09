@@ -21,8 +21,8 @@
 //! The collector records facts (resolved path references, `unsafe` sites, lint, `ignore` and
 //! `macro_export` attributes, include-family macros, item declarations, test functions) with
 //! their file, line and context (production or test code); `rules_purity`, `rules_include`,
-//! `rules_runtime`, `rules_types`, `rules_hygiene`, `rules_cqrs` and `rules_seams` turn facts
-//! into diagnostics, and `rules_clippy` checks the pure crates' Clippy configuration, the
+//! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs` and
+//! `rules_seams` turn facts into diagnostics, and `rules_clippy` checks the pure crates' Clippy configuration, the
 //! semantic layer behind these syntactic rules.
 
 mod collect;
@@ -30,6 +30,7 @@ mod flow;
 mod paths;
 mod rules_clippy;
 mod rules_cqrs;
+mod rules_events;
 mod rules_hygiene;
 mod rules_include;
 mod rules_purity;
@@ -211,6 +212,67 @@ pub struct Facts {
     /// `env!` and `option_env!` invocations (also in macro tokens): where, which, and the
     /// variable when the first argument is a string literal (`ARCH-domain-purity` in tests).
     pub env_macros: Vec<(Site, String, Option<String>)>,
+    /// `#[serde(..)]` attributes, parsed and in macro tokens, through `cfg_attr` too
+    /// (`ARCH-event-payload-serde`).
+    pub serde_attrs: Vec<SerdeAttr>,
+    /// What each macro definition or invocation holds that the event rules read
+    /// (`ARCH-sample-coverage`, `ARCH-event-set-macro`).
+    pub macros: Vec<MacroFacts>,
+}
+
+/// One `#[serde(..)]` attribute: the key of each of its arguments, with the string a
+/// `key = "value"` argument gives. An argument list that does not parse is one
+/// [`rules_events::UNREADABLE`] key, so it is refused where serde keys are restricted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerdeAttr {
+    /// Where its `#` is.
+    pub site: Site,
+    /// `try_from`, `alias`, `rename_all`, ..; with the literal value when there is one.
+    pub keys: Vec<(String, Option<String>)>,
+}
+
+/// A trait impl found in a macro's tokens (`impl $crate::event::EventSet for $name`), which
+/// [`ImplDecl`] cannot see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenImpl {
+    /// Where `impl` is.
+    pub site: Site,
+    /// The trait's last segment.
+    pub trait_name: String,
+    /// The self type's name, or `$var` when it is a metavariable.
+    pub self_name: String,
+}
+
+/// A struct or enum in a macro's tokens whose container `#[serde(try_from = "..")]` decodes it
+/// through a conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodedType {
+    /// Where its `#` is.
+    pub site: Site,
+    /// The type's name, or `$var` when it is a metavariable.
+    pub name: String,
+    /// The `try_from` source type, as written.
+    pub try_from: String,
+    /// Whether it is an enum.
+    pub is_enum: bool,
+}
+
+/// One macro definition (`macro_rules! name`) or invocation, by what the event rules read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroFacts {
+    /// Where the macro's path is.
+    pub site: Site,
+    /// The invoked macro's last segment (`macro_rules` for a definition).
+    pub name: String,
+    /// For a `macro_rules!` item, the name it defines.
+    pub defines: Option<String>,
+    /// For a definition, the metavariable of a trailing `$x:ident` in its first arm's matcher;
+    /// for an invocation, its last top-level identifier: the type a type-declaring macro names.
+    pub last_ident: Option<String>,
+    /// Trait impls in its tokens.
+    pub impls: Vec<TokenImpl>,
+    /// Types in its tokens decoded through a container `try_from`.
+    pub coded: Vec<CodedType>,
 }
 
 /// The `name` of an [`AttributeUse`] whose own name, or a `cfg_attr` branch's, is a macro
@@ -271,6 +333,13 @@ pub struct TypeDecl {
     pub derives: Vec<String>,
     /// Every identifier in its field types.
     pub fields: BTreeSet<String>,
+    /// The source type of a container `#[serde(try_from = "..")]`, as written.
+    pub try_from: Option<String>,
+    /// Whether it is an enum.
+    pub is_enum: bool,
+    /// Whether a container `#[serde(..)]` decodes or encodes it through a conversion
+    /// (`try_from`, `from` or `into`).
+    pub converted: bool,
 }
 
 /// A trait impl (`impl Trait for Type`).
@@ -376,6 +445,7 @@ pub fn check(
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));
+    out.extend(rules_events::check(&every));
     out.extend(rules_seams::check(&every));
     out.extend(hygiene.finish());
     // Line numbers are computed; the parsed sources need not stay in this thread's span map.
@@ -394,6 +464,8 @@ fn selector_crates() -> BTreeSet<String> {
             &rules_cqrs::APPLICATION,
             &rules_seams::DEFINER,
             &rules_types::AGGREGATES.0,
+            &rules_events::EVENTS_CRATE,
+            &rules_events::VALUES_CRATE,
         ])
         .chain(rules_seams::USERS)
         .chain(rules_runtime::SPAWN_MODULES.iter().map(|(name, _)| name))

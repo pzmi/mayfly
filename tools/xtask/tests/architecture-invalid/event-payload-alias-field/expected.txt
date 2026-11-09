@@ -1,0 +1,4 @@
+rule: ARCH-event-payload-serde
+at: crates/mayfly-control-domain/src/lib.rs:8
+contains: `alias`
+only: true

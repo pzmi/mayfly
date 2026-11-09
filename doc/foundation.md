@@ -408,6 +408,9 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-detached-spawn` | `tokio::spawn`, `tokio::task::{spawn, spawn_blocking, spawn_local, block_in_place}`, `std::thread::{spawn, Builder}` in a production crate outside `mayfly-composition::supervision`, `mayfly-adapter-sqlite::writer`, `mayfly-adapter-link::transport`, `mayfly-adapter-{tart,guest}::process` (tasks are spawned on a tracker handed down) | ARCH-01 |
 | `ARCH-secret-serialize` | a type that is or transitively holds `Secret` deriving or implementing `Serialize`; `Secret` deriving `Debug`/`Display`; `Debug`/`Display` for `Secret` implemented outside the file that defines it | ARCH-01 (exercised from KER-02, RT-01) |
 | `ARCH-aggregate-registered` | an `impl Aggregate for X` in `mayfly-control-domain` production code without `visitor.visit::<X>()` in `ControlAggregates::accept` (the harnesses would skip it) | ARCH-01 |
+| `ARCH-event-payload-serde` | in `mayfly-control-domain` or `mayfly-domain` production code, a `#[serde(..)]` (container, field or variant, through `cfg_attr` and in macro tokens) with `try_from`, `from`, `into`, `with`, `deserialize_with`, `serialize_with`, `alias`, `other`, `untagged`, `tag`, `content`, `flatten` or arguments that do not parse, or a hand-written `Serialize`/`Deserialize` impl: the event shape tracer would pass a coded or catch-all enum as a plain leaf (ADR 0018); the one exception is a `mayfly-domain` **struct** that converts (`try_from`, `from`, `into`), a validated value type held by the next rule; an enum there may not convert | ARCH-04 |
+| `ARCH-sample-coverage` | a `mayfly-domain` production type decoded through a container `#[serde(try_from)]` from anything but an integer (also one a `macro_rules!` declares, resolved through the macro's trailing `$name:ident` and its invocations) that does not implement `Sample`, is not listed in `texts()` of `mayfly-control-domain/src/shape.rs`, or whose name cannot be resolved | ARCH-04 |
+| `ARCH-event-set-macro` | `impl EventSet for` in production code anywhere but the body of `macro_rules! event_set` in `mayfly-control-domain/src/event.rs` (test code may write one): a hand-written set has no generated `shape()` | ARCH-04 |
 | `ARCH-nightly-features` | `#![feature(..)]` (also through `cfg_attr` or inside a macro's tokens) or a macro 2.0 item (`macro name`, `pub macro name`), in any crate: the pinned stable toolchain (ADR 0006) builds them only under `RUSTC_BOOTSTRAP`, which §3.6 refuses | ARCH-03 |
 | `ARCH-macro-export` | a `#[macro_export]` in a production crate without an `[[exceptions.lints]]` row (`lint = "macro_export"`) citing an ADR: an exported macro's body is checked under its own crate's rules but expands in another (composition's spawn in the CLI); `event_set!` is approved by ADR 0018 | ARCH-02 |
 
@@ -850,7 +853,7 @@ One commit lands per green CI run on `main`. A red `main` is fixed immediately, 
 ### 10.3 ADRs
 
 Nygard format in `doc/adr/NNNN-kebab-title.md`: `# NNNN. Title`, `Date:`, `## Status`
-(`Proposed`, `Accepted (owner, YYYY-MM-DD)`, `Rejected (owner, YYYY-MM-DD)` once FND-07 lands,
+(`Proposed`, `Accepted (owner, YYYY-MM-DD)`, `Rejected (owner, YYYY-MM-DD)`,
 `Superseded by NNNN`, with annotations such as `amended by NNNN`), `## Context`, `## Decision`,
 `## Consequences`, optional `## Alternatives considered`. The index `doc/adr/README.md` is checked
 against the files by the `docs` stage. ADR 0001 (amended 2026-11-09) records the practice: an ADR

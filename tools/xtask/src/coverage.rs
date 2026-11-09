@@ -889,5 +889,5 @@ diff --git a/crates/mayfly-domain/src/old.rs b/crates/mayfly-domain/src/old.rs
     /// together, never lower either (lowering needs the owner).
     const STARTING_OVERALL: u32 = 85;
     const STARTING_CHANGED: u32 = 90;
-    const STARTING_CRATES: &[(&str, u32)] = &[("mayfly-domain", 79), ("mayfly-control-domain", 94)];
+    const STARTING_CRATES: &[(&str, u32)] = &[("mayfly-domain", 84), ("mayfly-control-domain", 96)];
 }

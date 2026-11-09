@@ -1,0 +1,4 @@
+rule: ARCH-event-payload-serde
+at: crates/mayfly-control-domain/src/lib.rs:9
+contains: `flatten` (needs a self-describing format)
+only: true

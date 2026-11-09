@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Proposed; amended 2026-11-09.
 
 ## Context
 
@@ -126,7 +126,8 @@ id-first tuple was untraceable; and two different nodes at one path kept the fir
   integer with a variant at the type's maximum, or as a string with a variant spelled exactly
   like a sample, still traces as a plain leaf. The complementary static rule (no
   `try_from`/`into`/`with` on an event payload's enums) belongs to the architecture checker and
-  is not part of this amendment.
+  is not part of this amendment. *(It landed as `ARCH-event-payload-serde`: see the ARCH-04
+  amendment below.)*
 - **Gaps.** `Shape::untraceable` maps each path to its `Gap` (self-describing format, unreached,
   opaque leaf, conflict, recursion, too deep, not converged); two different nodes at one path
   (a tuple's elements share `[]`) are a `Conflict`, not first-wins.
@@ -149,3 +150,42 @@ hook on `EventSet` that hands the payload type to a visitor generic over `Deseri
 with the tracer in the test kit; it keeps the pure crate smaller but adds a second generic entry
 point every event set must carry and splits the shape rules from the codec they describe. It
 remains open if the pure crate's tracer grows.
+
+## Amended 2026-11-09 (planner): the static rules behind the tracer (ARCH-04)
+
+Review of the tracer amendment (KER-03G) left three things to the architecture checker and one
+to a test; ARCH-04 lands them.
+
+- **A catch-all coded enum.** Besides the limitation above, an enum coded as a string or integer
+  whose conversion accepts *any* value (an `Other(String)` fallback) accepts the tracer's first
+  sample, so it traces as a plain leaf and is not even reported as opaque; likewise a
+  `#[serde(other)]` variant decodes every unknown variant name, so a renamed variant would load
+  as the catch-all instead of failing. The tracer cannot see either, by design: serde hands it a
+  `String` or `u8` visitor, and an unknown name never reaches it. The architecture rule
+  `ARCH-event-payload-serde` prevents both statically: production code of
+  `mayfly-control-domain`, which declares the events, writes no `#[serde(..)]` with `try_from`,
+  `from`, `into`, `with`, `deserialize_with`, `serialize_with`, `alias`, `other`, `untagged`,
+  `tag`, `content` or `flatten` (container, field or variant, through `cfg_attr` and in macro
+  tokens; arguments that do not parse are refused too) and no hand-written `Serialize` or
+  `Deserialize` impl. The rule covers every type of the crate rather than the types an
+  `event_set!` reaches: a reachability analysis by name could miss exactly the type that matters,
+  and the crate holds only events, the types they carry and the kernel. `mayfly-domain`, whose
+  value types events carry, is held to the same rule except that a struct there may convert
+  (`try_from`, `from`, `into`): its validated value types decode through their parsers on
+  purpose and are the stated exception; an enum there may not convert. The edge table lets
+  `mayfly-control-domain` depend on `mayfly-domain` alone (fnd §2.2), so the two crates hold
+  every workspace type an event can carry; a new edge adds its crate to the rule's list.
+- **Validated types stay on the list.** `ARCH-sample-coverage`: every `mayfly-domain` type
+  decoded through a container `try_from` from anything but an integer implements `Sample` and
+  is listed in `texts()` of `shape.rs`; a type a `macro_rules!` declares (`hex_id!(EventId)`) is
+  resolved through the macro's trailing `$name:ident` and its invocations, and one that cannot be
+  resolved is reported. Integer-coded types (`Generation`) need neither, as above.
+- **Event sets come from the macro.** `ARCH-event-set-macro`: production code implements
+  `EventSet` only inside `macro_rules! event_set` in `src/event.rs`, so every set has the
+  generated `shape()`; the harness's `NoShape` failure stays the run-time backstop, and test code
+  may still write a set by hand to exercise it.
+- **Field and variant names in a container's identity** are kept and pinned by
+  `should_trace_both_when_a_nested_container_differs_only_in_its_field_names`: a container that
+  holds another with the same serde name, length and visitor type but different field names (a
+  hand-written visitor choosing its field list by depth) is another type, and without the names
+  the tracer would report the inner one as a differing recursive copy instead of tracing it.

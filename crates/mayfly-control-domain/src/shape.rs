@@ -35,10 +35,15 @@
 //! differs, nesting past [`MAX_DEPTH`], or a trace that does not settle.
 //!
 //! **Limitations** (ADR 0018): an enum coded as an integer with a variant at the type's
-//! maximum, or as a string with a variant spelled like a sample, still traces as a plain leaf; a
+//! maximum, or as a string with a variant spelled like a sample, still traces as a plain leaf,
+//! and so does a catch-all coded enum (one whose conversion accepts any string or integer, an
+//! `Other(String)` fallback): it accepts the first sample, so it is not even an opaque leaf. A
 //! `#[serde(alias)]` name is one of a struct's fields or an enum's variants like any other, so a
-//! sample must show it, and a sample that does cannot re-encode byte for byte: aliases are
-//! refused in event payloads (a renamed field is a new version).
+//! sample must show it, and a sample that does cannot re-encode byte for byte. The tracer does
+//! not catch these; the architecture rule `ARCH-event-payload-serde` keeps them out of the
+//! crate that declares events (no `try_from`, `from`, `into`, `with`, `alias`, `other`, tagged
+//! or untagged enums or `flatten`, no hand-written serde impls), and `ARCH-sample-coverage`
+//! keeps every validated value type of `mayfly_domain` on the list below.
 //!
 //! Each behaviour is pinned by a unit test at the end of this file.
 
@@ -289,6 +294,9 @@ fn relocate(path: &str, root: &str, original: &str) -> String {
 struct Identity {
     kind: &'static str,
     name: &'static str,
+    /// The field or variant names, compared by content: a container that differs from another
+    /// only in them is another type (pinned by
+    /// `should_trace_both_when_a_nested_container_differs_only_in_its_field_names`).
     names: &'static [&'static str],
     len: usize,
     /// The visitor's Rust type, which carries a generic type's parameters.
@@ -1077,8 +1085,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use mayfly_domain::{
-        AttemptId, CommandId, Deadline, Epoch, Generation, HostId, ImageDigest, Millis,
-        OwnedVmName, PoolName, Resources, Slot,
+        AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Generation, HostId,
+        ImageDigest, Millis, ObservationId, OwnedVmName, PoolName, Resources, Slot,
     };
     use serde::Deserialize;
     use serde::de::{DeserializeSeed, Deserializer, MapAccess, Visitor};
@@ -1280,6 +1288,9 @@ mod tests {
         host: HostId,
         attempt: AttemptId,
         command: CommandId,
+        directive: DirectiveId,
+        event: EventId,
+        observation: ObservationId,
         digest: ImageDigest,
         vm: OwnedVmName,
         generation: Generation,
@@ -1488,12 +1499,16 @@ mod tests {
     #[derive(PartialEq)]
     struct Knot;
 
+    /// `inner` is the field list of the nested struct: the same as the outer one's for
+    /// [`Knot`], another for [`Twin`].
     struct KnotSeed {
         depth: u8,
+        inner: &'static [&'static str],
     }
 
     struct KnotVisitor {
         depth: u8,
+        inner: &'static [&'static str],
     }
 
     impl<'de> Visitor<'de> for KnotVisitor {
@@ -1504,7 +1519,10 @@ mod tests {
         fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Knot, M::Error> {
             while map.next_key::<String>()?.is_some() {
                 if self.depth == 0 {
-                    map.next_value_seed(KnotSeed { depth: 1 })?;
+                    map.next_value_seed(KnotSeed {
+                        depth: 1,
+                        inner: self.inner,
+                    })?;
                 } else {
                     map.next_value::<u8>()?;
                 }
@@ -1516,13 +1534,26 @@ mod tests {
     impl<'de> DeserializeSeed<'de> for KnotSeed {
         type Value = Knot;
         fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Knot, D::Error> {
-            deserializer.deserialize_struct("Knot", &["next"], KnotVisitor { depth: self.depth })
+            let fields = if self.depth == 0 {
+                &["next"]
+            } else {
+                self.inner
+            };
+            let visitor = KnotVisitor {
+                depth: self.depth,
+                inner: self.inner,
+            };
+            deserializer.deserialize_struct("Knot", fields, visitor)
         }
     }
 
     impl<'de> Deserialize<'de> for Knot {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            KnotSeed { depth: 0 }.deserialize(deserializer)
+            KnotSeed {
+                depth: 0,
+                inner: &["next"],
+            }
+            .deserialize(deserializer)
         }
     }
 
@@ -1534,6 +1565,32 @@ mod tests {
         let shape = traced();
         // then
         assert_eq!(gaps(shape), [gap("next", Gap::Recursion)]);
+    }
+
+    /// A [`Knot`] whose nested struct has the same name, length and visitor but another field
+    /// list: only the field names tell the two apart, so it is not recursion.
+    #[derive(PartialEq)]
+    struct Twin;
+
+    impl<'de> Deserialize<'de> for Twin {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let seed = KnotSeed {
+                depth: 0,
+                inner: &["last"],
+            };
+            seed.deserialize(deserializer).map(|Knot| Twin)
+        }
+    }
+
+    #[test]
+    fn should_trace_both_when_a_nested_container_differs_only_in_its_field_names() {
+        // given
+        let traced = trace::<Twin>;
+        // when
+        let shape = traced();
+        // then
+        assert!(shape.untraceable.is_empty(), "{:?}", shape.untraceable);
+        assert_eq!(atoms(&shape), [field("next"), field("next.last")]);
     }
 
     /// A struct nested without end, under a new name at every level.

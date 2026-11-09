@@ -12,11 +12,13 @@ use syn::{Attribute, Item, Meta};
 
 use super::flow;
 use super::paths::{self, Scopes, TokenScan, Written, scan_tokens, use_leaves};
+use super::rules_events;
 use super::{
     AttributeUse, Context, Declaration, Facts, HiddenItem, INCLUDE_FAMILY, ImplDecl, IncludeKind,
-    IncludeUse, METAVARIABLE_ATTRIBUTE, MethodCall, MutParam, RefKind, Reference, Site, TestFn,
-    TypeDecl, Unit, effective_metas, foreign_message, include_path, is_doc_hidden, is_include,
-    is_test_attribute, is_test_only, non_literal, outside_package, relative,
+    IncludeUse, METAVARIABLE_ATTRIBUTE, MacroFacts, MethodCall, MutParam, RefKind, Reference,
+    SerdeAttr, Site, TestFn, TypeDecl, Unit, effective_metas, foreign_message, include_path,
+    is_doc_hidden, is_include, is_test_attribute, is_test_only, non_literal, outside_package,
+    relative,
 };
 
 /// Where a target is: the workspace root, its package's directory, and whether it is the
@@ -70,6 +72,7 @@ pub fn collect_target(
             library: target.library,
             registry: false,
             self_ty: None,
+            defining: None,
         };
         for attr in &unit.attrs {
             collector.visit_attribute(attr);
@@ -267,6 +270,8 @@ struct Collector<'a> {
     registry: bool,
     /// The self type of the enclosing `impl`, when it is a plain path: what `Self` names.
     self_ty: Option<Written>,
+    /// The name of the `macro_rules!` item being visited.
+    defining: Option<String>,
 }
 
 impl Collector<'_> {
@@ -500,6 +505,14 @@ impl Collector<'_> {
             let Some(name) = meta.path().get_ident().map(paths::name) else {
                 continue;
             };
+            if name == "serde" {
+                let site = self.site(line);
+                self.facts.serde_attrs.push(SerdeAttr {
+                    site,
+                    keys: rules_events::serde_keys(&meta),
+                });
+                continue;
+            }
             if name == "feature" {
                 let site = self.site(line);
                 let shown = match &meta {
@@ -537,13 +550,22 @@ impl Collector<'_> {
     }
 
     /// Records a struct or enum with its derives and field identifiers.
-    fn type_decl(&mut self, attrs: &[Attribute], ident: &syn::Ident, fields: BTreeSet<String>) {
+    fn type_decl(
+        &mut self,
+        attrs: &[Attribute],
+        ident: &syn::Ident,
+        fields: BTreeSet<String>,
+        is_enum: bool,
+    ) {
         let site = self.site(ident.span().start().line);
         self.facts.types.push(TypeDecl {
             site,
             name: paths::name(ident),
             derives: derives(attrs),
             fields,
+            try_from: rules_events::container_try_from(attrs),
+            is_enum,
+            converted: rules_events::converted(attrs),
         });
     }
 
@@ -883,7 +905,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 let site = this.site(line);
                 this.facts.macro_exports.push(site);
             }
+            let defining = match item {
+                Item::Macro(mac) => mac.ident.as_ref().map(paths::name),
+                _ => None,
+            };
+            let outer = std::mem::replace(&mut this.defining, defining);
             visit::visit_item(this, item);
+            this.defining = outer;
         });
     }
 
@@ -993,6 +1021,42 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .last()
             .is_some_and(|s| TEST_MACROS.contains(&paths::name(&s.ident).as_str()));
         self.tokens(&mac.tokens, test_macro);
+        let defines = self.defining.take();
+        let site = self.site(line);
+        let found = rules_events::scan_macro(&mac.tokens, defines.is_some());
+        let at = |line: usize| self.site(line);
+        let impls = found
+            .impls
+            .into_iter()
+            .map(|(line, trait_name, self_name)| super::TokenImpl {
+                site: at(line),
+                trait_name,
+                self_name,
+            })
+            .collect();
+        let coded = found
+            .coded
+            .into_iter()
+            .map(|(line, name, try_from, is_enum)| super::CodedType {
+                site: at(line),
+                name,
+                try_from,
+                is_enum,
+            })
+            .collect();
+        self.facts.macros.push(MacroFacts {
+            site,
+            name: mac
+                .path
+                .segments
+                .last()
+                .map(|s| paths::name(&s.ident))
+                .unwrap_or_default(),
+            defines,
+            last_ident: found.last_ident,
+            impls,
+            coded,
+        });
     }
 
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
@@ -1034,7 +1098,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .iter()
             .flat_map(|f| type_idents(&f.ty))
             .collect();
-        self.type_decl(&item.attrs, &item.ident, fields);
+        self.type_decl(&item.attrs, &item.ident, fields, false);
         visit::visit_item_struct(self, item);
     }
 
@@ -1046,7 +1110,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             .flat_map(|v| v.fields.iter())
             .flat_map(|f| type_idents(&f.ty))
             .collect();
-        self.type_decl(&item.attrs, &item.ident, fields);
+        self.type_decl(&item.attrs, &item.ident, fields, true);
         visit::visit_item_enum(self, item);
     }
 
