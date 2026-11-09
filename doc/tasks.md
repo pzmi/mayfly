@@ -125,6 +125,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | FND-07 | ADR parser: `Rejected` status and decider annotations | FND-02 | haiku | |
 | ARCH-01 | Align the architecture policy with fnd §2–§3 | FND-04 | opus | |
 | ARCH-02 | Close the checker bypasses of the second FND-04 review | ARCH-01 | opus | |
+| ARCH-03 | Close the third FND-04 review's bypasses; checker threat model | ARCH-02 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences, ownership proof | FND-02 | sonnet | |
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | DEC-01 | Record the owner's decisions as ADRs and apply them to the documents | DDD-01 | opus | |
@@ -281,6 +282,15 @@ code-named design, whichever keeps the checker simpler (say which, and why, in t
 `ARCH-unbounded-channel`, `ARCH-detached-spawn`, `ARCH-secret-serialize`, each with a negative
 fixture; (4) the fault lab's package name (`mayfly-faultlab`) in fnd.
 Accept: `cargo xtask check` green; each new rule fails its fixture; fnd §2–§3 describe the code exactly.
+
+#### ARCH-03 Close the third FND-04 review's bypasses; checker threat model
+Cites: fnd §2.3, §3.6, ADR 0019 (2026-11-09 amendment). Landed: lint levels through macro
+metavariables refused (ARCH-lint-suppression), build-steering cargo config and environment refused
+(ARCH-lint-config, xtask preflight), ARCH-nightly-features, wider pure-crate clippy layer
+(`disallowed-macros`, Unix sockets, DNS), CI lockstep refuses failure-swallowing steps and YAML
+merge keys, non-literal include paths refused, and fnd §3.6's threat model: the checker defends
+against honest mistakes, shortcuts and drift, not a determined insider; review is the backstop.
+Accept: each bypass has a negative fixture or test; `cargo xtask check` green.
 
 #### ARCH-02 Close the checker bypasses of the second FND-04 review
 Cites: fnd §2–§3, ADR 0019. The adversarial re-review of ARCH-01 bypassed the checker with a renamed

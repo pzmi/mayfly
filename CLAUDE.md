@@ -93,7 +93,10 @@ reviewable.
   Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,
   locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`). Each pure
   crate's `clippy.toml` (`disallowed-methods`/`-types`, ARCH-pure-clippy-config) enforces this
-  semantically, tests included; never shadow it or set `CLIPPY_CONF_DIR`. No `include!` under any
+  semantically, tests included (methods, types and `disallowed-macros` such as `println!`/`dbg!`);
+  never shadow it. No `#![feature]` or macro 2.0 (ARCH-nightly-features). The xtask preflight
+  refuses build-steering environment (`RUSTFLAGS` other than `-D warnings`, `RUSTC_WRAPPER`,
+  `CLIPPY_*`, `RUSTC_BOOTSTRAP`, `CARGO_ALIAS_*`, …; fnd §3.6): never export them for the gate. No `include!` under any
   name or inside a macro (ARCH-include-macro); `#[macro_export]` in production needs an ADR-cited
   exception (ARCH-macro-export). Shared crates dev-depend only on shared crates.
   Test kits are per plane (ADR 0019): `mayfly-testkit` is the control plane's; data-plane crates
