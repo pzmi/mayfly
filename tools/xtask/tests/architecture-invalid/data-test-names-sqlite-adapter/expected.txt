@@ -1,0 +1,4 @@
+rule: ARCH-layer-isolation
+at: crates/mayfly-data/src/lib.rs:10
+contains: mayfly-data names `mayfly_adapter_sqlite::Store` in test code
+only: true

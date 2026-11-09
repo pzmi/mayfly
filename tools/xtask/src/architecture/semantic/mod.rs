@@ -6,12 +6,19 @@
 //! included), inline modules and `include!` of a literal path. Every `cfg` branch is read:
 //! nothing is evaluated, so code for another platform is checked too. Code that cannot be
 //! analysed fails instead of passing: a file that does not parse, a module file that does
-//! not exist, and an `include!` or `#[path]` whose path is not a literal.
+//! not exist, and an `include!` or `#[path]` whose path is not a literal. A target root,
+//! `#[path]` or `include!` that resolves outside the package's own directory is refused
+//! (`ARCH-foreign-source`) and not loaded: one crate never analyses, or compiles, another's
+//! source under its own policy.
+//!
+//! References to another workspace crate are followed through that crate's `use` items
+//! (re-exports, globs, renames), so `pub use std::process::Command as Spawner` in one crate
+//! still names `std::process::Command` where a second crate writes `other::Spawner`.
 //!
 //! The collector records facts (resolved path references, `unsafe` sites, lint and
 //! `ignore` attributes, test functions) with their file, line and context (production or
-//! test code); `rules_purity`, `rules_hygiene`, `rules_cqrs` and `rules_seams` turn facts
-//! into diagnostics.
+//! test code); `rules_purity`, `rules_runtime`, `rules_types`, `rules_hygiene`, `rules_cqrs`
+//! and `rules_seams` turn facts into diagnostics.
 
 mod collect;
 mod flow;
@@ -19,7 +26,9 @@ mod paths;
 mod rules_cqrs;
 mod rules_hygiene;
 mod rules_purity;
+mod rules_runtime;
 mod rules_seams;
+mod rules_types;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -92,6 +101,8 @@ pub struct Reference {
     /// Modules of the same target the resolution passed through (`crate::..`), so a
     /// re-export through `crate::queries` still names `crate::queries`.
     pub through: Vec<Vec<String>>,
+    /// Written in a library target (`ARCH-anyhow-in-library`).
+    pub library: bool,
 }
 
 /// A function signature that takes something by `&mut`.
@@ -169,6 +180,43 @@ pub struct Facts {
     pub hidden: Vec<HiddenItem>,
     /// `cfg!` invocations that name a platform, with their predicate.
     pub platform_cfgs: Vec<(Site, String)>,
+    /// Target roots, `#[path]` modules and `include!`s that resolve outside the package
+    /// directory: where, and what.
+    pub foreign: Vec<(String, String)>,
+    /// `static` items, with whether they are `static mut`.
+    pub statics: Vec<(Site, bool)>,
+    /// Structs and enums.
+    pub types: Vec<TypeDecl>,
+    /// Trait impls.
+    pub impls: Vec<ImplDecl>,
+    /// The types `ControlAggregates::accept` visits (`visitor.visit::<X>()`), by last segment.
+    pub registry_visits: Vec<String>,
+}
+
+/// A struct or enum declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDecl {
+    /// Where its name is.
+    pub site: Site,
+    /// Its name.
+    pub name: String,
+    /// The last segment of every derived trait, through `cfg_attr` too.
+    pub derives: Vec<String>,
+    /// Every identifier in its field types.
+    pub fields: BTreeSet<String>,
+}
+
+/// A trait impl (`impl Trait for Type`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplDecl {
+    /// Where the trait is named.
+    pub site: Site,
+    /// The trait's last segment.
+    pub trait_name: String,
+    /// The last segment of the self type's path (empty when it is not a path).
+    pub self_name: String,
+    /// Every identifier in the self type.
+    pub self_idents: BTreeSet<String>,
 }
 
 /// An item marked `#[doc(hidden)]`: a function, a method, a type or a constant.
@@ -229,8 +277,16 @@ pub fn check(
         .collect();
     out.extend(hygiene.config(root, &manifests));
     let mut every = Vec::new();
+    let mut libraries = BTreeMap::new();
     for package in metadata.workspace_packages() {
-        let facts = collect_package(root, package);
+        let (facts, library) = collect_package(root, package);
+        libraries.extend(library);
+        every.push(facts);
+    }
+    for facts in &mut every {
+        follow_reexports(&libraries, &mut facts.references);
+    }
+    for facts in &every {
         for (at, problem) in &facts.problems {
             out.push(Diagnostic::new(
                 Rule::SourceParse,
@@ -238,11 +294,19 @@ pub fn check(
                 at.clone(),
             ));
         }
-        out.extend(rules_purity::check(&facts, policy));
-        out.extend(rules_cqrs::check(&facts, policy));
-        out.extend(hygiene.check(&facts));
-        every.push(facts);
+        for (at, problem) in &facts.foreign {
+            out.push(Diagnostic::new(
+                Rule::ForeignSource,
+                problem.clone(),
+                at.clone(),
+            ));
+        }
+        out.extend(rules_purity::check(facts, policy));
+        out.extend(rules_runtime::check(facts, policy));
+        out.extend(rules_cqrs::check(facts, policy));
+        out.extend(hygiene.check(facts));
     }
+    out.extend(rules_types::check(&every));
     out.extend(rules_seams::check(&every));
     out.extend(hygiene.finish());
     // Line numbers are computed; the parsed sources need not stay in this thread's span map.
@@ -250,20 +314,20 @@ pub fn check(
     out
 }
 
-/// Every workspace crate a rule names, as a package name: the crates the rules apply to,
-/// exempt or forbid, the graph's independent oracles included. A renamed crate would make those rules pass without checking anything.
+/// Every workspace crate a rule names in code, as a package name: the crates the rules apply
+/// to, exempt or forbid. A renamed crate would make those rules pass without checking
+/// anything. The crates `[planes]` and `[purity]` name are checked by `ARCH-missing-crate`.
 fn selector_crates() -> BTreeSet<String> {
-    let mut out: BTreeSet<String> = rules_purity::PURE
+    let mut out: BTreeSet<String> = rules_purity::APPLICATIONS
         .iter()
-        .chain(rules_purity::APPLICATIONS)
-        .chain(rules_purity::PROCESS_ALLOWED)
         .chain([
             &rules_hygiene::POLL_HELPER.0,
             &rules_cqrs::APPLICATION,
             &rules_seams::DEFINER,
+            &rules_types::AGGREGATES.0,
         ])
         .chain(rules_seams::USERS)
-        .chain(super::graph::INDEPENDENT)
+        .chain(rules_runtime::SPAWN_MODULES.iter().map(|(name, _)| name))
         .map(|name| (*name).to_owned())
         .collect();
     for (package, crates) in rules_purity::ISOLATION {
@@ -357,17 +421,71 @@ pub fn first_hit(reference: &Reference, forbidden: &[&[&str]]) -> Option<String>
     })
 }
 
-fn collect_package(root: &Path, package: &Package) -> Facts {
-    let dir = package
+/// The scopes of each workspace library target, by the name code uses for it
+/// (`mayfly_composition`), for [`follow_reexports`].
+type Libraries = BTreeMap<String, paths::Scopes>;
+
+/// How many workspace crates a re-export chain is followed through.
+const MAX_REEXPORT_HOPS: usize = 8;
+
+/// Adds to every reference the candidates its workspace-crate candidates re-export: a
+/// candidate `other::a::B` is looked up as `crate::a::B` in `other`'s library scopes; each
+/// path that leaves that crate (`std::process::Command`) becomes a candidate and is followed
+/// further (chains of crates), and each path inside it is added as `other::..` (so a
+/// renamed re-export still shows the name it stands for). Candidates are only added, so a
+/// rule can only find more. Pinned by `should_follow_reexports_when_another_crate_names_them`.
+fn follow_reexports(libraries: &Libraries, references: &mut [Reference]) {
+    for reference in references {
+        let mut frontier = reference.resolved.clone();
+        for _ in 0..MAX_REEXPORT_HOPS {
+            let mut next = Vec::new();
+            for candidate in &frontier {
+                let Some((first, rest)) = candidate.split_first() else {
+                    continue;
+                };
+                let Some(scopes) = libraries.get(first) else {
+                    continue;
+                };
+                let mut segments = vec!["crate".to_owned()];
+                segments.extend_from_slice(rest);
+                let path = paths::Written {
+                    absolute: false,
+                    segments,
+                };
+                for mut found in scopes.resolve(&[], &path) {
+                    let local = found.first().is_some_and(|f| f == "crate");
+                    if local {
+                        first.clone_into(&mut found[0]);
+                    }
+                    if !reference.resolved.contains(&found) {
+                        reference.resolved.push(found.clone());
+                        if !local {
+                            next.push(found);
+                        }
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+    }
+}
+
+fn collect_package(root: &Path, package: &Package) -> (Facts, Option<(String, paths::Scopes)>) {
+    let package_dir = package
         .manifest_path
         .parent()
-        .map(|p| relative(root, p.as_std_path()))
+        .map(|p| p.as_std_path().to_path_buf())
         .unwrap_or_default();
+    let dir = relative(root, &package_dir);
     let mut facts = Facts {
         package: package.name.to_string(),
         dir,
         ..Facts::default()
     };
+    let mut library = None;
     let renames: BTreeMap<String, String> = package
         .dependencies
         .iter()
@@ -378,19 +496,34 @@ fn collect_package(root: &Path, package: &Package) -> Facts {
         })
         .collect();
     for target in &package.targets {
-        let units = match load_target(root, target) {
-            Ok((units, texts)) => {
-                facts.sources.extend(texts);
-                units
+        let is_library = target.kind.iter().any(|k| {
+            matches!(
+                k.to_string().as_str(),
+                "lib" | "rlib" | "dylib" | "proc-macro"
+            )
+        });
+        let units = match load_target(root, &package_dir, target) {
+            Ok(loaded) => {
+                facts.sources.extend(loaded.texts);
+                facts.foreign.extend(loaded.foreign);
+                loaded.units
             }
             Err(problems) => {
                 facts.problems.extend(problems);
                 continue;
             }
         };
-        collect::collect_target(root, &units, renames.clone(), &mut facts);
+        let place = collect::Target {
+            root,
+            package_dir: &package_dir,
+            library: is_library,
+        };
+        let scopes = collect::collect_target(&place, &units, renames.clone(), &mut facts);
+        if is_library {
+            library = Some((target.name.replace('-', "_"), scopes));
+        }
     }
-    facts
+    (facts, library)
 }
 
 /// One module's items from one file. A module whose items come from several files (through
@@ -410,39 +543,77 @@ pub struct Unit {
 
 /// Parses a target's module tree. Problems are reported per file; one problem anywhere
 /// fails the target.
-fn load_target(root: &Path, target: &Target) -> Result<Loaded, Vec<(String, String)>> {
+fn load_target(
+    root: &Path,
+    package_dir: &Path,
+    target: &Target,
+) -> Result<Loaded, Vec<(String, String)>> {
     let test = target
         .kind
         .iter()
         .any(|k| matches!(k.to_string().as_str(), "test" | "bench" | "example"));
     let file = target.src_path.as_std_path().to_path_buf();
-    let mut loader = Loader::new(root);
+    let mut loader = Loader::new(root, package_dir);
     let mod_dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
     loader.load_file(&file, Vec::new(), &mod_dir, test, 0, None);
     if loader.problems.is_empty() {
-        Ok((loader.units, loader.texts))
+        Ok(Loaded {
+            units: loader.units,
+            texts: loader.texts,
+            foreign: loader.foreign,
+        })
     } else {
         Err(loader.problems)
     }
 }
 
-/// A target's units and the text of each file, by workspace-relative path.
-type Loaded = (Vec<Unit>, BTreeMap<String, String>);
+/// A target's units, the text of each file by workspace-relative path, and the files it
+/// refused to load because they lie outside the package.
+struct Loaded {
+    units: Vec<Unit>,
+    texts: BTreeMap<String, String>,
+    foreign: Vec<(String, String)>,
+}
+
+/// Whether `file` lies inside `package_dir` once both are canonical (symlinks and `..`
+/// resolved). A file that does not exist is left to the missing-file diagnostics.
+pub fn outside_package(file: &Path, package_dir: &Path) -> bool {
+    match (fs::canonicalize(file), fs::canonicalize(package_dir)) {
+        (Ok(file), Ok(dir)) => !file.starts_with(dir),
+        _ => false,
+    }
+}
+
+/// The `ARCH-foreign-source` message for `file`, reached through `what`: the file is shown
+/// canonical and relative to `root` (`crates/other/src/lib.rs`, not `crates/a/src/../..`).
+pub fn foreign_message(what: &str, root: &Path, file: &Path) -> String {
+    let rel = match (fs::canonicalize(root), fs::canonicalize(file)) {
+        (Ok(root), Ok(file)) => relative(&root, &file),
+        _ => relative(root, file),
+    };
+    format!(
+        "{what} resolves to `{rel}`, outside the package directory: a crate's source never comes from another package (it would be checked, and compiled, under the wrong policy)"
+    )
+}
 
 struct Loader<'a> {
     root: &'a Path,
+    package_dir: PathBuf,
     units: Vec<Unit>,
     problems: Vec<(String, String)>,
+    foreign: Vec<(String, String)>,
     seen: BTreeSet<(PathBuf, Vec<String>)>,
     texts: BTreeMap<String, String>,
 }
 
 impl<'a> Loader<'a> {
-    fn new(root: &'a Path) -> Self {
+    fn new(root: &'a Path, package_dir: &Path) -> Self {
         Self {
             root,
+            package_dir: package_dir.to_path_buf(),
             units: Vec::new(),
             problems: Vec::new(),
+            foreign: Vec::new(),
             seen: BTreeSet::new(),
             texts: BTreeMap::new(),
         }
@@ -463,6 +634,18 @@ impl<'a> Loader<'a> {
         from: Option<String>,
     ) {
         let rel = relative(self.root, file);
+        if outside_package(file, &self.package_dir) {
+            let (at, what) = match from {
+                Some(at) => (at, "a `#[path]` module or `include!`"),
+                None => (
+                    relative(self.root, &self.package_dir.join("Cargo.toml")),
+                    "a target root",
+                ),
+            };
+            self.foreign
+                .push((at, foreign_message(what, self.root, file)));
+            return;
+        }
         let at = from.unwrap_or_else(|| rel.clone());
         if depth > MAX_NESTING || !self.seen.insert((file.to_path_buf(), module.clone())) {
             self.problem(at, format!("`{rel}` is loaded recursively"));
@@ -798,10 +981,10 @@ pub fn relative(root: &Path, path: &Path) -> String {
 pub mod testing {
     use super::*;
 
-    /// A policy with every rule crate in its usual category.
+    /// A policy with every rule crate in its usual category, plane and purity role.
     pub fn policy() -> Policy {
         super::super::policy::parse(
-            "schema = 1\n[workspace]\nproduction = [\"mayfly-domain\", \"mayfly-protocol\", \"mayfly-control-domain\", \"mayfly-control\", \"mayfly-data-domain\", \"mayfly-data\", \"mayfly-adapter-sqlite\", \"mayfly-adapter-github\", \"mayfly-adapter-secrets\", \"mayfly-adapter-tart\", \"mayfly-adapter-guest\", \"mayfly-adapter-host\", \"mayfly-adapter-link\", \"mayfly-composition\", \"mayfly-cli\"]\ntest_only = [\"mayfly-testkit\", \"mayfly-conformance\", \"mayfly-fake-tart\", \"mayfly-fake-github\"]\ntool_only = [\"xtask\", \"mayfly-faultlab\"]\n[dependencies.normal]\n",
+            "schema = 1\n[workspace]\nproduction = [\"mayfly-domain\", \"mayfly-protocol\", \"mayfly-control-domain\", \"mayfly-control\", \"mayfly-data-domain\", \"mayfly-data\", \"mayfly-adapter-sqlite\", \"mayfly-adapter-github\", \"mayfly-adapter-secrets\", \"mayfly-adapter-tart\", \"mayfly-adapter-guest\", \"mayfly-adapter-host\", \"mayfly-adapter-link\", \"mayfly-composition\", \"mayfly-cli\"]\ntest_only = [\"mayfly-testkit\", \"mayfly-conformance\", \"mayfly-fake-tart\", \"mayfly-fake-github\"]\ntool_only = [\"xtask\", \"mayfly-faultlab\"]\n[dependencies.normal]\n[planes]\ncontrol = [\"mayfly-control-domain\", \"mayfly-control\", \"mayfly-adapter-sqlite\", \"mayfly-adapter-github\", \"mayfly-adapter-secrets\", \"mayfly-testkit\"]\ndata = [\"mayfly-data-domain\", \"mayfly-data\", \"mayfly-adapter-tart\", \"mayfly-adapter-guest\", \"mayfly-adapter-host\"]\nshared = [\"mayfly-domain\", \"mayfly-protocol\", \"mayfly-adapter-link\"]\nboth = [\"mayfly-composition\", \"mayfly-cli\", \"mayfly-conformance\"]\n[planes.vocabulary]\ncontrol = [\"Journal\", \"AggregateStore\"]\ndata = [\"VmProvider\", \"GuestTransport\"]\n[purity]\npure = [\"mayfly-domain\", \"mayfly-protocol\", \"mayfly-control-domain\", \"mayfly-data-domain\"]\nprocess_authority = [\"mayfly-adapter-tart\", \"mayfly-adapter-guest\", \"mayfly-composition\"]\nindependent = [\"mayfly-faultlab\", \"mayfly-fake-tart\", \"mayfly-fake-github\"]\n",
         )
         .unwrap()
     }
@@ -818,16 +1001,22 @@ pub mod testing {
             fs::write(path, text).unwrap();
         }
         let lib = package_dir.join(files[0].0);
-        let mut loader = Loader::new(root);
+        let mut loader = Loader::new(root, &package_dir);
         loader.load_file(&lib, Vec::new(), lib.parent().unwrap(), false, 0, None);
         let mut facts = Facts {
             package: package.to_owned(),
             dir: format!("crates/{package}"),
             problems: loader.problems.clone(),
+            foreign: loader.foreign.clone(),
             sources: loader.texts.clone(),
             ..Facts::default()
         };
-        collect::collect_target(root, &loader.units, BTreeMap::new(), &mut facts);
+        let place = collect::Target {
+            root,
+            package_dir: &package_dir,
+            library: true,
+        };
+        collect::collect_target(&place, &loader.units, BTreeMap::new(), &mut facts);
         facts
     }
 
@@ -895,12 +1084,97 @@ mod tests {
     }
 
     #[test]
+    fn should_follow_reexports_when_another_crate_names_them() {
+        // given
+        let composition = testing::facts_for(
+            "mayfly-composition",
+            &[(
+                "src/lib.rs",
+                "pub use std::process::Command as Spawner;\npub use self::inner::Journal as Log;\nmod inner { pub trait Journal {} }\n",
+            )],
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        fs::write(
+            &file,
+            &composition.sources["crates/mayfly-composition/src/lib.rs"],
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path(), dir.path());
+        loader.load_file(&file, Vec::new(), dir.path(), false, 0, None);
+        let place = collect::Target {
+            root: dir.path(),
+            package_dir: dir.path(),
+            library: true,
+        };
+        let scopes = collect::collect_target(
+            &place,
+            &loader.units,
+            BTreeMap::new(),
+            &mut Facts::default(),
+        );
+        let libraries = Libraries::from([("mayfly_composition".to_owned(), scopes)]);
+        let mut cli = testing::facts_for(
+            "mayfly-cli",
+            &[(
+                "src/lib.rs",
+                "pub fn run(_: &dyn mayfly_composition::Log) {\n    let _ = mayfly_composition::Spawner::new(\"sh\");\n}\n",
+            )],
+        );
+
+        // when
+        follow_reexports(&libraries, &mut cli.references);
+
+        // then
+        let all: Vec<String> = cli
+            .references
+            .iter()
+            .flat_map(|r| r.resolved.iter().map(|c| c.join("::")))
+            .collect();
+        assert!(
+            all.contains(&"std::process::Command::new".to_owned()),
+            "{all:?}"
+        );
+        assert!(
+            all.contains(&"mayfly_composition::inner::Journal".to_owned()),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_path_and_include_when_they_leave_the_package() {
+        // given
+        let files = [
+            (
+                "src/lib.rs",
+                "#[path = \"../../other/src/lib.rs\"]\nmod x;\npub fn f() -> u8 {\n    include!(\"../../other/value.rs\")\n}\n",
+            ),
+            ("../other/src/lib.rs", "pub fn g() {}\n"),
+            ("../other/value.rs", "1\n"),
+        ];
+
+        // when
+        let facts = testing::facts_for("p", &files);
+
+        // then
+        let got: Vec<&str> = facts.foreign.iter().map(|(at, _)| at.as_str()).collect();
+        assert_eq!(
+            got,
+            ["crates/p/src/lib.rs:2", "crates/p/src/lib.rs:4"],
+            "{:?}",
+            facts.foreign
+        );
+        assert!(facts.problems.is_empty(), "{:?}", facts.problems);
+        assert!(!facts.sources.contains_key("crates/other/src/lib.rs"));
+    }
+
+    #[test]
     fn should_report_line_when_file_does_not_parse() {
         // given
         let dir = tempfile::TempDir::new().unwrap();
         let file = dir.path().join("lib.rs");
         fs::write(&file, "pub fn ok() {}\npub fn broken( {\n").unwrap();
-        let mut loader = Loader::new(dir.path());
+        let mut loader = Loader::new(dir.path(), dir.path());
 
         // when
         loader.load_file(&file, Vec::new(), dir.path(), false, 0, None);
@@ -933,7 +1207,7 @@ mod tests {
         fs::write(root.join("t/inner.rs"), "").unwrap();
         fs::write(root.join("other.rs"), "").unwrap();
         fs::write(root.join("gen.rs"), "fn generated() {}\n").unwrap();
-        let mut loader = Loader::new(root);
+        let mut loader = Loader::new(root, root);
 
         // when
         loader.load_file(&root.join("lib.rs"), Vec::new(), root, false, 0, None);
@@ -970,7 +1244,7 @@ mod tests {
             "mod gone;\ninclude!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n",
         )
         .unwrap();
-        let mut loader = Loader::new(root);
+        let mut loader = Loader::new(root, root);
 
         // when
         loader.load_file(&root.join("lib.rs"), Vec::new(), root, false, 0, None);

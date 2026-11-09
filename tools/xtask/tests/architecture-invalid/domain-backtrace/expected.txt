@@ -1,0 +1,4 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-protocol/src/lib.rs:5
+contains: `std::backtrace::Backtrace::capture`
+only: true

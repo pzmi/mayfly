@@ -50,6 +50,7 @@ pub struct Hygiene<'a> {
     policy: &'a Policy,
     adr_exists: &'a dyn Fn(&str) -> bool,
     used: BTreeSet<usize>,
+    vendor_used: BTreeSet<String>,
 }
 
 impl<'a> Hygiene<'a> {
@@ -59,6 +60,7 @@ impl<'a> Hygiene<'a> {
             policy,
             adr_exists,
             used: BTreeSet::new(),
+            vendor_used: BTreeSet::new(),
         }
     }
 
@@ -109,6 +111,7 @@ impl<'a> Hygiene<'a> {
                     && let Some(config) = read_toml(root, &rel, &mut out)
                 {
                     rustflags(&config, &rel, &mut out);
+                    self.sources(&config, dir, &rel, &mut out);
                 }
             }
             for name in ["clippy.toml", ".clippy.toml"] {
@@ -128,7 +131,69 @@ impl<'a> Hygiene<'a> {
                 }
             }
         }
+        for (dir, approval) in &self.policy.exceptions.vendor {
+            if !self.vendor_used.contains(dir) {
+                out.push(Diagnostic::new(
+                    Rule::LintConfig,
+                    format!(
+                        "[exceptions.vendor] `{dir}` (ADR {}) is substituted by no .cargo/config.toml; remove it",
+                        approval.adr
+                    ),
+                    POLICY_FILE,
+                ));
+            }
+        }
         out
+    }
+
+    /// `[source]` replacement in a `.cargo/config.toml` under `dir` (the workspace root or a
+    /// member, `dir` ending in `/` or empty): every crate would then come from somewhere
+    /// `cargo deny` and the lockfile do not show. Only a `directory` source inside the
+    /// workspace that `[exceptions.vendor]` approves with an existing ADR passes.
+    fn sources(&mut self, config: &toml::Table, dir: &str, rel: &str, out: &mut Vec<Diagnostic>) {
+        let Some(sources) = config.get("source").and_then(toml::Value::as_table) else {
+            return;
+        };
+        for (name, source) in sources {
+            let Some(target) = source.get("replace-with").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let directory = sources
+                .get(target)
+                .and_then(|t| t.get("directory"))
+                .and_then(toml::Value::as_str)
+                .map(|d| format!("{dir}{d}"));
+            let approved = directory.as_ref().and_then(|d| {
+                self.policy
+                    .exceptions
+                    .vendor
+                    .get(d)
+                    .map(|approval| (d.clone(), approval.adr.clone()))
+            });
+            match approved {
+                Some((d, adr)) if (self.adr_exists)(&adr) => {
+                    self.vendor_used.insert(d);
+                }
+                Some((d, adr)) => {
+                    self.vendor_used.insert(d.clone());
+                    out.push(Diagnostic::new(
+                        Rule::LintConfig,
+                        format!(
+                            "[exceptions.vendor] `{d}` cites ADR {adr}, but no doc/adr/{adr}-*.md exists"
+                        ),
+                        rel,
+                    ));
+                }
+                None => out.push(Diagnostic::new(
+                    Rule::LintConfig,
+                    format!(
+                        "[source.{name}] is replaced with `{target}`{}: packages would come from a source the lockfile and cargo-deny do not show; only an approved vendored directory ([exceptions.vendor]) may replace one",
+                        directory.map(|d| format!(" (directory `{d}`)")).unwrap_or_default()
+                    ),
+                    rel,
+                )),
+            }
+        }
     }
 
     /// Reports `allow` levels in the root `[workspace.lints]` that no exception approves;

@@ -9,6 +9,10 @@
 //! space before the colon all hid references from it. The check also fails closed: a line
 //! that mentions the token `uses` more often than the parsed structure accounts for is an
 //! error, so a reference in a shape the walk does not know is reported, never skipped.
+//!
+//! Container images are pinned too (foundation.md section 7.3): `jobs.<id>.container` and
+//! every `jobs.<id>.services.<name>`, as a string or through its `image` key, must name an
+//! image by `@sha256:<64 hex>` digest, since a tag can be moved to other contents.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -269,6 +273,74 @@ fn is_pinned(reference: &str) -> bool {
     })
 }
 
+/// `image@sha256:<64 lowercase hex>`, optionally behind `docker://`.
+fn is_image_pinned(image: &str) -> bool {
+    let image = image.strip_prefix("docker://").unwrap_or(image);
+    image.split_once("@sha256:").is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"./:_-".contains(&b))
+            && is_hex(digest, 64)
+    })
+}
+
+/// The image a `container` or service value names: the string itself, or its `image` key.
+/// `None` with the line when it names none in a shape the check can read.
+fn image_of(node: &Node) -> Result<(String, usize), Option<usize>> {
+    match node {
+        Node::Scalar { value, line, .. } => Ok((value.clone(), *line)),
+        Node::Map(_) => match entries(node, "image").next() {
+            Some((_, Node::Scalar { value, line, .. })) => Ok((value.clone(), *line)),
+            Some((Node::Scalar { line, .. }, _)) => Err(Some(*line)),
+            _ => Err(None),
+        },
+        Node::Seq(_) => Err(None),
+    }
+}
+
+/// Every `jobs.<id>.container` and `jobs.<id>.services.<name>` image that is not pinned by
+/// digest. Pinned by `should_report_container_and_service_images_when_they_are_only_tagged`.
+fn image_findings(document: &Node, out: &mut Vec<Finding>) {
+    for (_, jobs) in entries(document, "jobs") {
+        let Node::Map(jobs) = jobs else { continue };
+        for (_, job) in jobs {
+            let mut images: Vec<(&str, &Node, usize)> = Vec::new();
+            for (key, container) in entries(job, "container") {
+                let line = match key {
+                    Node::Scalar { line, .. } => *line,
+                    _ => 0,
+                };
+                images.push(("container", container, line));
+            }
+            for (_, services) in entries(job, "services") {
+                if let Node::Map(services) = services {
+                    for (key, service) in services {
+                        let line = match key {
+                            Node::Scalar { line, .. } => *line,
+                            _ => 0,
+                        };
+                        images.push(("service", service, line));
+                    }
+                }
+            }
+            for (what, node, key_line) in images {
+                match image_of(node) {
+                    Ok((image, line)) if !is_image_pinned(&image) => out.push(Finding {
+                        line,
+                        message: format!("{what} image '{image}' is not pinned by @sha256 digest"),
+                    }),
+                    Ok(_) => {}
+                    Err(line) => out.push(Finding {
+                        line: line.unwrap_or(key_line),
+                        message: format!("{what} names no image the pin check can read"),
+                    }),
+                }
+            }
+        }
+    }
+}
+
 /// Every problem in one file's text, in line order.
 pub fn findings(text: &str) -> Vec<Finding> {
     let documents = match parse(text) {
@@ -281,6 +353,7 @@ pub fn findings(text: &str) -> Vec<Finding> {
     let mut accounted: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for document in &documents {
         merge_keys(document, &mut out);
+        image_findings(document, &mut out);
         for uses in walk(document) {
             accounted.insert((uses.key_line, uses.key_col), 1);
             match uses.value {
@@ -411,6 +484,29 @@ mod tests {
     /// A workflow whose single job's steps are `steps`; the first step is on line 6.
     fn workflow(steps: &str) -> String {
         format!("on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n{steps}\n")
+    }
+
+    #[test]
+    fn should_report_container_and_service_images_when_they_are_only_tagged() {
+        // given
+        let digest = "b".repeat(64);
+        let text = format!(
+            "on: push\njobs:\n  j:\n    runs-on: x\n    container: rust:1.97\n    services:\n      db:\n        image: postgres:17\n      cache:\n        image: redis@sha256:{digest}\n    steps:\n      - run: true\n  k:\n    runs-on: x\n    container:\n      image: docker://alpine@sha256:{digest}\n    steps:\n      - run: true\n"
+        );
+
+        // when
+        let found = findings(&text);
+
+        // then
+        assert_eq!(lines(&found), [5, 8], "{found:?}");
+        assert!(
+            found[0].message.contains("container image 'rust:1.97'"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].message.contains("service image 'postgres:17'"),
+            "{found:?}"
+        );
     }
 
     #[test]

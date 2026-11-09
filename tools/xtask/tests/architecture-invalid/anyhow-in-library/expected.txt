@@ -1,0 +1,4 @@
+rule: ARCH-anyhow-in-library
+at: crates/mayfly-data/src/lib.rs:3
+contains: mayfly-data names `anyhow::Result`
+only: true

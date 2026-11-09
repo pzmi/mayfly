@@ -1,0 +1,7 @@
+# Fixture: crates.io is replaced by another registry, so every package could come from a
+# source the lockfile and cargo-deny do not show.
+[source.crates-io]
+replace-with = "mirror"
+
+[source.mirror]
+registry = "sparse+https://mirror.example.invalid/index/"

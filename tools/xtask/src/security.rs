@@ -35,7 +35,7 @@ pub fn stages() -> Vec<Stage> {
             .and_needs("shellcheck"),
         Stage::in_process(
             "action-pins",
-            "check .github/workflows and .github/actions for unpinned uses:",
+            "check .github/workflows and .github/actions for unpinned uses: and container or service images",
             action_pins::run,
         ),
     ]

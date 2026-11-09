@@ -1,29 +1,25 @@
-//! Purity of the pure crates, process authority, plane and layer isolation, and `unsafe`
-//! (foundation.md section 3.3; plan sections 3.4 and 4).
+//! Purity of the pure crates, process authority, plane vocabulary, layer isolation, and
+//! `unsafe` (foundation.md sections 2.3 and 3.3; plan sections 3.4 and 4).
 //!
-//! The path rules apply to production code (see [`Context`]): tests may spawn fakes and build
-//! temporary state. `unsafe` is rejected everywhere.
+//! The crates each rule selects come from the policy (`[purity]`, `[planes]`). Purity and
+//! process authority apply to production code (see [`Context`]): tests may spawn fakes and
+//! build temporary state. Layer isolation and plane vocabulary apply to test code too, so a
+//! data-plane test cannot name the SQLite adapter. `unsafe` is rejected everywhere.
 
 use super::super::policy::Policy;
 use super::super::report::{Diagnostic, Rule};
 use super::{Context, Facts, Reference, first_hit};
-
-/// The crates whose code must stay pure (plan section 4): the shared kernel, the protocol and
-/// the two plane domains.
-pub const PURE: &[&str] = &[
-    "mayfly-domain",
-    "mayfly-protocol",
-    "mayfly-control-domain",
-    "mayfly-data-domain",
-];
 
 /// The application crates of the two planes: their decisions are checked by
 /// `ARCH-observability-isolation` like the pure crates'.
 pub const APPLICATIONS: &[&str] = &["mayfly-control", "mayfly-data"];
 
 /// What a pure crate must not reach: ambient I/O, processes, environment, threads, the clock,
-/// randomness, async runtimes, HTTP, SQL, console output and the outer layers. Bare names are
-/// prelude macros (`println!`, `env!`).
+/// randomness (a std `HashMap`/`HashSet` iterates in a per-process random order, so a
+/// `decide` over one is not deterministic; `BTreeMap`/`BTreeSet` are the deterministic
+/// choice), a backtrace (it reads `RUST_BACKTRACE`), global mutable state (atomics, locks,
+/// lazy statics, `thread_local!`), async runtimes and executors, HTTP, SQL, console output and
+/// the outer layers. Bare names are prelude macros (`println!`, `env!`).
 const PURE_FORBIDDEN: &[&[&str]] = &[
     &["std", "fs"],
     &["std", "net"],
@@ -38,8 +34,32 @@ const PURE_FORBIDDEN: &[&[&str]] = &[
     &["std", "time", "SystemTime", "elapsed"],
     &["std", "time", "Instant", "now"],
     &["std", "time", "Instant", "elapsed"],
+    &["std", "time", "UNIX_EPOCH"],
+    &["std", "time", "SystemTime", "UNIX_EPOCH"],
     &["std", "collections", "hash_map", "RandomState"],
     &["std", "hash", "RandomState"],
+    &["std", "collections", "HashMap"],
+    &["std", "collections", "HashSet"],
+    &["std", "collections", "hash_map"],
+    &["std", "collections", "hash_set"],
+    &["hashbrown"],
+    &["std", "backtrace"],
+    &["std", "sync", "atomic"],
+    &["core", "sync", "atomic"],
+    &["std", "sync", "Mutex"],
+    &["std", "sync", "RwLock"],
+    &["std", "sync", "Condvar"],
+    &["std", "sync", "Once"],
+    &["std", "sync", "OnceLock"],
+    &["std", "sync", "LazyLock"],
+    &["std", "sync", "Barrier"],
+    &["std", "sync", "mpsc"],
+    &["thread_local"],
+    &["std", "thread_local"],
+    &["rustix"],
+    &["nix"],
+    &["futures", "executor"],
+    &["futures_executor"],
     &["print"],
     &["println"],
     &["eprint"],
@@ -94,14 +114,10 @@ const PURE_FORBIDDEN: &[&[&str]] = &[
     &["mayfly_conformance"],
 ];
 
-/// The production crates that may spawn or control processes (plan section 3.4): the Tart and
-/// guest adapters, and composition. Test-only and tool-only crates may too; the pure crates
-/// are covered by [`PURE_FORBIDDEN`].
-pub const PROCESS_ALLOWED: &[&str] = &[
-    "mayfly-adapter-tart",
-    "mayfly-adapter-guest",
-    "mayfly-composition",
-];
+/// Method names a pure crate must not call: `elapsed` reads the clock whatever value it is
+/// called on (`UNIX_EPOCH.elapsed()`, an `Instant` handed in). Method calls are matched by
+/// name only.
+const PURE_FORBIDDEN_METHODS: &[&str] = &["elapsed"];
 
 /// Paths that spawn, signal or otherwise control processes.
 const PROCESS_AUTHORITY: &[&[&str]] = &[
@@ -123,11 +139,13 @@ const PROCESS_HARMLESS: &[&[&str]] = &[
 ];
 
 /// Crates each crate must not name (plan sections 3.4 and 4): the planes never name each
-/// other (the data plane names no journal type, the control plane no data-plane or process
-/// API), adapters never name a sibling adapter, composition or the CLI, the applications name
-/// no adapter technology, and the CLI names only composition. The dependency graph forbids
-/// most of these edges too; this rule also catches a name reached through a dev edge or a
-/// re-export.
+/// other's crates, adapters never name a sibling adapter, composition or the CLI, the
+/// applications name no adapter technology, and the CLI names only composition. The rule runs
+/// over production and test code; test code may still name a test-only crate (the CLI's e2e
+/// tests use the testkit). The dependency graph forbids the edges themselves
+/// (`ARCH-forbidden-edge`, and `ARCH-plane-separation` over dev closures); this rule catches a
+/// name that arrives anyway, through another workspace crate's re-export included
+/// ([`super::follow_reexports`]).
 pub const ISOLATION: &[(&str, &[&str])] = &[
     (
         "mayfly-protocol",
@@ -137,10 +155,7 @@ pub const ISOLATION: &[(&str, &[&str])] = &[
         "mayfly-control-domain",
         &["mayfly_data_domain", "mayfly_protocol"],
     ),
-    (
-        "mayfly-data-domain",
-        &["mayfly_control_domain", "mayfly_protocol"],
-    ),
+    ("mayfly-data-domain", &["mayfly_control_domain"]),
     (
         "mayfly-control",
         &[
@@ -323,13 +338,48 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
         .production
         .as_ref()
         .is_some_and(|p| p.contains(&facts.package));
-    let pure = PURE.contains(&facts.package.as_str());
-    let process_checked = production && !pure && !PROCESS_ALLOWED.contains(&facts.package.as_str());
+    let pure = policy.purity.pure.contains(&facts.package);
+    let allowed = &policy.purity.process_authority;
+    let process_checked = production && !pure && !allowed.contains(&facts.package);
+    let test_only: Vec<String> = policy
+        .workspace
+        .test_only
+        .iter()
+        .flatten()
+        .map(|c| c.replace('-', "_"))
+        .collect();
     let isolation = ISOLATION
         .iter()
         .find(|(name, _)| *name == facts.package)
         .map(|(_, crates)| *crates);
+    out.extend(vocabulary(facts, policy));
     for reference in &facts.references {
+        if let Some(crates) = isolation {
+            let crates: Vec<&str> = crates
+                .iter()
+                .copied()
+                .filter(|c| {
+                    reference.site.context == Context::Production
+                        || !test_only.iter().any(|t| t == c)
+                })
+                .collect();
+            let prefixes: Vec<[&str; 1]> = crates.iter().map(|c| [*c]).collect();
+            let prefixes: Vec<&[&str]> = prefixes.iter().map(|p| p.as_slice()).collect();
+            if let Some(hit) = first_hit(reference, &prefixes) {
+                out.push(Diagnostic::new(
+                    Rule::LayerIsolation,
+                    format!(
+                        "{} names `{}`{} in {} code: this crate must not reach {}",
+                        facts.package,
+                        hit,
+                        written(reference, &hit),
+                        context_word(reference.site.context),
+                        crates.join(", "),
+                    ),
+                    reference.site.at(),
+                ));
+            }
+        }
         if reference.site.context != Context::Production {
             continue;
         }
@@ -352,29 +402,40 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
             out.push(Diagnostic::new(
                 Rule::ProcessAuthority,
                 format!(
-                    "{} names `{}`{}: process authority is allowed only in {}, test-only and tool-only crates (plan section 3.4)",
+                    "{} names `{}`{}: process authority is allowed only in [purity] process_authority ({}), test-only and tool-only crates (plan section 3.4)",
                     facts.package,
                     hit,
                     written(reference, &hit),
-                    PROCESS_ALLOWED.join(", ")
+                    allowed.join(", ")
                 ),
                 reference.site.at(),
             ));
         }
-        if let Some(crates) = isolation {
-            let prefixes: Vec<[&str; 1]> = crates.iter().map(|c| [*c]).collect();
-            let prefixes: Vec<&[&str]> = prefixes.iter().map(|p| p.as_slice()).collect();
-            if let Some(hit) = first_hit(reference, &prefixes) {
+    }
+    if pure {
+        for call in &facts.method_calls {
+            if call.site.context == Context::Production
+                && PURE_FORBIDDEN_METHODS.contains(&call.name.as_str())
+            {
                 out.push(Diagnostic::new(
-                    Rule::LayerIsolation,
+                    Rule::DomainPurity,
                     format!(
-                        "{} names `{}`{}: this crate must not reach {}",
-                        facts.package,
-                        hit,
-                        written(reference, &hit),
-                        crates.join(", "),
+                        "{} calls `.{}()`: it reads the clock; time arrives as a value (plan section 5.1)",
+                        facts.package, call.name
                     ),
-                    reference.site.at(),
+                    call.site.at(),
+                ));
+            }
+        }
+        for (site, mutable) in &facts.statics {
+            if *mutable && site.context == Context::Production {
+                out.push(Diagnostic::new(
+                    Rule::DomainPurity,
+                    format!(
+                        "{} declares a `static mut`: the pure crates hold no global mutable state",
+                        facts.package
+                    ),
+                    site.at(),
                 ));
             }
         }
@@ -388,6 +449,66 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
             ),
             site.at(),
         ));
+    }
+    out
+}
+
+fn context_word(context: Context) -> &'static str {
+    match context {
+        Context::Production => "production",
+        Context::Test => "test",
+    }
+}
+
+/// `ARCH-plane-vocabulary`: a crate of a plane, or a shared crate, names a word another plane
+/// owns (`[planes.vocabulary]`), as a segment of what it writes or of any candidate (a
+/// shared crate's re-export of `Journal` still names `Journal`), in production and test code.
+fn vocabulary(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let Some(plane) = policy.planes.of(&facts.package) else {
+        return out;
+    };
+    let words: Vec<(&str, &str)> = plane
+        .forbidden()
+        .iter()
+        .flat_map(|owner| {
+            policy
+                .planes
+                .vocabulary
+                .of(*owner)
+                .iter()
+                .map(|w| (w.as_str(), owner.key()))
+        })
+        .collect();
+    if words.is_empty() {
+        return out;
+    }
+    for reference in &facts.references {
+        let segments = reference
+            .written
+            .split("::")
+            .map(str::to_owned)
+            .chain(reference.resolved.iter().flatten().cloned());
+        let mut hit = None;
+        for segment in segments {
+            if let Some(found) = words.iter().find(|(w, _)| *w == segment) {
+                hit = Some(*found);
+                break;
+            }
+        }
+        if let Some((word, owner)) = hit {
+            out.push(Diagnostic::new(
+                Rule::PlaneVocabulary,
+                format!(
+                    "{} crate {} names `{word}` (written `{}`) in {} code: `{word}` belongs to the {owner} plane alone",
+                    plane.key(),
+                    facts.package,
+                    reference.written,
+                    context_word(reference.site.context),
+                ),
+                reference.site.at(),
+            ));
+        }
     }
     out
 }
@@ -425,6 +546,12 @@ mod tests {
     use super::*;
 
     const DOMAIN: &str = "mayfly-domain";
+    const PURE: &[&str] = &[
+        "mayfly-domain",
+        "mayfly-protocol",
+        "mayfly-control-domain",
+        "mayfly-data-domain",
+    ];
 
     fn reference(written: &str, resolved: &[&str], open: (bool, bool)) -> Reference {
         Reference {
@@ -443,6 +570,7 @@ mod tests {
             kind: RefKind::Path,
             module: Vec::new(),
             through: Vec::new(),
+            library: true,
         }
     }
 
@@ -576,6 +704,75 @@ mod tests {
                 .collect();
             assert_eq!(lines, ["2)", "3)", "4)"], "{package}: {found:?}");
         }
+    }
+
+    #[test]
+    fn should_report_domain_when_global_state_runtime_or_qualified_clock_is_named() {
+        // given
+        let source = "use std::sync::Mutex;\nstatic mut COUNT: u32 = 0;\npub fn f() {\n    let _ = <std::time::Instant as Clone>::clone;\n    let _ = <std::time::Instant>::now();\n    let _ = std::collections::HashSet::<u8>::new();\n    let _ = rustix::process::getpid();\n    let _ = nix::unistd::getpid();\n    futures::executor::block_on(async {});\n    let _ = std::sync::Arc::new(1);\n    let _ = std::collections::BTreeMap::<u8, u8>::new();\n}\n";
+
+        // when
+        let got = diagnostics(DOMAIN, &[("src/lib.rs", source)]);
+
+        // then
+        let mut lines: Vec<&str> = got
+            .iter()
+            .filter(|d| d.starts_with("ARCH-domain-purity"))
+            .map(|d| d.rsplit(':').next().unwrap_or(""))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        assert_eq!(lines, ["1)", "2)", "5)", "6)", "7)", "8)", "9)"], "{got:?}");
+    }
+
+    #[test]
+    fn should_report_isolation_in_tests_when_a_test_names_another_plane_but_not_test_kits() {
+        // given
+        let source = "#[cfg(test)]\nmod tests {\n    use mayfly_control::Bus;\n    use mayfly_testkit::poll;\n}\n";
+
+        // when
+        let data = diagnostics("mayfly-data", &[("src/lib.rs", source)]);
+        let cli = diagnostics("mayfly-cli", &[("src/lib.rs", source)]);
+
+        // then
+        let isolation = |found: &[String]| -> Vec<String> {
+            found
+                .iter()
+                .filter(|d| d.starts_with("ARCH-layer-isolation"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(isolation(&data).len(), 1, "{data:?}");
+        assert!(isolation(&data)[0].contains("in test code"), "{data:?}");
+        assert!(
+            isolation(&cli)
+                .iter()
+                .all(|d| !d.contains("mayfly_testkit")),
+            "{cli:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_vocabulary_when_a_plane_names_the_other_planes_types() {
+        // given
+        let data = "pub fn f(_: &dyn mayfly_protocol::Journal) {}\n#[cfg(test)]\nmod tests {\n    use mayfly_testkit::AggregateStore;\n}\n";
+        let control = "pub fn g<P: mayfly_domain::VmProvider>(_: P) {}\npub fn h(_: &dyn mayfly_control::Journal) {}\n";
+
+        // when
+        let in_data = diagnostics("mayfly-data", &[("src/lib.rs", data)]);
+        let in_control = diagnostics("mayfly-control", &[("src/lib.rs", control)]);
+        let in_shared = diagnostics("mayfly-protocol", &[("src/lib.rs", control)]);
+
+        // then
+        let count = |found: &[String]| {
+            found
+                .iter()
+                .filter(|d| d.starts_with("ARCH-plane-vocabulary"))
+                .count()
+        };
+        assert_eq!(count(&in_data), 2, "{in_data:?}");
+        assert_eq!(count(&in_control), 1, "{in_control:?}");
+        assert_eq!(count(&in_shared), 2, "{in_shared:?}");
     }
 
     #[test]

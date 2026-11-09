@@ -183,8 +183,10 @@ Accept: all workflows green on `main`; actionlint clean; (owner) branch ruleset 
 listed checks, if the owner wants one.
 
 #### FND-05 nextest profiles, testkit poll helper, coverage stage
-Cites: ver §2, §10. `.config/nextest.toml` (default, ci, serial profiles), `mayfly-testkit::poll`
-(the only place a test may wait on a real-OS condition, bounded, with a reason), coverage stage
+Cites: ver §2, §10, ADR 0019. `.config/nextest.toml` (default, ci, serial profiles), the `poll`
+helper (the only place a test may wait on a real-OS condition, bounded, with a reason) in the
+plane-neutral shared test kit, which this task creates (ADR 0019: data-plane tests cannot use the
+control plane's `mayfly-testkit`; move `ARCH-test-sleep`'s selector with it), coverage stage
 with `cargo-llvm-cov` and `coverage-floor.toml` (start 85% overall, 90% changed lines, ratcheted).
 Accept: `check` runs nextest; a sleeping test fails the hygiene rule; coverage stage in CI.
 
@@ -348,14 +350,14 @@ Accept: component tests for each recovery row; safe mode admits nothing and dele
 Cites: plan §3.1, §8.1. `mayfly-data`: ports `VmProvider`, `GuestTransport`, `HostProbe`; executor
 applying the KER-08 FSM with per-directive deadlines and bounded concurrency (semaphores per
 operation kind); inventory observer emitting `Inventory` on start and periodically; in-memory fake
-provider in testkit with scripted faults.
+provider with scripted faults in a new data-plane test kit (plane `data`, ADR 0019).
 Accept: component tests: duplicate directive executes once; ambiguous provider error → `Unknown`;
 restart rebuilds from inventory.
 
 #### DP-02 In-process link and link contract suite
 Cites: plan §3.3. `mayfly-adapter-link::inproc` with bounded channels and serde round-trip; the
 **link contract suite** (handshake, version refusal, at-least-once, ordering not assumed,
-backpressure, close semantics) in testkit as factory-parameterised functions.
+backpressure, close semantics) in the shared test kit (ADR 0019) as factory-parameterised functions.
 Accept: suite green on inproc.
 
 #### DP-03 `mayfly-fake-tart`

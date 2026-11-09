@@ -1,0 +1,4 @@
+rule: ARCH-plane-vocabulary
+at: crates/mayfly-control/src/lib.rs:4
+contains: names `VmProvider`
+only: true

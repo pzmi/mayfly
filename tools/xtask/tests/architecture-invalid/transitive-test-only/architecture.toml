@@ -14,4 +14,8 @@ mayfly-testkit = ["mayfly-domain", "mayfly-control"]
 mayfly-adapter-sqlite = ["mayfly-control", "mayfly-testkit"]
 
 [semantic]
-absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-fake-github", "mayfly-fake-tart", "mayfly-faultlab", "mayfly-protocol"]
+absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-protocol"]
+
+[purity]
+pure = ["mayfly-domain"]
+process_authority = ["mayfly-composition"]

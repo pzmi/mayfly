@@ -1,0 +1,4 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-data-domain/src/lib.rs:3
+contains: `thread_local`
+only: true

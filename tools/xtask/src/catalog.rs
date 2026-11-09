@@ -55,10 +55,11 @@ pub const CATALOG: &[Check] = &[
     row(
         "cross-check",
         "static",
-        "cargo check --locked --workspace --target aarch64-apple-darwin (after a rustup target preflight)",
+        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight)",
         "FND-04",
         true,
     ),
+    row("docs", "static", "cargo xtask adr index", "ARCH-01", true),
     row(
         "unit-tests",
         "unit",
@@ -122,7 +123,7 @@ pub const CATALOG: &[Check] = &[
     row(
         "action-pins",
         "security",
-        "check .github/workflows and .github/actions for unpinned uses:",
+        "check .github/workflows and .github/actions for unpinned uses: and container or service images",
         "FND-02",
         true,
     ),
@@ -270,7 +271,7 @@ mod tests {
             let line = format!("\"id\": \"{}\"", rule.id());
             assert!(json.contains(&line), "{line} missing from {json}");
             assert!(
-                ["FND-", "CP-", "ES-"]
+                ["FND-", "ARCH-", "CP-", "ES-"]
                     .iter()
                     .any(|task| rule.owner().starts_with(task)),
                 "{}",

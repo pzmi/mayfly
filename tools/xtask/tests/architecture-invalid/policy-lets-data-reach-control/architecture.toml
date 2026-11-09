@@ -1,0 +1,20 @@
+# Fixture: the policy itself lets the data plane depend on the control plane; no Cargo edge
+# exists yet, but the allowlist must already keep the planes apart (checkpoint finding M3).
+schema = 1
+
+[workspace]
+production = ["mayfly-data", "mayfly-control-domain"]
+
+[dependencies.normal]
+mayfly-data = ["mayfly-control-domain"]
+mayfly-control-domain = []
+
+[planes]
+control = ["mayfly-control-domain"]
+data = ["mayfly-data"]
+
+[purity]
+pure = ["mayfly-control-domain"]
+
+[semantic]
+absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit"]

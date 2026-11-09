@@ -14,6 +14,11 @@ pub use reload_state::ReloadState;
 use mayfly_domain::Revision;
 use tokio::sync::watch;
 
+/// The control plane's own vocabulary is its to use (`ARCH-plane-vocabulary`).
+pub trait Journal {
+    fn head(&self) -> Revision;
+}
+
 pub fn publish(sender: &watch::Sender<u64>, revision: &Revision) {
     let _ = sender.send(revision.0);
 }

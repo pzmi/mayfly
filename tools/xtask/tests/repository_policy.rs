@@ -1,5 +1,6 @@
 //! Every registry dependency names a full `major.minor.patch` version, as `cargo add` writes
-//! it, so a manifest says which release was reviewed.
+//! it, so a manifest says which release was reviewed; and the policy selects the crates
+//! foundation.md names for each role and plane.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -109,4 +110,79 @@ fn should_report_requirement_when_it_omits_the_patch_version() {
     // then
     let names: Vec<_> = partial.iter().map(|(_, n, _)| n.as_str()).collect();
     assert_eq!(names, ["axum", "bar"]);
+}
+
+/// A policy list as sorted names.
+fn names(policy: &toml::Table, table: &str, key: &str) -> Vec<String> {
+    let mut out: Vec<String> = policy
+        .get(table)
+        .and_then(|t| t.get(key))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out
+}
+
+/// The rules select crates from `[purity]` and `[planes]` (ADR 0019), so an edit that drops
+/// a crate from a list would switch its checks off silently; this pins the lists to
+/// foundation.md sections 2.1 and 2.3.
+#[test]
+fn should_select_the_foundation_crates_when_repository_purity_and_planes_are_read() {
+    // given
+    let text = fs::read_to_string(repository_root().join("architecture.toml")).expect("policy");
+    let policy: toml::Table = text.parse().expect("parse policy");
+    let sorted = |list: &[&str]| {
+        let mut out: Vec<String> = list.iter().map(|s| (*s).to_owned()).collect();
+        out.sort();
+        out
+    };
+
+    // when
+    let got = [
+        names(&policy, "purity", "pure"),
+        names(&policy, "purity", "process_authority"),
+        names(&policy, "purity", "independent"),
+        names(&policy, "planes", "control"),
+        names(&policy, "planes", "data"),
+        names(&policy, "planes", "shared"),
+        names(&policy, "planes", "both"),
+    ];
+
+    // then
+    let want = [
+        sorted(&[
+            "mayfly-domain",
+            "mayfly-protocol",
+            "mayfly-control-domain",
+            "mayfly-data-domain",
+        ]),
+        sorted(&[
+            "mayfly-adapter-tart",
+            "mayfly-adapter-guest",
+            "mayfly-composition",
+        ]),
+        sorted(&["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]),
+        sorted(&[
+            "mayfly-control-domain",
+            "mayfly-control",
+            "mayfly-adapter-sqlite",
+            "mayfly-adapter-github",
+            "mayfly-adapter-secrets",
+            "mayfly-testkit",
+        ]),
+        sorted(&[
+            "mayfly-data-domain",
+            "mayfly-data",
+            "mayfly-adapter-tart",
+            "mayfly-adapter-guest",
+            "mayfly-adapter-host",
+        ]),
+        sorted(&["mayfly-domain", "mayfly-protocol", "mayfly-adapter-link"]),
+        sorted(&["mayfly-composition", "mayfly-cli", "mayfly-conformance"]),
+    ];
+    assert_eq!(got, want);
 }

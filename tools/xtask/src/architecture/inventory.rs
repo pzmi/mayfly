@@ -135,6 +135,16 @@ fn policy_names(policy: &Policy) -> BTreeSet<(String, &str)> {
             out.insert((format!("[external.{kind}]"), krate.as_str()));
         }
     }
+    for (plane, list) in policy.planes.lists() {
+        for name in list.iter().filter(|n| !fuzz.contains(n.as_str())) {
+            out.insert((format!("[planes] {}", plane.key()), name.as_str()));
+        }
+    }
+    for (key, list) in policy.purity.lists() {
+        for name in list {
+            out.insert((format!("[purity] {key}"), name.as_str()));
+        }
+    }
     out
 }
 

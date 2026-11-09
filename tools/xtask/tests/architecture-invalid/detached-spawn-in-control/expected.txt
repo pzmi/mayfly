@@ -1,0 +1,4 @@
+rule: ARCH-detached-spawn
+at: crates/mayfly-control/src/lib.rs:4
+contains: mayfly-control names `tokio::spawn` in module `crate`
+only: true

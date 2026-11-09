@@ -1,0 +1,4 @@
+rule: ARCH-plane-separation
+at: crates/mayfly-data/Cargo.toml
+contains: data crate `mayfly-data` reaches control crate `mayfly-adapter-sqlite`: mayfly-data -> mayfly-conformance -> mayfly-adapter-sqlite
+only: true

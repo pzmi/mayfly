@@ -1,0 +1,4 @@
+rule: ARCH-secret-serialize
+at: crates/mayfly-domain/src/lib.rs:4
+contains: derives a formatting trait for `Secret`
+only: true

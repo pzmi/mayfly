@@ -1,0 +1,4 @@
+rule: ARCH-aggregate-registered
+at: crates/mayfly-control-domain/src/lib.rs:16
+contains: `Host`
+only: true

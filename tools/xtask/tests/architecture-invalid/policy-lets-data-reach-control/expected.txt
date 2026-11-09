@@ -1,0 +1,4 @@
+rule: ARCH-plane-separation
+at: architecture.toml
+contains: `[dependencies]` lets data crate `mayfly-data` reach control crate `mayfly-control-domain`
+only: true

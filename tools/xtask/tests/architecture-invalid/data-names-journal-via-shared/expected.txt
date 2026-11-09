@@ -1,0 +1,3 @@
+rule: ARCH-plane-vocabulary
+at: crates/mayfly-data/src/lib.rs:4
+contains: data crate mayfly-data names `Journal` (written `mayfly_protocol::Log`)

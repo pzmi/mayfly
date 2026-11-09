@@ -1,18 +1,18 @@
 //! `cargo xtask check`: the full blocking gate (foundation.md section 9).
 //!
 //! It composes the registered stages: the `quick` stages other than its tests (format check,
-//! architecture with its fixtures, Clippy), the macOS cross check, everything `test` runs, then
-//! `security`. A stage
+//! architecture with its fixtures, Clippy), the macOS cross lint, the docs checks, everything
+//! `test` runs, then `security`. A stage
 //! that does not exist yet is absent, never skipped; one that cannot run because its pinned
 //! tool is missing shows `UNAVAILABLE` and fails the gate.
 
 use std::process::Command;
 
 use crate::process::{Stage, finish, run_report};
-use crate::{quick, repo, security, test, tools};
+use crate::{adr, quick, repo, security, test, tools};
 
-/// The product's target (D2): checked from Linux so a macOS-only compile error is caught before
-/// the native `macos` job.
+/// The product's target (D2): linted from Linux so a macOS-only compile error or warning is
+/// caught before the native `macos` job.
 const DARWIN_TARGET: &str = "aarch64-apple-darwin";
 
 /// Whether `rustup target list --installed` output names `target`.
@@ -20,10 +20,26 @@ fn target_installed(list: &str, target: &str) -> bool {
     list.lines().any(|line| line.trim() == target)
 }
 
-/// The `cross-check` stage body: `cargo check` of the whole workspace for [`DARWIN_TARGET`].
-/// A missing rustup target fails with the command that installs it, never a skip (D15); this is
-/// a preflight rather than cargo's own "can't find crate for `core`" so the fix is obvious.
-/// Pinned by `should_detect_an_installed_target_when_rustup_lists_it`.
+/// The arguments of the `cross-check` stage: Clippy with warnings denied over every target of
+/// the workspace for [`DARWIN_TARGET`], so `#[cfg(target_os = "macos")]` code, which the Linux
+/// `clippy` stage never compiles, is linted too (a plain `cargo check` let its warnings
+/// through). Pinned by `should_lint_every_target_for_darwin_when_cross_check_is_built`.
+const CROSS_CHECK_ARGS: &[&str] = &[
+    "clippy",
+    "--locked",
+    "--workspace",
+    "--all-targets",
+    "--target",
+    DARWIN_TARGET,
+    "--",
+    "-D",
+    "warnings",
+];
+
+/// The `cross-check` stage body: `cargo` with [`CROSS_CHECK_ARGS`]. A missing rustup target
+/// fails with the command that installs it, never a skip (D15); this is a preflight rather
+/// than cargo's own "can't find crate for `core`" so the fix is obvious. Pinned by
+/// `should_detect_an_installed_target_when_rustup_lists_it`.
 fn run_cross_check() -> i32 {
     let root = repo::root();
     let listed = Command::new("rustup")
@@ -44,13 +60,7 @@ fn run_cross_check() -> i32 {
         }
     }
     let status = Command::new("cargo")
-        .args([
-            "check",
-            "--locked",
-            "--workspace",
-            "--target",
-            DARWIN_TARGET,
-        ])
+        .args(CROSS_CHECK_ARGS)
         .current_dir(&root)
         .status();
     match status {
@@ -62,6 +72,12 @@ fn run_cross_check() -> i32 {
     }
 }
 
+/// The `docs` stage body: the ADR index matches the ADR files (foundation.md section 10.3),
+/// through the same code as `cargo xtask adr index`.
+fn run_docs() -> i32 {
+    adr::run_index(false)
+}
+
 /// The stages `check` runs, in order. Their names are catalog ids with `in_check` set.
 pub fn stages() -> Vec<Stage> {
     let mut stages: Vec<Stage> = quick::stages()
@@ -70,9 +86,10 @@ pub fn stages() -> Vec<Stage> {
         .collect();
     stages.push(Stage::in_process(
         "cross-check",
-        "cargo check --locked --workspace --target aarch64-apple-darwin (after a rustup target preflight)",
+        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight)",
         run_cross_check,
     ));
+    stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
     stages.extend(test::stages());
     stages.extend(security::stages());
     stages
@@ -167,6 +184,7 @@ mod tests {
             "architecture",
             "clippy",
             "cross-check",
+            "docs",
             "unit-tests",
             "integration-tests",
             "doctests",
@@ -261,20 +279,22 @@ mod tests {
 
     /// Reads the job table of a workflow without a YAML parser (the tests below read
     /// `.github/workflows/ci.yml` through it and keep its jobs in lockstep with the catalog):
-    /// job ids at two spaces, steps as `      - ` items. Comment lines are ignored, so prose naming the command counts for
-    /// nothing. A step that runs `cargo xtask check --only` with `continue-on-error` or its own
-    /// `if:`, or in a job that has `continue-on-error` or a job-level `if:` (four spaces), is listed in `softened`: the gate would
-    /// pass without having run (or passed) that stage.
+    /// job ids at two spaces, steps as `      - ` items. Comment lines are ignored, so prose
+    /// naming the command counts for nothing. Every job but the `required` aggregate is a gate
+    /// job, and every step in it is a gate step (the macOS build, `doctor`, a tool install, not
+    /// only `cargo xtask check --only`): a step with `continue-on-error` or its own `if:`, or
+    /// any step of a job with `continue-on-error` or a job-level `if:` (four spaces), is listed
+    /// in `softened`, because the gate could then pass without that step having run or passed.
     fn parse_ci(text: &str) -> ParsedCi {
         let mut out = ParsedCi::default();
         let mut in_jobs = false;
         let mut job = String::new();
         let mut in_needs = false;
-        let mut job_soft = false;
-        let mut job_if = false;
-        let mut job_gate = false;
-        let mut step_soft = false;
-        let mut step_gate = false;
+        let soften = |out: &mut ParsedCi, note: String| {
+            if !out.softened.contains(&note) {
+                out.softened.push(note);
+            }
+        };
         for line in text.lines() {
             if line.trim_start().starts_with('#') {
                 continue;
@@ -296,39 +316,26 @@ mod tests {
                 out.stages.entry(job.clone()).or_default();
                 out.needs.entry(job.clone()).or_default();
                 in_needs = false;
-                job_soft = false;
-                job_if = false;
-                job_gate = false;
-                step_soft = false;
-                step_gate = false;
                 continue;
             }
-            let is_step_start = line.starts_with("      - ");
-            if is_step_start {
-                step_soft = false;
-                step_gate = false;
-            }
+            let gate_job = job != "required";
             // A step's own keys: the item line itself (`      - if:`) or eight spaces in.
-            let key = if is_step_start {
+            let key = if line.starts_with("      - ") {
                 line.trim_start().trim_start_matches("- ")
             } else if line.starts_with("        ") && !line.starts_with("         ") {
                 line.trim_start()
             } else {
                 ""
             };
-            let soft_key = key.starts_with("continue-on-error:") || key.starts_with("if:");
-            if soft_key {
-                step_soft = true;
+            let soft = |k: &str| k.starts_with("continue-on-error:") || k.starts_with("if:");
+            if gate_job && soft(key) {
+                soften(&mut out, format!("{job}: a gate step has `{key}`"));
             }
-            if line.starts_with("    continue-on-error:") {
-                job_soft = true;
-            }
-            if line.starts_with("    if:") {
-                job_if = true;
+            // A job-level `if:` can skip the whole job (a skipped job satisfies `needs`).
+            if gate_job && let Some(job_key) = line.strip_prefix("    ").filter(|k| soft(k)) {
+                soften(&mut out, format!("{job}: a gate job has `{job_key}`"));
             }
             if let Some(args) = line.split("cargo xtask check --only ").nth(1) {
-                step_gate = true;
-                job_gate = true;
                 // `--only a,b` and `--only a --only b` both name stages
                 let args = args.replace("--only ", "");
                 let list = out.stages.get_mut(&job).unwrap();
@@ -343,16 +350,6 @@ mod tests {
                 out.needs.get_mut(&job).unwrap().push(name.to_owned());
             } else {
                 in_needs = false;
-            }
-            let note = format!("{job}: a step running `check --only`");
-            // A job-level `if:` can skip the whole job (a skipped job satisfies `needs`), wherever
-            // in the job it is written relative to the gate step.
-            let job_note = format!("{job}: a job running `check --only` has a job-level `if:`");
-            if job_gate && job_if && !out.softened.contains(&job_note) {
-                out.softened.push(job_note);
-            }
-            if step_gate && (step_soft || job_soft) && !out.softened.contains(&note) {
-                out.softened.push(note);
             }
         }
         out
@@ -431,25 +428,28 @@ mod tests {
         // then
         assert_eq!(
             a.softened,
-            ["a: a job running `check --only` has a job-level `if:`"]
+            ["a: a gate job has `if: github.event_name == 'push'`"]
         );
-        assert_eq!(
-            b.softened,
-            ["b: a job running `check --only` has a job-level `if:`"]
-        );
+        assert_eq!(b.softened, ["b: a gate job has `if: always()`"]);
         assert!(c.softened.is_empty(), "{:?}", c.softened);
     }
 
     #[test]
-    fn should_not_flag_other_steps_when_a_neighbour_has_an_if() {
-        // given
-        let text = "jobs:\n  a:\n    steps:\n      - name: Keep\n        if: failure()\n        run: echo\n      - run: cargo xtask check --only clippy\n";
+    fn should_flag_every_step_of_a_gate_job_when_it_has_an_if_or_continue_on_error() {
+        // given: the macOS build and `doctor` gate as much as `check --only` does
+        let text = "jobs:\n  macos:\n    steps:\n      - name: Build\n        if: failure()\n        run: cargo build\n      - name: Pinned tools\n        continue-on-error: true\n        run: cargo xtask doctor\n      - run: cargo xtask test --only platform-tests\n";
 
         // when
         let parsed = parse_ci(text);
 
         // then
-        assert!(parsed.softened.is_empty(), "{:?}", parsed.softened);
+        assert_eq!(
+            parsed.softened,
+            [
+                "macos: a gate step has `if: failure()`",
+                "macos: a gate step has `continue-on-error: true`"
+            ]
+        );
     }
 
     #[test]
@@ -488,6 +488,46 @@ mod tests {
             block.push(line);
         }
         block.join("\n")
+    }
+
+    #[test]
+    fn should_lint_every_target_for_darwin_when_cross_check_is_built() {
+        // given
+        let args = CROSS_CHECK_ARGS.join(" ");
+
+        // when
+        let listed = catalog::find("cross-check").map(|c| c.command);
+
+        // then
+        assert_eq!(
+            args,
+            "clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings"
+        );
+        assert!(listed.is_some_and(|l| l.contains(&args)), "{listed:?}");
+    }
+
+    #[test]
+    fn should_keep_main_runs_when_ci_concurrency_is_read() {
+        // given
+        let text = ci_text();
+
+        // when
+        let block: Vec<&str> = text
+            .lines()
+            .skip_while(|l| *l != "concurrency:")
+            .take(3)
+            .collect();
+
+        // then: every push to main is verified, so a newer push never cancels or replaces a
+        // pending main run; pull requests share a group per ref and cancel stale runs
+        assert_eq!(
+            block,
+            [
+                "concurrency:",
+                "  group: ci-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}",
+                "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            ]
+        );
     }
 
     #[test]
@@ -600,6 +640,7 @@ mod tests {
 
         // then
         assert!(macos.contains("runs-on: macos-latest"), "{macos}");
+        assert!(macos.contains("RUSTFLAGS: \"-D warnings\""), "{macos}");
         assert!(text.contains("cargo xtask test --only platform-tests"));
         assert_eq!(parsed.stages["cross"], ["cross-check"]);
         assert!(text.contains("rustup target add aarch64-apple-darwin"));

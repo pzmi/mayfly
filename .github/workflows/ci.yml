@@ -5,7 +5,9 @@ name: CI
 # stage code. `required` needs every job and is the one result to watch.
 # tools/xtask/src/check.rs (should_cover_each_in_check_stage_once_when_ci_jobs_are_read) fails
 # when an `in_check` stage of the catalog is in no job or in two, so no stage is dropped
-# silently. Every job installs only the tools its stages need.
+# silently, and fails when any step of a job other than `required` has `continue-on-error` or
+# an `if:` (the macOS build and `doctor` gate as much as `check --only`). Every job installs
+# only the tools its stages need.
 
 on:
   push:
@@ -16,8 +18,11 @@ on:
 permissions:
   contents: read
 
+# Every push to main is verified (foundation.md section 7.3): on main each commit has its own
+# group, so a newer push neither cancels nor replaces a pending run; a pull request's newer
+# push cancels its stale run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -74,8 +79,8 @@ jobs:
       - name: Pinned tools
         run: cargo xtask doctor
 
-      - name: Static quality
-        run: cargo xtask check --only fmt-check,clippy
+      - name: Static quality and docs
+        run: cargo xtask check --only fmt-check,clippy,docs
 
       - name: Save caches (main only)
         uses: ./.github/actions/save-rust-cache
@@ -83,8 +88,9 @@ jobs:
           key: ${{ steps.rust.outputs.cache-key }}
           hit: ${{ steps.rust.outputs.cache-hit }}
 
-  # The product targets aarch64-apple-darwin (D2): a macOS-only compile error shows here, in a
-  # Linux minute, before the native `macos` job.
+  # The product targets aarch64-apple-darwin (D2): Clippy over every target for it, warnings
+  # denied, so a macOS-only compile error or lint shows here, in a Linux minute, before the
+  # native `macos` job.
   cross:
     name: Cross check (aarch64-apple-darwin)
     runs-on: ubuntu-24.04
@@ -151,6 +157,9 @@ jobs:
     name: macOS (arm64)
     runs-on: macos-latest
     timeout-minutes: 45
+    # The native build denies warnings like every other build of the gate.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

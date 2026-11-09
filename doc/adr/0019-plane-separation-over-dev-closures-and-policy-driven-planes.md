@@ -1,0 +1,75 @@
+# 0019. Plane separation over dev closures and policy-driven planes
+
+Date: 2026-11-09
+
+## Status
+
+Proposed
+
+## Context
+
+D1 (ADR 0002) makes the control plane / data plane split structural, and fnd §2.2 rule 3 says
+a dev edge never breaks it ("a DP crate's tests do not use the SQLite adapter"). The checker
+ported in FND-02 did not enforce that: a dev edge was legal whenever it targeted a test-only
+crate, and the name rules ran over production code only, so `mayfly-data` could dev-depend on
+`mayfly-conformance`, which sees both planes and may re-export `mayfly_adapter_sqlite`, and its
+tests could drive the journal (FND-04 checkpoint finding M1). The plane membership itself was
+spread over hand-written tables in the checker's code (`PURE`, `PROCESS_ALLOWED`,
+`INDEPENDENT`, the isolation table), while fnd §3.1 describes `[planes]` and `[purity]`
+tables in `architecture.toml` (ARCH-01 item 2, finding M3).
+
+`mayfly-testkit` was listed with both planes' crates in its allowlist, and KER-03 gave it the
+golden and determinism harnesses over `mayfly-control-domain`'s `Aggregate`; ES-01 adds the
+in-memory journal and its contract suite there, DP-01 a fake VM provider. One kit serving both
+planes is exactly the bypass above.
+
+Alternatives considered:
+
+- *Name rules only* (run layer isolation over test code and follow re-exports): catches a test
+  that names the other plane, but not one that drives it through a test crate's own API, which
+  names nothing plane-specific.
+- *Allow dev edges to any test crate and trust review*: the finding shows review missed it.
+- *One plane-neutral testkit*: impossible while the event-sourcing harnesses are generic over
+  the control domain's `Aggregate`.
+
+## Decision
+
+1. Plane membership and the role selectors are data in `architecture.toml`: `[planes]`
+   (`control`, `data`, `shared`, `both`, and `[planes.vocabulary]`) and `[purity]` (`pure`,
+   `process_authority`, `independent`). Every production crate is in exactly one plane list.
+   A repository test pins the lists to fnd §2.1 and §2.3 so an edit cannot switch a check off
+   silently; the checker keeps in code only the selectors fnd does not tabulate.
+2. `ARCH-plane-separation` holds at two levels. Over the policy: the `[dependencies]`
+   allowlist closure of a control, data or shared crate contains no crate of a forbidden plane
+   (the other plane; for a shared crate, either plane). Over the resolved graph: from a control
+   or data crate, its own normal, build **and dev** edges as the first hop, then normal and
+   build edges, reach no crate of the other plane. A dev edge to a test crate is therefore
+   legal only when that crate's production closure stays within the dependent's plane and the
+   shared crates. A shared crate's tests may use a plane's kit: they cross into no plane's code
+   under test.
+3. Test support is split per plane. `mayfly-testkit` is the control plane's kit (plane
+   `control`; allowlist `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`,
+   `mayfly-control`). Data-plane fakes and suites (the fake provider, the `VmProvider` contract
+   suite) go to a data-plane kit created by the first task that needs one (DP-01), with plane
+   `data`. Plane-neutral helpers that both planes' tests need (FND-05's poll helper, DP-02's
+   link contract suite) go to a shared kit whose closure is the shared crates, created by the
+   first of those tasks; both plane kits may depend on it. `mayfly-conformance` stays `both`,
+   so no plane crate may dev-depend on it.
+4. `ARCH-layer-isolation` runs over test code too (test code may still name test-only
+   crates), `ARCH-plane-vocabulary` forbids each plane's own type names in the other plane and
+   in shared crates, and references to a workspace crate are followed through its `use`
+   re-exports, so neither a re-export nor a renaming hides a name.
+
+## Consequences
+
+- A data-plane crate cannot use `mayfly-testkit`; DP-01 creates the data-plane kit and its
+  policy entry, FND-05 and DP-02 the shared kit (and FND-05 moves the poll helper selector of
+  `ARCH-test-sleep` with it). fnd §2.1, §2.2 and §2.5 say so.
+- Adding a crate means choosing its plane in the same commit, or `ARCH-plane-separation`
+  fails.
+- The plane rules can only grow stricter by data: widening a plane list or an allowlist that
+  crosses planes fails the policy-level check before any code exists.
+- Enforced by `ARCH-plane-separation` (fixtures `data-dev-depends-on-conformance`,
+  `policy-lets-data-reach-control`), `ARCH-plane-vocabulary` (`control-names-vm-provider`,
+  `data-names-journal-via-shared`) and `ARCH-layer-isolation`
+  (`data-test-names-sqlite-adapter`); introduced by ARCH-01.

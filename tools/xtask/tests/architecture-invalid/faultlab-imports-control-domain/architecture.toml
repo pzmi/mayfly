@@ -10,4 +10,8 @@ mayfly-control-domain = ["mayfly-domain"]
 mayfly-faultlab = []
 
 [semantic]
-absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-data", "mayfly-data-domain", "mayfly-fake-github", "mayfly-fake-tart", "mayfly-protocol", "mayfly-testkit"]
+absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-data", "mayfly-data-domain", "mayfly-protocol", "mayfly-testkit"]
+
+[purity]
+pure = ["mayfly-domain", "mayfly-control-domain"]
+independent = ["mayfly-faultlab"]

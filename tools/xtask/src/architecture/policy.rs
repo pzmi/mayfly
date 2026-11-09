@@ -31,6 +31,146 @@ pub struct Policy {
     /// Settings of the semantic rules.
     #[serde(default)]
     pub semantic: Semantic,
+    /// The plane of every crate that has one, and each plane's own vocabulary.
+    #[serde(default)]
+    pub planes: Planes,
+    /// The crates the purity, process-authority and independent-oracle rules select.
+    #[serde(default)]
+    pub purity: Purity,
+}
+
+/// A plane of foundation.md section 2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Plane {
+    /// The control plane: decides, owns the journal.
+    Control,
+    /// The data plane: acts, stores nothing durable.
+    Data,
+    /// Where the two planes meet: the kernel, the protocol, the link.
+    Shared,
+    /// Sees both planes: composition, the CLI, conformance.
+    Both,
+}
+
+impl Plane {
+    /// The key under `[planes]`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Data => "data",
+            Self::Shared => "shared",
+            Self::Both => "both",
+        }
+    }
+
+    /// The planes a crate of this plane must never reach, by any edge kind or name: the other
+    /// plane for a plane crate, both planes for a shared crate.
+    pub fn forbidden(self) -> &'static [Plane] {
+        match self {
+            Self::Control => &[Self::Data],
+            Self::Data => &[Self::Control],
+            Self::Shared => &[Self::Control, Self::Data],
+            Self::Both => &[],
+        }
+    }
+}
+
+/// `[planes]`: plane membership (foundation.md section 2.1). A production crate is in exactly
+/// one list once any list is given; test-only crates may be listed too, tools are not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Planes {
+    /// Control-plane crates.
+    #[serde(default)]
+    pub control: Vec<String>,
+    /// Data-plane crates.
+    #[serde(default)]
+    pub data: Vec<String>,
+    /// Crates both planes may reach.
+    #[serde(default)]
+    pub shared: Vec<String>,
+    /// Crates that see both planes.
+    #[serde(default)]
+    pub both: Vec<String>,
+    /// `[planes.vocabulary]`: names that belong to one plane only.
+    #[serde(default)]
+    pub vocabulary: Vocabulary,
+}
+
+impl Planes {
+    /// Each plane with its list, in a fixed order.
+    pub fn lists(&self) -> [(Plane, &Vec<String>); 4] {
+        [
+            (Plane::Control, &self.control),
+            (Plane::Data, &self.data),
+            (Plane::Shared, &self.shared),
+            (Plane::Both, &self.both),
+        ]
+    }
+
+    /// Whether any plane list is given: then every production crate must be in one.
+    pub fn declared(&self) -> bool {
+        self.lists().iter().any(|(_, list)| !list.is_empty())
+    }
+
+    /// The plane of `name`: the first list naming it.
+    pub fn of(&self, name: &str) -> Option<Plane> {
+        self.lists()
+            .into_iter()
+            .find(|(_, list)| list.iter().any(|n| n == name))
+            .map(|(plane, _)| plane)
+    }
+}
+
+/// `[planes.vocabulary]`: identifiers that only the named plane may write (a CP-only type
+/// such as `Journal`, a DP-only port such as `VmProvider`). A crate of the other plane, or a
+/// shared crate, that names one fails `ARCH-plane-vocabulary`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vocabulary {
+    /// Names only the control plane may write.
+    #[serde(default)]
+    pub control: Vec<String>,
+    /// Names only the data plane may write.
+    #[serde(default)]
+    pub data: Vec<String>,
+}
+
+impl Vocabulary {
+    /// The words of `plane`'s own vocabulary.
+    pub fn of(&self, plane: Plane) -> &[String] {
+        match plane {
+            Plane::Control => &self.control,
+            Plane::Data => &self.data,
+            Plane::Shared | Plane::Both => &[],
+        }
+    }
+}
+
+/// `[purity]`: the crates the semantic rules select by role (foundation.md section 2.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Purity {
+    /// Crates held to `ARCH-domain-purity`.
+    #[serde(default)]
+    pub pure: Vec<String>,
+    /// Production crates that may name a process API (`ARCH-process-authority`).
+    #[serde(default)]
+    pub process_authority: Vec<String>,
+    /// Independent oracles that reach no workspace crate (`ARCH-independent-oracle`, D11).
+    #[serde(default)]
+    pub independent: Vec<String>,
+}
+
+impl Purity {
+    /// Each list with its key, in a fixed order.
+    pub fn lists(&self) -> [(&'static str, &Vec<String>); 3] {
+        [
+            ("pure", &self.pure),
+            ("process_authority", &self.process_authority),
+            ("independent", &self.independent),
+        ]
+    }
 }
 
 /// `[semantic]`: settings of the semantic rules.
@@ -196,6 +336,11 @@ pub struct Exceptions {
     /// `#[coverage(off)]`) and production `todo!`/`unimplemented!`/`dbg!` calls, by file.
     #[serde(default)]
     pub lints: Vec<LintException>,
+    /// `[exceptions.vendor]`: a `directory` source, relative to the workspace root, that a
+    /// `.cargo/config.toml` may substitute for crates.io (the fixtures' offline stubs), to
+    /// the approval. Any other `[source]` replacement fails `ARCH-lint-config`.
+    #[serde(default)]
+    pub vendor: BTreeMap<String, SourceException>,
 }
 
 /// One approved suppression. Every entry must match at least one suppression.
@@ -254,6 +399,39 @@ mod tests {
         assert_eq!(policy.workspace.production, Some(vec!["a".to_owned()]));
         assert_eq!(policy.workspace.test_only, None);
         assert_eq!(policy.external, External::default());
+        assert_eq!(policy.planes, Planes::default());
+        assert_eq!(policy.purity, Purity::default());
+    }
+
+    #[test]
+    fn should_find_plane_and_vocabulary_when_planes_table_is_given() {
+        // given
+        let text = format!(
+            "{MINIMAL}[planes]\ncontrol = [\"c\"]\ndata = [\"d\"]\nshared = [\"a\"]\n[planes.vocabulary]\ncontrol = [\"Journal\"]\n[purity]\npure = [\"a\"]\n"
+        );
+
+        // when
+        let policy = parse(&text).unwrap();
+
+        // then
+        assert!(policy.planes.declared());
+        assert_eq!(policy.planes.of("d"), Some(Plane::Data));
+        assert_eq!(policy.planes.of("x"), None);
+        assert_eq!(policy.planes.vocabulary.of(Plane::Control), ["Journal"]);
+        assert_eq!(policy.purity.pure, ["a"]);
+        assert_eq!(Plane::Shared.forbidden(), [Plane::Control, Plane::Data]);
+    }
+
+    #[test]
+    fn should_reject_planes_when_a_key_is_unknown() {
+        // given
+        let text = format!("{MINIMAL}[planes]\ncontrl = [\"a\"]\n");
+
+        // when
+        let err = parse(&text).unwrap_err();
+
+        // then
+        assert!(err.contains("unknown field `contrl`"), "{err}");
     }
 
     #[test]

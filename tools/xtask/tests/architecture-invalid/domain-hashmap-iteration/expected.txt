@@ -1,0 +1,4 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-control-domain/src/lib.rs:4
+contains: `std::collections::HashMap`
+only: true

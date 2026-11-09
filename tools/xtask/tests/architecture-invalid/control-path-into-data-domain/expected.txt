@@ -1,0 +1,4 @@
+rule: ARCH-foreign-source
+at: crates/mayfly-control/src/lib.rs:4
+contains: `crates/mayfly-data-domain/src/lib.rs`
+only: true

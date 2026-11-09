@@ -76,7 +76,7 @@ rules! {
         "A normal workspace edge is not in [dependencies.normal]: a reversed layer, or a control-plane crate reaching the data plane or the reverse.",
         ["cli-bypasses-composition", "control-depends-on-data", "data-depends-on-control", "reversed-edge"];
     IndependentOracle => "ARCH-independent-oracle", "FND-02",
-        "An independent oracle (mayfly-faultlab, mayfly-fake-tart, mayfly-fake-github) has a normal, dev or build edge to a workspace crate.",
+        "An independent oracle ([purity] independent) has a normal, dev or build edge to a workspace crate.",
         ["faultlab-dev-depends-on-testkit", "faultlab-imports-control-domain"];
     UndeclaredBuildDep => "ARCH-undeclared-build-dep", "FND-02",
         "A build edge to a workspace crate is not in [dependencies.build].",
@@ -102,15 +102,18 @@ rules! {
     SourceParse => "ARCH-source-parse", "FND-02",
         "A reachable source file cannot be analysed: it does not parse, a module file is missing, or an include!/#[path] is not a literal.",
         ["include-non-literal", "unparseable-source"];
+    ForeignSource => "ARCH-foreign-source", "ARCH-01",
+        "A target root, #[path] module or include! resolves outside the owning package's directory, so one crate would compile another's source under its own policy.",
+        ["control-path-into-data-domain", "faultlab-includes-adapter-source"];
     DomainPurity => "ARCH-domain-purity", "FND-02",
-        "A pure crate (mayfly-domain, mayfly-protocol, mayfly-control-domain, mayfly-data-domain) names I/O, a process, env, a thread, the clock, randomness, a runtime, HTTP, SQL, the console or an outer layer in production code.",
-        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-fs-via-macro-head", "domain-std-fs", "domain-std-net", "domain-tokio-via-macro-path"];
+        "A [purity] pure crate names I/O, a process, env, a thread, the clock (also through <T>::now, UNIX_EPOCH or elapsed), randomness (also a std HashMap/HashSet), a backtrace, global mutable state (atomics, locks, lazy statics, thread_local!, static mut), a runtime or executor, HTTP, SQL, the console or an outer layer in production code.",
+        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-backtrace", "domain-fs-via-macro-head", "domain-hashmap-iteration", "domain-qself-clock", "domain-static-counter", "domain-std-fs", "domain-std-net", "domain-thread-local", "domain-tokio-via-macro-path", "domain-unix-epoch-elapsed"];
     ProcessAuthority => "ARCH-process-authority", "FND-02",
-        "Production code of a production crate other than mayfly-adapter-tart, mayfly-adapter-guest and mayfly-composition names a process API (std::process beyond ExitCode, tokio::process, ..).",
-        ["process-in-control"];
+        "Production code of a production crate outside [purity] process_authority names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export.",
+        ["cli-uses-reexported-command", "process-in-control"];
     LayerIsolation => "ARCH-layer-isolation", "FND-02",
-        "A crate names the other plane (the data plane a journal type, the control plane a data-plane crate), an adapter names a sibling adapter, composition or the CLI, an application names adapter technology, or the CLI names anything but composition.",
-        ["adapter-names-sibling-adapter", "data-names-journal"];
+        "A crate names a crate it must not reach, in production or test code (test code may name test-only crates): the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI.",
+        ["adapter-names-sibling-adapter", "data-names-journal", "data-test-names-sqlite-adapter"];
     UnsafeCode => "ARCH-unsafe-code", "FND-02",
         "Owned code contains an unsafe block, fn, impl, trait, extern block or unsafe attribute.",
         ["unsafe-block"];
@@ -118,8 +121,8 @@ rules! {
         "A crate the semantic rules name is missing and not listed in [semantic] absent, or absent lists a member or a crate no rule names.",
         ["missing-selector"];
     LintConfig => "ARCH-lint-config", "FND-02",
-        "A lint is relaxed outside source: a member's [lints] is not workspace = true, a workspace lint is allowed, rustflags allow or cap lints, or clippy.toml allows.",
-        ["clippy-toml-allow", "member-lints-override", "rustflags-allow"];
+        "A lint or source policy is relaxed outside source: a member's [lints] is not workspace = true, a workspace lint is allowed, rustflags allow or cap lints, clippy.toml allows, or a .cargo/config.toml replaces a package source.",
+        ["cargo-source-replacement", "clippy-toml-allow", "member-lints-override", "rustflags-allow"];
     UnfinishedCode => "ARCH-unfinished-code", "FND-02",
         "Production code calls todo!, unimplemented! or dbg! without an [exceptions.lints] entry.",
         ["todo-in-production"];
@@ -153,6 +156,27 @@ rules! {
     HiddenSeam => "ARCH-hidden-seam", "FND-02",
         "A crate other than mayfly-composition and mayfly-conformance names a #[doc(hidden)] item of mayfly-composition.",
         ["cli-calls-hidden-seam", "cli-names-hidden-trait"];
+    PlaneSeparation => "ARCH-plane-separation", "ARCH-01",
+        "A production crate is in no [planes] list or in two, or a control, data or shared crate reaches a crate of a forbidden plane: in the [dependencies] allowlist, or over the resolved graph with its own dev edges as the first hop (ADR 0019).",
+        ["data-dev-depends-on-conformance", "policy-lets-data-reach-control"];
+    PlaneVocabulary => "ARCH-plane-vocabulary", "ARCH-01",
+        "A crate names a word of another plane's [planes.vocabulary] (a CP-only type such as Journal in a data or shared crate, a DP-only type such as VmProvider in a control or shared crate), in any context and through any crate.",
+        ["control-names-vm-provider", "data-names-journal-via-shared"];
+    AnyhowInLibrary => "ARCH-anyhow-in-library", "ARCH-01",
+        "Production code of a library target names anyhow; libraries return typed errors.",
+        ["anyhow-in-library"];
+    UnboundedChannel => "ARCH-unbounded-channel", "ARCH-01",
+        "Production code of a production crate creates or names an unbounded channel or queue (tokio unbounded_channel, std::sync::mpsc::channel, crossbeam/flume/async-channel/futures unbounded).",
+        ["unbounded-channel-in-data"];
+    DetachedSpawn => "ARCH-detached-spawn", "ARCH-01",
+        "Production code of a production crate spawns a detached task or thread (tokio::spawn, spawn_blocking, spawn_local, std::thread::spawn) outside the listed supervision, writer, transport and process modules.",
+        ["detached-spawn-in-control"];
+    SecretSerialize => "ARCH-secret-serialize", "ARCH-01",
+        "Production code derives or implements Serialize for Secret or a type that contains it, derives Debug on Secret, or implements Debug/Display for Secret outside the file that defines it.",
+        ["secret-container-serializes", "secret-derives-debug"];
+    AggregateRegistered => "ARCH-aggregate-registered", "ARCH-01",
+        "An `impl Aggregate for X` in mayfly-control-domain production code has no visitor.visit::<X>() in ControlAggregates::accept, so the golden and determinism harnesses would skip it.",
+        ["unregistered-aggregate"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

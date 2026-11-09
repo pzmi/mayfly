@@ -26,14 +26,17 @@ pull requests and by hand. A test in `tools/xtask/src/check.rs`
 | Job id | Display name | Runs (`cargo xtask ...`) |
 |:--|:--|:--|
 | `architecture` | Architecture and policy | `check --only architecture` |
-| `static` | Static quality | `check --only fmt-check,clippy`, after `doctor` has asserted every pinned tool |
-| `cross` | Cross check (aarch64-apple-darwin) | `check --only cross-check` |
+| `static` | Static quality | `check --only fmt-check,clippy,docs` (docs: the ADR index matches the ADR files), after `doctor` has asserted every pinned tool |
+| `cross` | Cross check (aarch64-apple-darwin) | `check --only cross-check` (Clippy over every target for the macOS target, warnings denied) |
 | `tests` | Tests | `check --only unit-tests,integration-tests,doctests` |
-| `macos` | macOS (arm64) | `cargo build --workspace --locked`, then `test --only platform-tests` on `macos-latest` |
+| `macos` | macOS (arm64) | `cargo build --workspace --locked`, then `test --only platform-tests` on `macos-latest`, with `RUSTFLAGS=-D warnings` |
 | `security` | Security | `check --only deny,secrets,workflows,action-pins` |
 | `required` | Required | the aggregate; needs all of the above |
 
-Every stage of `check` is in exactly one job; a test fails when a stage is in none or in two.
+Every stage of `check` is in exactly one job; a test fails when a stage is in none or in two,
+and when any step of a job other than `required` (the macOS build and `doctor` included) has
+`continue-on-error` or an `if:`. Runs on `main` are never cancelled or replaced by a newer push:
+each commit there has its own concurrency group, so every commit on `main` is verified.
 `platform-tests` is a stage of `test`, not of `check`: it is the unit and integration tests of
 every crate except `xtask` (whose fixtures need the Linux-only scanners), so on Linux the stages
 it repeats already run in `tests`.

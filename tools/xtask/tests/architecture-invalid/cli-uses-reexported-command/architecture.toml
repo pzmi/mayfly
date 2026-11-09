@@ -1,0 +1,14 @@
+schema = 1
+
+[workspace]
+production = ["mayfly-composition", "mayfly-cli"]
+
+[dependencies.normal]
+mayfly-composition = []
+mayfly-cli = ["mayfly-composition"]
+
+[purity]
+process_authority = ["mayfly-composition"]
+
+[semantic]
+absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit"]

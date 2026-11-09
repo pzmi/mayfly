@@ -1,8 +1,9 @@
 //! Walks the units of one Cargo target twice: first to build the module scopes (`use`,
 //! `extern crate`, items, child modules, also inside macro token streams), then to record
-//! every path reference with its resolution, and every `unsafe` site.
+//! every path reference with its resolution, every `unsafe` site, and the declarations the
+//! type rules read (statics, structs and enums, trait impls, the aggregate registry).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +13,31 @@ use syn::{Attribute, Item, Meta};
 use super::flow;
 use super::paths::{self, Scopes, TokenScan, Written, scan_tokens, use_leaves};
 use super::{
-    AttributeUse, Context, Facts, HiddenItem, MethodCall, MutParam, RefKind, Reference, Site,
-    TestFn, Unit, effective_metas, include_path, is_doc_hidden, is_include, is_test_attribute,
-    is_test_only, non_literal, relative,
+    AttributeUse, Context, Facts, HiddenItem, ImplDecl, MethodCall, MutParam, RefKind, Reference,
+    Site, TestFn, TypeDecl, Unit, effective_metas, foreign_message, include_path, is_doc_hidden,
+    is_include, is_test_attribute, is_test_only, non_literal, outside_package, relative,
 };
 
-/// Collects the facts of one target into `facts`.
+/// Where a target is: the workspace root, its package's directory, and whether it is the
+/// package's library.
+pub struct Target<'a> {
+    /// The workspace root.
+    pub root: &'a Path,
+    /// The package directory; an `include!` outside it is refused.
+    pub package_dir: &'a Path,
+    /// Whether the target is a library.
+    pub library: bool,
+}
+
+/// Collects the facts of one target into `facts`; returns its module scopes, which
+/// [`super::follow_reexports`] reads for a library.
 pub fn collect_target(
-    root: &Path,
+    target: &Target<'_>,
     units: &[Unit],
     renames: BTreeMap<String, String>,
     facts: &mut Facts,
-) {
+) -> Scopes {
+    let root = target.root;
     let mut scopes = Scopes::new(renames);
     for unit in units {
         let mut binder = Binder {
@@ -51,6 +65,9 @@ pub fn collect_target(
             facts: &mut *facts,
             depth: 0,
             impl_generics: Vec::new(),
+            package_dir: target.package_dir,
+            library: target.library,
+            registry: false,
         };
         for attr in &unit.attrs {
             collector.visit_attribute(attr);
@@ -59,6 +76,62 @@ pub fn collect_target(
             collector.visit_item(item);
         }
     }
+    scopes
+}
+
+/// The impl whose `accept` lists the control plane's aggregates (`ARCH-aggregate-registered`).
+const REGISTRY_IMPL: (&str, &str) = ("AggregateRegistry", "ControlAggregates");
+
+/// The last segment of a type's path, or empty.
+fn type_last(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| paths::name(&s.ident))
+            .unwrap_or_default(),
+        syn::Type::Reference(r) => type_last(&r.elem),
+        syn::Type::Paren(p) => type_last(&p.elem),
+        syn::Type::Group(g) => type_last(&g.elem),
+        _ => String::new(),
+    }
+}
+
+/// Every identifier in a type, generic arguments included.
+fn type_idents(ty: &syn::Type) -> BTreeSet<String> {
+    struct Idents(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Idents {
+        fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
+            self.0.insert(paths::name(&segment.ident));
+            visit::visit_path_segment(self, segment);
+        }
+    }
+    let mut idents = Idents(BTreeSet::new());
+    idents.visit_type(ty);
+    idents.0
+}
+
+/// The last segment of every trait in a `derive`, also through `cfg_attr`.
+fn derives(attrs: &[Attribute]) -> Vec<String> {
+    let mut out = Vec::new();
+    for attr in attrs {
+        for meta in effective_metas(&attr.meta) {
+            if let Meta::List(list) = &meta
+                && list.path.is_ident("derive")
+                && let Ok(paths) = list.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                )
+            {
+                out.extend(
+                    paths
+                        .iter()
+                        .filter_map(|p| p.segments.last().map(|s| paths::name(&s.ident))),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// The `cfg` predicate names that select a platform.
@@ -174,6 +247,12 @@ struct Collector<'a> {
     depth: usize,
     /// Type parameters of the enclosing `impl` or `trait`.
     impl_generics: Vec<String>,
+    /// The package directory: an `include!` outside it is refused.
+    package_dir: &'a Path,
+    /// Whether the target is a library.
+    library: bool,
+    /// Inside `impl AggregateRegistry for ControlAggregates`.
+    registry: bool,
 }
 
 impl Collector<'_> {
@@ -218,7 +297,50 @@ impl Collector<'_> {
             kind,
             module: self.module.clone(),
             through,
+            library: self.library,
         });
+    }
+
+    /// A path with a qualified self type (`<std::time::SystemTime>::now`,
+    /// `<T as Trait>::f`): the self type's candidates continued by the segments after the
+    /// trait, so the call is checked like `std::time::SystemTime::now`.
+    fn qualified(&mut self, qself: Option<&syn::QSelf>, path: &syn::Path) {
+        let Some(qself) = qself else {
+            return;
+        };
+        let syn::Type::Path(base) = qself.ty.as_ref() else {
+            return;
+        };
+        if base.qself.is_some() {
+            return;
+        }
+        let written = Written::from_syn(&base.path);
+        let tail: Vec<String> = path
+            .segments
+            .iter()
+            .skip(qself.position)
+            .map(|s| paths::name(&s.ident))
+            .collect();
+        if tail.is_empty() {
+            return;
+        }
+        let (resolved, through) = self.scopes.resolve_through(&self.module, &written, false);
+        let resolved: Vec<Vec<String>> = resolved
+            .into_iter()
+            .map(|mut candidate| {
+                candidate.extend(tail.iter().cloned());
+                candidate
+            })
+            .collect();
+        let mut shown = written.clone();
+        shown.segments.extend(tail);
+        self.push(
+            &shown,
+            (resolved, through),
+            first_line(&base.path),
+            RefKind::Path,
+            (false, false),
+        );
     }
 
     fn use_item(&mut self, item: &syn::ItemUse) {
@@ -341,6 +463,17 @@ impl Collector<'_> {
         }
     }
 
+    /// Records a struct or enum with its derives and field identifiers.
+    fn type_decl(&mut self, attrs: &[Attribute], ident: &syn::Ident, fields: BTreeSet<String>) {
+        let site = self.site(ident.span().start().line);
+        self.facts.types.push(TypeDecl {
+            site,
+            name: paths::name(ident),
+            derives: derives(attrs),
+            fields,
+        });
+    }
+
     /// Records `ident` as a hidden item when `attrs` hold `#[doc(hidden)]`.
     fn hidden(&mut self, attrs: &[Attribute], ident: &syn::Ident) {
         if is_doc_hidden(attrs) {
@@ -444,6 +577,12 @@ impl Collector<'_> {
         };
         let file = self.file.parent().unwrap_or(Path::new("")).join(path);
         let rel = relative(self.root, &file);
+        if outside_package(&file, self.package_dir) {
+            self.facts
+                .foreign
+                .push((at, foreign_message("an `include!`", self.root, &file)));
+            return;
+        }
         if self.depth > super::MAX_NESTING {
             self.facts
                 .problems
@@ -615,12 +754,35 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.hidden(&item.attrs, &item.ident);
+        let fields = item
+            .fields
+            .iter()
+            .flat_map(|f| type_idents(&f.ty))
+            .collect();
+        self.type_decl(&item.attrs, &item.ident, fields);
         visit::visit_item_struct(self, item);
     }
 
     fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
         self.hidden(&item.attrs, &item.ident);
+        let fields = item
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .flat_map(|f| type_idents(&f.ty))
+            .collect();
+        self.type_decl(&item.attrs, &item.ident, fields);
         visit::visit_item_enum(self, item);
+    }
+
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        self.qualified(expr.qself.as_ref(), &expr.path);
+        visit::visit_expr_path(self, expr);
+    }
+
+    fn visit_type_path(&mut self, ty: &'ast syn::TypePath) {
+        self.qualified(ty.qself.as_ref(), &ty.path);
+        visit::visit_type_path(self, ty);
     }
 
     fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
@@ -635,6 +797,9 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
         self.hidden(&item.attrs, &item.ident);
+        let site = self.site(item.ident.span().start().line);
+        let mutable = matches!(item.mutability, syn::StaticMutability::Mut(_));
+        self.facts.statics.push((site, mutable));
         visit::visit_item_static(self, item);
     }
 
@@ -647,6 +812,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
         self.method_call(paths::name(&expr.method), expr.method.span().start().line);
+        if self.registry && expr.method == "visit" {
+            for argument in expr.turbofish.iter().flat_map(|t| &t.args) {
+                if let syn::GenericArgument::Type(ty) = argument {
+                    self.facts.registry_visits.push(type_last(ty));
+                }
+            }
+        }
         visit::visit_expr_method_call(self, expr);
     }
 
@@ -667,6 +839,22 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if let Some(token) = &item.unsafety {
             self.unsafe_site(token.span.start().line, "an `unsafe impl`");
         }
+        let mut registry = false;
+        if let Some((path, _)) = &item.trait_
+            && let Some(last) = path.segments.last()
+        {
+            let trait_name = paths::name(&last.ident);
+            let self_name = type_last(&item.self_ty);
+            registry = (trait_name.as_str(), self_name.as_str()) == REGISTRY_IMPL;
+            let site = self.site(last.ident.span().start().line);
+            self.facts.impls.push(ImplDecl {
+                site,
+                trait_name,
+                self_name,
+                self_idents: type_idents(&item.self_ty),
+            });
+        }
+        let outer_registry = std::mem::replace(&mut self.registry, registry);
         let outer = std::mem::replace(
             &mut self.impl_generics,
             item.generics
@@ -676,6 +864,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         );
         visit::visit_item_impl(self, item);
         self.impl_generics = outer;
+        self.registry = outer_registry;
     }
 
     fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {

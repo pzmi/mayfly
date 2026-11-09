@@ -20,7 +20,7 @@
 use super::super::policy::Policy;
 use super::super::report::{Diagnostic, Rule};
 use super::flow::{INSTRUMENTATION_CRATES, INSTRUMENTATION_MODULES};
-use super::rules_purity::{APPLICATIONS, PURE};
+use super::rules_purity::APPLICATIONS;
 use super::{Context, Facts, Site, first_hit};
 
 /// The crate whose modules the command and query rules select.
@@ -79,7 +79,7 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
         out.extend(commands(facts));
         out.extend(queries(facts));
     }
-    let pure = PURE.contains(&facts.package.as_str());
+    let pure = policy.purity.pure.contains(&facts.package);
     if pure {
         for reference in production(&facts.references, |r| &r.site) {
             if let Some(hit) = first_hit(reference, PURE_INSTRUMENTATION) {

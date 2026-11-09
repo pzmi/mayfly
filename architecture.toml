@@ -1,4 +1,5 @@
-# The dependency law of plan section 4, checked by `cargo xtask architecture` (D1, D3).
+# The dependency law of plan section 4 and foundation.md sections 2-3, checked by
+# `cargo xtask architecture` (D1, D3).
 # Every workspace crate is in exactly one category; a new crate gets its `members` entry and its
 # entry here in the same commit. An architecture failure is fixed by fixing the structure, never
 # by loosening this file (unless the task says so, with an ADR).
@@ -20,14 +21,44 @@ test_only = [
 ]
 tool_only = ["xtask", "mayfly-faultlab"]
 
-# Allowed workspace edges (plan section 4). A dev-dependency may target a test_only crate or a
-# crate in the dependent's normal list. No production crate may reach a test_only or tool_only
-# crate over normal or build edges, and the lists must be acyclic.
-#
-# The control plane / data plane split (plan section 3.4, D1) is structural: no mayfly-control*
-# crate or control-plane adapter lists a mayfly-data* crate or a data-plane adapter, and the
-# reverse; both planes reach only mayfly-domain and mayfly-protocol. Only mayfly-composition
-# sees both planes.
+# Plane membership (foundation.md section 2.1, D1). Every production crate is in exactly one
+# list. A control, data or shared crate never reaches a crate of a forbidden plane (the other
+# plane; for a shared crate, either plane): not in [dependencies] below, and not over the
+# resolved graph, where its own dev edges count as the first hop (ARCH-plane-separation,
+# ADR 0019). Test-only crates are listed by the plane their production closure stays in.
+[planes]
+control = [
+  "mayfly-control-domain", "mayfly-control",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-secrets",
+  "mayfly-testkit",
+]
+data = [
+  "mayfly-data-domain", "mayfly-data",
+  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+]
+shared = ["mayfly-domain", "mayfly-protocol", "mayfly-adapter-link"]
+both = ["mayfly-composition", "mayfly-cli", "mayfly-conformance"]
+
+# Names one plane owns (ARCH-plane-vocabulary): a crate of the other plane, or a shared crate,
+# never writes them, through whatever crate they arrive.
+[planes.vocabulary]
+control = [
+  "Journal", "MemoryJournal", "AggregateStore", "UnitOfWork", "ProjectionSpec",
+  "ControlAggregates", "rusqlite",
+]
+data = ["VmProvider", "GuestTransport", "HostProbe", "ProcessRunner", "TartCli"]
+
+# The crates the semantic rules select by role (foundation.md section 2.3).
+[purity]
+pure = ["mayfly-domain", "mayfly-protocol", "mayfly-control-domain", "mayfly-data-domain"]
+process_authority = ["mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-composition"]
+independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
+
+# Allowed workspace edges (foundation.md section 2.2, plan section 4). A dev-dependency may
+# target a test_only crate or a crate in the dependent's normal list, within the plane rule
+# above. No production crate may reach a test_only or tool_only crate over normal or build
+# edges, and the lists must be acyclic. CP and DP meet only in mayfly-domain and
+# mayfly-protocol; only the `both` crates see both planes.
 [dependencies.normal]
 mayfly-domain = []
 mayfly-protocol = ["mayfly-domain"]
@@ -35,18 +66,19 @@ mayfly-protocol = ["mayfly-domain"]
 mayfly-control-domain = ["mayfly-domain"]
 mayfly-control = ["mayfly-control-domain", "mayfly-domain", "mayfly-protocol"]
 
-mayfly-data-domain = ["mayfly-domain"]
+mayfly-data-domain = ["mayfly-domain", "mayfly-protocol"]
 mayfly-data = ["mayfly-data-domain", "mayfly-domain", "mayfly-protocol"]
 
-# Control-plane adapters.
+# Control-plane adapters: the kernel and the application; the SQLite journal also decodes
+# the control domain's events.
 mayfly-adapter-sqlite = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
-mayfly-adapter-github = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
-mayfly-adapter-secrets = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
+mayfly-adapter-github = ["mayfly-control", "mayfly-domain"]
+mayfly-adapter-secrets = ["mayfly-control", "mayfly-domain"]
 
-# Data-plane adapters.
-mayfly-adapter-tart = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
-mayfly-adapter-guest = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
-mayfly-adapter-host = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
+# Data-plane adapters: the kernel and the application.
+mayfly-adapter-tart = ["mayfly-data", "mayfly-domain"]
+mayfly-adapter-guest = ["mayfly-data", "mayfly-domain"]
+mayfly-adapter-host = ["mayfly-data", "mayfly-domain"]
 
 # The CP<->DP transports carry protocol messages only.
 mayfly-adapter-link = ["mayfly-protocol", "mayfly-domain"]
@@ -61,12 +93,16 @@ mayfly-composition = [
 ]
 mayfly-cli = ["mayfly-composition"]
 
+# The control plane's test kit (ADR 0019): its closure stays in the control plane and the
+# shared crates, so control and shared crates may dev-depend on it and data crates may not.
+# Data-plane test support goes to its own kit when DP-01 needs one.
 mayfly-testkit = [
   "mayfly-domain", "mayfly-protocol",
   "mayfly-control-domain", "mayfly-control",
-  "mayfly-data-domain", "mayfly-data",
 ]
-# Conformance drives the production crates the Quint models govern, over the testkit.
+# Conformance drives the production crates the Quint models govern, over the testkit, the
+# Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
+# dev-depend on it.
 mayfly-conformance = [
   "mayfly-testkit",
   "mayfly-domain", "mayfly-protocol",

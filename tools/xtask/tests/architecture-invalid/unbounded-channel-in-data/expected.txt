@@ -1,0 +1,4 @@
+rule: ARCH-unbounded-channel
+at: crates/mayfly-data/src/lib.rs:5
+contains: `tokio::sync::mpsc::unbounded_channel`
+only: true

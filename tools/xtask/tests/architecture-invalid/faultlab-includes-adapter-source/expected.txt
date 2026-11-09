@@ -1,0 +1,4 @@
+rule: ARCH-foreign-source
+at: tools/faultlab/src/lib.rs:3
+contains: `crates/mayfly-adapter-tart/src/lib.rs`
+only: true

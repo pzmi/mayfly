@@ -11,13 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use cargo_metadata::{DependencyKind, Metadata};
 
 use super::POLICY_FILE;
-use super::policy::{Category, Policy};
+use super::policy::{Category, Plane, Policy};
 use super::report::{Diagnostic, Rule};
-
-/// The independent oracles (D11, foundation.md section 2.6): they share no code with
-/// production, so they may reach no workspace crate over any kind of edge, the test-only
-/// crates included (a dev edge to the testkit is otherwise legal).
-pub const INDEPENDENT: &[&str] = &["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"];
 
 /// A dependency kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -158,7 +153,9 @@ pub fn check(
     manifests: &BTreeMap<String, String>,
 ) -> Vec<Diagnostic> {
     let mut out = check_policy_cycles(policy);
+    out.extend(check_policy_planes(policy));
     let category = categories(policy);
+    let independent = &policy.purity.independent;
     let at = |name: &str| {
         manifests
             .get(name)
@@ -179,7 +176,7 @@ pub fn check(
             }
             let to = graph.name_of(to_id);
             let path = render_path(&[from, to]);
-            if INDEPENDENT.contains(&from) {
+            if independent.iter().any(|i| i == from) {
                 out.push(Diagnostic::new(
                     Rule::IndependentOracle,
                     format!(
@@ -215,6 +212,143 @@ pub fn check(
         }
         if category.get(from) == Some(&Category::Production) {
             out.extend(check_closure(graph, id, &category, &at));
+        }
+        out.extend(check_plane_closure(policy, graph, id, &at));
+    }
+    out
+}
+
+/// `ARCH-plane-separation` over the resolved graph: from a control, data or shared crate,
+/// over normal and build edges, it must reach no crate of a plane [`Plane::forbidden`] for
+/// it. For a control or data crate its own dev edges count as the first hop, so a dev edge to
+/// a test crate is legal only when that crate's production closure stays within the
+/// dependent's plane and the shared crates (ADR 0019): a data-plane test cannot reach the
+/// SQLite adapter through `mayfly-conformance`. A shared crate's tests may use a plane's test
+/// kit: they cross into no plane's code under test.
+fn check_plane_closure(
+    policy: &Policy,
+    graph: &Graph,
+    start: &str,
+    at: &dyn Fn(&str) -> String,
+) -> Vec<Diagnostic> {
+    let from = graph.name_of(start);
+    let Some(plane) = policy.planes.of(from) else {
+        return Vec::new();
+    };
+    let forbidden = plane.forbidden();
+    if forbidden.is_empty() {
+        return Vec::new();
+    }
+    let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut queue = VecDeque::new();
+    for (to, kind) in graph.edges_from(start) {
+        let first_hop = *kind != Kind::Dev || plane != Plane::Shared;
+        if first_hop && !paths.contains_key(to) {
+            paths.insert(to.clone(), vec![start.to_owned(), to.clone()]);
+            queue.push_back(to.clone());
+        }
+    }
+    while let Some(id) = queue.pop_front() {
+        let path = paths[&id].clone();
+        for (to, kind) in graph.edges_from(&id) {
+            if *kind != Kind::Dev && to != start && !paths.contains_key(to) {
+                let mut next = path.clone();
+                next.push(to.clone());
+                paths.insert(to.clone(), next);
+                queue.push_back(to.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (id, path) in paths {
+        if !graph.is_member(&id) {
+            continue;
+        }
+        let to = graph.name_of(&id);
+        let Some(reached) = policy.planes.of(to).filter(|p| forbidden.contains(p)) else {
+            continue;
+        };
+        let names: Vec<&str> = path.iter().map(|p| graph.name_of(p)).collect();
+        out.push(Diagnostic::new(
+            Rule::PlaneSeparation,
+            format!(
+                "{} crate `{from}` reaches {} crate `{to}`: {} (dev edges count for the first hop, ADR 0019)",
+                plane.key(),
+                reached.key(),
+                render_path(&names)
+            ),
+            at(from),
+        ));
+    }
+    out
+}
+
+/// `ARCH-plane-separation` over the policy itself: every production crate is in exactly one
+/// `[planes]` list once any is given, and the allowlist closure (normal and build) of a
+/// control, data or shared crate holds no crate of a forbidden plane, so the policy cannot
+/// even permit a crossing that the resolved graph would then follow.
+fn check_policy_planes(policy: &Policy) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let planes = &policy.planes;
+    if !planes.declared() {
+        return out;
+    }
+    let mut seen: BTreeMap<&str, Vec<Plane>> = BTreeMap::new();
+    for (plane, list) in planes.lists() {
+        for name in list {
+            seen.entry(name).or_default().push(plane);
+        }
+    }
+    for (name, list) in &seen {
+        if list.len() > 1 {
+            let keys: Vec<&str> = list.iter().map(|p| p.key()).collect();
+            out.push(Diagnostic::new(
+                Rule::PlaneSeparation,
+                format!(
+                    "crate `{name}` is in {} `[planes]` lists: {}",
+                    list.len(),
+                    keys.join(", ")
+                ),
+                POLICY_FILE,
+            ));
+        }
+    }
+    for name in policy.workspace.production.iter().flatten() {
+        if !seen.contains_key(name.as_str()) {
+            out.push(Diagnostic::new(
+                Rule::PlaneSeparation,
+                format!(
+                    "production crate `{name}` is in no `[planes]` list (control, data, shared or both)"
+                ),
+                POLICY_FILE,
+            ));
+        }
+    }
+    let mut adjacency: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (_, table) in policy.dependencies.tables() {
+        for (from, deps) in table {
+            adjacency
+                .entry(from)
+                .or_default()
+                .extend(deps.iter().map(String::as_str));
+        }
+    }
+    for (plane, list) in planes.lists() {
+        for name in list {
+            for (to, path) in policy_paths(&adjacency, name) {
+                if let Some(reached) = planes.of(to).filter(|p| plane.forbidden().contains(p)) {
+                    out.push(Diagnostic::new(
+                        Rule::PlaneSeparation,
+                        format!(
+                            "`[dependencies]` lets {} crate `{name}` reach {} crate `{to}`: {}",
+                            plane.key(),
+                            reached.key(),
+                            render_path(&path)
+                        ),
+                        POLICY_FILE,
+                    ));
+                }
+            }
         }
     }
     out
@@ -331,6 +465,94 @@ fn categories(policy: &Policy) -> BTreeMap<&str, Category> {
 mod tests {
     use super::*;
     use crate::architecture::policy;
+
+    const PLANES: &str = r#"schema = 1
+[workspace]
+production = ["kernel", "cp", "dp"]
+test_only = ["kit", "drive"]
+[dependencies.normal]
+kernel = []
+cp = ["kernel"]
+dp = ["kernel"]
+kit = ["kernel", "cp"]
+drive = ["kernel", "cp", "dp"]
+[planes]
+control = ["cp", "kit"]
+data = ["dp"]
+shared = ["kernel"]
+both = ["drive"]
+"#;
+
+    fn plane_graph(edges: &[(&str, &str, Kind)]) -> Vec<Diagnostic> {
+        let policy = policy::parse(PLANES).unwrap();
+        let mut graph = Graph::default();
+        for name in ["kernel", "cp", "dp", "kit", "drive"] {
+            graph.add_node(name, name, true);
+        }
+        for (from, to, kind) in edges {
+            graph.add_edge(from, to, *kind);
+        }
+        let mut out: Vec<Diagnostic> = check(&policy, &graph, &BTreeMap::new())
+            .into_iter()
+            .filter(|d| d.rule == Rule::PlaneSeparation)
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn should_report_plane_separation_when_a_dev_edge_reaches_the_other_plane() {
+        // given
+        let edges = [
+            ("drive", "cp", Kind::Normal),
+            ("drive", "dp", Kind::Normal),
+            ("kit", "cp", Kind::Normal),
+            ("dp", "drive", Kind::Dev),
+            ("cp", "kit", Kind::Dev),
+        ];
+
+        // when
+        let diagnostics = plane_graph(&edges);
+
+        // then
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0].message.ends_with(
+                "data crate `dp` reaches control crate `cp`: dp -> drive -> cp (dev edges count for the first hop, ADR 0019)"
+            ),
+            "{}",
+            diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn should_report_plane_separation_when_the_policy_lets_a_plane_reach_the_other() {
+        // given
+        let text = PLANES
+            .replace("dp = [\"kernel\"]", "dp = [\"kernel\", \"kit\"]")
+            .replace(
+                "production = [\"kernel\", \"cp\", \"dp\"]",
+                "production = [\"kernel\", \"cp\", \"dp\", \"loose\"]",
+            );
+        let policy = policy::parse(&text).unwrap();
+
+        // when
+        let mut got: Vec<String> = check_policy_planes(&policy)
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        got.sort();
+
+        // then
+        assert_eq!(
+            got,
+            [
+                "`[dependencies]` lets data crate `dp` reach control crate `cp`: dp -> kit -> cp",
+                "`[dependencies]` lets data crate `dp` reach control crate `kit`: dp -> kit",
+                "production crate `loose` is in no `[planes]` list (control, data, shared or both)",
+            ]
+        );
+    }
 
     const POLICY: &str = r#"schema = 1
 [workspace]
