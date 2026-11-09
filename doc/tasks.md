@@ -69,7 +69,7 @@ mechanical docs and config.
 
 **Review checkpoints (⛳):** after a ⛳ task lands green, the orchestrator runs `/review` plus an
 adversarial second review over the range since the previous `checkpoint-*` tag, lands the fixes,
-tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04** (gate + CI),
+tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04** (gate + CI), **DDD-01** (domain model),
 **KER-08** (kernel and models), **ES-04** (journal), **E2E-01** (walking skeleton), **E2E-02**
 (scale-set demand), **VER-04** (fault lab), **OPS-03** (release).
 
@@ -85,13 +85,14 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | FND-06 | Formal toolchain: Quint and Apalache pins, `formal` stages | FND-04 | sonnet | |
 | ARCH-01 | Align the architecture policy with fnd §2–§3 | FND-04 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences | FND-02 | sonnet | |
-| KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06 | opus | |
+| DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
+| KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06, DDD-01 | opus | |
 | KER-03 | Event-sourcing kernel: aggregate, event registry, goldens, determinism | KER-01 | opus | |
-| KER-04 | Lifecycle model and `Attempt` aggregate | KER-03, FND-06 | opus | |
-| KER-05 | Scheduling model, `Host`/`Pool` aggregates, capacity policy | KER-03, FND-06 | opus | |
-| KER-06 | Scale-set model, `ScaleSet` aggregate, demand calculation | KER-03, FND-06 | opus | |
-| KER-07 | Recovery model and decision table | KER-04, KER-05 | opus | |
-| KER-08 | Data-plane domain: directive executor and VM supervisor FSMs | KER-02 | opus | ⛳ |
+| KER-04 | Lifecycle model and `Attempt` aggregate | KER-03, FND-06, DDD-01 | opus | |
+| KER-05 | Scheduling model, `Host`/`Pool` aggregates, capacity policy | KER-03, FND-06, DDD-01 | opus | |
+| KER-06 | Scale-set model, `ScaleSet` aggregate, demand calculation | KER-03, FND-06, DDD-01 | opus | |
+| KER-07 | Recovery model and decision table | KER-04, KER-05, DDD-01 | opus | |
+| KER-08 | Data-plane domain: directive executor and VM supervisor FSMs | KER-02, DDD-01 | opus | ⛳ |
 | ES-01 | Journal port, in-memory journal, journal contract suite | KER-03 | opus | |
 | ES-02 | SQLite journal: migrations, receipts, outbox, inbox, crash matrix | ES-01 | opus | |
 | ES-03 | AggregateStore single write path, command bus, reactors | ES-01 | opus | |
@@ -216,6 +217,17 @@ parse of `mf-<pool>-<host>-s<slot>-g<gen>-<short>`; rejects anything else), `Ima
 the ADR for D9 allows `serde` derive here (decide and record).
 Accept: proptest round-trip format/parse; rejection table for malformed names; foreign names never
 parse as owned.
+
+#### DDD-01 ⛳ Event storming and domain model
+Cites: plan §2–§10, ver §6.1. Domain-driven design pass before any real aggregate exists. Big
+Picture and Process Level event storming from four perspectives (GitHub demand, VM fleet, SRE/ops,
+security), merged into `doc/domain-model.md`: event timeline with pivotal events and swimlanes,
+bounded contexts and context map (upstream/downstream, anti-corruption layers for GitHub and the VM
+provider, published language for the CP↔DP protocol), ubiquitous language glossary, aggregates with
+their invariants (mapped to I01–I16), commands, policies (→ process managers), read models
+(→ projections), external systems, and hot spots. Proposes the changes to plan.md and to KER-02..08
+it implies; the orchestrator applies them after the ⛳ owner review.
+Accept: every KER-04..08 aggregate and every policy traces to the model; (owner) hot spots decided.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
