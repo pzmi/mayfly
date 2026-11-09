@@ -59,3 +59,22 @@ cannot afford.
 Amended by ADR 0034 (2026-11-09, owner): directives become `DirectiveIssued` events delivered by a
 durable consumer (no outbox table); refusal receipts are bound to the stream revision they were
 decided at; stream epochs and snapshots are built now; the projection rebuild is online.
+
+## Amended 2026-11-09 (planner): reporting order, names and receipts after ES-01F (amendment proposed)
+
+ES-01F realigned the landed port with ADR 0034 and the ES-01 review; three passages above are
+refined, not reversed:
+
+- *Check order.* The reporting order is shape, epoch above the build, receipt (replay or reuse),
+  inbox, event ids, expected revisions (appended and read streams together, lowest `StreamId`
+  first), stream epochs, then `Busy` and `Storage`; there is no outbox step (ADR 0034). Event ids
+  come before revisions so that a writer that lost a commit's reply can re-append the identical
+  unit and be answered by its receipt or by `DuplicateEventId` where it wrote, not by the stale
+  revision its own commit caused. It is stated apart from the lock order (heads first), which an
+  adapter keeps; JC-09 pins the reporting order and `LateIdCheckJournal` fails it.
+- *Names.* `Journal::recorded_kinds` is `stored_kinds`, `stream_revision` is `head` (an absent
+  stream has no head; revisions count from 0), and the inbox read is `inbox_contains`, as in
+  `doc/event-store.md` §3.3.
+- *Receipts.* Refusal receipts are kept, bound to the stream revision they were decided at, and
+  every receipt carries the canonical intent digest (ADR 0034, E3); the "revisit with ES-03" note
+  is settled.

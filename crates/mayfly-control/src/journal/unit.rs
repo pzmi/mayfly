@@ -1,13 +1,14 @@
-//! The unit of work: everything one command commits, atomically (plan §5.2, fnd §6.3).
+//! The unit of work: everything one command commits, atomically (`doc/event-store.md` §3.2,
+//! fnd §6.3, ES-I1).
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-use mayfly_domain::Millis;
+use mayfly_domain::{EventId, Millis};
 
-use crate::journal::outbox::OutboxWrite;
 use crate::journal::values::{
-    CommandReceipt, InboxEntry, NewEvent, ProjectionWrite, RecordedEvent, StreamId, StreamRevision,
+    AggregateName, Decision, ExpectedRevision, InboxKey, NewEvent, NewReceipt, ProjectionWrite,
+    ReadCondition, StreamId, StreamRevision, SupportedEpochs, valid_snake_name,
 };
 
 /// Events for one stream, appended only if the stream is still at `expected`.
@@ -15,128 +16,179 @@ use crate::journal::values::{
 pub struct StreamAppend {
     /// The stream.
     pub stream: StreamId,
-    /// The revision the writer loaded; any other current revision refuses the whole unit.
-    pub expected: StreamRevision,
-    /// The events, in order. May be empty: the append is then a pure revision guard.
+    /// The aggregate the stream belongs to (`Aggregate::NAME`). Its supported epoch judges this
+    /// append's events (`EpochAboveBuild`); it is recorded in the head when the append creates
+    /// the stream, and from then on the recorded aggregate judges the stream's epoch
+    /// (`StreamEpochUnsupported`). The journal does not compare the two: `AggregateStore`
+    /// (ES-03) derives both the stream id and this name from one aggregate type.
+    pub aggregate: AggregateName,
+    /// The head the writer decided against; any other head refuses the whole unit.
+    pub expected: ExpectedRevision,
+    /// The events, in order; at least one (a guard without events is a read, not an append).
     pub events: Vec<NewEvent>,
 }
 
-/// Everything one command commits in one transaction: the expected-revision checks and events
-/// per stream, the command receipt, the inbox entry that caused it, outbox rows, and
-/// synchronous projection updates. A journal applies all of it or none of it.
+/// Everything one command commits in one store transaction (ES-I1): the appends with their
+/// expected revisions, the validated reads, the command receipt, the inbox entry that caused
+/// it, and the inline projection rows. A journal applies all of it or none of it.
+///
+/// What is **not** here: a directive is a `DirectiveIssued` event in `appends` (E2, ADR 0034;
+/// no table of its own), and the dispatch marks that hand it to the `directive_relay` consumer
+/// are written by the store itself for every registered consumer of every appended stream
+/// (ES-05), so a build marks consumers it does not run. The snapshot request joins with ES-08.
 ///
 /// `recorded_at` is supplied by the writer, read from the control plane's `Clock` port
-/// (Unix-epoch wall-clock milliseconds, ADR 0020); the journal reads no clock. It becomes every
-/// event's `recorded_at` and the inbox entry's `processed_at`.
+/// (Unix-epoch wall-clock milliseconds, ADR 0020); the journal reads no clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitOfWork {
+    /// Per-stream appends; a stream at most once across `appends` and `reads`.
+    pub appends: Vec<StreamAppend>,
+    /// Streams the decision read without writing, each refused if it moved.
+    pub reads: Vec<ReadCondition>,
+    /// The command's receipt.
+    pub receipt: Option<NewReceipt>,
+    /// The inbound message the unit consumed.
+    pub inbox: Option<InboxKey>,
+    /// Inline projection rows, each `(projection, key)` at most once, each keyed by a stream
+    /// the unit appends to (ES-I10).
+    pub projections: Vec<ProjectionWrite>,
+    /// This build's supported epoch per aggregate (ES-I12).
+    pub supported_epochs: SupportedEpochs,
     /// When the unit was recorded.
     pub recorded_at: Millis,
-    /// Per-stream appends, each stream at most once.
-    pub streams: Vec<StreamAppend>,
-    /// The command's receipt.
-    pub receipt: Option<CommandReceipt>,
-    /// The inbound message the unit processed.
-    pub inbox: Option<InboxEntry>,
-    /// Outbox inserts and transitions, each directive at most once.
-    pub outbox: Vec<OutboxWrite>,
-    /// Projection updates, each `(projection, key)` at most once.
-    pub projections: Vec<ProjectionWrite>,
 }
 
 impl UnitOfWork {
-    /// An empty unit recorded at `recorded_at`; add parts with the `with_*` methods.
+    /// An empty unit recorded at `recorded_at` by a build supporting `supported_epochs`; add
+    /// parts with the `with_*` methods.
     #[must_use]
-    pub const fn new(recorded_at: Millis) -> Self {
+    pub fn new(recorded_at: Millis, supported_epochs: SupportedEpochs) -> Self {
         Self {
-            recorded_at,
-            streams: Vec::new(),
+            appends: Vec::new(),
+            reads: Vec::new(),
             receipt: None,
             inbox: None,
-            outbox: Vec::new(),
             projections: Vec::new(),
+            supported_epochs,
+            recorded_at,
         }
     }
 
-    /// Adds `events` for `stream`, expected at `expected`.
+    /// Adds `events` for `stream` of `aggregate`, expected at `expected`.
     #[must_use]
-    pub fn with_stream(
+    pub fn with_append(
         mut self,
         stream: StreamId,
-        expected: StreamRevision,
+        aggregate: AggregateName,
+        expected: ExpectedRevision,
         events: Vec<NewEvent>,
     ) -> Self {
-        self.streams.push(StreamAppend {
+        self.appends.push(StreamAppend {
             stream,
+            aggregate,
             expected,
             events,
         });
         self
     }
 
+    /// Adds a validated read of `stream` at `expected`.
+    #[must_use]
+    pub fn with_read(mut self, stream: StreamId, expected: ExpectedRevision) -> Self {
+        self.reads.push(ReadCondition { stream, expected });
+        self
+    }
+
     /// Sets the command receipt.
     #[must_use]
-    pub fn with_receipt(mut self, receipt: CommandReceipt) -> Self {
+    pub fn with_receipt(mut self, receipt: NewReceipt) -> Self {
         self.receipt = Some(receipt);
         self
     }
 
     /// Sets the inbox entry.
     #[must_use]
-    pub fn with_inbox(mut self, entry: InboxEntry) -> Self {
-        self.inbox = Some(entry);
+    pub fn with_inbox(mut self, key: InboxKey) -> Self {
+        self.inbox = Some(key);
         self
     }
 
-    /// Adds an outbox write.
-    #[must_use]
-    pub fn with_outbox(mut self, write: OutboxWrite) -> Self {
-        self.outbox.push(write);
-        self
-    }
-
-    /// Adds a projection write.
+    /// Adds a projection row write.
     #[must_use]
     pub fn with_projection(mut self, write: ProjectionWrite) -> Self {
         self.projections.push(write);
         self
     }
 
+    /// Every event id of the unit, in unit order.
+    pub fn event_ids(&self) -> impl Iterator<Item = EventId> + '_ {
+        self.appends
+            .iter()
+            .flat_map(|a| a.events.iter().map(|e| e.event_id))
+    }
+
     /// Whether the unit is well formed on its own, before any journal state is consulted.
-    /// Every `Journal::append` checks this first (the journal contract's `malformed_unit`
-    /// case; `should_refuse_unit_when_it_names_a_stream_twice` and its siblings here).
+    /// Every `Journal::append` checks this first (contract case JC-08 `malformed_unit` and
+    /// JC-19 `payload_round_trip`; the `should_refuse_unit_when_*` tests here).
     ///
     /// # Errors
     /// The first [`MalformedUnit`] found, in the order the variants are declared.
     pub fn check_shape(&self) -> Result<(), MalformedUnit> {
-        if self.streams.is_empty()
-            && self.receipt.is_none()
-            && self.inbox.is_none()
-            && self.outbox.is_empty()
-            && self.projections.is_empty()
-        {
+        if self.appends.is_empty() && self.receipt.is_none() && self.inbox.is_none() {
             return Err(MalformedUnit::Empty);
         }
+        if self.appends.iter().any(|a| a.events.is_empty()) {
+            return Err(MalformedUnit::EmptyAppend);
+        }
         let mut streams = BTreeSet::new();
-        if !self.streams.iter().all(|s| streams.insert(&s.stream)) {
+        let named = self
+            .appends
+            .iter()
+            .map(|a| &a.stream)
+            .chain(self.reads.iter().map(|r| &r.stream));
+        if !named.into_iter().all(|s| streams.insert(s)) {
             return Err(MalformedUnit::DuplicateStream);
         }
-        let mut events = BTreeSet::new();
-        if !self
-            .streams
-            .iter()
-            .flat_map(|s| &s.events)
-            .all(|e| events.insert(e.event_id))
-        {
+        let mut ids = BTreeSet::new();
+        if !self.event_ids().all(|id| ids.insert(id)) {
             return Err(MalformedUnit::DuplicateEventId);
         }
-        let mut directives = BTreeSet::new();
+        let storable = |e: ExpectedRevision| match e {
+            ExpectedRevision::NoStream => true,
+            ExpectedRevision::Exactly(r) => r.is_storable(),
+        };
         if !self
-            .outbox
+            .appends
             .iter()
-            .all(|w| directives.insert(w.directive_id()))
+            .map(|a| a.expected)
+            .chain(self.reads.iter().map(|r| r.expected))
+            .all(storable)
         {
-            return Err(MalformedUnit::DuplicateDirective);
+            return Err(MalformedUnit::RevisionOutOfRange);
+        }
+        let events = || self.appends.iter().flat_map(|a| &a.events);
+        if !events().all(|e| valid_snake_name(&e.kind.event_type)) {
+            return Err(MalformedUnit::InvalidEventType);
+        }
+        let rejection = match &self.receipt {
+            Some(NewReceipt {
+                decision: Decision::Refused { rejection },
+                ..
+            }) => Some(rejection),
+            _ => None,
+        };
+        let holds_nul = events().any(|e| e.payload.holds_nul())
+            || self
+                .projections
+                .iter()
+                .filter_map(|p| p.row.as_ref())
+                .any(|r| r.holds_nul())
+            || rejection.is_some_and(|r| r.holds_nul());
+        if holds_nul {
+            return Err(MalformedUnit::NulInPayload);
+        }
+        if rejection.is_some() && (!self.appends.is_empty() || self.reads.len() != 1) {
+            return Err(MalformedUnit::RefusalNotBound);
         }
         let mut rows = BTreeSet::new();
         if !self
@@ -146,82 +198,171 @@ impl UnitOfWork {
         {
             return Err(MalformedUnit::DuplicateProjectionRow);
         }
+        if !self
+            .projections
+            .iter()
+            .all(|p| self.appends.iter().any(|a| a.stream == p.stream))
+        {
+            return Err(MalformedUnit::ProjectionOutsideUnit);
+        }
+        if !self
+            .projections
+            .iter()
+            .all(|p| (1..=256).contains(&p.key.len()) && !p.key.chars().any(char::is_control))
+        {
+            return Err(MalformedUnit::InvalidProjectionKey);
+        }
         Ok(())
+    }
+
+    /// The first appended stream with an event needing more than this build supports: the
+    /// [`crate::journal::AppendError::EpochAboveBuild`] check, which reads no stored state.
+    #[must_use]
+    pub fn epoch_above_build(&self) -> Option<&StreamId> {
+        self.appends
+            .iter()
+            .find(|a| {
+                let supported = self.supported_epochs.of(&a.aggregate);
+                a.events.iter().any(|e| e.required_epoch > supported)
+            })
+            .map(|a| &a.stream)
     }
 }
 
 /// Why a unit of work is malformed regardless of journal state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MalformedUnit {
-    /// It changes nothing.
+    /// It has no append, no receipt and no inbox entry: it records nothing.
     Empty,
-    /// It names a stream twice.
+    /// One of its appends has no event.
+    EmptyAppend,
+    /// It names a stream twice (in `appends`, in `reads`, or in both).
     DuplicateStream,
     /// Two of its events share an id.
     DuplicateEventId,
-    /// It touches a directive twice.
-    DuplicateDirective,
+    /// An expected revision is above what a store can hold.
+    RevisionOutOfRange,
+    /// An event type is not `[a-z][a-z0-9_]{0,63}`.
+    InvalidEventType,
+    /// A payload, row or refusal holds a NUL, which PostgreSQL refuses (JC-19).
+    NulInPayload,
+    /// A refusal receipt with appends, or without exactly one read to bind it to (E3).
+    RefusalNotBound,
     /// It writes a projection row twice.
     DuplicateProjectionRow,
+    /// A projection row is keyed by a stream the unit does not append to (ES-I10).
+    ProjectionOutsideUnit,
+    /// A projection key is empty, longer than 256 bytes or holds a control character.
+    InvalidProjectionKey,
 }
 
 impl fmt::Display for MalformedUnit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Empty => "the unit of work changes nothing",
+            Self::Empty => "the unit of work records nothing",
+            Self::EmptyAppend => "an append of the unit of work has no event",
             Self::DuplicateStream => "the unit of work names a stream twice",
             Self::DuplicateEventId => "two events of the unit of work share an id",
-            Self::DuplicateDirective => "the unit of work touches a directive twice",
+            Self::RevisionOutOfRange => "an expected revision is above the storable maximum",
+            Self::InvalidEventType => "an event type is not a snake_case name",
+            Self::NulInPayload => "a payload of the unit of work holds a NUL",
+            Self::RefusalNotBound => "a refusal receipt is not bound to exactly one read",
             Self::DuplicateProjectionRow => "the unit of work writes a projection row twice",
+            Self::ProjectionOutsideUnit => "a projection row belongs to a stream not appended",
+            Self::InvalidProjectionKey => "a projection key is empty, long or not printable",
         })
     }
 }
 
-/// What a committed unit recorded: its events, in the unit's order, with their streams and
-/// revisions (what reactors are notified with after the commit).
+/// What one appended stream received.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedStream {
+    /// The stream.
+    pub stream: StreamId,
+    /// The revision of its first new event.
+    pub first: StreamRevision,
+    /// The revision of its last new event: its new head.
+    pub last: StreamRevision,
+    /// The new events' ids, in order.
+    pub event_ids: Vec<EventId>,
+}
+
+/// What a committed unit recorded, per stream in the unit's order: the outcome an accepted
+/// receipt keeps, and what the after-commit kick names. It carries no payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Appended {
-    /// The recorded events.
-    pub events: Vec<RecordedEvent>,
+    /// The appended streams.
+    pub streams: Vec<AppendedStream>,
 }
 
 #[cfg(test)]
 mod tests {
-    use mayfly_domain::{AttemptId, CommandId, DirectiveId, EventId, Generation};
+    use mayfly_domain::CommandId;
 
     use super::*;
-    use crate::journal::outbox::{NewDirective, OutboxStatus, OutboxTransition};
-    use crate::journal::values::{Payload, ProjectionName, ReceiptStatus};
+    use crate::journal::values::{
+        CommandType, InboxSource, IntentDigest, MessageId, Payload, ProjectionName, StoredKind,
+    };
 
     fn stream(name: &str) -> StreamId {
         StreamId::new(name).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    fn attempt() -> AggregateName {
+        AggregateName::new("attempt").unwrap_or_else(|e| panic!("{e}"))
+    }
+
     fn event(id: u128) -> NewEvent {
         NewEvent {
             event_id: EventId::from_u128(id),
-            event_type: "vm_cloned".to_owned(),
-            schema_version: 1,
+            kind: StoredKind {
+                event_type: "vm_cloned".to_owned(),
+                schema_version: 1,
+            },
+            required_epoch: 1,
             payload: Payload::new("{}"),
         }
     }
 
-    fn projection(key: &str) -> ProjectionWrite {
+    fn unit() -> UnitOfWork {
+        UnitOfWork::new(Millis::new(1), SupportedEpochs::new().with(attempt(), 1))
+    }
+
+    fn appending(events: Vec<NewEvent>) -> UnitOfWork {
+        unit().with_append(stream("a-1"), attempt(), ExpectedRevision::NoStream, events)
+    }
+
+    fn receipt(decision: Decision) -> NewReceipt {
+        NewReceipt {
+            command_id: CommandId::from_u128(1),
+            command_type: CommandType::new("start_attempt").unwrap_or_else(|e| panic!("{e}")),
+            intent: IntentDigest::new([1; 32]),
+            decision,
+        }
+    }
+
+    fn row(stream_name: &str, key: &str, value: &str) -> ProjectionWrite {
         ProjectionWrite {
             projection: ProjectionName::new("attempts").unwrap_or_else(|e| panic!("{e}")),
+            stream: stream(stream_name),
             key: key.to_owned(),
-            value: None,
+            row: Some(Payload::new(value)),
+        }
+    }
+
+    fn refused() -> Decision {
+        Decision::Refused {
+            rejection: Payload::new("{\"code\":\"pool_draining\"}"),
         }
     }
 
     #[test]
-    fn should_accept_unit_when_it_only_records_a_receipt() {
+    fn should_accept_unit_when_it_only_records_a_bound_refusal_receipt() {
         // given
-        let unit = UnitOfWork::new(Millis::new(1)).with_receipt(CommandReceipt {
-            command_id: CommandId::from_u128(1),
-            status: ReceiptStatus::Refused,
-            result: Payload::new("{}"),
-        });
+        let unit = unit()
+            .with_read(stream("a-1"), ExpectedRevision::NoStream)
+            .with_receipt(receipt(refused()));
 
         // when
         let shape = unit.check_shape();
@@ -231,9 +372,28 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_unit_when_it_changes_nothing() {
+    fn should_accept_unit_when_it_only_records_an_inbox_entry_or_an_accepted_receipt() {
         // given
-        let unit = UnitOfWork::new(Millis::new(1));
+        let key = InboxKey {
+            source: InboxSource::new("scaleset-1").unwrap_or_else(|e| panic!("{e}")),
+            message_id: MessageId::new("7").unwrap_or_else(|e| panic!("{e}")),
+        };
+        let units = [
+            unit().with_inbox(key),
+            unit().with_receipt(receipt(Decision::Accepted)),
+        ];
+
+        // when
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
+
+        // then
+        assert_eq!(shapes, [Ok(()), Ok(())]);
+    }
+
+    #[test]
+    fn should_refuse_unit_when_it_records_nothing() {
+        // given
+        let unit = unit().with_read(stream("a-1"), ExpectedRevision::NoStream);
 
         // when
         let shape = unit.check_shape();
@@ -243,25 +403,45 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_unit_when_it_names_a_stream_twice() {
+    fn should_refuse_unit_when_an_append_has_no_event() {
         // given
-        let unit = UnitOfWork::new(Millis::new(1))
-            .with_stream(stream("a-1"), StreamRevision::EMPTY, vec![event(1)])
-            .with_stream(stream("a-1"), StreamRevision::EMPTY, vec![event(2)]);
+        let unit = appending(Vec::new());
 
         // when
         let shape = unit.check_shape();
 
         // then
-        assert_eq!(shape, Err(MalformedUnit::DuplicateStream));
+        assert_eq!(shape, Err(MalformedUnit::EmptyAppend));
+    }
+
+    #[test]
+    fn should_refuse_unit_when_it_names_a_stream_twice() {
+        // given
+        let twice = appending(vec![event(1)]).with_append(
+            stream("a-1"),
+            attempt(),
+            ExpectedRevision::NoStream,
+            vec![event(2)],
+        );
+        let written_and_read =
+            appending(vec![event(1)]).with_read(stream("a-1"), ExpectedRevision::NoStream);
+
+        // when
+        let shapes = [twice.check_shape(), written_and_read.check_shape()];
+
+        // then
+        assert_eq!(shapes, [Err(MalformedUnit::DuplicateStream); 2]);
     }
 
     #[test]
     fn should_refuse_unit_when_two_events_share_an_id_across_streams() {
         // given
-        let unit = UnitOfWork::new(Millis::new(1))
-            .with_stream(stream("a-1"), StreamRevision::EMPTY, vec![event(1)])
-            .with_stream(stream("a-2"), StreamRevision::EMPTY, vec![event(1)]);
+        let unit = appending(vec![event(1)]).with_append(
+            stream("a-2"),
+            attempt(),
+            ExpectedRevision::NoStream,
+            vec![event(1)],
+        );
 
         // when
         let shape = unit.check_shape();
@@ -271,43 +451,140 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_unit_when_it_touches_a_directive_twice() {
+    fn should_refuse_unit_when_an_expected_revision_is_not_storable() {
         // given
-        let id = DirectiveId::from_u128(9);
-        let unit = UnitOfWork::new(Millis::new(1))
-            .with_outbox(OutboxWrite::Insert(NewDirective {
-                directive_id: id,
-                attempt_id: AttemptId::from_u128(1),
-                generation: Generation::FIRST,
-                kind: "clone_vm".to_owned(),
-                request: Payload::new("{}"),
-                next_attempt_at: Millis::new(1),
-            }))
-            .with_outbox(OutboxWrite::Transition(OutboxTransition {
-                directive_id: id,
-                from: OutboxStatus::Pending,
-                to: OutboxStatus::Sent,
-                next_attempt_at: Millis::new(1),
-            }));
+        let too_high = ExpectedRevision::Exactly(StreamRevision::new(u64::MAX));
+        let unit = appending(vec![event(1)]).with_read(stream("a-2"), too_high);
 
         // when
         let shape = unit.check_shape();
 
         // then
-        assert_eq!(shape, Err(MalformedUnit::DuplicateDirective));
+        assert_eq!(shape, Err(MalformedUnit::RevisionOutOfRange));
+    }
+
+    #[test]
+    fn should_refuse_unit_when_an_event_type_is_not_a_snake_name() {
+        // given
+        let mut bad = event(1);
+        bad.kind.event_type = "VmCloned".to_owned();
+
+        // when
+        let shape = appending(vec![bad]).check_shape();
+
+        // then
+        assert_eq!(shape, Err(MalformedUnit::InvalidEventType));
+    }
+
+    #[test]
+    fn should_refuse_unit_when_an_event_a_row_or_a_refusal_holds_a_nul() {
+        // given
+        let mut nul_event = event(1);
+        nul_event.payload = Payload::new("{\"n\":\"\\u0000\"}");
+        let units = [
+            appending(vec![nul_event]),
+            appending(vec![event(1)]).with_projection(row("a-1", "k", "\u{0}")),
+            unit()
+                .with_read(stream("a-1"), ExpectedRevision::NoStream)
+                .with_receipt(receipt(Decision::Refused {
+                    rejection: Payload::new("\u{0}"),
+                })),
+        ];
+
+        // when
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
+
+        // then
+        assert_eq!(shapes, [Err(MalformedUnit::NulInPayload); 3]);
+    }
+
+    #[test]
+    fn should_refuse_unit_when_a_refusal_receipt_is_not_bound_to_one_read() {
+        // given
+        let units = [
+            unit().with_receipt(receipt(refused())),
+            appending(vec![event(1)]).with_receipt(receipt(refused())),
+            unit()
+                .with_read(stream("a-1"), ExpectedRevision::NoStream)
+                .with_read(stream("a-2"), ExpectedRevision::NoStream)
+                .with_receipt(receipt(refused())),
+        ];
+
+        // when
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
+
+        // then
+        assert_eq!(shapes, [Err(MalformedUnit::RefusalNotBound); 3]);
     }
 
     #[test]
     fn should_refuse_unit_when_it_writes_a_projection_row_twice() {
         // given
-        let unit = UnitOfWork::new(Millis::new(1))
-            .with_projection(projection("k"))
-            .with_projection(projection("k"));
+        let unit = appending(vec![event(1)])
+            .with_projection(row("a-1", "k", "{}"))
+            .with_projection(row("a-1", "k", "{}"));
 
         // when
         let shape = unit.check_shape();
 
         // then
         assert_eq!(shape, Err(MalformedUnit::DuplicateProjectionRow));
+    }
+
+    #[test]
+    fn should_refuse_unit_when_a_projection_row_belongs_to_another_stream() {
+        // given
+        let unit = appending(vec![event(1)]).with_projection(row("a-2", "k", "{}"));
+
+        // when
+        let shape = unit.check_shape();
+
+        // then
+        assert_eq!(shape, Err(MalformedUnit::ProjectionOutsideUnit));
+    }
+
+    #[test]
+    fn should_refuse_unit_when_a_projection_key_is_empty_or_not_printable() {
+        // given
+        let units = [
+            appending(vec![event(1)]).with_projection(row("a-1", "", "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "a\nb", "{}")),
+        ];
+
+        // when
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
+
+        // then
+        assert_eq!(shapes, [Err(MalformedUnit::InvalidProjectionKey); 2]);
+    }
+
+    #[test]
+    fn should_name_the_stream_when_an_event_needs_more_than_the_build_supports() {
+        // given
+        let mut newer = event(2);
+        newer.required_epoch = 2;
+        let unit = appending(vec![event(1)]).with_append(
+            stream("a-2"),
+            attempt(),
+            ExpectedRevision::NoStream,
+            vec![newer],
+        );
+        let unknown_aggregate =
+            super::UnitOfWork::new(Millis::new(1), SupportedEpochs::new().with(attempt(), 1))
+                .with_append(
+                    stream("h-1"),
+                    AggregateName::new("host").unwrap_or_else(|e| panic!("{e}")),
+                    ExpectedRevision::NoStream,
+                    vec![event(3)],
+                );
+
+        // when
+        let above = unit.epoch_above_build();
+        let fine = appending(vec![event(1)]).epoch_above_build().cloned();
+
+        // then
+        assert_eq!(above, Some(&stream("a-2")));
+        assert_eq!(fine, None);
+        assert_eq!(unknown_aggregate.epoch_above_build(), Some(&stream("h-1")));
     }
 }

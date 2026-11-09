@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-adapter-sqlite"
-description = "Control-plane adapter: SQLite journal, receipts, outbox, inbox, projections and migrations."
+description = "Control-plane adapter: SQLite journal, receipts, inbox, delivery ledger, snapshots, projections and migrations."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

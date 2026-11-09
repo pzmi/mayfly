@@ -1,137 +1,170 @@
-//! Why an append or a read failed.
+//! Why an append or a read failed (`doc/event-store.md` §3.3, ES-I18).
 
 use std::fmt;
 
-use mayfly_domain::{DirectiveId, EventId};
+use mayfly_domain::{CommandId, EventId};
 
-use crate::journal::outbox::OutboxStatus;
 use crate::journal::unit::MalformedUnit;
-use crate::journal::values::{CommandReceipt, InboxEntry, StreamId, StreamRevision};
+use crate::journal::values::{
+    CommandReceipt, ExpectedRevision, InboxKey, StreamId, StreamRevision,
+};
 
-/// The store failed: I/O, corruption, a writer that went away. The reason is for operators and
-/// logs; it never carries a payload, a secret or a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The store failed: I/O, corruption, a writer that went away. It carries a fixed `snake_case`
+/// code and nothing else, so no payload, secret, path or engine message can reach a log or a
+/// caller through it (ES-I13; contract case JC-19 `payload_round_trip`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageError {
-    reason: String,
+    code: &'static str,
 }
 
 impl StorageError {
-    /// A failure described by `reason`.
+    /// A failure named by `code`, a fixed `snake_case` name (an adapter maps an engine's
+    /// extended code or SQLSTATE to one; it never formats one from data).
     #[must_use]
-    pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
+    pub const fn new(code: &'static str) -> Self {
+        Self { code }
     }
 
-    /// The description.
+    /// The code.
     #[must_use]
-    pub fn reason(&self) -> &str {
-        &self.reason
+    pub const fn code(&self) -> &'static str {
+        self.code
     }
 }
 
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "journal storage failed: {}", self.reason)
+        write!(f, "journal storage failed: {}", self.code)
     }
 }
 
 impl std::error::Error for StorageError {}
 
-/// Why a unit of work was not committed. Every variant but
-/// [`AppendError::OutcomeUnknown`] means **nothing** of the unit was committed.
+/// Why a unit of work was not committed, in **reporting order**: a unit that breaks several
+/// rules is refused with the first variant below that applies (contract case JC-09
+/// `refusal_order`). Every variant but [`AppendError::OutcomeUnknown`] is **definite**: nothing
+/// of the unit was committed ([`AppendError::is_definite`]).
+///
+/// The reporting order is not the lock order (`doc/event-store.md` §4.2): an adapter takes
+/// its locks heads-first in `StreamId` order and may learn of a duplicate event id after it
+/// holds every head, yet must still report the duplicate id ahead of a stale revision. That is
+/// what lets a writer that lost a commit's reply re-append the identical unit and be answered
+/// by its receipt or by `DuplicateEventId` at the place it wrote, rather than by the
+/// `WrongExpectedRevision` its own commit caused.
+///
+/// `#[non_exhaustive]`: the online rebuild (ES-12) adds `ProjectionGenerationMoved`; callers
+/// keep a fallback arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AppendError {
-    /// The unit is malformed on its own ([`crate::journal::UnitOfWork::check_shape`]).
+    /// The unit is malformed on its own ([`crate::journal::UnitOfWork::check_shape`]),
+    /// whatever is stored.
     Malformed(MalformedUnit),
-    /// The unit's command already has a receipt: the command ran. The original receipt is
-    /// returned so a repeat answers exactly as the first run did (fnd §6.4).
-    DuplicateCommand(Box<CommandReceipt>),
-    /// The unit's inbox entry was already processed: a redelivery.
-    DuplicateMessage(InboxEntry),
-    /// A stream is not at the revision the writer expected; `with_version_retry` (ES-03)
-    /// reloads and decides again.
+    /// An event of the unit needs a higher epoch than this build supports for its aggregate
+    /// ([`crate::journal::UnitOfWork::epoch_above_build`]): this build could not decide the
+    /// stream afterwards (ES-I12).
+    EpochAboveBuild {
+        /// The first such stream, in unit order.
+        stream: StreamId,
+    },
+    /// The unit's command already has a receipt with the same intent that still answers: an
+    /// accepted receipt (for ever), or a refusal receipt whose stream is still at the revision
+    /// it was decided at (E3). Carries that receipt, so a repeat answers exactly as the first
+    /// run did; an `Err` so no caller mistakes it for a fresh commit.
+    CommandReplayed(Box<CommandReceipt>),
+    /// The unit's command id has a receipt for another intent. Reveals nothing else.
+    CommandIdReused {
+        /// The reused id.
+        command_id: CommandId,
+    },
+    /// The unit's inbox key was consumed by a committed unit: a redelivery (ES-I6).
+    DuplicateMessage(InboxKey),
+    /// An event id of the unit is already recorded; the lowest such id is named. Resolve with
+    /// [`crate::journal::Journal::lookup_event`].
+    DuplicateEventId(EventId),
+    /// A stream the unit appends to or reads is not where the unit expected; the lowest such
+    /// stream in `StreamId` order is named. `with_revision_retry` (ES-03) reloads and decides
+    /// again.
     WrongExpectedRevision {
         /// The stream.
         stream: StreamId,
         /// What the unit expected.
-        expected: StreamRevision,
-        /// What the journal holds.
-        actual: StreamRevision,
+        expected: ExpectedRevision,
+        /// The revision of its last event, `None` when it has none.
+        actual: Option<StreamRevision>,
     },
-    /// An event id is already recorded.
-    DuplicateEventId(EventId),
-    /// An outbox insert names a directive that already exists.
-    DuplicateDirective(DirectiveId),
-    /// An outbox transition names a directive that does not exist.
-    UnknownDirective(DirectiveId),
-    /// An outbox transition's `from` is not the row's status: someone moved it first.
-    OutboxStatusMismatch {
-        /// The row.
-        directive_id: DirectiveId,
-        /// The transition's `from`.
-        expected: OutboxStatus,
-        /// The row's status.
-        actual: OutboxStatus,
+    /// A stream the unit appends to holds events of a higher epoch than this build supports
+    /// for its aggregate: this build may read it but never write it (ES-I12, `doc/event-store.md`
+    /// §6.3); the lowest such stream in `StreamId` order is named.
+    StreamEpochUnsupported {
+        /// The stream.
+        stream: StreamId,
+        /// Its epoch.
+        epoch: u32,
     },
-    /// An outbox transition the status machine forbids ([`OutboxStatus::allows`]).
-    IllegalOutboxTransition {
-        /// The row.
-        directive_id: DirectiveId,
-        /// Its status.
-        from: OutboxStatus,
-        /// The refused target.
-        to: OutboxStatus,
-    },
+    /// A bounded lock wait ran out (`busy_timeout`, `lock_timeout`): definite, nothing
+    /// committed. The caller reports it; nothing retries it blindly.
+    Busy,
     /// The store failed before committing: nothing was committed.
     Storage(StorageError),
-    /// The store failed in a way that leaves the commit's outcome unknown (the reply from the
-    /// writer was lost). The unit is either wholly committed or wholly absent; the caller finds
-    /// out which by reading the receipt or the inbox entry, never by guessing.
+    /// The commit's reply was lost: the unit is wholly committed or wholly absent, and only a
+    /// read can tell which. Re-append the identical unit: its receipt answers
+    /// (`CommandReplayed`), or `DuplicateEventId` names an id that
+    /// [`crate::journal::Journal::lookup_event`] finds at the place the unit wrote it; any other
+    /// answer is the outcome of a unit that never committed (contract case JC-25
+    /// `outcome_unknown`).
     OutcomeUnknown(StorageError),
+}
+
+impl AppendError {
+    /// Whether the error says for certain that nothing was committed: every variant but
+    /// [`AppendError::OutcomeUnknown`] (ES-I18).
+    #[must_use]
+    pub const fn is_definite(&self) -> bool {
+        !matches!(self, Self::OutcomeUnknown(_))
+    }
 }
 
 impl fmt::Display for AppendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(m) => write!(f, "malformed unit of work: {m}"),
-            Self::DuplicateCommand(r) => {
+            Self::EpochAboveBuild { stream } => write!(
+                f,
+                "an event for stream {stream} needs a higher epoch than this build supports"
+            ),
+            Self::CommandReplayed(r) => {
                 write!(f, "command {} already has a receipt", r.command_id)
             }
-            Self::DuplicateMessage(e) => write!(
+            Self::CommandIdReused { command_id } => {
+                write!(f, "command id {command_id} was used for another intent")
+            }
+            Self::DuplicateMessage(key) => write!(
                 f,
-                "message {} from {} was already processed",
-                e.message_id.as_str(),
-                e.source
+                "message {} from {} was already consumed",
+                key.message_id.as_str(),
+                key.source
             ),
+            Self::DuplicateEventId(id) => write!(f, "event {id} is already recorded"),
             Self::WrongExpectedRevision {
                 stream,
                 expected,
                 actual,
-            } => write!(
+            } => match actual {
+                Some(actual) => write!(
+                    f,
+                    "stream {stream} is at revision {actual}, not the expected {expected}"
+                ),
+                None => write!(
+                    f,
+                    "stream {stream} has no event, not the expected {expected}"
+                ),
+            },
+            Self::StreamEpochUnsupported { stream, epoch } => write!(
                 f,
-                "stream {stream} is at revision {actual}, not the expected {expected}"
+                "stream {stream} is at epoch {epoch}, above what this build supports"
             ),
-            Self::DuplicateEventId(id) => write!(f, "event {id} is already recorded"),
-            Self::DuplicateDirective(id) => write!(f, "directive {id} is already in the outbox"),
-            Self::UnknownDirective(id) => write!(f, "directive {id} is not in the outbox"),
-            Self::OutboxStatusMismatch {
-                directive_id,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "directive {directive_id} is {actual}, not the expected {expected}"
-            ),
-            Self::IllegalOutboxTransition {
-                directive_id,
-                from,
-                to,
-            } => write!(
-                f,
-                "directive {directive_id} may not move from {from} to {to}"
-            ),
+            Self::Busy => f.write_str("the journal was busy; nothing was committed"),
             Self::Storage(e) => write!(f, "{e}; nothing was committed"),
             Self::OutcomeUnknown(e) => write!(f, "{e}; the commit's outcome is unknown"),
         }

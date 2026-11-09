@@ -1,169 +1,228 @@
-//! `MemoryJournal`: the `Journal` port in memory, with the same transactional semantics the
-//! SQLite journal promises (ver §7.1). It passes the journal contract
+//! `MemoryJournal`: the `Journal` port in memory, with the transactional semantics every
+//! journal promises (`doc/event-store.md` §3.3). It passes the journal contract
 //! (`tests/journal_contract.rs`: `should_pass_journal_contract_when_journal_is_in_memory`).
+//!
+//! A unit is judged and applied under one lock in one poll, so the memory journal never
+//! interleaves two units: it shows the contract's outcomes, not its concurrency. Faults are
+//! injected through [`MemoryJournal::inject`], which is how the contract's unknown-outcome and
+//! crash cases (JC-23, JC-25) run on memory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mayfly_control::journal::{
-    AppendError, Appended, CommandReceipt, EventLocation, InboxEntry, Journal, OutboxRow,
-    OutboxStatus, OutboxWrite, Payload, ProjectionName, RecordedEvent, RecordedKind, StorageError,
-    StreamId, StreamRevision, UnitOfWork,
+    AggregateName, AppendError, Appended, AppendedStream, CommandReceipt, Decision, EventLocation,
+    ExpectedRevision, InboxKey, Journal, MAX_PAGE, Payload, ProjectionName, ReceiptOutcome,
+    RecordedEvent, StorageError, StoredKind, StreamHead, StreamId, StreamRevision, UnitOfWork,
 };
-use mayfly_domain::{CommandId, DirectiveId, EventId, Millis};
+use mayfly_domain::{CommandId, EventId};
 
-use crate::contracts::journal::JournalFactory;
+use crate::contracts::journal::{InjectedFault, JournalFactory};
 
 #[derive(Debug, Clone, Default)]
 struct State {
     streams: BTreeMap<StreamId, Vec<RecordedEvent>>,
-    event_ids: BTreeMap<EventId, EventLocation>,
-    kinds: BTreeSet<RecordedKind>,
+    heads: BTreeMap<StreamId, StreamHead>,
+    identities: BTreeMap<EventId, EventLocation>,
+    kinds: BTreeSet<StoredKind>,
     receipts: BTreeMap<CommandId, CommandReceipt>,
-    inbox: BTreeMap<InboxEntry, Millis>,
-    outbox: BTreeMap<DirectiveId, OutboxRow>,
+    inbox: BTreeSet<InboxKey>,
     projections: BTreeMap<(ProjectionName, String), Payload>,
 }
 
 impl State {
-    fn revision(&self, stream: &StreamId) -> StreamRevision {
-        self.streams
-            .get(stream)
-            .and_then(|events| events.last())
-            .map_or(StreamRevision::EMPTY, |e| e.revision)
+    fn revision(&self, stream: &StreamId) -> Option<StreamRevision> {
+        self.heads.get(stream).map(|h| h.revision)
     }
 
-    /// The state after `unit`, or the first refusal in the port's check order. `self` is never
-    /// touched, which is what makes the commit all-or-nothing.
-    fn after(&self, unit: UnitOfWork) -> Result<(Self, Appended), AppendError> {
-        unit.check_shape().map_err(AppendError::Malformed)?;
-        if let Some(existing) = unit
-            .receipt
-            .as_ref()
-            .and_then(|r| self.receipts.get(&r.command_id))
+    /// The first refusal of `unit` in the port's reporting order, or `None` when it commits.
+    fn refusal(&self, unit: &UnitOfWork) -> Option<AppendError> {
+        if let Err(malformed) = unit.check_shape() {
+            return Some(AppendError::Malformed(malformed));
+        }
+        if let Some(stream) = unit.epoch_above_build() {
+            return Some(AppendError::EpochAboveBuild {
+                stream: stream.clone(),
+            });
+        }
+        if let Some(new) = &unit.receipt
+            && let Some(stored) = self.receipts.get(&new.command_id)
         {
-            return Err(AppendError::DuplicateCommand(Box::new(existing.clone())));
+            if stored.intent != new.intent {
+                return Some(AppendError::CommandIdReused {
+                    command_id: new.command_id,
+                });
+            }
+            let answers = match &stored.outcome {
+                ReceiptOutcome::Accepted(_) => true,
+                ReceiptOutcome::Refused { bound, .. } => {
+                    bound.expected.matches(self.revision(&bound.stream))
+                }
+            };
+            if answers {
+                return Some(AppendError::CommandReplayed(Box::new(stored.clone())));
+            }
         }
-        if let Some(entry) = unit.inbox.as_ref().filter(|e| self.inbox.contains_key(e)) {
-            return Err(AppendError::DuplicateMessage(entry.clone()));
+        if let Some(key) = unit.inbox.as_ref().filter(|k| self.inbox.contains(k)) {
+            return Some(AppendError::DuplicateMessage(key.clone()));
         }
-        for append in &unit.streams {
-            let actual = self.revision(&append.stream);
-            if actual != append.expected {
-                return Err(AppendError::WrongExpectedRevision {
-                    stream: append.stream.clone(),
-                    expected: append.expected,
+        if let Some(id) = unit
+            .event_ids()
+            .filter(|id| self.identities.contains_key(id))
+            .min()
+        {
+            return Some(AppendError::DuplicateEventId(id));
+        }
+        let mut conditions: Vec<(&StreamId, ExpectedRevision)> = unit
+            .appends
+            .iter()
+            .map(|a| (&a.stream, a.expected))
+            .chain(unit.reads.iter().map(|r| (&r.stream, r.expected)))
+            .collect();
+        conditions.sort_by_key(|(stream, _)| *stream);
+        for (stream, expected) in conditions {
+            let actual = self.revision(stream);
+            if !expected.matches(actual) {
+                return Some(AppendError::WrongExpectedRevision {
+                    stream: stream.clone(),
+                    expected,
                     actual,
                 });
             }
         }
-        if let Some(event) = unit
-            .streams
-            .iter()
-            .flat_map(|s| &s.events)
-            .find(|e| self.event_ids.contains_key(&e.event_id))
-        {
-            return Err(AppendError::DuplicateEventId(event.event_id));
+        let mut appended: Vec<&StreamId> = unit.appends.iter().map(|a| &a.stream).collect();
+        appended.sort();
+        for stream in appended {
+            if let Some(head) = self.heads.get(stream)
+                && head.epoch > unit.supported_epochs.of(&head.aggregate)
+            {
+                return Some(AppendError::StreamEpochUnsupported {
+                    stream: stream.clone(),
+                    epoch: head.epoch,
+                });
+            }
         }
+        None
+    }
 
-        let mut next = self.clone();
-        for write in unit.outbox {
-            next.write_outbox(write)?;
+    /// The state after `unit`, or its refusal. `self` is never touched, which is what makes
+    /// the commit all-or-nothing.
+    fn after(&self, unit: UnitOfWork) -> Result<(Self, Appended), AppendError> {
+        if let Some(refusal) = self.refusal(&unit) {
+            return Err(refusal);
         }
-        let mut recorded = Vec::new();
-        for append in unit.streams {
-            let mut revision = append.expected;
-            for event in append.events {
-                revision = revision.next().ok_or_else(exhausted)?;
-                next.event_ids.insert(
+        let mut next = self.clone();
+        let mut appended = Appended::default();
+        for append in unit.appends {
+            let mut revision =
+                append
+                    .expected
+                    .next_revision()
+                    .ok_or(AppendError::Storage(StorageError::new(
+                        "revision_exhausted",
+                    )))?;
+            let first = revision;
+            let mut last = revision;
+            let mut event_ids = Vec::new();
+            let mut epoch = self.heads.get(&append.stream).map_or(0, |h| h.epoch);
+            for (i, event) in append.events.into_iter().enumerate() {
+                if i > 0 {
+                    revision = revision
+                        .next()
+                        .ok_or(AppendError::Storage(StorageError::new(
+                            "revision_exhausted",
+                        )))?;
+                }
+                last = revision;
+                epoch = epoch.max(event.required_epoch);
+                event_ids.push(event.event_id);
+                next.identities.insert(
                     event.event_id,
                     EventLocation {
                         stream: append.stream.clone(),
                         revision,
                     },
                 );
-                next.kinds.insert(RecordedKind {
-                    event_type: event.event_type.clone(),
-                    schema_version: event.schema_version,
-                });
-                recorded.push(RecordedEvent {
-                    stream: append.stream.clone(),
-                    revision,
-                    event_id: event.event_id,
-                    event_type: event.event_type,
-                    schema_version: event.schema_version,
-                    payload: event.payload,
-                    recorded_at: unit.recorded_at,
-                });
+                next.kinds.insert(event.kind.clone());
+                next.streams
+                    .entry(append.stream.clone())
+                    .or_default()
+                    .push(RecordedEvent {
+                        stream: append.stream.clone(),
+                        revision,
+                        event_id: event.event_id,
+                        kind: event.kind,
+                        payload: event.payload,
+                        recorded_at: unit.recorded_at,
+                    });
             }
-        }
-        for event in &recorded {
-            next.streams
-                .entry(event.stream.clone())
-                .or_default()
-                .push(event.clone());
+            let aggregate: AggregateName = self
+                .heads
+                .get(&append.stream)
+                .map_or(append.aggregate, |h| h.aggregate.clone());
+            next.heads.insert(
+                append.stream.clone(),
+                StreamHead {
+                    stream: append.stream.clone(),
+                    revision: last,
+                    aggregate,
+                    epoch,
+                },
+            );
+            appended.streams.push(AppendedStream {
+                stream: append.stream,
+                first,
+                last,
+                event_ids,
+            });
         }
         if let Some(receipt) = unit.receipt {
-            next.receipts.insert(receipt.command_id, receipt);
+            let outcome = match receipt.decision {
+                Decision::Accepted => ReceiptOutcome::Accepted(appended.clone()),
+                Decision::Refused { rejection } => ReceiptOutcome::Refused {
+                    bound: unit
+                        .reads
+                        .into_iter()
+                        .next()
+                        .ok_or(AppendError::Storage(StorageError::new("refusal_unbound")))?,
+                    rejection,
+                },
+            };
+            next.receipts.insert(
+                receipt.command_id,
+                CommandReceipt {
+                    command_id: receipt.command_id,
+                    command_type: receipt.command_type,
+                    intent: receipt.intent,
+                    outcome,
+                },
+            );
         }
-        if let Some(entry) = unit.inbox {
-            next.inbox.insert(entry, unit.recorded_at);
+        if let Some(key) = unit.inbox {
+            next.inbox.insert(key);
         }
         for write in unit.projections {
             let key = (write.projection, write.key);
-            match write.value {
-                Some(value) => next.projections.insert(key, value),
+            match write.row {
+                Some(row) => next.projections.insert(key, row),
                 None => next.projections.remove(&key),
             };
         }
-        Ok((next, Appended { events: recorded }))
-    }
-
-    fn write_outbox(&mut self, write: OutboxWrite) -> Result<(), AppendError> {
-        match write {
-            OutboxWrite::Insert(directive) => {
-                if self.outbox.contains_key(&directive.directive_id) {
-                    return Err(AppendError::DuplicateDirective(directive.directive_id));
-                }
-                self.outbox
-                    .insert(directive.directive_id, OutboxRow::pending(directive));
-            }
-            OutboxWrite::Transition(transition) => {
-                let id = transition.directive_id;
-                let row = self
-                    .outbox
-                    .remove(&id)
-                    .ok_or(AppendError::UnknownDirective(id))?;
-                if row.status != transition.from {
-                    return Err(AppendError::OutboxStatusMismatch {
-                        directive_id: id,
-                        expected: transition.from,
-                        actual: row.status,
-                    });
-                }
-                if !row.status.allows(transition.to) {
-                    return Err(AppendError::IllegalOutboxTransition {
-                        directive_id: id,
-                        from: row.status,
-                        to: transition.to,
-                    });
-                }
-                self.outbox.insert(id, row.moved(&transition));
-            }
-        }
-        Ok(())
+        Ok((next, appended))
     }
 }
 
-fn exhausted() -> AppendError {
-    AppendError::Storage(StorageError::new("stream revision exhausted"))
+#[derive(Debug, Default)]
+struct Shared {
+    state: State,
+    fault: Option<InjectedFault>,
 }
 
-/// The in-memory journal. Clones share one store, so a clone is the same journal "reopened":
-/// what one handle committed, every other reads.
+/// The in-memory journal. Clones share one store: a clone is a second handle on the same
+/// journal, and the same journal "reopened" (what one handle committed, every other reads).
 #[derive(Debug, Clone, Default)]
 pub struct MemoryJournal {
-    state: Arc<Mutex<State>>,
+    shared: Arc<Mutex<Shared>>,
 }
 
 impl MemoryJournal {
@@ -173,15 +232,54 @@ impl MemoryJournal {
         Self::default()
     }
 
+    /// Arms `fault` for the next append through any handle; returns whether this journal can
+    /// inject it (memory has two crash points: before the commit and after it).
+    pub fn inject(&self, fault: InjectedFault) -> bool {
+        if matches!(fault, InjectedFault::CrashAfterStatement(n) if n > 1) {
+            return false;
+        }
+        self.lock().fault = Some(fault);
+        true
+    }
+
+    /// The refusal `unit` would get now, or `None` when it would commit; nothing is written
+    /// and no injected fault is consumed. For broken journals built over this one.
+    #[must_use]
+    pub fn judge(&self, unit: &UnitOfWork) -> Option<AppendError> {
+        self.read(|s| s.refusal(unit))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn read<T>(&self, f: impl FnOnce(&State) -> T) -> T {
-        f(&self.state.lock().unwrap_or_else(PoisonError::into_inner))
+        f(&self.lock().state)
     }
 
     fn commit(&self, unit: UnitOfWork) -> Result<Appended, AppendError> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let (next, appended) = state.after(unit)?;
-        *state = next;
-        Ok(appended)
+        let mut shared = self.lock();
+        let fault = shared.fault.take();
+        match fault {
+            Some(InjectedFault::StorageBeforeCommit | InjectedFault::CrashAfterStatement(0)) => {
+                return Err(AppendError::Storage(StorageError::new("injected_failure")));
+            }
+            Some(InjectedFault::Busy) => return Err(AppendError::Busy),
+            _ => {}
+        }
+        let (next, appended) = shared.state.after(unit)?;
+        let lost = AppendError::OutcomeUnknown(StorageError::new("injected_lost_reply"));
+        match fault {
+            Some(InjectedFault::ReplyLostBeforeCommit) => Err(lost),
+            Some(InjectedFault::ReplyLostAfterCommit | InjectedFault::CrashAfterStatement(_)) => {
+                shared.state = next;
+                Err(lost)
+            }
+            _ => {
+                shared.state = next;
+                Ok(appended)
+            }
+        }
     }
 }
 
@@ -190,82 +288,58 @@ impl Journal for MemoryJournal {
         self.commit(unit)
     }
 
-    async fn stream_revision(&self, stream: &StreamId) -> Result<StreamRevision, StorageError> {
-        Ok(self.read(|s| s.revision(stream)))
+    async fn head(&self, stream: &StreamId) -> Result<Option<StreamHead>, StorageError> {
+        Ok(self.read(|s| s.heads.get(stream).cloned()))
     }
 
     async fn read_stream(
         &self,
         stream: &StreamId,
-        after: StreamRevision,
-        limit: usize,
+        after: Option<StreamRevision>,
+        through: Option<StreamRevision>,
     ) -> Result<Vec<RecordedEvent>, StorageError> {
         Ok(self.read(|s| {
             s.streams
                 .get(stream)
                 .into_iter()
                 .flatten()
-                .filter(|e| e.revision > after)
-                .take(limit)
-                .cloned()
-                .collect()
-        }))
-    }
-
-    async fn streams(
-        &self,
-        after: Option<&StreamId>,
-        limit: usize,
-    ) -> Result<Vec<StreamId>, StorageError> {
-        Ok(self.read(|s| {
-            s.streams
-                .keys()
-                .filter(|id| after.is_none_or(|a| *id > a))
-                .take(limit)
+                .filter(|e| after.is_none_or(|a| e.revision > a))
+                .filter(|e| through.is_none_or(|t| e.revision <= t))
                 .cloned()
                 .collect()
         }))
     }
 
     async fn lookup_event(&self, event_id: EventId) -> Result<Option<EventLocation>, StorageError> {
-        Ok(self.read(|s| s.event_ids.get(&event_id).cloned()))
-    }
-
-    async fn recorded_kinds(&self) -> Result<Vec<RecordedKind>, StorageError> {
-        Ok(self.read(|s| s.kinds.iter().cloned().collect()))
+        Ok(self.read(|s| s.identities.get(&event_id).cloned()))
     }
 
     async fn receipt(&self, command_id: CommandId) -> Result<Option<CommandReceipt>, StorageError> {
         Ok(self.read(|s| s.receipts.get(&command_id).cloned()))
     }
 
-    async fn processed_at(&self, entry: &InboxEntry) -> Result<Option<Millis>, StorageError> {
-        Ok(self.read(|s| s.inbox.get(entry).copied()))
+    async fn inbox_contains(&self, key: &InboxKey) -> Result<bool, StorageError> {
+        Ok(self.read(|s| s.inbox.contains(key)))
     }
 
-    async fn directive(
+    async fn streams(
         &self,
-        directive_id: DirectiveId,
-    ) -> Result<Option<OutboxRow>, StorageError> {
-        Ok(self.read(|s| s.outbox.get(&directive_id).cloned()))
-    }
-
-    async fn directives(
-        &self,
-        status: OutboxStatus,
-        limit: usize,
-    ) -> Result<Vec<OutboxRow>, StorageError> {
+        after: Option<&StreamId>,
+        limit: u32,
+    ) -> Result<Vec<StreamHead>, StorageError> {
+        let limit = usize::try_from(limit.min(MAX_PAGE)).unwrap_or(0);
         Ok(self.read(|s| {
-            let mut rows: Vec<_> = s
-                .outbox
+            s.heads
                 .values()
-                .filter(|r| r.status == status)
+                .filter(|h| after.is_none_or(|a| h.stream > *a))
+                .take(limit)
                 .cloned()
-                .collect();
-            rows.sort_by_key(|r| (r.next_attempt_at, r.directive_id));
-            rows.truncate(limit);
-            rows
+                .collect()
         }))
+    }
+
+    async fn stored_kinds(&self) -> Result<Vec<StoredKind>, StorageError> {
+        Ok(self.read(|s| s.kinds.iter().cloned().collect()))
     }
 
     async fn projection(
@@ -281,7 +355,8 @@ impl Journal for MemoryJournal {
     }
 }
 
-/// Makes [`MemoryJournal`]s for the journal contract; reopening hands back the same store.
+/// Makes [`MemoryJournal`]s for the journal contract: reopening, a second handle and a crash
+/// all hand back the same store, and faults are injected with [`MemoryJournal::inject`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryJournalFactory;
 
@@ -293,6 +368,18 @@ impl JournalFactory for MemoryJournalFactory {
     }
 
     async fn reopen(&self, journal: MemoryJournal) -> MemoryJournal {
+        journal
+    }
+
+    async fn second_handle(&self, journal: &MemoryJournal) -> MemoryJournal {
+        journal.clone()
+    }
+
+    async fn inject(&self, journal: &MemoryJournal, fault: InjectedFault) -> bool {
+        journal.inject(fault)
+    }
+
+    async fn crash(&self, journal: MemoryJournal) -> MemoryJournal {
         journal
     }
 }

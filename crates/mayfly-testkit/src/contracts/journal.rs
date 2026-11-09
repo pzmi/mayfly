@@ -1,35 +1,72 @@
-//! The journal contract suite (ver §5): one set of cases every `Journal` implementation
-//! passes, written once over a [`JournalFactory`].
+//! The journal contract suite (ver §5, `doc/event-store.md` §7.1): one set of cases every
+//! `Journal` implementation passes, written once over a [`JournalFactory`].
 //!
-//! Every case starts from [`JournalFactory::fresh`] and calls [`JournalFactory::reopen`]
-//! between writing and checking, so one suite runs a journal fresh (a factory whose reopen
-//! hands the same handle back) and reopened (a factory that closes and reopens its file).
-//! [`check_journal_contract`] returns a report of failed cases instead of panicking: the
-//! suite's own tests use it to show deliberately broken journals failing named cases
-//! (`tests/journal_contract.rs`).
+//! Cases are named by their id in `doc/event-store.md` §7.1 (`JC-01` …). The suite holds the
+//! stream-scoped design (ADR 0021, ADR 0034): per-stream order on a stream head, an event-id
+//! registry, command receipts with intent digests and refusal receipts bound to a revision,
+//! an inbox, stream epochs, and no global order to read (no method returns events of more
+//! than one stream; the suite reads the journal by enumerating streams). JC-26 (durability
+//! settings at open) and JC-27 (raw `UPDATE`/`DELETE` refused) need an engine and join with
+//! the adapters (ES-02, ES-09).
 //!
-//! The cases hold the stream-scoped event store design (ADR 0021): per-stream order on a
-//! stream head, an event-id registry, command receipts, and no global order to read. The
-//! concurrency cases drive several appends at once on one task ([`join_all`]), so an adapter
-//! whose append really waits (a writer thread, a database) interleaves them; none of them
-//! needs a runtime.
+//! **What the concurrency cases prove, and what they do not.** JC-21, JC-22, JC-29..JC-32
+//! drive several appends (and a reader) at once on one task ([`join_all`], [`join2`]), through
+//! two handles where the factory gives a second one. An adapter whose append really waits (a
+//! writer thread, a database) interleaves them at its await points, so the cases check the
+//! *outcomes* of the interleavings it allows: exactly one of two racing units commits, a
+//! disjoint unit is never refused for another stream, a reader never sees part of a unit. They
+//! do not prove freedom from a global lock: a store that serialises every unit without refusing
+//! any passes them (memory does, by construction). That structural half (no waiter blocked by
+//! a unit on another stream) is ES-09's `pg_blocking_pids` check, and the model's
+//! `implStepSerial` relation is the admitted restriction for SQLite (`doc/event-store.md`
+//! §7.3).
+//!
+//! Every case starts from [`JournalFactory::fresh`] and reopens where a case says so, so one
+//! suite runs a journal fresh (a factory whose reopen hands the same store back) and reopened
+//! (a factory that closes and reopens its file). [`check_journal_contract`] returns a report
+//! of failed cases instead of panicking: the suite's own tests use it to show deliberately
+//! broken journals failing named cases (`tests/journal_contract.rs`, `doc/event-store.md`
+//! §7.6). A factory that cannot inject a fault a case needs fails that case: no case is skipped.
 
 use std::fmt::{self, Debug, Display};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use mayfly_control::journal::{
-    AppendError, CommandReceipt, EventLocation, InboxEntry, InboxSource, Journal, MalformedUnit,
-    MessageId, NewDirective, NewEvent, OutboxRow, OutboxStatus, OutboxTransition, OutboxWrite,
-    Payload, ProjectionName, ProjectionWrite, ReceiptStatus, RecordedEvent, RecordedKind, StreamId,
-    StreamRevision, UnitOfWork,
+    AggregateName, AppendError, Appended, AppendedStream, CommandReceipt, CommandType, Decision,
+    EventLocation, ExpectedRevision, InboxKey, InboxSource, IntentDigest, Journal, MAX_PAGE,
+    MalformedUnit, MessageId, NewEvent, NewReceipt, Payload, ProjectionName, ProjectionWrite,
+    ReadCondition, ReceiptOutcome, RecordedEvent, StoredKind, StreamHead, StreamId, StreamRevision,
+    SupportedEpochs, UnitOfWork,
 };
-use mayfly_domain::{AttemptId, CommandId, DirectiveId, EventId, Generation, Millis};
+use mayfly_domain::{CommandId, EventId, Millis};
 
 use crate::block_on::block_on;
 
-/// Makes the journals the suite runs against.
+/// A fault the contract asks a factory to arm for the next append (JC-23, JC-25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectedFault {
+    /// The store fails before the commit: a definite `Storage` error, nothing written.
+    StorageBeforeCommit,
+    /// A bounded lock wait runs out: a definite `Busy`, nothing written.
+    Busy,
+    /// The unit commits, then its reply is lost: `OutcomeUnknown` with the unit present.
+    ReplyLostAfterCommit,
+    /// The commit's reply is lost and the commit did not apply: `OutcomeUnknown` with the unit
+    /// absent.
+    ReplyLostBeforeCommit,
+    /// The process dies after the given number of the unit's statements (0: before the first);
+    /// the store is then reopened with [`JournalFactory::crash`]. A factory answers `false`
+    /// past its last statement, which ends JC-23's walk.
+    CrashAfterStatement(u32),
+}
+
+/// Makes the journals the suite runs against, and the hooks its modes need.
+///
+/// Every method is required, so a new adapter cannot skip a mode by omission: memory answers
+/// each one trivially, the SQLite adapter (ES-02) with a second connection or file handle,
+/// `StoreHooks` and a dropped connection.
 pub trait JournalFactory {
     /// The implementation under test.
     type Journal: Journal;
@@ -40,87 +77,207 @@ pub trait JournalFactory {
     /// The same store, closed and opened again; a store with nothing to reopen returns
     /// `journal` itself. Whatever was committed before must read the same after.
     fn reopen(&self, journal: Self::Journal) -> impl Future<Output = Self::Journal>;
+
+    /// Another handle on the same store, as a second process would hold (two-handle mode):
+    /// it shares no cache with `journal` (JC-21, JC-29..JC-31).
+    fn second_handle(&self, journal: &Self::Journal) -> impl Future<Output = Self::Journal>;
+
+    /// Arms `fault` for the next append on `journal`'s store; `false` when this factory cannot
+    /// (the case then fails, it never skips).
+    fn inject(&self, journal: &Self::Journal, fault: InjectedFault) -> impl Future<Output = bool>;
+
+    /// The process holding `journal` died; the store, reopened (crash-injected mode, JC-23).
+    fn crash(&self, journal: Self::Journal) -> impl Future<Output = Self::Journal>;
 }
 
-/// One case of the journal contract.
+/// One case of the journal contract, named after its id in `doc/event-store.md` §7.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum JournalCase {
-    /// Appended events read back per stream with their revisions, sequences, kinds,
-    /// payloads and `recorded_at`.
-    AppendsAndReadsStreams,
-    /// A wrong expected revision (stale, ahead, or on a missing stream) is refused with the
-    /// actual revision and changes nothing.
-    ExpectedRevisionConflict,
-    /// An event id already recorded is refused and changes nothing.
-    DuplicateEventId,
-    /// A unit refused at any step leaves every table as it was; an accepted one writes all
-    /// of its parts.
-    AllOrNothing,
-    /// A receipt survives a reopen; a repeat of its command returns the original receipt,
-    /// even when the streams have moved, and changes nothing.
-    ReceiptReplay,
-    /// A processed inbox entry refuses its redelivery, even when the streams have moved;
-    /// the same message id from another source is a different message.
-    InboxDedupe,
-    /// Outbox rows move exactly as `OutboxStatus::allows` says, refuse a stale `from`, count
-    /// attempts and list by status.
-    OutboxStatusTransitions,
-    /// Two appends racing at one expected revision of one stream: exactly one commits, the
-    /// other is refused as a lost race and leaves nothing of its unit behind (the stream head's
-    /// compare-and-set).
-    RacingWritersOnOneStream,
-    /// Appends to different streams commit at once, each judged by its own stream alone; only
-    /// an event id two of them share decides between them (the event-id registry).
-    IndependentStreams,
-    /// Per-stream reads honour their bounds; streams enumerate by id; the event-id registry
-    /// and the event-kind manifest answer; a refused or eventless append creates no stream.
-    StreamReads,
-    /// Projection rows are set, replaced and removed with their unit.
-    ProjectionWrites,
-    /// A malformed unit is refused before anything is checked or written.
+    /// JC-01: an absent stream reads empty and has no head; an empty journal lists nothing.
+    AbsentStream,
+    /// JC-02: a batch takes consecutive revisions from 0 and reads back as written.
+    ConsecutiveRevisions,
+    /// JC-03: a later append continues from the head; reads honour `after` and `through`.
+    ContinuesFromHead,
+    /// JC-04: a stale expected revision is refused and writes nothing in any table.
+    StaleExpectedRevision,
+    /// JC-05: an expected revision ahead of the head is refused.
+    AheadExpectedRevision,
+    /// JC-06: `Exactly` on an absent stream and `NoStream` on an existing one are refused.
+    NoStreamMismatch,
+    /// JC-07: an event id stored on another stream refuses the unit, nothing written.
+    DuplicateEventIdAcrossStreams,
+    /// JC-08: a malformed unit is refused before anything is checked or written.
     MalformedUnit,
+    /// JC-09: the reporting order of `AppendError` for a unit that breaks several rules.
+    RefusalOrder,
+    /// JC-10: a multi-stream unit whose second stream conflicts writes nothing on the first;
+    /// an accepted unit writes every part.
+    MultiStreamAllOrNothing,
+    /// JC-11: a moved read condition refuses the unit; a `NoStream` read is invalidated by a
+    /// create; a held read writes nothing of its own.
+    ReadConditions,
+    /// JC-12: a replayed command returns its first outcome after its streams moved, writing
+    /// nothing; a zero-event acceptance answers like any other.
+    ReceiptReplay,
+    /// JC-13: a reused command id with another intent is `CommandIdReused`.
+    CommandIdReused,
+    /// JC-14: a unit the store refuses leaves no receipt and the command may later commit; a
+    /// domain refusal leaves a refusal receipt bound to its revision.
+    StoreRefusalLeavesNoReceipt,
+    /// JC-15: a redelivered inbox key is `DuplicateMessage`; an inbox-only unit commits.
+    InboxDedupe,
+    /// JC-16: `lookup_event` finds each id at its place and none of a refused batch.
+    LookupEvent,
+    /// JC-17: the manifest lists every kind ever committed and none of a refused unit.
+    KindManifest,
+    /// JC-18: epochs rise to the batch maximum and never fall; a stream above the build refuses
+    /// appends but serves reads; a batch above the build is refused before any write.
+    Epochs,
+    /// JC-19: payloads round-trip byte for byte; a NUL is refused before any write; errors carry
+    /// no payload text.
+    PayloadRoundTrip,
+    /// JC-20: `streams` pages through every head once, in byte order of the id.
+    StreamsEnumeration,
+    /// JC-21: two handles decide against the same revision; exactly one append commits.
+    RacingHandles,
+    /// JC-22: units on disjoint streams both commit; units naming two streams in opposite
+    /// orders both finish.
+    IndependentStreams,
+    /// JC-23: a crash after any statement of a unit leaves it wholly present or wholly absent.
+    CrashAtomicity,
+    /// JC-24: heads, receipts, inbox, manifest, epochs and rows survive a reopen and still
+    /// answer.
+    SurvivesReopen,
+    /// JC-25: only a fault at the commit is `OutcomeUnknown`; re-appending the identical unit
+    /// resolves it.
+    OutcomeUnknown,
+    /// JC-28: a refusal receipt answers at its revision and is re-decided and replaced after
+    /// the stream moved; one whose stream moved before commit is refused.
+    RefusalReceipts,
+    /// JC-29: two units with one command id on different streams: exactly one commits.
+    RacingCommandIds,
+    /// JC-30: two units with one inbox key on different streams: exactly one commits.
+    RacingInboxKeys,
+    /// JC-31: two units with one event id on different streams: exactly one commits.
+    RacingEventIds,
+    /// JC-32: a reader running beside an append never sees part of the unit.
+    UnitVisibleAtOnce,
 }
 
 impl JournalCase {
     /// Every case, in the order the suite runs them.
-    pub const ALL: [Self; 12] = [
-        Self::AppendsAndReadsStreams,
-        Self::ExpectedRevisionConflict,
-        Self::DuplicateEventId,
-        Self::AllOrNothing,
-        Self::ReceiptReplay,
-        Self::InboxDedupe,
-        Self::OutboxStatusTransitions,
-        Self::RacingWritersOnOneStream,
-        Self::IndependentStreams,
-        Self::StreamReads,
-        Self::ProjectionWrites,
+    pub const ALL: [Self; 30] = [
+        Self::AbsentStream,
+        Self::ConsecutiveRevisions,
+        Self::ContinuesFromHead,
+        Self::StaleExpectedRevision,
+        Self::AheadExpectedRevision,
+        Self::NoStreamMismatch,
+        Self::DuplicateEventIdAcrossStreams,
         Self::MalformedUnit,
+        Self::RefusalOrder,
+        Self::MultiStreamAllOrNothing,
+        Self::ReadConditions,
+        Self::ReceiptReplay,
+        Self::CommandIdReused,
+        Self::StoreRefusalLeavesNoReceipt,
+        Self::InboxDedupe,
+        Self::LookupEvent,
+        Self::KindManifest,
+        Self::Epochs,
+        Self::PayloadRoundTrip,
+        Self::StreamsEnumeration,
+        Self::RacingHandles,
+        Self::IndependentStreams,
+        Self::CrashAtomicity,
+        Self::SurvivesReopen,
+        Self::OutcomeUnknown,
+        Self::RefusalReceipts,
+        Self::RacingCommandIds,
+        Self::RacingInboxKeys,
+        Self::RacingEventIds,
+        Self::UnitVisibleAtOnce,
     ];
+
+    /// The case's id in `doc/event-store.md` §7.1.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::AbsentStream => "JC-01",
+            Self::ConsecutiveRevisions => "JC-02",
+            Self::ContinuesFromHead => "JC-03",
+            Self::StaleExpectedRevision => "JC-04",
+            Self::AheadExpectedRevision => "JC-05",
+            Self::NoStreamMismatch => "JC-06",
+            Self::DuplicateEventIdAcrossStreams => "JC-07",
+            Self::MalformedUnit => "JC-08",
+            Self::RefusalOrder => "JC-09",
+            Self::MultiStreamAllOrNothing => "JC-10",
+            Self::ReadConditions => "JC-11",
+            Self::ReceiptReplay => "JC-12",
+            Self::CommandIdReused => "JC-13",
+            Self::StoreRefusalLeavesNoReceipt => "JC-14",
+            Self::InboxDedupe => "JC-15",
+            Self::LookupEvent => "JC-16",
+            Self::KindManifest => "JC-17",
+            Self::Epochs => "JC-18",
+            Self::PayloadRoundTrip => "JC-19",
+            Self::StreamsEnumeration => "JC-20",
+            Self::RacingHandles => "JC-21",
+            Self::IndependentStreams => "JC-22",
+            Self::CrashAtomicity => "JC-23",
+            Self::SurvivesReopen => "JC-24",
+            Self::OutcomeUnknown => "JC-25",
+            Self::RefusalReceipts => "JC-28",
+            Self::RacingCommandIds => "JC-29",
+            Self::RacingInboxKeys => "JC-30",
+            Self::RacingEventIds => "JC-31",
+            Self::UnitVisibleAtOnce => "JC-32",
+        }
+    }
 
     /// The case's `snake_case` name.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::AppendsAndReadsStreams => "appends_and_reads_streams",
-            Self::ExpectedRevisionConflict => "expected_revision_conflict",
-            Self::DuplicateEventId => "duplicate_event_id",
-            Self::AllOrNothing => "all_or_nothing",
-            Self::ReceiptReplay => "receipt_replay",
-            Self::InboxDedupe => "inbox_dedupe",
-            Self::OutboxStatusTransitions => "outbox_status_transitions",
-            Self::RacingWritersOnOneStream => "racing_writers_on_one_stream",
-            Self::IndependentStreams => "independent_streams",
-            Self::StreamReads => "stream_reads",
-            Self::ProjectionWrites => "projection_writes",
+            Self::AbsentStream => "absent_stream",
+            Self::ConsecutiveRevisions => "consecutive_revisions",
+            Self::ContinuesFromHead => "continues_from_head",
+            Self::StaleExpectedRevision => "stale_expected_revision",
+            Self::AheadExpectedRevision => "ahead_expected_revision",
+            Self::NoStreamMismatch => "no_stream_mismatch",
+            Self::DuplicateEventIdAcrossStreams => "duplicate_event_id_across_streams",
             Self::MalformedUnit => "malformed_unit",
+            Self::RefusalOrder => "refusal_order",
+            Self::MultiStreamAllOrNothing => "multi_stream_all_or_nothing",
+            Self::ReadConditions => "read_conditions",
+            Self::ReceiptReplay => "receipt_replay",
+            Self::CommandIdReused => "command_id_reused",
+            Self::StoreRefusalLeavesNoReceipt => "store_refusal_leaves_no_receipt",
+            Self::InboxDedupe => "inbox_dedupe",
+            Self::LookupEvent => "lookup_event",
+            Self::KindManifest => "kind_manifest",
+            Self::Epochs => "epochs",
+            Self::PayloadRoundTrip => "payload_round_trip",
+            Self::StreamsEnumeration => "streams_enumeration",
+            Self::RacingHandles => "racing_handles",
+            Self::IndependentStreams => "independent_streams",
+            Self::CrashAtomicity => "crash_atomicity",
+            Self::SurvivesReopen => "survives_reopen",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::RefusalReceipts => "refusal_receipts",
+            Self::RacingCommandIds => "racing_command_ids",
+            Self::RacingInboxKeys => "racing_inbox_keys",
+            Self::RacingEventIds => "racing_event_ids",
+            Self::UnitVisibleAtOnce => "unit_visible_at_once",
         }
     }
 }
 
 impl Display for JournalCase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        write!(f, "{} {}", self.id(), self.name())
     }
 }
 
@@ -198,20 +355,41 @@ pub fn run_journal_contract<F: JournalFactory>(factory: &F) {
 /// What was expected and what the journal did, at the first check that failed.
 pub async fn check_case<F: JournalFactory>(factory: &F, case: JournalCase) -> Result<(), String> {
     match case {
-        JournalCase::AppendsAndReadsStreams => appends_and_reads_streams(factory).await,
-        JournalCase::ExpectedRevisionConflict => expected_revision_conflict(factory).await,
-        JournalCase::DuplicateEventId => duplicate_event_id(factory).await,
-        JournalCase::AllOrNothing => all_or_nothing(factory).await,
-        JournalCase::ReceiptReplay => receipt_replay(factory).await,
-        JournalCase::InboxDedupe => inbox_dedupe(factory).await,
-        JournalCase::OutboxStatusTransitions => outbox_status_transitions(factory).await,
-        JournalCase::RacingWritersOnOneStream => racing_writers_on_one_stream(factory).await,
-        JournalCase::IndependentStreams => independent_streams(factory).await,
-        JournalCase::StreamReads => stream_reads(factory).await,
-        JournalCase::ProjectionWrites => projection_writes(factory).await,
+        JournalCase::AbsentStream => absent_stream(factory).await,
+        JournalCase::ConsecutiveRevisions => consecutive_revisions(factory).await,
+        JournalCase::ContinuesFromHead => continues_from_head(factory).await,
+        JournalCase::StaleExpectedRevision => stale_expected_revision(factory).await,
+        JournalCase::AheadExpectedRevision => ahead_expected_revision(factory).await,
+        JournalCase::NoStreamMismatch => no_stream_mismatch(factory).await,
+        JournalCase::DuplicateEventIdAcrossStreams => duplicate_event_id(factory).await,
         JournalCase::MalformedUnit => malformed_unit(factory).await,
+        JournalCase::RefusalOrder => refusal_order(factory).await,
+        JournalCase::MultiStreamAllOrNothing => multi_stream_all_or_nothing(factory).await,
+        JournalCase::ReadConditions => read_conditions(factory).await,
+        JournalCase::ReceiptReplay => receipt_replay(factory).await,
+        JournalCase::CommandIdReused => command_id_reused(factory).await,
+        JournalCase::StoreRefusalLeavesNoReceipt => store_refusal_leaves_no_receipt(factory).await,
+        JournalCase::InboxDedupe => inbox_dedupe(factory).await,
+        JournalCase::LookupEvent => lookup_event(factory).await,
+        JournalCase::KindManifest => kind_manifest(factory).await,
+        JournalCase::Epochs => epochs_case(factory).await,
+        JournalCase::PayloadRoundTrip => payload_round_trip(factory).await,
+        JournalCase::StreamsEnumeration => streams_enumeration(factory).await,
+        JournalCase::RacingHandles => racing_handles(factory).await,
+        JournalCase::IndependentStreams => independent_streams(factory).await,
+        JournalCase::CrashAtomicity => crash_atomicity(factory).await,
+        JournalCase::SurvivesReopen => survives_reopen(factory).await,
+        JournalCase::OutcomeUnknown => outcome_unknown(factory).await,
+        JournalCase::RefusalReceipts => refusal_receipts(factory).await,
+        JournalCase::RacingCommandIds => racing_command_ids(factory).await,
+        JournalCase::RacingInboxKeys => racing_inbox_keys(factory).await,
+        JournalCase::RacingEventIds => racing_event_ids(factory).await,
+        JournalCase::UnitVisibleAtOnce => unit_visible_at_once(factory).await,
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Checks and fixtures
 
 type Check = Result<(), String>;
 
@@ -231,41 +409,113 @@ fn io<T, E: Display>(what: &str, result: Result<T, E>) -> Result<T, String> {
     result.map_err(|e| format!("{what}: unexpected error: {e}"))
 }
 
+fn refused<T: Debug>(result: Result<T, AppendError>) -> Result<AppendError, String> {
+    match result {
+        Ok(done) => Err(format!("expected a refusal, the unit committed: {done:?}")),
+        Err(error) => Ok(error),
+    }
+}
+
 fn stream(name: &str) -> StreamId {
     StreamId::new(name).unwrap_or_else(|e| panic!("contract stream id {name}: {e}"))
+}
+
+/// The aggregate of a contract stream: its prefix before the first `-`.
+fn aggregate_of(stream: &StreamId) -> AggregateName {
+    let prefix = stream.as_str().split('-').next().unwrap_or_default();
+    AggregateName::new(prefix).unwrap_or_else(|e| panic!("contract aggregate {prefix}: {e}"))
+}
+
+fn aggregate(name: &str) -> AggregateName {
+    AggregateName::new(name).unwrap_or_else(|e| panic!("contract aggregate {name}: {e}"))
 }
 
 fn rev(n: u64) -> StreamRevision {
     StreamRevision::new(n)
 }
 
-fn at(ms: u64) -> Millis {
-    Millis::new(ms)
+fn at(n: u64) -> ExpectedRevision {
+    ExpectedRevision::Exactly(rev(n))
+}
+
+const NEW: ExpectedRevision = ExpectedRevision::NoStream;
+
+/// A build supporting epoch `epoch` for the contract's aggregates (`attempt`, `pool`).
+fn build(epoch: u32) -> SupportedEpochs {
+    SupportedEpochs::new()
+        .with(aggregate("attempt"), epoch)
+        .with(aggregate("pool"), epoch)
+        .with(aggregate("scaleset"), epoch)
+}
+
+fn unit(ms: u64) -> UnitOfWork {
+    UnitOfWork::new(Millis::new(ms), build(1))
+}
+
+fn kind(event_type: &str, schema_version: u32) -> StoredKind {
+    StoredKind {
+        event_type: event_type.to_owned(),
+        schema_version,
+    }
 }
 
 fn event(n: u128) -> NewEvent {
     NewEvent {
         event_id: EventId::from_u128(n),
-        event_type: "contract_fact_recorded".to_owned(),
-        schema_version: 1,
+        kind: kind("contract_fact_recorded", 1),
+        required_epoch: 1,
         payload: Payload::new(format!("{{\"n\":{n}}}")),
     }
 }
 
-fn ids(events: &[RecordedEvent]) -> Vec<u128> {
-    events.iter().map(|e| e.event_id.as_u128()).collect()
+fn events(ids: &[u128]) -> Vec<NewEvent> {
+    ids.iter().copied().map(event).collect()
 }
 
-fn receipt(command: u128, status: ReceiptStatus, result: &str) -> CommandReceipt {
-    CommandReceipt {
+/// Adds an append of `ids` to `s` at `expected`, its aggregate taken from its prefix.
+fn appending(
+    unit: UnitOfWork,
+    s: &StreamId,
+    expected: ExpectedRevision,
+    ids: &[u128],
+) -> UnitOfWork {
+    unit.with_append(s.clone(), aggregate_of(s), expected, events(ids))
+}
+
+fn intent(n: u8) -> IntentDigest {
+    IntentDigest::new([n; 32])
+}
+
+fn command_type() -> CommandType {
+    CommandType::new("contract_command").unwrap_or_else(|e| panic!("contract command type: {e}"))
+}
+
+fn accepted(command: u128, intent_of: u8) -> NewReceipt {
+    NewReceipt {
         command_id: CommandId::from_u128(command),
-        status,
-        result: Payload::new(result),
+        command_type: command_type(),
+        intent: intent(intent_of),
+        decision: Decision::Accepted,
     }
 }
 
-fn inbox(source: &str, message: &str) -> InboxEntry {
-    InboxEntry {
+fn rejection(code: &str) -> Payload {
+    Payload::new(format!("{{\"code\":\"{code}\"}}"))
+}
+
+fn refusal(command: u128, intent_of: u8, code: &str) -> NewReceipt {
+    NewReceipt {
+        command_id: CommandId::from_u128(command),
+        command_type: command_type(),
+        intent: intent(intent_of),
+        decision: Decision::Refused {
+            rejection: rejection(code),
+        },
+    }
+}
+
+fn key(source: &str, message: &str) -> InboxKey {
+    InboxKey {
         source: InboxSource::new(source)
             .unwrap_or_else(|e| panic!("contract inbox source {source}: {e}")),
         message_id: MessageId::new(message)
@@ -273,56 +523,133 @@ fn inbox(source: &str, message: &str) -> InboxEntry {
     }
 }
 
-fn directive(id: u128, next_attempt_at: u64) -> OutboxWrite {
-    OutboxWrite::Insert(NewDirective {
-        directive_id: DirectiveId::from_u128(id),
-        attempt_id: AttemptId::from_u128(id + 1_000),
-        generation: Generation::FIRST,
-        kind: "clone_vm".to_owned(),
-        request: Payload::new(format!("{{\"directive\":{id}}}")),
-        next_attempt_at: at(next_attempt_at),
-    })
-}
-
-fn transition(id: u128, from: OutboxStatus, to: OutboxStatus, next: u64) -> OutboxWrite {
-    OutboxWrite::Transition(OutboxTransition {
-        directive_id: DirectiveId::from_u128(id),
-        from,
-        to,
-        next_attempt_at: at(next),
-    })
-}
-
 fn projection_name() -> ProjectionName {
     ProjectionName::new("contract_rows").unwrap_or_else(|e| panic!("contract projection: {e}"))
 }
 
-fn row(key: &str, value: Option<&str>) -> ProjectionWrite {
+fn row(s: &StreamId, row_key: &str, value: Option<&str>) -> ProjectionWrite {
     ProjectionWrite {
         projection: projection_name(),
-        key: key.to_owned(),
-        value: value.map(Payload::new),
+        stream: s.clone(),
+        key: row_key.to_owned(),
+        row: value.map(Payload::new),
     }
 }
 
-/// Every recorded event, stream by stream in id order, each in revision order: what the
-/// journal holds, read without any global order.
-async fn history<J: Journal>(journal: &J) -> Result<Vec<RecordedEvent>, String> {
-    let streams = io("streams", journal.streams(None, usize::MAX).await)?;
-    let mut events = Vec::new();
-    for stream in &streams {
-        events.extend(io(
-            "read_stream",
-            journal
-                .read_stream(stream, StreamRevision::EMPTY, usize::MAX)
-                .await,
+fn ids(events: &[RecordedEvent]) -> Vec<u128> {
+    events.iter().map(|e| e.event_id.as_u128()).collect()
+}
+
+fn appended(s: &StreamId, first: u64, ids: &[u128]) -> AppendedStream {
+    AppendedStream {
+        stream: s.clone(),
+        first: rev(first),
+        last: rev(first + ids.len() as u64 - 1),
+        event_ids: ids.iter().copied().map(EventId::from_u128).collect(),
+    }
+}
+
+/// What a [`Probe`] reads of a journal: enough to prove a refused unit left no trace, read
+/// stream by stream and key by key (no global read exists).
+#[derive(Debug, Clone, PartialEq)]
+struct Observed {
+    heads: Vec<Option<StreamHead>>,
+    events: Vec<Vec<RecordedEvent>>,
+    receipts: Vec<Option<CommandReceipt>>,
+    inbox: Vec<bool>,
+    identities: Vec<Option<EventLocation>>,
+    kinds: Vec<StoredKind>,
+    rows: Vec<Option<Payload>>,
+    streams: Vec<StreamHead>,
+}
+
+/// The streams, commands, inbox keys, event ids and projection rows a case looks at.
+#[derive(Debug, Clone, Default)]
+struct Probe {
+    streams: Vec<StreamId>,
+    commands: Vec<u128>,
+    keys: Vec<InboxKey>,
+    events: Vec<u128>,
+    rows: Vec<String>,
+}
+
+async fn observe<J: Journal>(journal: &J, probe: &Probe) -> Result<Observed, String> {
+    let mut seen = Observed {
+        heads: Vec::new(),
+        events: Vec::new(),
+        receipts: Vec::new(),
+        inbox: Vec::new(),
+        identities: Vec::new(),
+        kinds: io("stored_kinds", journal.stored_kinds().await)?,
+        rows: Vec::new(),
+        streams: all_streams(journal).await?,
+    };
+    for s in &probe.streams {
+        seen.heads.push(io("head", journal.head(s).await)?);
+        seen.events
+            .push(io("read_stream", journal.read_stream(s, None, None).await)?);
+    }
+    for c in &probe.commands {
+        seen.receipts.push(io(
+            "receipt",
+            journal.receipt(CommandId::from_u128(*c)).await,
         )?);
     }
-    Ok(events)
+    for k in &probe.keys {
+        seen.inbox
+            .push(io("inbox_contains", journal.inbox_contains(k).await)?);
+    }
+    for e in &probe.events {
+        seen.identities.push(io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(*e)).await,
+        )?);
+    }
+    for r in &probe.rows {
+        seen.rows.push(io(
+            "projection",
+            journal.projection(&projection_name(), r).await,
+        )?);
+    }
+    Ok(seen)
 }
 
-/// Polls every future on the calling task until all are ready, in order: appends run "at
-/// once" without a runtime, interleaving wherever an implementation yields.
+/// Every stream head, paged by key.
+async fn all_streams<J: Journal>(journal: &J) -> Result<Vec<StreamHead>, String> {
+    let mut heads: Vec<StreamHead> = Vec::new();
+    loop {
+        let after = heads.last().map(|h| h.stream.clone());
+        let page = io("streams", journal.streams(after.as_ref(), 3).await)?;
+        if page.is_empty() {
+            return Ok(heads);
+        }
+        heads.extend(page);
+        if heads.len() > 10_000 {
+            return Err("streams paged past 10000 heads: the cursor does not advance".to_owned());
+        }
+    }
+}
+
+async fn head_revision<J: Journal>(
+    journal: &J,
+    s: &StreamId,
+) -> Result<Option<StreamRevision>, String> {
+    Ok(io("head", journal.head(s).await)?.map(|h| h.revision))
+}
+
+async fn must_inject<F: JournalFactory>(
+    factory: &F,
+    journal: &F::Journal,
+    fault: InjectedFault,
+) -> Check {
+    ensure(
+        &format!("the factory cannot inject {fault:?}, so the case cannot run (it never skips)"),
+        factory.inject(journal, fault).await,
+    )
+}
+
+/// Polls every future on the calling task until all are ready: appends run "at once" without
+/// a runtime, interleaving wherever an implementation yields.
 pub async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
     let mut pending: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
     let mut outputs: Vec<Option<F::Output>> = pending.iter().map(|_| None).collect();
@@ -343,704 +670,61 @@ pub async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
     .await
 }
 
-async fn appends_and_reads_streams<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    eq(
-        "revision of a new stream",
-        &io("stream_revision", journal.stream_revision(&s1).await)?,
-        &StreamRevision::EMPTY,
-    )?;
-    ensure(
-        "an empty journal reads no events",
-        history(&journal).await?.is_empty(),
-    )?;
-
-    let mut accented = event(2);
-    accented.payload = Payload::new("{\"note\":\"zażółć \\u0000 ✓\"}");
-    accented.schema_version = 3;
-    let first = io(
-        "first append",
-        journal
-            .append(UnitOfWork::new(at(1_000)).with_stream(
-                s1.clone(),
-                StreamRevision::EMPTY,
-                vec![event(1), accented.clone()],
-            ))
-            .await,
-    )?;
-    eq(
-        "revisions of the first append",
-        &first.events.iter().map(|e| e.revision).collect::<Vec<_>>(),
-        &vec![rev(1), rev(2)],
-    )?;
-    let recorded = first
-        .events
-        .get(1)
-        .ok_or_else(|| "the first append recorded fewer than two events".to_owned())?;
-    eq("recorded event id", &recorded.event_id, &accented.event_id)?;
-    eq("recorded type", &recorded.event_type, &accented.event_type)?;
-    eq("recorded version", &recorded.schema_version, &3)?;
-    eq("recorded payload", &recorded.payload, &accented.payload)?;
-    eq("recorded stream", &recorded.stream, &s1)?;
-    eq("recorded_at", &recorded.recorded_at, &at(1_000))?;
-
-    let journal = factory.reopen(journal).await;
-    eq(
-        "stream read after reopen",
-        &io(
-            "read_stream",
-            journal
-                .read_stream(&s1, StreamRevision::EMPTY, usize::MAX)
-                .await,
-        )?,
-        &first.events,
-    )?;
-    eq(
-        "revision after two events",
-        &io("stream_revision", journal.stream_revision(&s1).await)?,
-        &rev(2),
-    )?;
-
-    let second = io(
-        "second append",
-        journal
-            .append(UnitOfWork::new(at(2_000)).with_stream(s1.clone(), rev(2), vec![event(3)]))
-            .await,
-    )?;
-    eq(
-        "the third event",
-        &second
-            .events
-            .iter()
-            .map(|e| (e.revision, e.recorded_at))
-            .collect::<Vec<_>>(),
-        &vec![(rev(3), at(2_000))],
-    )?;
-    eq(
-        "the whole stream",
-        &ids(&history(&journal).await?),
-        &vec![1, 2, 3],
-    )
-}
-
-async fn expected_revision_conflict<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    let s2 = stream("attempt-2");
-    io(
-        "seed append",
-        journal
-            .append(UnitOfWork::new(at(1_000)).with_stream(
-                s1.clone(),
-                StreamRevision::EMPTY,
-                vec![event(1), event(2)],
-            ))
-            .await,
-    )?;
-    let before = history(&journal).await?;
-
-    let attempts = [
-        (s1.clone(), StreamRevision::EMPTY, rev(2)),
-        (s1.clone(), rev(1), rev(2)),
-        (s1.clone(), rev(3), rev(2)),
-        (s2.clone(), rev(1), StreamRevision::EMPTY),
-    ];
-    for (target, expected, actual) in attempts {
-        let refused = journal
-            .append(
-                UnitOfWork::new(at(2_000))
-                    .with_stream(target.clone(), expected, vec![event(3)])
-                    .with_receipt(receipt(1, ReceiptStatus::Accepted, "{}")),
-            )
-            .await;
-        eq(
-            &format!("append to {target} expecting {expected}"),
-            &refused.map(|_| ()),
-            &Err(AppendError::WrongExpectedRevision {
-                stream: target,
-                expected,
-                actual,
-            }),
-        )?;
-        eq(
-            "events after a conflict",
-            &history(&journal).await?,
-            &before,
-        )?;
-        eq(
-            "receipt after a conflict",
-            &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
-            &None,
-        )?;
-    }
-
-    let journal = factory.reopen(journal).await;
-    eq("events after reopen", &history(&journal).await?, &before)?;
-    eq(
-        "revision of the conflicted stream",
-        &io("stream_revision", journal.stream_revision(&s1).await)?,
-        &rev(2),
-    )?;
-    eq(
-        "revision of the missing stream",
-        &io("stream_revision", journal.stream_revision(&s2).await)?,
-        &StreamRevision::EMPTY,
-    )?;
-    io(
-        "the refused unit at the right revision",
-        journal
-            .append(
-                UnitOfWork::new(at(3_000))
-                    .with_stream(s1.clone(), rev(2), vec![event(3)])
-                    .with_receipt(receipt(1, ReceiptStatus::Accepted, "{}")),
-            )
-            .await,
-    )?;
-    eq(
-        "revision after the retry",
-        &io("stream_revision", journal.stream_revision(&s1).await)?,
-        &rev(3),
-    )
-}
-
-async fn duplicate_event_id<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    let s2 = stream("attempt-2");
-    io(
-        "seed append",
-        journal
-            .append(UnitOfWork::new(at(1_000)).with_stream(
-                s1,
-                StreamRevision::EMPTY,
-                vec![event(1)],
-            ))
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    let before = history(&journal).await?;
-
-    let refused = journal
-        .append(UnitOfWork::new(at(2_000)).with_stream(
-            s2.clone(),
-            StreamRevision::EMPTY,
-            vec![event(2), event(1)],
-        ))
-        .await;
-    eq(
-        "append of a recorded event id",
-        &refused.map(|_| ()),
-        &Err(AppendError::DuplicateEventId(EventId::from_u128(1))),
-    )?;
-    eq(
-        "events after the refusal",
-        &history(&journal).await?,
-        &before,
-    )?;
-    eq(
-        "revision of the refused stream",
-        &io("stream_revision", journal.stream_revision(&s2).await)?,
-        &StreamRevision::EMPTY,
-    )?;
-
-    let journal = factory.reopen(journal).await;
-    io(
-        "the refused unit's fresh event alone",
-        journal
-            .append(UnitOfWork::new(at(3_000)).with_stream(
-                s2,
-                StreamRevision::EMPTY,
-                vec![event(2)],
-            ))
-            .await,
-    )
-    .map(|_| ())
-}
-
-/// What `all_or_nothing` reads to prove a refused unit left no trace.
-#[derive(Debug, PartialEq)]
-struct Trace {
-    events: Vec<RecordedEvent>,
-    s1: StreamRevision,
-    s2: StreamRevision,
-    receipt: Option<CommandReceipt>,
-    processed: Option<Millis>,
-    seeded: Option<OutboxRow>,
-    inserted: Option<OutboxRow>,
-    row: Option<Payload>,
-}
-
-async fn trace<J: Journal>(journal: &J) -> Result<Trace, String> {
-    Ok(Trace {
-        events: history(journal).await?,
-        s1: io(
-            "stream_revision",
-            journal.stream_revision(&stream("attempt-1")).await,
-        )?,
-        s2: io(
-            "stream_revision",
-            journal.stream_revision(&stream("attempt-2")).await,
-        )?,
-        receipt: io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
-        processed: io(
-            "processed_at",
-            journal.processed_at(&inbox("scaleset-1", "m-1")).await,
-        )?,
-        seeded: io(
-            "directive",
-            journal.directive(DirectiveId::from_u128(1)).await,
-        )?,
-        inserted: io(
-            "directive",
-            journal.directive(DirectiveId::from_u128(2)).await,
-        )?,
-        row: io(
-            "projection",
-            journal.projection(&projection_name(), "k").await,
-        )?,
-    })
-}
-
-async fn all_or_nothing<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    let s2 = stream("attempt-2");
-    io(
-        "seed append",
-        journal
-            .append(
-                UnitOfWork::new(at(1_000))
-                    .with_stream(s2.clone(), StreamRevision::EMPTY, vec![event(1)])
-                    .with_outbox(directive(1, 1_000)),
-            )
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    let before = trace(&journal).await?;
-
-    let whole = |s2_expected: u64, s2_event: u128, d1_from: OutboxStatus| {
-        UnitOfWork::new(at(2_000))
-            .with_stream(s1.clone(), StreamRevision::EMPTY, vec![event(10)])
-            .with_stream(s2.clone(), rev(s2_expected), vec![event(s2_event)])
-            .with_receipt(receipt(1, ReceiptStatus::Accepted, "{\"ok\":true}"))
-            .with_inbox(inbox("scaleset-1", "m-1"))
-            .with_outbox(directive(2, 2_000))
-            .with_outbox(transition(1, d1_from, OutboxStatus::Sent, 2_000))
-            .with_projection(row("k", Some("{\"v\":1}")))
-    };
-    let refusals = [
-        (
-            "a unit whose second stream conflicts",
-            whole(0, 11, OutboxStatus::Pending),
-            AppendError::WrongExpectedRevision {
-                stream: s2.clone(),
-                expected: StreamRevision::EMPTY,
-                actual: rev(1),
-            },
-        ),
-        (
-            "a unit whose last event id is recorded",
-            whole(1, 1, OutboxStatus::Pending),
-            AppendError::DuplicateEventId(EventId::from_u128(1)),
-        ),
-        (
-            "a unit whose last outbox write is stale",
-            whole(1, 11, OutboxStatus::Sent),
-            AppendError::OutboxStatusMismatch {
-                directive_id: DirectiveId::from_u128(1),
-                expected: OutboxStatus::Sent,
-                actual: OutboxStatus::Pending,
-            },
-        ),
-    ];
-    let mut journal = journal;
-    for (what, unit, error) in refusals {
-        eq(what, &journal.append(unit).await.map(|_| ()), &Err(error))?;
-        eq(
-            &format!("state after {what}"),
-            &trace(&journal).await?,
-            &before,
-        )?;
-        journal = factory.reopen(journal).await;
-        eq(
-            &format!("state after {what}, reopened"),
-            &trace(&journal).await?,
-            &before,
-        )?;
-    }
-
-    io(
-        "the whole unit",
-        journal.append(whole(1, 11, OutboxStatus::Pending)).await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    let after = trace(&journal).await?;
-    eq(
-        "events of the whole unit",
-        &ids(&after.events),
-        &vec![10, 1, 11],
-    )?;
-    eq("first stream after the whole unit", &after.s1, &rev(1))?;
-    eq("second stream after the whole unit", &after.s2, &rev(2))?;
-    eq(
-        "receipt of the whole unit",
-        &after.receipt,
-        &Some(receipt(1, ReceiptStatus::Accepted, "{\"ok\":true}")),
-    )?;
-    eq(
-        "inbox entry of the whole unit",
-        &after.processed,
-        &Some(at(2_000)),
-    )?;
-    eq(
-        "moved directive",
-        &after.seeded.map(|r| r.status),
-        &Some(OutboxStatus::Sent),
-    )?;
-    eq(
-        "inserted directive",
-        &after.inserted.map(|r| r.status),
-        &Some(OutboxStatus::Pending),
-    )?;
-    eq(
-        "projection row",
-        &after.row,
-        &Some(Payload::new("{\"v\":1}")),
-    )
-}
-
-async fn receipt_replay<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    let original = receipt(1, ReceiptStatus::Accepted, "{\"events\":1}");
-    io(
-        "the command's unit",
-        journal
-            .append(
-                UnitOfWork::new(at(1_000))
-                    .with_stream(s1.clone(), StreamRevision::EMPTY, vec![event(1)])
-                    .with_receipt(original.clone()),
-            )
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    eq(
-        "receipt after reopen",
-        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
-        &Some(original.clone()),
-    )?;
-
-    let replay = journal
-        .append(
-            UnitOfWork::new(at(2_000))
-                .with_stream(s1.clone(), StreamRevision::EMPTY, vec![event(2)])
-                .with_receipt(receipt(1, ReceiptStatus::Accepted, "{\"events\":2}")),
-        )
-        .await;
-    eq(
-        "repeat of the command with a stale revision",
-        &replay.map(|_| ()),
-        &Err(AppendError::DuplicateCommand(Box::new(original.clone()))),
-    )?;
-    eq(
-        "stream after the repeat",
-        &ids(&history(&journal).await?),
-        &vec![1],
-    )?;
-
-    let refusal = receipt(2, ReceiptStatus::Refused, "{\"code\":\"pool_draining\"}");
-    io(
-        "a refused command's receipt alone",
-        journal
-            .append(UnitOfWork::new(at(3_000)).with_receipt(refusal.clone()))
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    eq(
-        "first receipt after the second reopen",
-        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
-        &Some(original),
-    )?;
-    eq(
-        "refusal receipt after reopen",
-        &io("receipt", journal.receipt(CommandId::from_u128(2)).await)?,
-        &Some(refusal.clone()),
-    )?;
-    eq(
-        "repeat of the refused command",
-        &journal
-            .append(UnitOfWork::new(at(4_000)).with_receipt(receipt(
-                2,
-                ReceiptStatus::Accepted,
-                "{}",
-            )))
-            .await
-            .map(|_| ()),
-        &Err(AppendError::DuplicateCommand(Box::new(refusal))),
-    )?;
-    eq(
-        "receipt of a command that never ran",
-        &io("receipt", journal.receipt(CommandId::from_u128(3)).await)?,
-        &None,
-    )
-}
-
-async fn inbox_dedupe<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("scaleset-1");
-    let message = inbox("scaleset-1", "42");
-    io(
-        "the message's unit",
-        journal
-            .append(
-                UnitOfWork::new(at(1_000))
-                    .with_stream(s1.clone(), StreamRevision::EMPTY, vec![event(1)])
-                    .with_inbox(message.clone()),
-            )
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    eq(
-        "processed_at after reopen",
-        &io("processed_at", journal.processed_at(&message).await)?,
-        &Some(at(1_000)),
-    )?;
-
-    for (what, expected) in [("current", rev(1)), ("stale", StreamRevision::EMPTY)] {
-        let redelivery = journal
-            .append(
-                UnitOfWork::new(at(2_000))
-                    .with_stream(s1.clone(), expected, vec![event(2)])
-                    .with_inbox(message.clone()),
-            )
-            .await;
-        eq(
-            &format!("redelivery at the {what} revision"),
-            &redelivery.map(|_| ()),
-            &Err(AppendError::DuplicateMessage(message.clone())),
-        )?;
-        eq(
-            "events after a redelivery",
-            &ids(&history(&journal).await?),
-            &vec![1],
-        )?;
-    }
-    eq(
-        "processed_at after redeliveries",
-        &io("processed_at", journal.processed_at(&message).await)?,
-        &Some(at(1_000)),
-    )?;
-
-    let other_source = inbox("dp-host1", "42");
-    eq(
-        "the same id from another source before it is processed",
-        &io("processed_at", journal.processed_at(&other_source).await)?,
-        &None,
-    )?;
-    io(
-        "the same id from another source",
-        journal
-            .append(
-                UnitOfWork::new(at(3_000))
-                    .with_stream(s1, rev(1), vec![event(2)])
-                    .with_inbox(other_source.clone()),
-            )
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
-    eq(
-        "processed_at of the other source",
-        &io("processed_at", journal.processed_at(&other_source).await)?,
-        &Some(at(3_000)),
-    )
-}
-
-/// The legal moves from `Pending` that reach `status`.
-fn path_to(status: OutboxStatus) -> &'static [OutboxStatus] {
-    match status {
-        OutboxStatus::Pending => &[],
-        OutboxStatus::Sent => &[OutboxStatus::Sent],
-        OutboxStatus::Unknown => &[OutboxStatus::Sent, OutboxStatus::Unknown],
-        OutboxStatus::Done => &[OutboxStatus::Sent, OutboxStatus::Done],
-        OutboxStatus::Cancelled => &[OutboxStatus::Cancelled],
-    }
-}
-
-async fn move_one<J: Journal>(journal: &J, write: OutboxWrite) -> Result<(), AppendError> {
-    journal
-        .append(UnitOfWork::new(at(5_000)).with_outbox(write))
-        .await
-        .map(|_| ())
-}
-
-async fn outbox_status_transitions<F: JournalFactory>(factory: &F) -> Check {
-    use OutboxStatus::{Done, Pending, Sent, Unknown};
-
-    let journal = factory.fresh().await;
-    let d1 = DirectiveId::from_u128(1);
-    io("insert", move_one(&journal, directive(1, 1_000)).await)?;
-    let journal = factory.reopen(journal).await;
-    let stored = io("directive", journal.directive(d1).await)?
-        .ok_or_else(|| "an inserted directive is missing".to_owned())?;
-    eq("inserted status", &stored.status, &Pending)?;
-    eq("inserted attempts", &stored.attempts, &0)?;
-    eq(
-        "inserted attempt id",
-        &stored.attempt_id,
-        &AttemptId::from_u128(1_001),
-    )?;
-    eq(
-        "inserted generation",
-        &stored.generation,
-        &Generation::FIRST,
-    )?;
-    eq("inserted kind", &stored.kind.as_str(), &"clone_vm")?;
-    eq(
-        "inserted request",
-        &stored.request,
-        &Payload::new("{\"directive\":1}"),
-    )?;
-    eq(
-        "inserted next_attempt_at",
-        &stored.next_attempt_at,
-        &at(1_000),
-    )?;
-
-    eq(
-        "a second insert of the directive",
-        &move_one(&journal, directive(1, 9_000)).await,
-        &Err(AppendError::DuplicateDirective(d1)),
-    )?;
-    eq(
-        "a transition of an unknown directive",
-        &move_one(&journal, transition(9, Pending, Sent, 1)).await,
-        &Err(AppendError::UnknownDirective(DirectiveId::from_u128(9))),
-    )?;
-
-    let steps = [
-        (Pending, Sent, 2_000, 1),
-        (Sent, Pending, 6_000, 1),
-        (Pending, Sent, 7_000, 2),
-    ];
-    for (from, to, next, attempts) in steps {
-        io(
-            "a legal move",
-            move_one(&journal, transition(1, from, to, next)).await,
-        )?;
-        let moved = io("directive", journal.directive(d1).await)?;
-        eq(
-            &format!("row after {from} -> {to}"),
-            &moved.map(|r| (r.status, r.attempts, r.next_attempt_at)),
-            &Some((to, attempts, at(next))),
-        )?;
-    }
-    eq(
-        "a move from a stale status",
-        &move_one(&journal, transition(1, Pending, Sent, 1)).await,
-        &Err(AppendError::OutboxStatusMismatch {
-            directive_id: d1,
-            expected: Pending,
-            actual: Sent,
-        }),
-    )?;
-    io(
-        "sent to unknown",
-        move_one(&journal, transition(1, Sent, Unknown, 8_000)).await,
-    )?;
-    io(
-        "unknown to done",
-        move_one(&journal, transition(1, Unknown, Done, 9_000)).await,
-    )?;
-
-    let mut id = 100;
-    for from in OutboxStatus::ALL {
-        for to in OutboxStatus::ALL {
-            id += 1;
-            io("insert", move_one(&journal, directive(id, 1_000)).await)?;
-            let mut current = Pending;
-            for step in path_to(from) {
-                io(
-                    "a legal move on the way",
-                    move_one(&journal, transition(id, current, *step, 1_000)).await,
-                )?;
-                current = *step;
-            }
-            let outcome = move_one(&journal, transition(id, from, to, 1_000)).await;
-            let row = io(
-                "directive",
-                journal.directive(DirectiveId::from_u128(id)).await,
-            )?
-            .map(|r| r.status);
-            if from.allows(to) {
-                eq(&format!("legal move {from} -> {to}"), &outcome, &Ok(()))?;
-                eq(&format!("status after {from} -> {to}"), &row, &Some(to))?;
-            } else {
-                eq(
-                    &format!("illegal move {from} -> {to}"),
-                    &outcome,
-                    &Err(AppendError::IllegalOutboxTransition {
-                        directive_id: DirectiveId::from_u128(id),
-                        from,
-                        to,
-                    }),
-                )?;
-                eq(
-                    &format!("status after refused {from} -> {to}"),
-                    &row,
-                    &Some(from),
-                )?;
+/// Polls two futures of different types on the calling task until both are ready.
+pub async fn join2<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (Box::pin(a), Box::pin(b));
+    let (mut out_a, mut out_b) = (None, None);
+    poll_fn(|cx| {
+        if out_a.is_none()
+            && let Poll::Ready(v) = a.as_mut().poll(cx)
+        {
+            out_a = Some(v);
+        }
+        if out_b.is_none()
+            && let Poll::Ready(v) = b.as_mut().poll(cx)
+        {
+            out_b = Some(v);
+        }
+        match (out_a.take(), out_b.take()) {
+            (Some(x), Some(y)) => Poll::Ready((x, y)),
+            (x, y) => {
+                out_a = x;
+                out_b = y;
+                Poll::Pending
             }
         }
+    })
+    .await
+}
+
+/// Pending once, waking itself: lets the other futures of a join run.
+struct YieldNow(bool);
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
     }
-
-    let journal = factory.reopen(journal).await;
-    eq(
-        "first directive after reopen",
-        &io("directive", journal.directive(d1).await)?.map(|r| (r.status, r.attempts)),
-        &Some((Done, 2)),
-    )?;
-    io("insert", move_one(&journal, directive(2, 3_000)).await)?;
-    io("insert", move_one(&journal, directive(3, 2_000)).await)?;
-    let pending: Vec<_> = io("directives", journal.directives(Pending, 100).await)?
-        .into_iter()
-        .map(|r| (r.next_attempt_at.get(), r.directive_id.as_u128()))
-        .collect();
-    let mut expected = vec![(2_000, 3), (3_000, 2)];
-    expected.extend((0..25_usize).filter_map(|k| {
-        let (from, to) = (OutboxStatus::ALL[k / 5], OutboxStatus::ALL[k % 5]);
-        let last = if from.allows(to) { to } else { from };
-        (last == Pending).then_some((1_000, 101 + k as u128))
-    }));
-    expected.sort_unstable();
-    eq("pending rows by next_attempt_at", &pending, &expected)?;
-    eq(
-        "pending rows with a limit",
-        &io("directives", journal.directives(Pending, 2).await)?
-            .into_iter()
-            .map(|r| r.directive_id.as_u128())
-            .collect::<Vec<_>>(),
-        &expected
-            .iter()
-            .take(2)
-            .map(|(_, id)| *id)
-            .collect::<Vec<_>>(),
-    )
 }
 
-/// A unit that appends `event_id` to `stream` at `expected`, with a receipt, an inbox entry, a
-/// directive and a projection row all numbered `n`, so a loser's leftovers can be looked for.
-fn tagged_unit(n: u128, stream: &StreamId, expected: StreamRevision, event_id: u128) -> UnitOfWork {
-    UnitOfWork::new(at(5_000))
-        .with_stream(stream.clone(), expected, vec![event(event_id)])
-        .with_receipt(receipt(n, ReceiptStatus::Accepted, "{}"))
-        .with_inbox(inbox("scaleset-1", &n.to_string()))
-        .with_outbox(directive(n, 5_000))
-        .with_projection(row(&n.to_string(), Some("{}")))
+/// A unit numbered `n`: `event_id` on `s` at `expected`, with receipt `n`, inbox key `n` and a
+/// projection row `n`, so a loser's leftovers can be looked for with [`traces_of`].
+fn tagged(n: u128, s: &StreamId, expected: ExpectedRevision, event_id: u128) -> UnitOfWork {
+    appending(unit(5_000), s, expected, &[event_id])
+        .with_receipt(accepted(n, 1))
+        .with_inbox(key("scaleset-1", &n.to_string()))
+        .with_projection(row(s, &n.to_string(), Some("{}")))
 }
 
-/// Whether anything of [`tagged_unit`] `n` (event `event_id`) is in the journal, part by part.
-async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[bool; 5], String> {
+/// Whether the event, receipt, inbox entry and row of [`tagged`] unit `n` are stored.
+async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[bool; 4], String> {
     Ok([
         io(
             "lookup_event",
@@ -1049,17 +733,11 @@ async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[
         .is_some(),
         io("receipt", journal.receipt(CommandId::from_u128(n)).await)?.is_some(),
         io(
-            "processed_at",
+            "inbox_contains",
             journal
-                .processed_at(&inbox("scaleset-1", &n.to_string()))
+                .inbox_contains(&key("scaleset-1", &n.to_string()))
                 .await,
-        )?
-        .is_some(),
-        io(
-            "directive",
-            journal.directive(DirectiveId::from_u128(n)).await,
-        )?
-        .is_some(),
+        )?,
         io(
             "projection",
             journal.projection(&projection_name(), &n.to_string()).await,
@@ -1068,61 +746,1740 @@ async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[
     ])
 }
 
-async fn racing_writers_on_one_stream<F: JournalFactory>(factory: &F) -> Check {
-    let mut journal = factory.fresh().await;
+/// Checks that exactly one of two racing outcomes committed and the other is `lost`, then
+/// returns `(winner index, loser index)`.
+fn one_winner(
+    what: &str,
+    outcomes: &[Result<Appended, AppendError>],
+    lost: impl Fn(usize) -> AppendError,
+) -> Result<(usize, usize), String> {
+    let (winner, loser) = match outcomes {
+        [Ok(_), Err(_)] => (0, 1),
+        [Err(_), Ok(_)] => (1, 0),
+        other => {
+            return Err(format!(
+                "{what}: exactly one of two racing units must commit, got {other:?}"
+            ));
+        }
+    };
+    let got = outcomes
+        .get(loser)
+        .cloned()
+        .map(|o| o.map(|_| ()))
+        .unwrap_or(Ok(()));
+    eq(
+        &format!("{what}: the loser's answer"),
+        &got,
+        &Err(lost(loser)),
+    )?;
+    Ok((winner, loser))
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-01 .. JC-06: stream heads and expected revisions
+
+async fn absent_stream<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
     let s1 = stream("attempt-1");
-    io(
-        "seed append",
+    eq(
+        "head of an absent stream",
+        &io("head", journal.head(&s1).await)?,
+        &None,
+    )?;
+    eq(
+        "events of an absent stream",
+        &io("read_stream", journal.read_stream(&s1, None, None).await)?,
+        &Vec::new(),
+    )?;
+    eq(
+        "streams of an empty journal",
+        &all_streams(&journal).await?,
+        &Vec::new(),
+    )?;
+    eq(
+        "kinds of an empty journal",
+        &io("stored_kinds", journal.stored_kinds().await)?,
+        &Vec::new(),
+    )?;
+    eq(
+        "an id in an empty journal",
+        &io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(1)).await,
+        )?,
+        &None,
+    )?;
+    eq(
+        "a receipt in an empty journal",
+        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
+        &None,
+    )?;
+    eq(
+        "an inbox key in an empty journal",
+        &io(
+            "inbox_contains",
+            journal.inbox_contains(&key("scaleset-1", "1")).await,
+        )?,
+        &false,
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "head after reopen",
+        &io("head", journal.head(&s1).await)?,
+        &None,
+    )
+}
+
+async fn consecutive_revisions<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    let mut other = event(3);
+    other.kind = kind("contract_other_recorded", 3);
+    let written = io(
+        "first append",
         journal
-            .append(UnitOfWork::new(at(1_000)).with_stream(
+            .append(unit(1_000).with_append(
                 s1.clone(),
-                StreamRevision::EMPTY,
-                vec![event(1)],
+                aggregate("attempt"),
+                NEW,
+                vec![event(1), event(2), other.clone()],
             ))
             .await,
     )?;
-    for round in 0..8_u64 {
-        let expected = rev(round + 1);
-        let (a, b) = (u128::from(round) * 2 + 10, u128::from(round) * 2 + 11);
-        let outcomes = join_all(vec![
-            journal.append(tagged_unit(a, &s1, expected, a)),
-            journal.append(tagged_unit(b, &s1, expected, b)),
-        ])
-        .await;
-        let lost: Result<(), AppendError> = Err(AppendError::WrongExpectedRevision {
+    eq(
+        "what the append reports",
+        &written,
+        &Appended {
+            streams: vec![appended(&s1, 0, &[1, 2, 3])],
+        },
+    )?;
+    let journal = factory.reopen(journal).await;
+    let read = io("read_stream", journal.read_stream(&s1, None, None).await)?;
+    eq(
+        "revisions from 0",
+        &read.iter().map(|e| e.revision).collect::<Vec<_>>(),
+        &vec![rev(0), rev(1), rev(2)],
+    )?;
+    let third = read
+        .get(2)
+        .ok_or_else(|| "the stream holds fewer than three events".to_owned())?;
+    eq(
+        "the third event as recorded",
+        third,
+        &RecordedEvent {
             stream: s1.clone(),
-            expected,
-            actual: rev(round + 2),
-        });
-        let (winner, loser) = match (&outcomes[0], &outcomes[1]) {
-            (Ok(_), refused) => (a, (b, refused)),
-            (refused, Ok(_)) => (b, (a, refused)),
-            (first, second) => {
-                return Err(format!(
-                    "round {round}: no writer committed: {first:?} and {second:?}"
-                ));
-            }
-        };
+            revision: rev(2),
+            event_id: other.event_id,
+            kind: other.kind,
+            payload: other.payload,
+            recorded_at: Millis::new(1_000),
+        },
+    )?;
+    eq(
+        "the head",
+        &io("head", journal.head(&s1).await)?,
+        &Some(StreamHead {
+            stream: s1.clone(),
+            revision: rev(2),
+            aggregate: aggregate("attempt"),
+            epoch: 1,
+        }),
+    )
+}
+
+async fn continues_from_head<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    io(
+        "seed",
+        journal
+            .append(appending(unit(1_000), &s1, NEW, &[1, 2]))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let second = io(
+        "second append",
+        journal
+            .append(appending(unit(2_000), &s1, at(1), &[3, 4]))
+            .await,
+    )?;
+    eq(
+        "the second append",
+        &second.streams,
+        &vec![appended(&s1, 2, &[3, 4])],
+    )?;
+    let journal = factory.reopen(journal).await;
+    let read = |after: Option<u64>, through: Option<u64>| {
+        journal.read_stream(&s1, after.map(rev), through.map(rev))
+    };
+    eq(
+        "the whole stream",
+        &ids(&io("read_stream", read(None, None).await)?),
+        &vec![1, 2, 3, 4],
+    )?;
+    eq(
+        "after 1",
+        &ids(&io("read_stream", read(Some(1), None).await)?),
+        &vec![3, 4],
+    )?;
+    eq(
+        "through 1",
+        &ids(&io("read_stream", read(None, Some(1)).await)?),
+        &vec![1, 2],
+    )?;
+    eq(
+        "after 0 through 2",
+        &ids(&io("read_stream", read(Some(0), Some(2)).await)?),
+        &vec![2, 3],
+    )?;
+    eq(
+        "after the head",
+        &ids(&io("read_stream", read(Some(3), None).await)?),
+        &Vec::new(),
+    )?;
+    eq(
+        "through below after",
+        &ids(&io("read_stream", read(Some(2), Some(1)).await)?),
+        &Vec::new(),
+    )?;
+    eq(
+        "the second unit's recorded_at",
+        &io("read_stream", read(Some(1), None).await)?
+            .iter()
+            .map(|e| e.recorded_at)
+            .collect::<Vec<_>>(),
+        &vec![Millis::new(2_000); 2],
+    )
+}
+
+/// The probe of the expected-revision cases: two streams and everything [`tagged`] 9 writes.
+fn revision_probe() -> Probe {
+    Probe {
+        streams: vec![stream("attempt-1"), stream("attempt-2")],
+        commands: vec![9],
+        keys: vec![key("scaleset-1", "9")],
+        events: vec![1, 2, 30],
+        rows: vec!["9".to_owned()],
+    }
+}
+
+/// Refuses each of `attempts` with `WrongExpectedRevision` and checks nothing was written.
+async fn refuse_revisions<F: JournalFactory>(
+    factory: &F,
+    attempts: &[(StreamId, ExpectedRevision, Option<StreamRevision>)],
+) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    io(
+        "seed",
+        journal
+            .append(appending(unit(1_000), &s1, NEW, &[1, 2]))
+            .await,
+    )?;
+    let probe = revision_probe();
+    let before = observe(&journal, &probe).await?;
+    let mut journal = journal;
+    for (target, expected, actual) in attempts {
+        let mut refused_unit = tagged(9, target, *expected, 30);
+        if let Some(first) = refused_unit.appends.first_mut() {
+            first.events.push(NewEvent {
+                kind: kind("contract_refused_recorded", 1),
+                ..event(31)
+            });
+        }
         eq(
-            &format!("round {round}: the losing writer's answer"),
-            &loser.1.clone().map(|_| ()),
-            &lost,
+            &format!("an append to {target} expecting {expected}"),
+            &journal.append(refused_unit).await.map(|_| ()),
+            &Err(AppendError::WrongExpectedRevision {
+                stream: target.clone(),
+                expected: *expected,
+                actual: *actual,
+            }),
+        )?;
+        eq(
+            &format!("the journal after refusing {target} at {expected}"),
+            &observe(&journal, &probe).await?,
+            &before,
         )?;
         journal = factory.reopen(journal).await;
         eq(
-            &format!("round {round}: the stream head"),
-            &io("stream_revision", journal.stream_revision(&s1).await)?,
-            &rev(round + 2),
+            "the journal after reopen",
+            &observe(&journal, &probe).await?,
+            &before,
+        )?;
+    }
+    io(
+        "the unit at the right revision",
+        journal.append(tagged(9, &s1, at(1), 30)).await,
+    )?;
+    eq(
+        "the head after the retry",
+        &head_revision(&journal, &s1).await?,
+        &Some(rev(2)),
+    )
+}
+
+async fn stale_expected_revision<F: JournalFactory>(factory: &F) -> Check {
+    let s1 = stream("attempt-1");
+    refuse_revisions(factory, &[(s1.clone(), at(0), Some(rev(1)))]).await
+}
+
+async fn ahead_expected_revision<F: JournalFactory>(factory: &F) -> Check {
+    let s1 = stream("attempt-1");
+    refuse_revisions(
+        factory,
+        &[
+            (s1.clone(), at(2), Some(rev(1))),
+            (s1.clone(), at(9), Some(rev(1))),
+        ],
+    )
+    .await
+}
+
+async fn no_stream_mismatch<F: JournalFactory>(factory: &F) -> Check {
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    refuse_revisions(
+        factory,
+        &[(s1.clone(), NEW, Some(rev(1))), (s2.clone(), at(0), None)],
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-07 .. JC-11: identities, shape, order, atomicity, read sets
+
+async fn duplicate_event_id<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s1, NEW, &[1])).await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        events: vec![1, 2],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    eq(
+        "a unit carrying an id stored on another stream",
+        &journal
+            .append(appending(unit(2_000), &s2, NEW, &[2, 1]))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::DuplicateEventId(EventId::from_u128(1))),
+    )?;
+    eq(
+        "the journal after the refusal",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    let journal = factory.reopen(journal).await;
+    io(
+        "the refused unit's fresh event alone",
+        journal.append(appending(unit(3_000), &s2, NEW, &[2])).await,
+    )?;
+    eq(
+        "where the stored id still lives",
+        &io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(1)).await,
+        )?,
+        &Some(EventLocation {
+            stream: s1,
+            revision: rev(0),
+        }),
+    )
+}
+
+async fn malformed_unit<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s1, NEW, &[1])).await,
+    )?;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1],
+        keys: vec![key("scaleset-1", "1")],
+        events: vec![2, 3],
+        rows: vec!["a".to_owned()],
+    };
+    let before = observe(&journal, &probe).await?;
+    let extras = |u: UnitOfWork| {
+        u.with_receipt(accepted(1, 1))
+            .with_inbox(key("scaleset-1", "1"))
+    };
+    let mut bad_type = event(2);
+    bad_type.kind.event_type = "ContractFact".to_owned();
+    let cases = [
+        (
+            unit(2_000).with_read(s1.clone(), at(0)),
+            MalformedUnit::Empty,
+        ),
+        (
+            extras(unit(2_000).with_append(s2.clone(), aggregate("attempt"), NEW, Vec::new())),
+            MalformedUnit::EmptyAppend,
+        ),
+        (
+            extras(appending(
+                appending(unit(2_000), &s1, at(0), &[2]),
+                &s1,
+                at(0),
+                &[3],
+            )),
+            MalformedUnit::DuplicateStream,
+        ),
+        (
+            extras(appending(unit(2_000), &s2, NEW, &[2]).with_read(s2.clone(), NEW)),
+            MalformedUnit::DuplicateStream,
+        ),
+        (
+            extras(appending(unit(2_000), &s1, at(0), &[2, 2])),
+            MalformedUnit::DuplicateEventId,
+        ),
+        (
+            extras(appending(
+                unit(2_000),
+                &s1,
+                ExpectedRevision::Exactly(rev(u64::MAX)),
+                &[2],
+            )),
+            MalformedUnit::RevisionOutOfRange,
+        ),
+        (
+            extras(unit(2_000).with_append(s2.clone(), aggregate("attempt"), NEW, vec![bad_type])),
+            MalformedUnit::InvalidEventType,
+        ),
+        (
+            unit(2_000)
+                .with_receipt(refusal(1, 1, "pool_draining"))
+                .with_inbox(key("scaleset-1", "1")),
+            MalformedUnit::RefusalNotBound,
+        ),
+        (
+            extras(
+                appending(unit(2_000), &s2, NEW, &[2])
+                    .with_projection(row(&s2, "a", Some("{}")))
+                    .with_projection(row(&s2, "a", None)),
+            ),
+            MalformedUnit::DuplicateProjectionRow,
+        ),
+        (
+            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(
+                &s1,
+                "a",
+                Some("{}"),
+            ))),
+            MalformedUnit::ProjectionOutsideUnit,
+        ),
+        (
+            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(
+                &s2,
+                "",
+                Some("{}"),
+            ))),
+            MalformedUnit::InvalidProjectionKey,
+        ),
+    ];
+    for (bad, malformed) in cases {
+        eq(
+            &format!("a unit that is {malformed}"),
+            &journal.append(bad).await.map(|_| ()),
+            &Err(AppendError::Malformed(malformed)),
+        )?;
+    }
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the journal after malformed units",
+        &observe(&journal, &probe).await?,
+        &before,
+    )
+}
+
+/// The JC-09 unit that breaks every rule from `stage` on, in reporting order: 1 shape, 2 epoch
+/// above the build, 3 receipt, 4 inbox, 5 event ids, 6 revisions, 7 stream epoch. Stage 8
+/// breaks none.
+fn order_unit(stage: u8, replay: bool) -> UnitOfWork {
+    let (s0, s1, s3, s4) = (
+        stream("attempt-0"),
+        stream("attempt-1"),
+        stream("attempt-3"),
+        stream("attempt-4"),
+    );
+    let breaks = |rule: u8| stage <= rule;
+    let s1_ids: &[u128] = if breaks(5) { &[21, 7, 1] } else { &[21] };
+    let mut u = appending(
+        unit(2_000),
+        &s1,
+        if breaks(6) { at(5) } else { at(0) },
+        s1_ids,
+    )
+    .with_read(s0.clone(), if breaks(6) { NEW } else { at(0) });
+    if breaks(7) {
+        u = appending(u, &s3, at(0), &[23]);
+    }
+    if breaks(2) {
+        let mut newer = event(24);
+        newer.required_epoch = 2;
+        u = u.with_append(s4, aggregate("attempt"), NEW, vec![newer]);
+    }
+    if breaks(1) {
+        u = u.with_read(s1, at(0));
+    }
+    u = u.with_receipt(if breaks(3) {
+        accepted(1, if replay { 1 } else { 2 })
+    } else {
+        accepted(2, 1)
+    });
+    u.with_inbox(if breaks(4) {
+        key("scaleset-1", "m1")
+    } else {
+        key("scaleset-1", "m2")
+    })
+}
+
+async fn refusal_order<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s0, s1, s3) = (
+        stream("attempt-0"),
+        stream("attempt-1"),
+        stream("attempt-3"),
+    );
+    io(
+        "seed attempt-0",
+        journal.append(appending(unit(1_000), &s0, NEW, &[7])).await,
+    )?;
+    let first = io(
+        "seed attempt-1",
+        journal
+            .append(
+                appending(unit(1_000), &s1, NEW, &[1])
+                    .with_receipt(accepted(1, 1))
+                    .with_inbox(key("scaleset-1", "m1")),
+            )
+            .await,
+    )?;
+    let mut newer = event(3);
+    newer.required_epoch = 2;
+    io(
+        "seed attempt-3 at epoch 2",
+        journal
+            .append(UnitOfWork::new(Millis::new(1_000), build(2)).with_append(
+                s3.clone(),
+                aggregate("attempt"),
+                NEW,
+                vec![newer],
+            ))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let stored = CommandReceipt {
+        command_id: CommandId::from_u128(1),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Accepted(first),
+    };
+    let expected = [
+        AppendError::Malformed(MalformedUnit::DuplicateStream),
+        AppendError::EpochAboveBuild {
+            stream: stream("attempt-4"),
+        },
+        AppendError::CommandIdReused {
+            command_id: CommandId::from_u128(1),
+        },
+        AppendError::DuplicateMessage(key("scaleset-1", "m1")),
+        AppendError::DuplicateEventId(EventId::from_u128(1)),
+        AppendError::WrongExpectedRevision {
+            stream: s0,
+            expected: NEW,
+            actual: Some(rev(0)),
+        },
+        AppendError::StreamEpochUnsupported {
+            stream: s3,
+            epoch: 2,
+        },
+    ];
+    for (stage, want) in (1_u8..).zip(expected) {
+        eq(
+            &format!("a unit breaking rules {stage} to 7"),
+            &journal.append(order_unit(stage, false)).await.map(|_| ()),
+            &Err(want),
+        )?;
+    }
+    eq(
+        "a replay breaking every later rule",
+        &journal.append(order_unit(3, true)).await.map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(stored))),
+    )?;
+    io(
+        "the unit that breaks none",
+        journal.append(order_unit(8, false)).await,
+    )
+    .map(|_| ())
+}
+
+async fn multi_stream_all_or_nothing<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s2, NEW, &[1])).await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1],
+        keys: vec![key("scaleset-1", "m-1")],
+        events: vec![10, 11],
+        rows: vec!["k1".to_owned(), "k2".to_owned()],
+    };
+    let before = observe(&journal, &probe).await?;
+    let whole = |s2_expected: ExpectedRevision, s2_event: u128| {
+        appending(
+            appending(unit(2_000), &s1, NEW, &[10]),
+            &s2,
+            s2_expected,
+            &[s2_event],
+        )
+        .with_receipt(accepted(1, 1))
+        .with_inbox(key("scaleset-1", "m-1"))
+        .with_projection(row(&s1, "k1", Some("{\"v\":1}")))
+        .with_projection(row(&s2, "k2", Some("{\"v\":2}")))
+    };
+    let refusals = [
+        (
+            "a unit whose second stream conflicts",
+            whole(NEW, 11),
+            AppendError::WrongExpectedRevision {
+                stream: s2.clone(),
+                expected: NEW,
+                actual: Some(rev(0)),
+            },
+        ),
+        (
+            "a unit whose last event id is stored",
+            whole(at(0), 1),
+            AppendError::DuplicateEventId(EventId::from_u128(1)),
+        ),
+    ];
+    let mut journal = journal;
+    for (what, refused_unit, error) in refusals {
+        eq(
+            what,
+            &journal.append(refused_unit).await.map(|_| ()),
+            &Err(error),
+        )?;
+        eq(
+            &format!("the journal after {what}"),
+            &observe(&journal, &probe).await?,
+            &before,
+        )?;
+        journal = factory.reopen(journal).await;
+        eq(
+            &format!("the journal after {what}, reopened"),
+            &observe(&journal, &probe).await?,
+            &before,
+        )?;
+    }
+    let written = io("the whole unit", journal.append(whole(at(0), 11)).await)?;
+    eq(
+        "what the whole unit appended",
+        &written.streams,
+        &vec![appended(&s1, 0, &[10]), appended(&s2, 1, &[11])],
+    )?;
+    let journal = factory.reopen(journal).await;
+    let after = observe(&journal, &probe).await?;
+    eq(
+        "heads after the whole unit",
+        &after
+            .heads
+            .iter()
+            .map(|h| h.as_ref().map(|h| h.revision))
+            .collect::<Vec<_>>(),
+        &vec![Some(rev(0)), Some(rev(1))],
+    )?;
+    eq(
+        "the receipt of the whole unit",
+        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.map(|r| r.outcome),
+        &Some(ReceiptOutcome::Accepted(written)),
+    )?;
+    eq(
+        "the inbox entry of the whole unit",
+        &after.inbox,
+        &vec![true],
+    )?;
+    eq(
+        "the rows of the whole unit",
+        &after.rows,
+        &vec![
+            Some(Payload::new("{\"v\":1}")),
+            Some(Payload::new("{\"v\":2}")),
+        ],
+    )
+}
+
+async fn read_conditions<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (pool, a1, a2, a3) = (
+        stream("pool-1"),
+        stream("attempt-1"),
+        stream("attempt-2"),
+        stream("attempt-3"),
+    );
+    io(
+        "seed the pool",
+        journal
+            .append(appending(unit(1_000), &pool, NEW, &[1]))
+            .await,
+    )?;
+    let decided = |s: &StreamId, read: ExpectedRevision, id: u128| {
+        appending(unit(2_000), s, NEW, &[id]).with_read(pool.clone(), read)
+    };
+    io(
+        "a decision on the pool as read",
+        journal.append(decided(&a1, at(0), 10)).await,
+    )?;
+    eq(
+        "a read writes no event and moves no head",
+        &(
+            head_revision(&journal, &pool).await?,
+            ids(&io(
+                "read_stream",
+                journal.read_stream(&pool, None, None).await,
+            )?),
+        ),
+        &(Some(rev(0)), vec![1]),
+    )?;
+    io(
+        "the pool moves",
+        journal
+            .append(appending(unit(3_000), &pool, at(0), &[2]))
+            .await,
+    )?;
+    eq(
+        "a decision on the pool before it moved",
+        &journal.append(decided(&a2, at(0), 11)).await.map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: pool.clone(),
+            expected: at(0),
+            actual: Some(rev(1)),
+        }),
+    )?;
+    eq(
+        "the refused decision's stream",
+        &head_revision(&journal, &a2).await?,
+        &None,
+    )?;
+    let absent = stream("pool-2");
+    let on_absent = |s: &StreamId, id: u128| {
+        appending(unit(4_000), s, NEW, &[id]).with_read(absent.clone(), NEW)
+    };
+    io(
+        "a decision on an absent pool",
+        journal.append(on_absent(&a2, 12)).await,
+    )?;
+    io(
+        "the pool is created",
+        journal
+            .append(appending(unit(5_000), &absent, NEW, &[3]))
+            .await,
+    )?;
+    eq(
+        "a decision on the pool before its creation",
+        &journal.append(on_absent(&a3, 13)).await.map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: absent,
+            expected: NEW,
+            actual: Some(rev(0)),
+        }),
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the refused decision's stream after reopen",
+        &head_revision(&journal, &a3).await?,
+        &None,
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-12 .. JC-15, JC-28: receipts and the inbox
+
+async fn receipt_replay<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    let first = io(
+        "the command's unit",
+        journal
+            .append(appending(unit(1_000), &s1, NEW, &[1, 2]).with_receipt(accepted(1, 1)))
+            .await,
+    )?;
+    io(
+        "another command moves the stream",
+        journal
+            .append(appending(unit(2_000), &s1, at(1), &[3]))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let stored = CommandReceipt {
+        command_id: CommandId::from_u128(1),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Accepted(first),
+    };
+    eq(
+        "the stored receipt",
+        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
+        &Some(stored.clone()),
+    )?;
+    let probe = Probe {
+        streams: vec![s1.clone()],
+        commands: vec![1, 2],
+        events: vec![4, 5],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    for (what, expected) in [("its first", NEW), ("the current", at(2))] {
+        eq(
+            &format!("a repeat of the command at {what} revision"),
+            &journal
+                .append(appending(unit(3_000), &s1, expected, &[4]).with_receipt(accepted(1, 1)))
+                .await
+                .map(|_| ()),
+            &Err(AppendError::CommandReplayed(Box::new(stored.clone()))),
+        )?;
+    }
+    eq(
+        "the journal after the repeats",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    io(
+        "an accepted command with no event",
+        journal
+            .append(unit(4_000).with_receipt(accepted(2, 1)))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let empty = CommandReceipt {
+        command_id: CommandId::from_u128(2),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Accepted(Appended::default()),
+    };
+    eq(
+        "a repeat of the command with no event",
+        &journal
+            .append(appending(unit(5_000), &s1, at(2), &[5]).with_receipt(accepted(2, 1)))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(empty))),
+    )?;
+    eq(
+        "the stream after every repeat",
+        &head_revision(&journal, &s1).await?,
+        &Some(rev(2)),
+    )
+}
+
+async fn command_id_reused<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "an accepted command",
+        journal
+            .append(appending(unit(1_000), &s1, NEW, &[1]).with_receipt(accepted(1, 1)))
+            .await,
+    )?;
+    io(
+        "a refused command",
+        journal
+            .append(unit(1_000).with_read(s2.clone(), NEW).with_receipt(refusal(
+                2,
+                1,
+                "pool_draining",
+            )))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1, 2],
+        events: vec![3, 4],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    let reuses = [
+        (
+            "the accepted command's id with another intent",
+            appending(unit(2_000), &s1, at(0), &[3]).with_receipt(accepted(1, 2)),
+            1,
+        ),
+        (
+            "the refused command's id with another intent at its revision",
+            appending(unit(2_000), &s2, NEW, &[4]).with_receipt(accepted(2, 2)),
+            2,
+        ),
+    ];
+    for (what, reuse, command) in reuses {
+        eq(
+            what,
+            &journal.append(reuse).await.map(|_| ()),
+            &Err(AppendError::CommandIdReused {
+                command_id: CommandId::from_u128(command),
+            }),
+        )?;
+    }
+    io(
+        "the refused command's stream moves",
+        journal.append(appending(unit(3_000), &s2, NEW, &[5])).await,
+    )?;
+    eq(
+        "the refused command's id with another intent after its stream moved",
+        &journal
+            .append(appending(unit(4_000), &s2, at(0), &[4]).with_receipt(accepted(2, 2)))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::CommandIdReused {
+            command_id: CommandId::from_u128(2),
+        }),
+    )?;
+    eq(
+        "the receipts after the reuses",
+        &observe(&journal, &probe).await?.receipts,
+        &before.receipts,
+    )
+}
+
+async fn store_refusal_leaves_no_receipt<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s1, NEW, &[1])).await,
+    )?;
+    let command = || accepted(5, 1);
+    eq(
+        "a command refused for its revision",
+        &journal
+            .append(appending(unit(2_000), &s1, NEW, &[2]).with_receipt(command()))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: s1.clone(),
+            expected: NEW,
+            actual: Some(rev(0)),
+        }),
+    )?;
+    eq(
+        "a command refused for an identity",
+        &journal
+            .append(appending(unit(2_000), &s2, NEW, &[1]).with_receipt(command()))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::DuplicateEventId(EventId::from_u128(1))),
+    )?;
+    must_inject(factory, &journal, InjectedFault::Busy).await?;
+    eq(
+        "a command refused as busy",
+        &journal
+            .append(appending(unit(2_000), &s1, at(0), &[2]).with_receipt(command()))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::Busy),
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the receipt after store refusals",
+        &io("receipt", journal.receipt(CommandId::from_u128(5)).await)?,
+        &None,
+    )?;
+    io(
+        "the same command, accepted later",
+        journal
+            .append(appending(unit(3_000), &s1, at(0), &[2]).with_receipt(command()))
+            .await,
+    )?;
+    io(
+        "a domain refusal",
+        journal
+            .append(
+                unit(4_000)
+                    .with_read(s1.clone(), at(1))
+                    .with_receipt(refusal(6, 1, "pool_draining")),
+            )
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the domain refusal's receipt",
+        &io("receipt", journal.receipt(CommandId::from_u128(6)).await)?.map(|r| r.outcome),
+        &Some(ReceiptOutcome::Refused {
+            bound: ReadCondition {
+                stream: s1.clone(),
+                expected: at(1),
+            },
+            rejection: rejection("pool_draining"),
+        }),
+    )?;
+    eq(
+        "the refused command's stream",
+        &head_revision(&journal, &s1).await?,
+        &Some(rev(1)),
+    )
+}
+
+async fn inbox_dedupe<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("scaleset-1"), stream("scaleset-2"));
+    let message = key("scaleset-1", "42");
+    io(
+        "the message's unit",
+        journal
+            .append(appending(unit(1_000), &s1, NEW, &[1]).with_inbox(message.clone()))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the consumed key",
+        &io("inbox_contains", journal.inbox_contains(&message).await)?,
+        &true,
+    )?;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        keys: vec![message.clone()],
+        events: vec![2],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    for (what, s, expected) in [
+        ("at the current revision", &s1, at(0)),
+        ("at a stale revision", &s1, NEW),
+        ("on another stream", &s2, NEW),
+    ] {
+        eq(
+            &format!("a redelivery {what}"),
+            &journal
+                .append(appending(unit(2_000), s, expected, &[2]).with_inbox(message.clone()))
+                .await
+                .map(|_| ()),
+            &Err(AppendError::DuplicateMessage(message.clone())),
+        )?;
+    }
+    eq(
+        "the journal after redeliveries",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    let other_source = key("dp-host1", "42");
+    eq(
+        "the same id from another source, before it is consumed",
+        &io(
+            "inbox_contains",
+            journal.inbox_contains(&other_source).await,
+        )?,
+        &false,
+    )?;
+    io(
+        "a unit that only consumes a message",
+        journal
+            .append(unit(3_000).with_inbox(other_source.clone()))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the inbox-only unit's key",
+        &io(
+            "inbox_contains",
+            journal.inbox_contains(&other_source).await,
+        )?,
+        &true,
+    )?;
+    eq(
+        "streams after the inbox-only unit",
+        &all_streams(&journal).await?.len(),
+        &1,
+    )?;
+    eq(
+        "a redelivery of the inbox-only message",
+        &journal
+            .append(unit(4_000).with_inbox(other_source.clone()))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::DuplicateMessage(other_source)),
+    )
+}
+
+async fn refusal_receipts<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s1, NEW, &[1])).await,
+    )?;
+    let refused_at = |expected: ExpectedRevision| {
+        unit(2_000)
+            .with_read(s1.clone(), expected)
+            .with_receipt(refusal(1, 1, "pool_draining"))
+    };
+    io(
+        "a refusal at revision 0",
+        journal.append(refused_at(at(0))).await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let recorded = CommandReceipt {
+        command_id: CommandId::from_u128(1),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Refused {
+            bound: ReadCondition {
+                stream: s1.clone(),
+                expected: at(0),
+            },
+            rejection: rejection("pool_draining"),
+        },
+    };
+    for (what, repeat) in [
+        ("the same refusal", refused_at(at(0))),
+        (
+            "an acceptance",
+            appending(unit(3_000), &s1, at(0), &[2]).with_receipt(accepted(1, 1)),
+        ),
+    ] {
+        eq(
+            &format!("a repeat as {what} while the stream is at revision 0"),
+            &journal.append(repeat).await.map(|_| ()),
+            &Err(AppendError::CommandReplayed(Box::new(recorded.clone()))),
+        )?;
+    }
+    eq(
+        "the stream after the replays",
+        &head_revision(&journal, &s1).await?,
+        &Some(rev(0)),
+    )?;
+    io(
+        "another command moves the stream",
+        journal
+            .append(appending(unit(4_000), &s1, at(0), &[3]))
+            .await,
+    )?;
+    eq(
+        "a refusal decided before the stream moved, committed after",
+        &journal
+            .append(
+                unit(5_000)
+                    .with_read(s1.clone(), at(0))
+                    .with_receipt(refusal(2, 1, "pool_draining")),
+            )
+            .await
+            .map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: s1.clone(),
+            expected: at(0),
+            actual: Some(rev(1)),
+        }),
+    )?;
+    eq(
+        "the receipt of the refusal that lost its stream",
+        &io("receipt", journal.receipt(CommandId::from_u128(2)).await)?,
+        &None,
+    )?;
+    io(
+        "the repeat re-decided as a refusal at revision 1",
+        journal.append(refused_at(at(1))).await,
+    )?;
+    eq(
+        "the refusal receipt, now bound to revision 1",
+        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.map(|r| r.outcome),
+        &Some(ReceiptOutcome::Refused {
+            bound: ReadCondition {
+                stream: s1.clone(),
+                expected: at(1),
+            },
+            rejection: rejection("pool_draining"),
+        }),
+    )?;
+    io(
+        "the stream moves again",
+        journal
+            .append(appending(unit(6_000), &s1, at(1), &[4]))
+            .await,
+    )?;
+    let accepted_now = io(
+        "the repeat re-decided as an acceptance",
+        journal
+            .append(appending(unit(7_000), &s1, at(2), &[5]).with_receipt(accepted(1, 1)))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let replaced = CommandReceipt {
+        outcome: ReceiptOutcome::Accepted(accepted_now),
+        ..recorded
+    };
+    eq(
+        "the receipt the acceptance replaced the refusal with",
+        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
+        &Some(replaced.clone()),
+    )?;
+    eq(
+        "a later repeat as a refusal at the current revision",
+        &journal.append(refused_at(at(3))).await.map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(replaced))),
+    )?;
+    io(
+        "a refusal on an absent stream",
+        journal
+            .append(
+                unit(8_000)
+                    .with_read(s2.clone(), NEW)
+                    .with_receipt(refusal(3, 1, "no_pool")),
+            )
+            .await,
+    )?;
+    io(
+        "the absent stream is created",
+        journal.append(appending(unit(9_000), &s2, NEW, &[6])).await,
+    )?;
+    io(
+        "the repeat after the creation, re-decided",
+        journal
+            .append(appending(unit(10_000), &s2, at(0), &[7]).with_receipt(accepted(3, 1)))
+            .await,
+    )
+    .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-16 .. JC-20: the registry, the manifest, epochs, payloads, enumeration
+
+async fn lookup_event<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "a two-stream unit",
+        journal
+            .append(appending(
+                appending(unit(1_000), &s1, NEW, &[1, 2]),
+                &s2,
+                NEW,
+                &[3],
+            ))
+            .await,
+    )?;
+    eq(
+        "a refused batch",
+        &journal
+            .append(appending(
+                appending(unit(2_000), &s1, at(1), &[4, 5]),
+                &s2,
+                NEW,
+                &[6],
+            ))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: s2.clone(),
+            expected: NEW,
+            actual: Some(rev(0)),
+        }),
+    )?;
+    let journal = factory.reopen(journal).await;
+    let mut found = Vec::new();
+    for id in 1..=6 {
+        found.push(io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(id)).await,
+        )?);
+    }
+    let place = |s: &StreamId, r: u64| {
+        Some(EventLocation {
+            stream: s.clone(),
+            revision: rev(r),
+        })
+    };
+    eq(
+        "every id's place",
+        &found,
+        &vec![
+            place(&s1, 0),
+            place(&s1, 1),
+            place(&s2, 0),
+            None,
+            None,
+            None,
+        ],
+    )
+}
+
+async fn kind_manifest<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    let with_kind = |id: u128, event_type: &str, version: u32| NewEvent {
+        kind: kind(event_type, version),
+        ..event(id)
+    };
+    io(
+        "two kinds",
+        journal
+            .append(unit(1_000).with_append(
+                s1.clone(),
+                aggregate("attempt"),
+                NEW,
+                vec![
+                    with_kind(1, "contract_b_recorded", 2),
+                    with_kind(2, "contract_a_recorded", 1),
+                ],
+            ))
+            .await,
+    )?;
+    io(
+        "a kind again and its next version",
+        journal
+            .append(unit(2_000).with_append(
+                s1.clone(),
+                aggregate("attempt"),
+                at(1),
+                vec![
+                    with_kind(3, "contract_a_recorded", 1),
+                    with_kind(4, "contract_a_recorded", 2),
+                ],
+            ))
+            .await,
+    )?;
+    eq(
+        "a refused unit with a new kind",
+        &journal
+            .append(unit(3_000).with_append(
+                s2.clone(),
+                aggregate("attempt"),
+                at(0),
+                vec![with_kind(5, "contract_c_recorded", 1)],
+            ))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: s2,
+            expected: at(0),
+            actual: None,
+        }),
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the manifest",
+        &io("stored_kinds", journal.stored_kinds().await)?,
+        &vec![
+            kind("contract_a_recorded", 1),
+            kind("contract_a_recorded", 2),
+            kind("contract_b_recorded", 2),
+        ],
+    )
+}
+
+fn at_epoch(id: u128, epoch: u32) -> NewEvent {
+    NewEvent {
+        required_epoch: epoch,
+        ..event(id)
+    }
+}
+
+async fn epochs_case<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2, s9) = (
+        stream("attempt-1"),
+        stream("attempt-2"),
+        stream("attempt-9"),
+    );
+    let by = |epoch: u32| UnitOfWork::new(Millis::new(1_000), build(epoch));
+    let add = |u: UnitOfWork, s: &StreamId, expected: ExpectedRevision, events: Vec<NewEvent>| {
+        u.with_append(s.clone(), aggregate("attempt"), expected, events)
+    };
+    io(
+        "an event needing epoch 2, by a build supporting 2",
+        journal
+            .append(add(by(2), &s1, NEW, vec![at_epoch(1, 2)]))
+            .await,
+    )?;
+    io(
+        "an event needing epoch 1 after it",
+        journal
+            .append(add(by(2), &s1, at(0), vec![at_epoch(2, 1)]))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let head = io("head", journal.head(&s1).await)?;
+    eq(
+        "the stream's epoch, never lowered",
+        &head.as_ref().map(|h| (h.revision, h.epoch)),
+        &Some((rev(1), 2)),
+    )?;
+    eq(
+        "an append by a build supporting 1",
+        &journal
+            .append(add(by(1), &s1, at(1), vec![at_epoch(3, 1)]))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::StreamEpochUnsupported {
+            stream: s1.clone(),
+            epoch: 2,
+        }),
+    )?;
+    eq(
+        "the stream's head after it",
+        &io("head", journal.head(&s1).await)?,
+        &head,
+    )?;
+    eq(
+        "the stream's events, still read",
+        &ids(&io(
+            "read_stream",
+            journal.read_stream(&s1, None, None).await,
+        )?),
+        &vec![1, 2],
+    )?;
+    eq(
+        "the stream, still enumerated",
+        &all_streams(&journal).await?.first().map(|h| h.epoch),
+        &Some(2),
+    )?;
+    io(
+        "a build supporting 1 reading the stream to decide another",
+        journal
+            .append(add(by(1), &s9, NEW, vec![at_epoch(9, 1)]).with_read(s1.clone(), at(1)))
+            .await,
+    )?;
+    eq(
+        "a batch above the build, with a stale revision too",
+        &journal
+            .append(add(
+                add(by(2), &s1, at(7), vec![at_epoch(4, 1)]),
+                &s2,
+                NEW,
+                vec![at_epoch(5, 3)],
+            ))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::EpochAboveBuild { stream: s2.clone() }),
+    )?;
+    eq(
+        "an aggregate the build does not support",
+        &journal
+            .append(by(9).with_append(
+                stream("host-1"),
+                aggregate("host"),
+                NEW,
+                vec![at_epoch(6, 1)],
+            ))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::EpochAboveBuild {
+            stream: stream("host-1"),
+        }),
+    )?;
+    eq(
+        "the refused batches' streams",
+        &(
+            head_revision(&journal, &s2).await?,
+            head_revision(&journal, &stream("host-1")).await?,
+        ),
+        &(None, None),
+    )?;
+    io(
+        "a build supporting 2 appends on",
+        journal
+            .append(add(by(2), &s1, at(1), vec![at_epoch(7, 1)]))
+            .await,
+    )?;
+    eq(
+        "the stream's epoch after it",
+        &io("head", journal.head(&s1).await)?.map(|h| h.epoch),
+        &Some(2),
+    )
+}
+
+async fn payload_round_trip<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    let big = format!("{{\"blob\":\"{}\"}}", "x".repeat(1024 * 1024));
+    let payloads = [
+        "{\"note\":\"zażółć gęślą jaźń ✓ 🦋\"}".to_owned(),
+        "{}".to_owned(),
+        "{\"escaped\":\"\\\\u0000\"}".to_owned(),
+        big,
+    ];
+    let written: Vec<NewEvent> = payloads
+        .iter()
+        .zip(1_u128..)
+        .map(|(p, n)| NewEvent {
+            payload: Payload::new(p.clone()),
+            ..event(n)
+        })
+        .collect();
+    io(
+        "payloads",
+        journal
+            .append(unit(1_000).with_append(s1.clone(), aggregate("attempt"), NEW, written.clone()))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "payloads read back byte for byte",
+        &io("read_stream", journal.read_stream(&s1, None, None).await)?
+            .into_iter()
+            .map(|e| e.payload)
+            .collect::<Vec<_>>(),
+        &written.into_iter().map(|e| e.payload).collect::<Vec<_>>(),
+    )?;
+    let probe = Probe {
+        streams: vec![s1.clone(), stream("attempt-2")],
+        events: vec![10],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    for nul in ["{\"n\":\"a\u{0}b\"}", "{\"n\":\"\\u0000\"}"] {
+        let with_nul = NewEvent {
+            payload: Payload::new(nul),
+            ..event(10)
+        };
+        eq(
+            &format!("a payload holding a NUL ({nul:?})"),
+            &journal
+                .append(unit(2_000).with_append(
+                    stream("attempt-2"),
+                    aggregate("attempt"),
+                    NEW,
+                    vec![with_nul],
+                ))
+                .await
+                .map(|_| ()),
+            &Err(AppendError::Malformed(MalformedUnit::NulInPayload)),
+        )?;
+    }
+    eq(
+        "the journal after NUL payloads",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    let marker = "contract-secret-marker";
+    let marked = |id: u128| NewEvent {
+        payload: Payload::new(format!("{{\"m\":\"{marker}\"}}")),
+        ..event(id)
+    };
+    io(
+        "a marked command",
+        journal
+            .append(
+                unit(3_000)
+                    .with_append(
+                        stream("attempt-3"),
+                        aggregate("attempt"),
+                        NEW,
+                        vec![marked(20)],
+                    )
+                    .with_receipt(accepted(1, 1))
+                    .with_inbox(key("scaleset-1", "1")),
+            )
+            .await,
+    )?;
+    let errors = [
+        journal
+            .append(unit(4_000).with_append(
+                s1.clone(),
+                aggregate("attempt"),
+                NEW,
+                vec![marked(21)],
+            ))
+            .await,
+        journal
+            .append(unit(4_000).with_append(
+                stream("attempt-4"),
+                aggregate("attempt"),
+                NEW,
+                vec![marked(20)],
+            ))
+            .await,
+        journal
+            .append(
+                unit(4_000)
+                    .with_append(
+                        stream("attempt-4"),
+                        aggregate("attempt"),
+                        NEW,
+                        vec![marked(22)],
+                    )
+                    .with_receipt(accepted(1, 1)),
+            )
+            .await,
+        journal
+            .append(
+                unit(4_000)
+                    .with_append(
+                        stream("attempt-4"),
+                        aggregate("attempt"),
+                        NEW,
+                        vec![marked(22)],
+                    )
+                    .with_inbox(key("scaleset-1", "1")),
+            )
+            .await,
+    ];
+    for error in errors {
+        let error = refused(error)?;
+        ensure(
+            &format!("an error carries no payload text: {error:?}"),
+            !format!("{error} {error:?}").contains(marker),
+        )?;
+    }
+    Ok(())
+}
+
+async fn streams_enumeration<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let names = [
+        "poola",
+        "pool-b",
+        "attempt-9",
+        "attempt-10",
+        "attempt-1x",
+        "pool-a",
+    ];
+    for (name, n) in names.iter().zip(1_u128..) {
+        let s = stream(name);
+        let aggregate_name = if name.starts_with("pool") {
+            "pool"
+        } else {
+            "attempt"
+        };
+        io(
+            &format!("a stream {name}"),
+            journal
+                .append(unit(1_000).with_append(s, aggregate(aggregate_name), NEW, events(&[n])))
+                .await,
+        )?;
+    }
+    eq(
+        "a refused create",
+        &journal
+            .append(appending(unit(2_000), &stream("attempt-5"), at(0), &[99]))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::WrongExpectedRevision {
+            stream: stream("attempt-5"),
+            expected: at(0),
+            actual: None,
+        }),
+    )?;
+    let journal = factory.reopen(journal).await;
+    let byte_order = vec![
+        "attempt-10",
+        "attempt-1x",
+        "attempt-9",
+        "pool-a",
+        "pool-b",
+        "poola",
+    ];
+    let paged = all_streams(&journal).await?;
+    eq(
+        "streams paged by three, in byte order",
+        &paged.iter().map(|h| h.stream.as_str()).collect::<Vec<_>>(),
+        &byte_order,
+    )?;
+    let whole = io("streams", journal.streams(None, u32::MAX).await)?;
+    eq("one page with the largest limit", &whole, &paged)?;
+    eq(
+        "an empty page",
+        &io("streams", journal.streams(None, 0).await)?,
+        &Vec::new(),
+    )?;
+    eq(
+        "a page after a key that is no stream",
+        &io(
+            "streams",
+            journal.streams(Some(&stream("attempt-2")), 2).await,
+        )?
+        .into_iter()
+        .map(|h| h.stream.as_str().to_owned())
+        .collect::<Vec<_>>(),
+        &vec!["attempt-9".to_owned(), "pool-a".to_owned()],
+    )?;
+    eq(
+        "a page after the last stream",
+        &io(
+            "streams",
+            journal.streams(Some(&stream("poola")), MAX_PAGE).await,
+        )?,
+        &Vec::new(),
+    )?;
+    for listed in &paged {
+        eq(
+            &format!("the listed head of {}", listed.stream),
+            &io("head", journal.head(&listed.stream).await)?.as_ref(),
+            &Some(listed),
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-21 .. JC-25, JC-29 .. JC-32: concurrency, crashes and unknown outcomes
+
+async fn racing_handles<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s1, NEW, &[1])).await,
+    )?;
+    let other = factory.second_handle(&journal).await;
+    for round in 0..6_u64 {
+        let base = 10 + u128::from(round) * 2;
+        let decided = io("head", journal.head(&s1).await)?.map(|h| h.revision);
+        let decided_too = io("head", other.head(&s1).await)?.map(|h| h.revision);
+        eq(
+            &format!("round {round}: both handles read one head"),
+            &decided_too,
+            &decided,
+        )?;
+        let expected = ExpectedRevision::of(decided);
+        let (first, second) = (
+            tagged(base, &s1, expected, base),
+            tagged(base + 1, &s1, expected, base + 1),
+        );
+        let outcomes = if round % 3 == 2 {
+            join_all(vec![journal.append(first), other.append(second)]).await
+        } else if round % 3 == 1 {
+            let b = other.append(second).await;
+            let a = journal.append(first).await;
+            vec![a, b]
+        } else {
+            let a = journal.append(first).await;
+            let b = other.append(second).await;
+            vec![a, b]
+        };
+        let now = expected.next_revision();
+        let (winner, loser) = one_winner(&format!("round {round}"), &outcomes, |_| {
+            AppendError::WrongExpectedRevision {
+                stream: s1.clone(),
+                expected,
+                actual: now,
+            }
+        })?;
+        let (winner, loser) = (base + winner as u128, base + loser as u128);
+        eq(
+            &format!("round {round}: the head"),
+            &head_revision(&other, &s1).await?,
+            &now,
         )?;
         eq(
             &format!("round {round}: the winner's unit"),
             &traces_of(&journal, winner, winner).await?,
-            &[true; 5],
+            &[true; 4],
         )?;
         eq(
             &format!("round {round}: the loser's unit"),
-            &traces_of(&journal, loser.0, loser.0).await?,
-            &[false; 5],
+            &traces_of(&other, loser, loser).await?,
+            &[false; 4],
         )?;
     }
     Ok(())
@@ -1130,12 +2487,16 @@ async fn racing_writers_on_one_stream<F: JournalFactory>(factory: &F) -> Check {
 
 async fn independent_streams<F: JournalFactory>(factory: &F) -> Check {
     let journal = factory.fresh().await;
+    let other = factory.second_handle(&journal).await;
     let streams: Vec<StreamId> = (1..=8).map(|i| stream(&format!("attempt-{i}"))).collect();
     let outcomes = join_all(
         streams
             .iter()
             .zip(1_u128..)
-            .map(|(s, n)| journal.append(tagged_unit(n, s, StreamRevision::EMPTY, n)))
+            .map(|(s, n)| {
+                let handle = if n % 2 == 0 { &other } else { &journal };
+                handle.append(tagged(n, s, NEW, n))
+            })
             .collect(),
     )
     .await;
@@ -1146,357 +2507,491 @@ async fn independent_streams<F: JournalFactory>(factory: &F) -> Check {
             &Ok(()),
         )?;
     }
-
+    let (s1, s2, s3, s4) = (&streams[0], &streams[1], &streams[2], &streams[3]);
     let mixed = join_all(vec![
-        journal.append(tagged_unit(20, &streams[0], StreamRevision::EMPTY, 20)),
-        journal.append(tagged_unit(21, &streams[1], rev(1), 21)),
+        journal.append(tagged(20, s1, NEW, 20)),
+        other.append(tagged(21, s2, at(0), 21)),
     ])
     .await;
     eq(
-        "a stale writer of the first stream",
-        &mixed[0].clone().map(|_| ()),
-        &Err(AppendError::WrongExpectedRevision {
-            stream: streams[0].clone(),
-            expected: StreamRevision::EMPTY,
-            actual: rev(1),
-        }),
+        "a stale writer of one stream",
+        &mixed.first().cloned().map(|o| o.map(|_| ())),
+        &Some(Err(AppendError::WrongExpectedRevision {
+            stream: s1.clone(),
+            expected: NEW,
+            actual: Some(rev(0)),
+        })),
     )?;
     eq(
-        "a current writer of the second stream beside it",
-        &mixed[1].clone().map(|_| ()),
-        &Ok(()),
-    )?;
-
-    io(
-        "a write to the third stream",
-        journal
-            .append(tagged_unit(22, &streams[2], rev(1), 22))
-            .await,
+        "a current writer of another stream beside it",
+        &mixed.get(1).cloned().map(|o| o.map(|_| ())),
+        &Some(Ok(())),
     )?;
     io(
-        "a writer of the fourth stream after another stream moved",
-        journal
-            .append(tagged_unit(23, &streams[3], rev(1), 23))
-            .await,
+        "a write to a third stream",
+        journal.append(tagged(22, s3, at(0), 22)).await,
     )?;
-
-    let shared_id = join_all(vec![
-        journal.append(tagged_unit(30, &streams[4], rev(1), 99)),
-        journal.append(tagged_unit(31, &streams[5], rev(1), 99)),
+    io(
+        "a writer of a fourth stream that decided before the third moved",
+        other.append(tagged(23, s4, at(0), 23)).await,
+    )?;
+    let (s5, s6) = (&streams[4], &streams[5]);
+    let opposite = join_all(vec![
+        journal.append(appending(
+            appending(unit(6_000), s5, at(0), &[30]),
+            s6,
+            at(0),
+            &[31],
+        )),
+        other.append(appending(
+            appending(unit(6_000), s6, at(0), &[32]),
+            s5,
+            at(0),
+            &[33],
+        )),
     ])
     .await;
-    let committed = shared_id.iter().filter(|o| o.is_ok()).count();
-    eq(
-        "writers of one event id on two streams that commit",
-        &committed,
-        &1,
+    one_winner(
+        "units naming two streams in opposite orders",
+        &opposite,
+        |_| AppendError::WrongExpectedRevision {
+            stream: s5.clone(),
+            expected: at(0),
+            actual: Some(rev(1)),
+        },
     )?;
-    ensure(
-        "the other writer of the shared id is refused as a duplicate",
-        shared_id
-            .iter()
-            .any(|o| *o == Err(AppendError::DuplicateEventId(EventId::from_u128(99)))),
-    )?;
-
     let journal = factory.reopen(journal).await;
-    let revisions = [rev(1), rev(2), rev(2), rev(2)];
+    let revisions = [0, 1, 1, 1, 1, 1, 0, 0];
     for (s, want) in streams.iter().zip(revisions) {
         eq(
-            &format!("revision of {s}"),
-            &io("stream_revision", journal.stream_revision(s).await)?,
-            &want,
+            &format!("the head of {s}"),
+            &head_revision(&journal, s).await?,
+            &Some(rev(want)),
         )?;
     }
-    let fifth = io(
-        "stream_revision",
-        journal.stream_revision(&streams[4]).await,
-    )?;
-    let sixth = io(
-        "stream_revision",
-        journal.stream_revision(&streams[5]).await,
-    )?;
-    eq(
-        "the shared id's streams together",
-        &(fifth.get() + sixth.get()),
-        &3,
-    )?;
-    eq(
-        "where the shared id lives",
-        &io(
-            "lookup_event",
-            journal.lookup_event(EventId::from_u128(99)).await,
-        )?
-        .map(|l| l.revision),
-        &Some(rev(2)),
-    )
+    Ok(())
 }
 
-async fn stream_reads<F: JournalFactory>(factory: &F) -> Check {
-    let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
-    let s2 = stream("attempt-2");
-    let s3 = stream("attempt-3");
-    let mut other_kind = event(5);
-    other_kind.event_type = "contract_other_recorded".to_owned();
-    other_kind.schema_version = 2;
-    let units = [
-        UnitOfWork::new(at(1_000)).with_stream(s2.clone(), rev(0), vec![event(1), event(2)]),
-        UnitOfWork::new(at(2_000)).with_stream(s1.clone(), rev(0), vec![event(3)]),
-        UnitOfWork::new(at(3_000))
-            .with_stream(s1.clone(), rev(1), vec![event(4)])
-            .with_stream(s2.clone(), rev(2), vec![other_kind]),
-    ];
-    for unit in units {
-        io("append", journal.append(unit).await)?;
+/// The JC-23 / JC-25 unit: a new stream, a second stream at revision 0, a receipt, an inbox
+/// key and a row on each stream.
+fn whole_unit(command: u128, s1: &StreamId, s2: &StreamId, ids: [u128; 2]) -> UnitOfWork {
+    appending(
+        appending(unit(2_000), s1, NEW, &[ids[0]]),
+        s2,
+        at(0),
+        &[ids[1]],
+    )
+    .with_receipt(accepted(command, 1))
+    .with_inbox(key("scaleset-1", &command.to_string()))
+    .with_projection(row(s1, "r1", Some("{}")))
+    .with_projection(row(s2, "r2", Some("{}")))
+}
+
+async fn crash_atomicity<F: JournalFactory>(factory: &F) -> Check {
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1],
+        keys: vec![key("scaleset-1", "1")],
+        events: vec![10, 11],
+        rows: vec!["r1".to_owned(), "r2".to_owned()],
+    };
+    let mut points = 0;
+    for point in 0..64_u32 {
+        let journal = factory.fresh().await;
+        io(
+            "seed",
+            journal.append(appending(unit(1_000), &s2, NEW, &[1])).await,
+        )?;
+        let before = observe(&journal, &probe).await?;
+        if !factory
+            .inject(&journal, InjectedFault::CrashAfterStatement(point))
+            .await
+        {
+            break;
+        }
+        points += 1;
+        let outcome = journal.append(whole_unit(1, &s1, &s2, [10, 11])).await;
+        let journal = factory.crash(journal).await;
+        let after = observe(&journal, &probe).await?;
+        if after == before {
+            ensure(
+                &format!("a crash after statement {point}: an absent unit was reported committed"),
+                outcome.is_err(),
+            )?;
+            continue;
+        }
+        let whole = after.heads.iter().all(Option::is_some)
+            && after.receipts.iter().all(Option::is_some)
+            && after.inbox.iter().all(|b| *b)
+            && after.identities.iter().all(Option::is_some)
+            && after.rows.iter().all(Option::is_some);
+        ensure(
+            &format!("a crash after statement {point} left part of the unit: {after:?}"),
+            whole,
+        )?;
+        ensure(
+            &format!(
+                "a crash after statement {point}: a present unit was reported as definitely failed"
+            ),
+            !matches!(outcome, Err(ref e) if e.is_definite()),
+        )?;
     }
-    eq(
-        "an append to a new stream with no event",
-        &journal
-            .append(UnitOfWork::new(at(4_000)).with_stream(s3.clone(), rev(0), Vec::new()))
-            .await
-            .map(|a| a.events.len()),
-        &Ok(0),
-    )?;
-    eq(
-        "a refused append to a new stream",
-        &journal
-            .append(UnitOfWork::new(at(4_000)).with_stream(s3.clone(), rev(1), vec![event(6)]))
-            .await
-            .map(|_| ()),
-        &Err(AppendError::WrongExpectedRevision {
-            stream: s3.clone(),
-            expected: rev(1),
-            actual: StreamRevision::EMPTY,
-        }),
-    )?;
-
-    let journal = factory.reopen(journal).await;
-    eq(
-        "streams in id order, none without events",
-        &io("streams", journal.streams(None, usize::MAX).await)?,
-        &vec![s1.clone(), s2.clone()],
-    )?;
-    eq(
-        "streams after the first",
-        &io("streams", journal.streams(Some(&s1), 10).await)?,
-        &vec![s2.clone()],
-    )?;
-    eq(
-        "streams with a limit",
-        &io("streams", journal.streams(None, 1).await)?,
-        &vec![s1.clone()],
-    )?;
-    eq(
-        "a stream in revision order",
-        &ids(&io(
-            "read_stream",
-            journal.read_stream(&s2, rev(0), usize::MAX).await,
-        )?),
-        &vec![1, 2, 5],
-    )?;
-    eq(
-        "a stream after revision 1, two at most",
-        &ids(&io(
-            "read_stream",
-            journal.read_stream(&s2, rev(1), 2).await,
-        )?),
-        &vec![2, 5],
-    )?;
-    eq(
-        "a stream after its head",
-        &io("read_stream", journal.read_stream(&s2, rev(3), 10).await)?,
-        &Vec::new(),
-    )?;
-    eq(
-        "a stream read with a zero limit",
-        &io("read_stream", journal.read_stream(&s1, rev(0), 0).await)?,
-        &Vec::new(),
-    )?;
-    eq(
-        "an absent stream",
-        &(
-            io("stream_revision", journal.stream_revision(&s3).await)?,
-            io("read_stream", journal.read_stream(&s3, rev(0), 10).await)?,
-        ),
-        &(StreamRevision::EMPTY, Vec::new()),
-    )?;
-    eq(
-        "where an event id lives",
-        &io(
-            "lookup_event",
-            journal.lookup_event(EventId::from_u128(4)).await,
-        )?,
-        &Some(EventLocation {
-            stream: s1.clone(),
-            revision: rev(2),
-        }),
-    )?;
-    eq(
-        "an event id never recorded",
-        &io(
-            "lookup_event",
-            journal.lookup_event(EventId::from_u128(6)).await,
-        )?,
-        &None,
-    )?;
-    eq(
-        "the event-kind manifest",
-        &io("recorded_kinds", journal.recorded_kinds().await)?,
-        &vec![
-            RecordedKind {
-                event_type: "contract_fact_recorded".to_owned(),
-                schema_version: 1,
-            },
-            RecordedKind {
-                event_type: "contract_other_recorded".to_owned(),
-                schema_version: 2,
-            },
-        ],
+    ensure(
+        "the factory offers no crash point, so the case cannot run",
+        points > 0,
     )
 }
 
-async fn projection_writes<F: JournalFactory>(factory: &F) -> Check {
+async fn survives_reopen<F: JournalFactory>(factory: &F) -> Check {
     let journal = factory.fresh().await;
-    let name = projection_name();
-    io(
-        "set two rows with an event",
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    let message = key("scaleset-1", "7");
+    let first = io(
+        "an accepted command at epoch 2",
         journal
             .append(
-                UnitOfWork::new(at(1_000))
-                    .with_stream(stream("attempt-1"), StreamRevision::EMPTY, vec![event(1)])
-                    .with_projection(row("a", Some("{\"v\":1}")))
-                    .with_projection(row("b", Some("{\"v\":2}"))),
+                UnitOfWork::new(Millis::new(1_000), build(2))
+                    .with_append(s1.clone(), aggregate("attempt"), NEW, vec![at_epoch(1, 2)])
+                    .with_receipt(accepted(1, 1))
+                    .with_inbox(message.clone())
+                    .with_projection(row(&s1, "r", Some("{\"v\":1}"))),
             )
             .await,
     )?;
     io(
-        "replace one row",
+        "a refused command",
         journal
-            .append(UnitOfWork::new(at(2_000)).with_projection(row("a", Some("{\"v\":3}"))))
+            .append(unit(2_000).with_read(s2.clone(), NEW).with_receipt(refusal(
+                2,
+                1,
+                "pool_draining",
+            )))
             .await,
     )?;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1, 2],
+        keys: vec![message.clone()],
+        events: vec![1],
+        rows: vec!["r".to_owned()],
+    };
+    let before = observe(&journal, &probe).await?;
     let journal = factory.reopen(journal).await;
     eq(
-        "replaced row",
-        &io("projection", journal.projection(&name, "a").await)?,
-        &Some(Payload::new("{\"v\":3}")),
+        "everything after reopen",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    let replay = CommandReceipt {
+        command_id: CommandId::from_u128(1),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Accepted(first),
+    };
+    eq(
+        "a repeat of the accepted command after reopen",
+        &journal
+            .append(
+                UnitOfWork::new(Millis::new(3_000), build(2))
+                    .with_append(s1.clone(), aggregate("attempt"), NEW, vec![at_epoch(1, 2)])
+                    .with_receipt(accepted(1, 1)),
+            )
+            .await
+            .map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(replay))),
     )?;
     eq(
-        "untouched row",
-        &io("projection", journal.projection(&name, "b").await)?,
-        &Some(Payload::new("{\"v\":2}")),
+        "a repeat of the refused command after reopen",
+        &journal
+            .append(unit(3_000).with_read(s2.clone(), NEW).with_receipt(refusal(
+                2,
+                1,
+                "pool_draining",
+            )))
+            .await
+            .map(|e| e.streams.len()),
+        &Err(AppendError::CommandReplayed(Box::new(CommandReceipt {
+            command_id: CommandId::from_u128(2),
+            command_type: command_type(),
+            intent: intent(1),
+            outcome: ReceiptOutcome::Refused {
+                bound: ReadCondition {
+                    stream: s2.clone(),
+                    expected: NEW,
+                },
+                rejection: rejection("pool_draining"),
+            },
+        }))),
     )?;
-    io(
-        "remove a row",
-        journal
-            .append(UnitOfWork::new(at(3_000)).with_projection(row("b", None)))
-            .await,
-    )?;
-    let journal = factory.reopen(journal).await;
     eq(
-        "removed row",
-        &io("projection", journal.projection(&name, "b").await)?,
-        &None,
+        "a redelivery after reopen",
+        &journal
+            .append(appending(unit(3_000), &s2, NEW, &[3]).with_inbox(message.clone()))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::DuplicateMessage(message)),
     )?;
     eq(
-        "a row of another projection",
-        &io(
-            "projection",
-            journal
-                .projection(
-                    &ProjectionName::new("other_rows")
-                        .unwrap_or_else(|e| panic!("contract projection: {e}")),
-                    "a",
-                )
-                .await,
-        )?,
-        &None,
+        "an append by a build supporting 1 after reopen",
+        &journal
+            .append(appending(unit(3_000), &s1, at(0), &[4]))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::StreamEpochUnsupported {
+            stream: s1,
+            epoch: 2,
+        }),
     )
 }
 
-async fn malformed_unit<F: JournalFactory>(factory: &F) -> Check {
+async fn outcome_unknown<F: JournalFactory>(factory: &F) -> Check {
     let journal = factory.fresh().await;
-    let s1 = stream("attempt-1");
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
     io(
-        "seed append",
-        journal
-            .append(UnitOfWork::new(at(1_000)).with_stream(
-                s1.clone(),
-                StreamRevision::EMPTY,
-                vec![event(1)],
-            ))
-            .await,
+        "seed",
+        journal.append(appending(unit(1_000), &s2, NEW, &[1])).await,
     )?;
-    let before = history(&journal).await?;
-    let with_receipt =
-        |unit: UnitOfWork| unit.with_receipt(receipt(1, ReceiptStatus::Accepted, "{}"));
-    let cases = [
-        (UnitOfWork::new(at(2_000)), MalformedUnit::Empty),
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone()],
+        commands: vec![1],
+        keys: vec![key("scaleset-1", "1")],
+        events: vec![10, 11],
+        rows: vec!["r1".to_owned(), "r2".to_owned()],
+    };
+    let before = observe(&journal, &probe).await?;
+    for (fault, want) in [
         (
-            with_receipt(
-                UnitOfWork::new(at(2_000))
-                    .with_stream(s1.clone(), rev(1), vec![event(2)])
-                    .with_stream(s1.clone(), rev(1), vec![event(3)]),
-            ),
-            MalformedUnit::DuplicateStream,
+            InjectedFault::StorageBeforeCommit,
+            "a definite storage failure",
         ),
-        (
-            with_receipt(UnitOfWork::new(at(2_000)).with_stream(
-                s1.clone(),
-                rev(1),
-                vec![event(2), event(2)],
-            )),
-            MalformedUnit::DuplicateEventId,
-        ),
-        (
-            with_receipt(
-                UnitOfWork::new(at(2_000))
-                    .with_outbox(directive(1, 1))
-                    .with_outbox(directive(1, 2)),
-            ),
-            MalformedUnit::DuplicateDirective,
-        ),
-        (
-            with_receipt(
-                UnitOfWork::new(at(2_000))
-                    .with_projection(row("a", Some("{}")))
-                    .with_projection(row("a", None)),
-            ),
-            MalformedUnit::DuplicateProjectionRow,
-        ),
-    ];
-    for (unit, malformed) in cases {
+        (InjectedFault::Busy, "a definite busy refusal"),
+    ] {
+        must_inject(factory, &journal, fault).await?;
+        let error = refused(journal.append(whole_unit(1, &s1, &s2, [10, 11])).await)?;
+        ensure(
+            &format!("{fault:?} must be {want}, got {error:?}"),
+            error.is_definite()
+                && matches!(
+                    (fault, &error),
+                    (InjectedFault::StorageBeforeCommit, AppendError::Storage(_))
+                        | (InjectedFault::Busy, AppendError::Busy)
+                ),
+        )?;
         eq(
-            &format!("a unit that is {malformed}"),
-            &journal.append(unit).await.map(|_| ()),
-            &Err(AppendError::Malformed(malformed)),
+            &format!("the journal after {fault:?}"),
+            &observe(&journal, &probe).await?,
+            &before,
         )?;
     }
+
+    must_inject(factory, &journal, InjectedFault::ReplyLostBeforeCommit).await?;
+    let error = refused(journal.append(whole_unit(1, &s1, &s2, [10, 11])).await)?;
+    ensure(
+        &format!("a reply lost before the commit is OutcomeUnknown, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)) && !error.is_definite(),
+    )?;
+    let committed = io(
+        "the identical unit re-appended after an outcome that did not commit",
+        journal.append(whole_unit(1, &s1, &s2, [10, 11])).await,
+    )?;
+    eq(
+        "what the re-append appended",
+        &committed.streams,
+        &vec![appended(&s1, 0, &[10]), appended(&s2, 1, &[11])],
+    )?;
+
+    must_inject(factory, &journal, InjectedFault::ReplyLostAfterCommit).await?;
+    let command = appending(unit(3_000), &s1, at(0), &[20, 21]).with_receipt(accepted(2, 1));
+    let error = refused(journal.append(command.clone()).await)?;
+    ensure(
+        &format!("a reply lost after the commit is OutcomeUnknown, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the identical command re-appended: its receipt answers",
+        &journal.append(command).await.map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(CommandReceipt {
+            command_id: CommandId::from_u128(2),
+            command_type: command_type(),
+            intent: intent(1),
+            outcome: ReceiptOutcome::Accepted(Appended {
+                streams: vec![appended(&s1, 1, &[20, 21])],
+            }),
+        }))),
+    )?;
+
+    must_inject(factory, &journal, InjectedFault::ReplyLostAfterCommit).await?;
+    let receiptless = appending(unit(4_000), &s1, at(2), &[31, 30]);
+    let error = refused(journal.append(receiptless.clone()).await)?;
+    ensure(
+        &format!("a reply lost after the commit is OutcomeUnknown, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the identical receipt-less unit re-appended: its lowest id answers",
+        &journal.append(receiptless).await.map(|_| ()),
+        &Err(AppendError::DuplicateEventId(EventId::from_u128(30))),
+    )?;
+    eq(
+        "where the answering id lives: the place the unit wrote it",
+        &io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(30)).await,
+        )?,
+        &Some(EventLocation {
+            stream: s1,
+            revision: rev(4),
+        }),
+    )
+}
+
+async fn racing_unique_key<F: JournalFactory>(
+    factory: &F,
+    what: &str,
+    units: [UnitOfWork; 2],
+    lost: impl Fn(usize) -> AppendError,
+) -> Check {
+    let journal = factory.fresh().await;
+    let other = factory.second_handle(&journal).await;
+    let streams: Vec<StreamId> = units
+        .iter()
+        .filter_map(|u| u.appends.first().map(|a| a.stream.clone()))
+        .collect();
+    let [a, b] = units;
+    let outcomes = join_all(vec![journal.append(a), other.append(b)]).await;
+    let (winner, loser) = one_winner(what, &outcomes, lost)?;
     let journal = factory.reopen(journal).await;
+    let heads = [
+        head_revision(&journal, &streams[winner]).await?,
+        head_revision(&journal, &streams[loser]).await?,
+    ];
     eq(
-        "events after malformed units",
-        &history(&journal).await?,
-        &before,
-    )?;
-    eq(
-        "receipt after malformed units",
-        &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?,
-        &None,
-    )?;
-    eq(
-        "directive after malformed units",
-        &io(
-            "directive",
-            journal.directive(DirectiveId::from_u128(1)).await,
+        &format!("{what}: the winner's and the loser's streams"),
+        &heads,
+        &[Some(rev(0)), None],
+    )
+}
+
+async fn racing_command_ids<F: JournalFactory>(factory: &F) -> Check {
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    let unit_on =
+        |s: &StreamId, id: u128| appending(unit(1_000), s, NEW, &[id]).with_receipt(accepted(7, 1));
+    let first = Appended {
+        streams: vec![appended(&s1, 0, &[1])],
+    };
+    let second = Appended {
+        streams: vec![appended(&s2, 0, &[2])],
+    };
+    racing_unique_key(
+        factory,
+        "two units of one command on two streams",
+        [unit_on(&s1, 1), unit_on(&s2, 2)],
+        |loser| {
+            AppendError::CommandReplayed(Box::new(CommandReceipt {
+                command_id: CommandId::from_u128(7),
+                command_type: command_type(),
+                intent: intent(1),
+                outcome: ReceiptOutcome::Accepted(if loser == 0 {
+                    second.clone()
+                } else {
+                    first.clone()
+                }),
+            }))
+        },
+    )
+    .await
+}
+
+async fn racing_inbox_keys<F: JournalFactory>(factory: &F) -> Check {
+    let (s1, s2) = (stream("scaleset-1"), stream("scaleset-2"));
+    let message = key("scaleset-1", "9");
+    let unit_on =
+        |s: &StreamId, id: u128| appending(unit(1_000), s, NEW, &[id]).with_inbox(message.clone());
+    racing_unique_key(
+        factory,
+        "two units consuming one message on two streams",
+        [unit_on(&s1, 1), unit_on(&s2, 2)],
+        |_| AppendError::DuplicateMessage(message.clone()),
+    )
+    .await
+}
+
+async fn racing_event_ids<F: JournalFactory>(factory: &F) -> Check {
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    racing_unique_key(
+        factory,
+        "two units carrying one event id on two streams",
+        [
+            appending(unit(1_000), &s1, NEW, &[5]),
+            appending(unit(1_000), &s2, NEW, &[5]),
+        ],
+        |_| AppendError::DuplicateEventId(EventId::from_u128(5)),
+    )
+    .await
+}
+
+/// One reader pass over the parts of [`whole_unit`], in a fixed order; each part present or
+/// not.
+async fn read_parts<J: Journal>(
+    journal: &J,
+    s1: &StreamId,
+    s2: &StreamId,
+) -> Result<Vec<bool>, String> {
+    Ok(vec![
+        head_revision(journal, s1).await?.is_some(),
+        !io("read_stream", journal.read_stream(s1, None, None).await)?.is_empty(),
+        io(
+            "lookup_event",
+            journal.lookup_event(EventId::from_u128(11)).await,
+        )?
+        .is_some(),
+        head_revision(journal, s2).await? == Some(rev(1)),
+        io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.is_some(),
+        io(
+            "inbox_contains",
+            journal.inbox_contains(&key("scaleset-1", "1")).await,
         )?,
-        &None,
-    )?;
-    eq(
-        "projection after malformed units",
-        &io(
+        io(
             "projection",
-            journal.projection(&projection_name(), "a").await,
-        )?,
-        &None,
+            journal.projection(&projection_name(), "r2").await,
+        )?
+        .is_some(),
+    ])
+}
+
+async fn unit_visible_at_once<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let reader = factory.second_handle(&journal).await;
+    let (s1, s2) = (stream("attempt-1"), stream("attempt-2"));
+    io(
+        "seed",
+        journal.append(appending(unit(1_000), &s2, NEW, &[1])).await,
+    )?;
+    let observer = async {
+        let mut passes = Vec::new();
+        for _ in 0..16 {
+            passes.push(read_parts(&reader, &s1, &s2).await);
+            YieldNow(false).await;
+        }
+        passes
+    };
+    let (outcome, passes) =
+        join2(journal.append(whole_unit(1, &s1, &s2, [10, 11])), observer).await;
+    io("the unit", outcome)?;
+    for (n, pass) in passes.into_iter().enumerate() {
+        let pass = pass?;
+        // A commit between two reads of one pass shows earlier parts absent and later parts
+        // present; a part present before one absent means the reader saw half a unit.
+        let torn = pass.windows(2).any(|w| matches!(w, [true, false]));
+        ensure(
+            &format!("reader pass {n} saw part of a unit: {pass:?}"),
+            !torn,
+        )?;
+    }
+    eq(
+        "every part after the commit",
+        &read_parts(&reader, &s1, &s2).await?,
+        &vec![true; 7],
     )
 }

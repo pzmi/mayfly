@@ -1,46 +1,55 @@
 //! The journal contract's own tests (ver §5): `MemoryJournal` passes it, and each deliberately
-//! broken journal fails the cases named for its fault.
+//! broken journal of `doc/event-store.md` §7.6 fails the cases named for its fault. Each test
+//! pins the exact set of failed cases, which must include the ones §7.6 names: a change that
+//! lets a broken journal through, or makes it fail for an unrelated reason, shows here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use mayfly_control::journal::{
-    AppendError, Appended, CommandReceipt, EventLocation, InboxEntry, Journal, OutboxRow,
-    OutboxStatus, Payload, ProjectionName, RecordedEvent, RecordedKind, StorageError, StreamId,
+    AppendError, Appended, CommandReceipt, EventLocation, ExpectedRevision, InboxKey, Journal,
+    Payload, ProjectionName, RecordedEvent, StorageError, StoredKind, StreamHead, StreamId,
     StreamRevision, UnitOfWork,
 };
-use mayfly_domain::{CommandId, DirectiveId, EventId, Millis};
+use mayfly_domain::{CommandId, EventId};
 use mayfly_testkit::block_on;
 use mayfly_testkit::contracts::journal::{
-    JournalCase, JournalFactory, check_journal_contract, run_journal_contract,
+    InjectedFault, JournalCase, JournalFactory, check_journal_contract, run_journal_contract,
 };
 use mayfly_testkit::journal::{MemoryJournal, MemoryJournalFactory};
 
-/// The fault a broken journal carries; each is a mistake a real journal could make.
+/// The fault a broken journal carries; each is a mistake a real journal could make, named as
+/// in `doc/event-store.md` §7.6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fault {
-    /// `LooseRevisionJournal`: ignores the expected revision and appends at the current one.
+    /// `LooseRevisionJournal`: ignores expected revisions and appends at the current head.
     LooseRevision,
-    /// `PartialCommitJournal`: when a unit fails, its first stream's events stay written.
+    /// `PartialCommitJournal`: when a multi-stream unit fails, its first stream's events stay
+    /// written.
     PartialCommit,
     /// `ForgetfulReceiptsJournal`: receipts written before a reopen are lost by it.
     ForgetfulReceipts,
-    /// `LeakyInboxJournal`: a redelivered message is processed again.
-    LeakyInbox,
-    /// `RacyHeadJournal`: checks the expected revision, yields, then appends at whatever the
-    /// head is by then: the check and the advance of the stream head are not one step.
-    RacyHead,
-    /// `GlobalWriterJournal`: one writer at a time across every stream; a second append while
-    /// one is in flight is turned away as busy.
-    GlobalWriter,
+    /// `IntentBlindReceipts`: a receipt answers a repeat whatever its intent.
+    IntentBlindReceipts,
+    /// `ForgetfulInbox`: a redelivered message is consumed again.
+    ForgetfulInbox,
+    /// `CachedHeadJournal`: each handle trusts the heads it cached over the store's, so a
+    /// unit the store refuses as stale commits when this handle's cache agrees with it.
+    CachedHead,
+    /// `GlobalLockJournal`: refuses a unit (busy) while a unit on another stream is open.
+    GlobalLock,
+    /// `LateIdCheckJournal`: checks expected revisions before event ids, so a duplicate id is
+    /// reported as a stale revision.
+    LateIdCheck,
+    /// `TornUnitJournal`: makes a unit's last stream visible after the rest of it.
+    TornUnit,
 }
 
-/// Pending once, waking itself: where a broken journal lets another append run.
+/// Pending once, waking itself: where a broken journal lets another future run.
 struct YieldOnce(bool);
 
 impl Future for YieldOnce {
@@ -63,35 +72,74 @@ struct BrokenJournal {
     fault: Fault,
     receipts_before_reopen: Arc<Mutex<BTreeSet<CommandId>>>,
     forgotten: BTreeSet<CommandId>,
-    in_flight: Arc<AtomicBool>,
+    open: Arc<Mutex<BTreeSet<StreamId>>>,
+    cached_heads: Arc<Mutex<BTreeMap<StreamId, Option<StreamRevision>>>>,
 }
 
 impl BrokenJournal {
+    fn new(fault: Fault, inner: MemoryJournal) -> Self {
+        Self {
+            inner,
+            fault,
+            receipts_before_reopen: Arc::default(),
+            forgotten: BTreeSet::new(),
+            open: Arc::default(),
+            cached_heads: Arc::default(),
+        }
+    }
+
+    /// The head this handle cached for `stream`, if it read or wrote one.
+    fn cached(&self, stream: &StreamId) -> Option<Option<StreamRevision>> {
+        self.cached_heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(stream)
+            .copied()
+    }
+
     fn forgets(&self, command_id: CommandId) -> bool {
         self.fault == Fault::ForgetfulReceipts && self.forgotten.contains(&command_id)
     }
 
+    async fn current(&self, stream: &StreamId) -> Result<Option<StreamRevision>, AppendError> {
+        Ok(self
+            .inner
+            .head(stream)
+            .await
+            .map_err(AppendError::Storage)?
+            .map(|h| h.revision))
+    }
+
+    /// Rewrites every expected revision of `unit` to the stream's current head.
+    async fn loosened(&self, mut unit: UnitOfWork) -> Result<UnitOfWork, AppendError> {
+        for append in &mut unit.appends {
+            append.expected = ExpectedRevision::of(self.current(&append.stream).await?);
+        }
+        for read in &mut unit.reads {
+            read.expected = ExpectedRevision::of(self.current(&read.stream).await?);
+        }
+        Ok(unit)
+    }
+
     async fn append_broken(&self, unit: UnitOfWork) -> Result<Appended, AppendError> {
+        if unit.check_shape().is_err() {
+            return self.inner.append(unit).await;
+        }
         match self.fault {
             Fault::LooseRevision => {
-                let mut unit = unit;
-                for append in &mut unit.streams {
-                    append.expected = self
-                        .inner
-                        .stream_revision(&append.stream)
-                        .await
-                        .map_err(AppendError::Storage)?;
-                }
+                let unit = self.loosened(unit).await?;
                 self.inner.append(unit).await
             }
             Fault::PartialCommit => match self.inner.append(unit.clone()).await {
-                Err(error) if !matches!(error, AppendError::Malformed(_)) => {
-                    if let Some(first) = unit.streams.first() {
-                        let half = UnitOfWork::new(unit.recorded_at).with_stream(
-                            first.stream.clone(),
-                            first.expected,
-                            first.events.clone(),
-                        );
+                Err(error) if unit.appends.len() > 1 => {
+                    if let Some(first) = unit.appends.first() {
+                        let half = UnitOfWork::new(unit.recorded_at, unit.supported_epochs.clone())
+                            .with_append(
+                                first.stream.clone(),
+                                first.aggregate.clone(),
+                                first.expected,
+                                first.events.clone(),
+                            );
                         let _ = self.inner.append(half).await;
                     }
                     Err(error)
@@ -117,7 +165,16 @@ impl BrokenJournal {
                 }
                 Ok(appended)
             }
-            Fault::LeakyInbox => match self.inner.append(unit.clone()).await {
+            Fault::IntentBlindReceipts => match self.inner.append(unit).await {
+                Err(AppendError::CommandIdReused { command_id }) => {
+                    match self.inner.receipt(command_id).await {
+                        Ok(Some(stored)) => Err(AppendError::CommandReplayed(Box::new(stored))),
+                        _ => Err(AppendError::CommandIdReused { command_id }),
+                    }
+                }
+                other => other,
+            },
+            Fault::ForgetfulInbox => match self.inner.append(unit.clone()).await {
                 Err(AppendError::DuplicateMessage(_)) => {
                     let mut unit = unit;
                     unit.inbox = None;
@@ -125,40 +182,96 @@ impl BrokenJournal {
                 }
                 other => other,
             },
-            Fault::RacyHead => {
-                for append in &unit.streams {
-                    let actual = self
-                        .inner
-                        .stream_revision(&append.stream)
-                        .await
-                        .map_err(AppendError::Storage)?;
-                    if actual != append.expected {
-                        return Err(AppendError::WrongExpectedRevision {
-                            stream: append.stream.clone(),
-                            expected: append.expected,
-                            actual,
-                        });
+            Fault::CachedHead => {
+                let outcome = match self.inner.append(unit.clone()).await {
+                    Err(AppendError::WrongExpectedRevision {
+                        stream, expected, ..
+                    }) if self.cached(&stream).is_some_and(|c| expected.matches(c)) => {
+                        let unit = self.loosened(unit).await?;
+                        self.inner.append(unit).await
+                    }
+                    other => other,
+                };
+                if let Ok(appended) = &outcome {
+                    let mut cache = self
+                        .cached_heads
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    for written in &appended.streams {
+                        cache.insert(written.stream.clone(), Some(written.last));
                     }
                 }
-                YieldOnce(false).await;
-                let mut unit = unit;
-                for append in &mut unit.streams {
-                    append.expected = self
-                        .inner
-                        .stream_revision(&append.stream)
-                        .await
-                        .map_err(AppendError::Storage)?;
-                }
-                self.inner.append(unit).await
+                outcome
             }
-            Fault::GlobalWriter => {
-                if self.in_flight.swap(true, Ordering::SeqCst) {
-                    return Err(AppendError::Storage(StorageError::new("journal busy")));
+            Fault::GlobalLock => {
+                let mine: BTreeSet<StreamId> = unit
+                    .appends
+                    .iter()
+                    .map(|a| a.stream.clone())
+                    .chain(unit.reads.iter().map(|r| r.stream.clone()))
+                    .collect();
+                {
+                    let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+                    if open.iter().any(|s| !mine.contains(s)) {
+                        return Err(AppendError::Busy);
+                    }
+                    open.extend(mine.iter().cloned());
                 }
                 YieldOnce(false).await;
                 let outcome = self.inner.append(unit).await;
-                self.in_flight.store(false, Ordering::SeqCst);
+                self.open
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|s| !mine.contains(s));
                 outcome
+            }
+            Fault::LateIdCheck => match self.inner.append(unit.clone()).await {
+                Err(AppendError::DuplicateEventId(id)) => {
+                    let mut conditions: Vec<(StreamId, ExpectedRevision)> = unit
+                        .appends
+                        .iter()
+                        .map(|a| (a.stream.clone(), a.expected))
+                        .chain(unit.reads.iter().map(|r| (r.stream.clone(), r.expected)))
+                        .collect();
+                    conditions.sort();
+                    for (stream, expected) in conditions {
+                        let actual = self.current(&stream).await?;
+                        if !expected.matches(actual) {
+                            return Err(AppendError::WrongExpectedRevision {
+                                stream,
+                                expected,
+                                actual,
+                            });
+                        }
+                    }
+                    Err(AppendError::DuplicateEventId(id))
+                }
+                other => other,
+            },
+            Fault::TornUnit => {
+                if unit.appends.len() < 2 {
+                    return self.inner.append(unit).await;
+                }
+                if let Some(refusal) = self.inner.judge(&unit) {
+                    return Err(refusal);
+                }
+                let mut rest = unit.clone();
+                let last = rest.appends.pop();
+                rest.projections
+                    .retain(|p| last.as_ref().is_none_or(|l| l.stream != p.stream));
+                let first = self.inner.append(rest).await?;
+                YieldOnce(false).await;
+                let mut tail = UnitOfWork::new(unit.recorded_at, unit.supported_epochs.clone());
+                tail.appends.extend(last.clone());
+                tail.projections = unit
+                    .projections
+                    .into_iter()
+                    .filter(|p| last.as_ref().is_some_and(|l| l.stream == p.stream))
+                    .collect();
+                let second = self.inner.append(tail).await?;
+                let mut all = first;
+                all.streams.extend(second.streams);
+                Ok(all)
             }
         }
     }
@@ -169,33 +282,28 @@ impl Journal for BrokenJournal {
         self.append_broken(unit).await
     }
 
-    async fn stream_revision(&self, stream: &StreamId) -> Result<StreamRevision, StorageError> {
-        self.inner.stream_revision(stream).await
+    async fn head(&self, stream: &StreamId) -> Result<Option<StreamHead>, StorageError> {
+        let head = self.inner.head(stream).await?;
+        if self.fault == Fault::CachedHead {
+            self.cached_heads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(stream.clone(), head.as_ref().map(|h| h.revision));
+        }
+        Ok(head)
     }
 
     async fn read_stream(
         &self,
         stream: &StreamId,
-        after: StreamRevision,
-        limit: usize,
+        after: Option<StreamRevision>,
+        through: Option<StreamRevision>,
     ) -> Result<Vec<RecordedEvent>, StorageError> {
-        self.inner.read_stream(stream, after, limit).await
-    }
-
-    async fn streams(
-        &self,
-        after: Option<&StreamId>,
-        limit: usize,
-    ) -> Result<Vec<StreamId>, StorageError> {
-        self.inner.streams(after, limit).await
+        self.inner.read_stream(stream, after, through).await
     }
 
     async fn lookup_event(&self, event_id: EventId) -> Result<Option<EventLocation>, StorageError> {
         self.inner.lookup_event(event_id).await
-    }
-
-    async fn recorded_kinds(&self) -> Result<Vec<RecordedKind>, StorageError> {
-        self.inner.recorded_kinds().await
     }
 
     async fn receipt(&self, command_id: CommandId) -> Result<Option<CommandReceipt>, StorageError> {
@@ -205,23 +313,20 @@ impl Journal for BrokenJournal {
         self.inner.receipt(command_id).await
     }
 
-    async fn processed_at(&self, entry: &InboxEntry) -> Result<Option<Millis>, StorageError> {
-        self.inner.processed_at(entry).await
+    async fn inbox_contains(&self, key: &InboxKey) -> Result<bool, StorageError> {
+        self.inner.inbox_contains(key).await
     }
 
-    async fn directive(
+    async fn streams(
         &self,
-        directive_id: DirectiveId,
-    ) -> Result<Option<OutboxRow>, StorageError> {
-        self.inner.directive(directive_id).await
+        after: Option<&StreamId>,
+        limit: u32,
+    ) -> Result<Vec<StreamHead>, StorageError> {
+        self.inner.streams(after, limit).await
     }
 
-    async fn directives(
-        &self,
-        status: OutboxStatus,
-        limit: usize,
-    ) -> Result<Vec<OutboxRow>, StorageError> {
-        self.inner.directives(status, limit).await
+    async fn stored_kinds(&self) -> Result<Vec<StoredKind>, StorageError> {
+        self.inner.stored_kinds().await
     }
 
     async fn projection(
@@ -239,13 +344,7 @@ impl JournalFactory for BrokenFactory {
     type Journal = BrokenJournal;
 
     async fn fresh(&self) -> BrokenJournal {
-        BrokenJournal {
-            inner: MemoryJournal::new(),
-            fault: self.0,
-            receipts_before_reopen: Arc::default(),
-            forgotten: BTreeSet::new(),
-            in_flight: Arc::default(),
-        }
+        BrokenJournal::new(self.0, MemoryJournal::new())
     }
 
     async fn reopen(&self, journal: BrokenJournal) -> BrokenJournal {
@@ -256,13 +355,36 @@ impl JournalFactory for BrokenFactory {
             .clone();
         BrokenJournal {
             forgotten,
+            cached_heads: Arc::default(),
             ..journal
         }
+    }
+
+    async fn second_handle(&self, journal: &BrokenJournal) -> BrokenJournal {
+        BrokenJournal {
+            cached_heads: Arc::default(),
+            ..journal.clone()
+        }
+    }
+
+    async fn inject(&self, journal: &BrokenJournal, fault: InjectedFault) -> bool {
+        journal.inner.inject(fault)
+    }
+
+    async fn crash(&self, journal: BrokenJournal) -> BrokenJournal {
+        self.reopen(journal).await
     }
 }
 
 fn failed_cases(fault: Fault) -> Vec<JournalCase> {
     block_on(check_journal_contract(&BrokenFactory(fault))).failed_cases()
+}
+
+/// Checks the §7.6 cases are among `failed` before the exact set is compared.
+fn assert_fails_named(failed: &[JournalCase], named: &[JournalCase]) {
+    for case in named {
+        assert!(failed.contains(case), "{case} did not fail: {failed:?}");
+    }
 }
 
 #[test]
@@ -279,7 +401,7 @@ fn should_pass_journal_contract_when_journal_is_in_memory() {
 }
 
 #[test]
-fn should_fail_every_revision_case_when_journal_ignores_expected_revision() {
+fn should_fail_revision_cases_when_journal_ignores_expected_revision() {
     // given
     let fault = Fault::LooseRevision;
 
@@ -287,20 +409,36 @@ fn should_fail_every_revision_case_when_journal_ignores_expected_revision() {
     let failed = failed_cases(fault);
 
     // then
+    assert_fails_named(
+        &failed,
+        &[
+            JournalCase::StaleExpectedRevision,
+            JournalCase::RacingHandles,
+        ],
+    );
     assert_eq!(
         failed,
         [
-            JournalCase::ExpectedRevisionConflict,
-            JournalCase::AllOrNothing,
-            JournalCase::RacingWritersOnOneStream,
+            JournalCase::StaleExpectedRevision,
+            JournalCase::AheadExpectedRevision,
+            JournalCase::NoStreamMismatch,
+            JournalCase::RefusalOrder,
+            JournalCase::MultiStreamAllOrNothing,
+            JournalCase::ReadConditions,
+            JournalCase::StoreRefusalLeavesNoReceipt,
+            JournalCase::LookupEvent,
+            JournalCase::KindManifest,
+            JournalCase::PayloadRoundTrip,
+            JournalCase::StreamsEnumeration,
+            JournalCase::RacingHandles,
             JournalCase::IndependentStreams,
-            JournalCase::StreamReads
+            JournalCase::RefusalReceipts
         ]
     );
 }
 
 #[test]
-fn should_fail_all_or_nothing_when_journal_commits_half_a_unit() {
+fn should_fail_atomicity_cases_when_journal_commits_half_a_unit() {
     // given
     let fault = Fault::PartialCommit;
 
@@ -308,14 +446,27 @@ fn should_fail_all_or_nothing_when_journal_commits_half_a_unit() {
     let failed = failed_cases(fault);
 
     // then
+    assert_fails_named(
+        &failed,
+        &[
+            JournalCase::MultiStreamAllOrNothing,
+            JournalCase::CrashAtomicity,
+        ],
+    );
     assert_eq!(
         failed,
-        [JournalCase::AllOrNothing, JournalCase::InboxDedupe]
+        [
+            JournalCase::RefusalOrder,
+            JournalCase::MultiStreamAllOrNothing,
+            JournalCase::LookupEvent,
+            JournalCase::CrashAtomicity,
+            JournalCase::OutcomeUnknown
+        ]
     );
 }
 
 #[test]
-fn should_fail_receipt_replay_when_journal_loses_receipts_on_reopen() {
+fn should_fail_survives_reopen_when_journal_loses_receipts_on_reopen() {
     // given
     let fault = Fault::ForgetfulReceipts;
 
@@ -323,67 +474,131 @@ fn should_fail_receipt_replay_when_journal_loses_receipts_on_reopen() {
     let failed = failed_cases(fault);
 
     // then
+    assert_fails_named(&failed, &[JournalCase::SurvivesReopen]);
     assert_eq!(
         failed,
         [
-            JournalCase::AllOrNothing,
+            JournalCase::RefusalOrder,
+            JournalCase::MultiStreamAllOrNothing,
             JournalCase::ReceiptReplay,
-            JournalCase::RacingWritersOnOneStream
+            JournalCase::CommandIdReused,
+            JournalCase::StoreRefusalLeavesNoReceipt,
+            JournalCase::SurvivesReopen,
+            JournalCase::RefusalReceipts
         ]
     );
 }
 
 #[test]
-fn should_fail_inbox_dedupe_when_journal_processes_a_redelivery() {
+fn should_fail_command_id_reused_when_receipts_ignore_the_intent() {
     // given
-    let fault = Fault::LeakyInbox;
+    let fault = Fault::IntentBlindReceipts;
 
     // when
     let failed = failed_cases(fault);
 
     // then
-    assert_eq!(failed, [JournalCase::InboxDedupe]);
+    assert_fails_named(&failed, &[JournalCase::CommandIdReused]);
+    assert_eq!(
+        failed,
+        [JournalCase::RefusalOrder, JournalCase::CommandIdReused]
+    );
 }
 
 #[test]
-fn should_fail_racing_writers_when_journal_checks_the_head_apart_from_advancing_it() {
+fn should_fail_inbox_dedupe_when_journal_consumes_a_redelivery() {
     // given
-    let fault = Fault::RacyHead;
+    let fault = Fault::ForgetfulInbox;
 
     // when
     let failed = failed_cases(fault);
 
     // then
+    assert_fails_named(&failed, &[JournalCase::InboxDedupe]);
     assert_eq!(
         failed,
         [
-            JournalCase::ReceiptReplay,
+            JournalCase::RefusalOrder,
             JournalCase::InboxDedupe,
-            JournalCase::RacingWritersOnOneStream
+            JournalCase::PayloadRoundTrip,
+            JournalCase::SurvivesReopen,
+            JournalCase::RacingInboxKeys
         ]
     );
 }
 
 #[test]
-fn should_fail_independent_streams_when_journal_admits_one_writer_at_a_time() {
+fn should_fail_racing_handles_when_journal_caches_heads_per_handle() {
     // given
-    let fault = Fault::GlobalWriter;
+    let fault = Fault::CachedHead;
 
     // when
     let failed = failed_cases(fault);
 
     // then
+    assert_fails_named(&failed, &[JournalCase::RacingHandles]);
+    assert_eq!(failed, [JournalCase::RacingHandles]);
+}
+
+#[test]
+fn should_fail_independent_streams_when_journal_holds_one_global_lock() {
+    // given
+    let fault = Fault::GlobalLock;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_fails_named(&failed, &[JournalCase::IndependentStreams]);
     assert_eq!(
         failed,
         [
-            JournalCase::RacingWritersOnOneStream,
-            JournalCase::IndependentStreams
+            JournalCase::IndependentStreams,
+            JournalCase::RacingCommandIds,
+            JournalCase::RacingInboxKeys,
+            JournalCase::RacingEventIds
         ]
     );
 }
 
 #[test]
-#[should_panic(expected = "receipt_replay")]
+fn should_fail_refusal_order_when_journal_checks_ids_after_revisions() {
+    // given
+    let fault = Fault::LateIdCheck;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_fails_named(&failed, &[JournalCase::RefusalOrder]);
+    assert_eq!(
+        failed,
+        [JournalCase::RefusalOrder, JournalCase::OutcomeUnknown]
+    );
+}
+
+#[test]
+fn should_fail_unit_visible_at_once_when_journal_shows_a_unit_in_parts() {
+    // given
+    let fault = Fault::TornUnit;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_fails_named(&failed, &[JournalCase::UnitVisibleAtOnce]);
+    assert_eq!(
+        failed,
+        [
+            JournalCase::MultiStreamAllOrNothing,
+            JournalCase::CrashAtomicity,
+            JournalCase::UnitVisibleAtOnce
+        ]
+    );
+}
+
+#[test]
+#[should_panic(expected = "JC-24 survives_reopen")]
 fn should_panic_naming_the_case_when_run_form_meets_a_broken_journal() {
     // given
     let factory = BrokenFactory(Fault::ForgetfulReceipts);
@@ -393,6 +608,69 @@ fn should_panic_naming_the_case_when_run_form_meets_a_broken_journal() {
 
     // then
     unreachable!("run_journal_contract returned for a broken journal");
+}
+
+/// A factory that cannot inject faults: the cases that need one fail, never skip.
+struct NoFaultsFactory;
+
+impl JournalFactory for NoFaultsFactory {
+    type Journal = MemoryJournal;
+
+    async fn fresh(&self) -> MemoryJournal {
+        MemoryJournal::new()
+    }
+
+    async fn reopen(&self, journal: MemoryJournal) -> MemoryJournal {
+        journal
+    }
+
+    async fn second_handle(&self, journal: &MemoryJournal) -> MemoryJournal {
+        journal.clone()
+    }
+
+    async fn inject(&self, _journal: &MemoryJournal, _fault: InjectedFault) -> bool {
+        false
+    }
+
+    async fn crash(&self, journal: MemoryJournal) -> MemoryJournal {
+        journal
+    }
+}
+
+#[test]
+fn should_fail_fault_cases_when_factory_cannot_inject_faults() {
+    // given
+    let factory = NoFaultsFactory;
+
+    // when
+    let failed = block_on(check_journal_contract(&factory)).failed_cases();
+
+    // then
+    assert_eq!(
+        failed,
+        [
+            JournalCase::StoreRefusalLeavesNoReceipt,
+            JournalCase::CrashAtomicity,
+            JournalCase::OutcomeUnknown
+        ]
+    );
+}
+
+#[test]
+fn should_name_every_case_by_its_event_store_id_when_listed() {
+    // given
+    let cases = JournalCase::ALL;
+
+    // when
+    let ids: Vec<&str> = cases.iter().map(|c| c.id()).collect();
+
+    // then
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, ids, "case ids are unique and listed in order");
+    assert!(ids.iter().all(|id| id.starts_with("JC-") && id.len() == 5));
+    assert!(!ids.contains(&"JC-26") && !ids.contains(&"JC-27"));
 }
 
 /// Pending until another thread sets `ready` and wakes the stored waker.

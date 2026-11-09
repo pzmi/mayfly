@@ -2,8 +2,8 @@
 //!
 //! Which clock a reading comes from is the reader's port's business (ADR 0020): the control
 //! plane's `Clock` port reads wall-clock time as milliseconds since the Unix epoch, because its
-//! readings are persisted (command `issued_at`, event instants, the journal's `recorded_at`,
-//! outbox `next_attempt_at`) and must keep their meaning across a restart; the data plane's
+//! readings are persisted (command `issued_at`, event instants such as a directive's deadline,
+//! the journal's `recorded_at`) and must keep their meaning across a restart; the data plane's
 //! `ProcessClock` reads a monotonic clock for deadlines that never leave the process.
 
 use serde::{Deserialize, Serialize};

@@ -107,7 +107,7 @@ scenario (§7.3), store-lab workloads (`SW`, §7.5) and the broken implementatio
 **ES-I1 Atomic unit**. A unit commits all of: every stream's batch and head
 revision and epoch, the event identities, the manifest rows, the receipt, the inbox entry, the
 inline projection rows, the dispatch marks and the snapshot request; or none of them.
-Pinned by JC-10, JC-23, PC-03, DC-03, SC-03 on all stores; model `ES_I1_atomicUnit`
+Pinned by JC-10, JC-23, JC-32, PC-03, DC-03, SC-03 on all stores; model `ES_I1_atomicUnit`
 (`batchFailsAfterSecondEvent`, `multiStreamConflict`); SW3; `PartialCommitJournal`.
 
 **ES-I2 Stream order**. A stream's revisions are consecutive from 0 with no committed
@@ -124,7 +124,7 @@ it. Pinned by JC-22 (outcome half, all stores; blocking half, PostgreSQL only); 
 
 **ES-I4 Global event identity**. An `event_id` is bound to at most one
 `(stream, revision)`; `lookup_event` resolves it; every event has its identity and every identity
-its event. Pinned by JC-07, JC-08, JC-16; model `ES_I4_globalEventIdentity`
+its event. Pinned by JC-07, JC-08, JC-16, JC-31; model `ES_I4_globalEventIdentity`
 (`duplicateAcrossStreams`, `repeatedWithinBatch`); SW4.
 
 **ES-I5 Command identity**. A repeated `command_id` with the same
@@ -134,13 +134,13 @@ commits per command id. A refusal writes a **refusal receipt bound to the stream
 was decided at** (E3, ADR 0034): a repeat while that stream is still at that revision is answered
 with the recorded refusal; once the stream moved, the repeat is decided afresh, never replayed, and
 its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
-Pinned by JC-12..JC-14, JC-28; model
+Pinned by JC-12..JC-14, JC-28, JC-29; model
 `ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`); SW6, SW8;
 `ForgetfulReceiptsJournal`, `IntentBlindReceipts`.
 
 **ES-I6 Message identity**. An inbox key is consumed by at most one committed unit; a
 redelivered message is answered `DuplicateMessage` with no write; a unit that only records the
-entry (nothing to do) is legal. Pinned by JC-15; model `ES_I6_messageIdentity`
+entry (nothing to do) is legal. Pinned by JC-15, JC-30; model `ES_I6_messageIdentity`
 (`inboxRedelivery`); SW10; `ForgetfulInbox`; ver §9 mutant 7.
 
 **ES-I7 History preservation**. No committed event, identity or head-revision step
@@ -229,12 +229,14 @@ precedes the GitHub ack); ES-I14 and ES-I18 carry I10 (an ambiguous effect stays
 
 ## 3. Storage-neutral ports
 
-All ports live in `mayfly-control::store` (application layer), are native `async fn`/RPITIT
-traits used through generics (D8), take and return values from `mayfly-domain` and
-`mayfly-control-domain`, and name no format beyond already-encoded payload strings. Implementations:
-`mayfly_testkit::store::Memory*` (full transactional semantics), `mayfly-adapter-sqlite`,
-`mayfly-adapter-postgres`. Signatures below are sketches; names that ES-01 already chose win where
-they mean the same.
+All ports live in `mayfly-control` (application layer; the journal in `mayfly_control::journal`),
+are native `async fn`/RPITIT traits used through generics (D8), take and return values from
+`mayfly-domain` and `mayfly-control-domain`, and name no format beyond already-encoded payload
+strings. Implementations: `mayfly_testkit::journal::MemoryJournal` and its siblings (full
+transactional semantics), `mayfly-adapter-sqlite`, `mayfly-adapter-postgres`. Signatures below
+are sketches; the landed journal port (ES-01, realigned by ES-01F) is authoritative where they
+differ in name only: `StreamRevision` for `Revision`, `ExpectedRevision` for `Expected`,
+`InboxKey`, `StoredKind`, `NewReceipt { command_id, command_type, intent, decision }`.
 
 ### 3.1 Values
 
@@ -282,8 +284,10 @@ pub struct UnitOfWork {
   not this build's code) for every appended stream, so a build marks consumers it does not run
   (§6.4).
 - A unit with no events is legal only to record an inbox entry (a message that required nothing)
-  or a refusal receipt (E3; it then carries the refused stream in `reads` at the revision decided
-  at, so a moved stream refuses the receipt); it writes no head.
+  or a receipt: a zero-event acceptance, or a refusal receipt (E3; it then carries no append and
+  exactly one read, the refused stream at the revision decided at, so a moved stream refuses the
+  receipt: `Malformed(RefusalNotBound)` otherwise); it writes no head. An append with no event is
+  `Malformed` (a guard is a read).
 - The receipt's recorded outcome is the `Appended` value: per stream the first and last revision
   and the event ids.
 
@@ -299,32 +303,48 @@ pub trait Journal: Send + Sync {
     fn receipt(&self, id: CommandId) -> impl Future<Output = Result<Option<CommandReceipt>, StorageError>> + Send;
     fn inbox_contains(&self, key: &InboxKey) -> impl Future<Output = Result<bool, StorageError>> + Send;
     /// Heads in `StreamId` order after `after`: enumeration by key, never by time or position.
-    fn streams(&self, after: Option<&StreamId>, limit: u32) -> impl Future<Output = Result<Vec<StreamHead>, StorageError>> + Send;
+    fn streams(&self, after: Option<&StreamId>, limit: u32) -> impl Future<Output = Result<Vec<StreamHead>, StorageError>> + Send; // limit clamped to MAX_PAGE
     fn stored_kinds(&self) -> impl Future<Output = Result<Vec<StoredKind>, StorageError>> + Send;
 }
 
+#[non_exhaustive]
 pub enum AppendError {
     Malformed(MalformedUnit),                         // before any storage access
     EpochAboveBuild { stream: StreamId },             // a batch needs more than this build supports
     CommandReplayed(Box<CommandReceipt>),             // same id, same intent: the recorded answer
     CommandIdReused { command_id: CommandId },        // same id, other intent
     DuplicateMessage(InboxKey),
+    DuplicateEventId(EventId),                        // the lowest stored id of the unit
     WrongExpectedRevision { stream: StreamId, expected: Expected, actual: Option<Revision> },
     StreamEpochUnsupported { stream: StreamId, epoch: u32 },
-    DuplicateEventId(EventId),
     Busy,                                             // a bounded lock wait ran out; definite
-    Storage(StorageError),                            // definite: rolled back
+    Storage(StorageError),                            // definite: rolled back; a fixed code only
     OutcomeUnknown(StorageError),                     // the commit's reply was lost
 }
 ```
 
-The refusal order above is part of the contract (JC-09) and of the model: two stores that refuse
-the same unit for different reasons diverge in conformance replay, which compares the
-refusal itself, not only that one occurred. `CommandReplayed` is an `Err` so that a
-caller cannot mistake it for a fresh commit; `AggregateStore` turns it into the receipt's answer.
+The **reporting order** above is part of the contract (JC-09) and of the model: two stores that
+refuse the same unit for different reasons diverge in conformance replay, which compares the
+refusal itself, not only that one occurred. Within a
+variant the lowest key is named: the lowest stored event id, the lowest `StreamId` among the
+appended and read streams. `CommandReplayed` is an `Err` so that a caller cannot mistake it for a
+fresh commit; `AggregateStore` turns it into the receipt's answer.
 
-No `read_all`, no global position, no `head()` of the journal (ES-I17). A journal-wide view for
-the operator (`mayfly events --follow`, plan §11) is built in §5.6 without one.
+The reporting order is **not the lock order** of §4.2. Event ids are reported before expected
+revisions (ES-01F, review M1/M4), although an adapter locks heads before identities: a writer that
+lost a commit's reply (`OutcomeUnknown`) re-appends the identical unit and is answered by its
+receipt (`CommandReplayed`) or by `DuplicateEventId` naming an id that `lookup_event` finds where
+the unit wrote it, never by the `WrongExpectedRevision` its own commit caused (JC-25;
+`LateIdCheckJournal` fails JC-09 and JC-25). A stored refusal receipt answers (`CommandReplayed`)
+only while its bound stream is still at the bound revision; otherwise the unit is judged afresh
+and, if it commits, its receipt replaces the refusal (E3, JC-28).
+
+No `read_all`, no global position, no `head()` of the journal (ES-I17), and no method returns
+events of more than one stream. A journal-wide view for the operator (`mayfly events --follow`,
+plan §11) is built in §5.6 without one. Until ES-04's `ProjectionStore`, the landed port keeps an
+interim `projection(name, key)` read and inline rows as `ProjectionWrite { projection, stream,
+key, row }`, refused `Malformed(ProjectionOutsideUnit)` when keyed by a stream the unit does not
+append to (ES-I10).
 
 ### 3.4 `DeliveryLedger`, `Consumer`, `DeliveryWorker`
 
@@ -753,7 +773,19 @@ refused at open unless the test profile allows it. JC-27 raw `UPDATE`/`DELETE` o
 refused by the store (adapter modes only). JC-28 a refusal receipt answers a repeat at the same
 revision with the recorded refusal; after the stream moved, the repeat is decided afresh and its
 acceptance replaces the refusal receipt; a refusal receipt whose stream moved before commit is
-refused (E3).
+refused (E3). JC-29 two units with one command id on different streams, at once: exactly one
+commits, the other is answered by its receipt. JC-30 the same for one inbox key
+(`DuplicateMessage`). JC-31 the same for one event id (`DuplicateEventId`). JC-32 a reader running
+beside an append never sees part of the unit (ES-I1). JC-26 and JC-27 need an engine and arrive
+with the adapters (ES-02, ES-09); the rest run on memory from ES-01F.
+
+The concurrency cases (JC-21, JC-22, JC-29..JC-32) drive units at once on one task through two
+handles, so they check the *outcomes* of the interleavings an adapter's await points allow; they
+do not prove that writers of disjoint streams never wait on each other (a store that serialises
+every unit without refusing one passes them). That structural half of ES-I3 is ES-09's
+`pg_blocking_pids` check (§7.2, §7.3). A factory that cannot inject the faults JC-14, JC-23 and
+JC-25 need (`InjectedFault`: before commit, busy, reply lost after or before the commit, crash
+after statement n) fails those cases; nothing skips.
 
 **Delivery (DC).** DC-01 no consumer: no mark and no write beyond the unit. DC-02 each registered consumer
 is marked at the new head. DC-03 a refused unit leaves no mark. DC-04 bootstrap marks every
@@ -926,10 +958,11 @@ then a fix.
 | `PartialCommitJournal` (commits the first stream of a unit) | contract | JC-10, JC-23; SW3 `partial-unit` |
 | `ForgetfulReceiptsJournal` (receipts lost on reopen) | contract | JC-24 (reopened mode); ver §9 mutant 10 |
 | `IntentBlindReceipts` (replays any intent) | contract | JC-13; SW8 `intent-blind` |
-| `ForgetfulInbox` | contract | JC-15; ver §9 mutant 7; SW10 |
+| `ForgetfulInbox` | contract | JC-15, JC-30; ver §9 mutant 7; SW10 |
 | `CachedHeadJournal` (head cached per handle) | contract | JC-21 (two-handle mode) |
-| `GlobalLockJournal` (refuses a unit while another stream's is open) | contract | JC-22 |
-| `LateIdCheckJournal` (id check after revision check) | contract | JC-09 |
+| `GlobalLockJournal` (refuses a unit while another stream's is open) | contract | JC-22, JC-29..JC-31 |
+| `LateIdCheckJournal` (id check after revision check) | contract | JC-09, JC-25 |
+| `TornUnitJournal` (a unit's last stream visible after the rest) | contract | JC-32 |
 | `AckBeforeCommitJournal` (reports success before `COMMIT` returns) | lab | SW6 `ack-before-commit` |
 | `UnfencedLedger` (advance ignores the token) | contract | DC-11; model trace `staleWorkerFenced`; SW9 |
 | `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08 |

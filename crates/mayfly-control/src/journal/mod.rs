@@ -1,78 +1,108 @@
-//! The `Journal` port (plan §5.2): the control plane's only durable state, written one atomic
-//! [`UnitOfWork`] at a time.
+//! The `Journal` port (plan §5.2, `doc/event-store.md` §3.3): the control plane's durable
+//! state, written one atomic [`UnitOfWork`] at a time.
 //!
-//! It follows the stream-scoped event store design (ADR 0021): order is per stream, held by a
-//! **stream head** compared and advanced by each append (the expected revision); event ids are
-//! unique across the journal through an **event-id registry**; **command receipts** make a
-//! repeated command answer as its first run did; and there is **no global journal order**: no
-//! sequence, no "read everything after position n". Consumers progress per stream, by
-//! enumerating [`Journal::streams`] and reading each with [`Journal::read_stream`] after their own
-//! checkpoint. No correctness here may rest on a single writer or on a storage row order, so a
-//! PostgreSQL adapter can follow the SQLite one (ES-02) with no change to this port.
+//! It follows the stream-scoped event store design (ADR 0021, amended by ADR 0034): order is per
+//! stream, held by a **stream head** compared and advanced by each append (the expected
+//! revision); event ids are unique across the journal through an **event-id registry**;
+//! **command receipts** carry a canonical intent digest and make a repeated command answer as
+//! its first run did, with refusal receipts bound to the revision they were decided at (E3);
+//! **stream epochs** keep a build from writing a stream it cannot decide (E6); and there is
+//! **no global journal order** (ES-I17): no sequence, no read-all, no head of the journal, and no
+//! method here returns events of more than one stream. Readers enumerate [`Journal::streams`]
+//! by key and read each with [`Journal::read_stream`] after their own checkpoint. No
+//! correctness here rests on a single writer or a storage row order, so the SQLite adapter
+//! (ES-02) and the PostgreSQL one (ES-09) implement this port unchanged.
 //!
-//! The port is shaped by what `AggregateStore::save` (ES-03), the only caller of
-//! [`Journal::append`] (fnd §6.3, `ARCH-single-append`), must commit in one transaction:
-//! expected-revision checks and events per stream, the command receipt, the inbox entry that
-//! caused the command, outbox rows, and synchronous projection updates. Payloads are already
-//! encoded; the journal never parses them, so this crate names no format here.
+//! **Directives are events** (E2, ADR 0034), with no table or queue of their own: a directive is a
+//! `DirectiveIssued` event appended by the unit that decided it, delivered at least once by the
+//! `directive_relay` durable consumer. The seam for that consumer is inside
+//! [`Journal::append`]: ES-05 adds the dispatch marks the store writes, in the same
+//! transaction, for every registered consumer of every appended stream (`doc/event-store.md`
+//! §5.1); nothing in the unit names them.
 //!
-//! Implementations: `mayfly_testkit::journal::MemoryJournal` and the SQLite journal (ES-02).
-//! Both pass one contract suite, `mayfly_testkit::contracts::journal` (ver §5), whose own
-//! tests show deliberately broken journals failing named cases.
+//! The only caller of [`Journal::append`] is `AggregateStore::save` (ES-03; fnd §6.3,
+//! `ARCH-single-append`). Payloads are already encoded; the journal never parses them, so this
+//! crate names no format here.
+//!
+//! Implementations: `mayfly_testkit::journal::MemoryJournal`, the SQLite journal (ES-02) and
+//! the PostgreSQL journal (ES-09). All pass one contract suite,
+//! `mayfly_testkit::contracts::journal` (ver §5), whose own tests show deliberately broken
+//! journals failing named cases (`doc/event-store.md` §7.6).
 
 mod error;
-mod outbox;
 mod unit;
 mod values;
 
 use std::future::Future;
 
-use mayfly_domain::{CommandId, DirectiveId, EventId, Millis};
+use mayfly_domain::{CommandId, EventId};
 
 pub use error::{AppendError, StorageError};
-pub use outbox::{NewDirective, OutboxRow, OutboxStatus, OutboxTransition, OutboxWrite};
-pub use unit::{Appended, MalformedUnit, StreamAppend, UnitOfWork};
+pub use unit::{Appended, AppendedStream, MalformedUnit, StreamAppend, UnitOfWork};
 pub use values::{
-    CommandReceipt, EventLocation, InboxEntry, InboxSource, JournalValueError, MessageId, NewEvent,
-    Payload, ProjectionName, ProjectionWrite, ReceiptStatus, RecordedEvent, RecordedKind, StreamId,
-    StreamRevision,
+    AggregateName, CommandReceipt, CommandType, Decision, EventLocation, ExpectedRevision,
+    InboxKey, InboxSource, IntentDigest, JournalValueError, MessageId, NewEvent, NewReceipt,
+    Payload, ProjectionName, ProjectionWrite, ReadCondition, ReceiptOutcome, RecordedEvent,
+    StoredKind, StreamHead, StreamId, StreamRevision, SupportedEpochs,
 };
 
-/// The event journal with its receipts, inbox, outbox and projection rows.
+/// The largest page [`Journal::streams`] returns; a larger `limit` is clamped to it, so a
+/// caller asking for `u32::MAX` gets a page, never an engine error (contract case JC-20).
+pub const MAX_PAGE: u32 = 1_000;
+
+/// The event journal with its stream heads, event-id registry, receipts, inbox, event-kind
+/// manifest and inline projection rows.
 ///
 /// A native async trait used through generics (D8); every returned future is `Send`.
 ///
-/// **Atomicity.** [`Journal::append`] commits a whole unit or nothing. Readers never see part
-/// of a unit, and a unit that fails leaves every table as it was (contract `all_or_nothing`).
+/// **Atomicity (ES-I1).** [`Journal::append`] commits a whole unit or nothing: the events and
+/// heads of every stream, the identities, the manifest, the receipt, the inbox entry and the
+/// projection rows. A reader never sees part of a unit (contract cases JC-10, JC-32).
+///
+/// **Reporting order.** A unit is refused with the first applicable [`AppendError`] in the
+/// order its variants are declared: shape, epoch above the build, receipt (replay or reuse),
+/// inbox, event ids, expected revisions (appends and reads together, lowest `StreamId` first),
+/// stream epochs, then the store's own `Busy` and `Storage`. JC-09 pins this order on every
+/// store, so two stores refusing one unit for different reasons cannot both pass.
+///
+/// **Lock order (ES-I16), which is not the reporting order.** An adapter that locks takes, in
+/// one transaction: the heads of appended and read streams in `StreamId` order; the receipt
+/// key; the inbox key; the event identities in ascending id; then journal rows, manifest rows,
+/// projection rows and dispatch marks (`doc/event-store.md` §4.2). Nothing awaits network I/O
+/// while holding any of them. Because the order is fixed, no two units wait on each other in a
+/// cycle; every wait is bounded and ends in [`AppendError::Busy`].
+///
+/// **Isolation.** No operation needs `SERIALIZABLE` or relies on it: every refusal comes from
+/// data, a compare-and-set of a head or a unique key. PostgreSQL (ES-09) runs `append` at
+/// `READ COMMITTED` with `SELECT … FOR NO KEY UPDATE` on written heads and `FOR SHARE` on read
+/// heads, in `StreamId` order; SQLite (ES-02) runs it in one `BEGIN IMMEDIATE` transaction.
+/// Reads are one statement each.
 ///
 /// **Concurrency.** Writers of one stream serialise on its head: of two appends expecting the
-/// same revision, exactly one commits and the other is refused with
-/// [`AppendError::WrongExpectedRevision`] and no effect (contract `racing_writers_on_one_stream`).
-/// Writers of different streams share nothing but the unique keys of the event-id registry, the
-/// receipts, the inbox and the outbox: none is refused or rolled back because another stream
-/// moved (contract `independent_streams`). A stream with no events has no head: a refused unit,
-/// or a unit whose append to a new stream carries no event, leaves it absent.
+/// same revision, at most one commits and the other is refused `WrongExpectedRevision` with no
+/// effect (ES-I2; JC-21). Writers of different streams share only unique keys (event ids,
+/// command ids, inbox keys): none is refused because another stream moved, and of two units
+/// sharing a key on different streams exactly one commits (ES-I3, ES-I4, ES-I5, ES-I6; JC-22,
+/// JC-29, JC-30, JC-31). The contract drives such units at once on one task, so it checks the
+/// *outcomes* of the interleavings an implementation's await points allow; it does not prove
+/// that two writers of disjoint streams never wait on each other (a global lock that
+/// serialises without refusing passes it). The structural half, no waiter blocked by a unit on
+/// another stream, is checked on PostgreSQL with `pg_blocking_pids` (ES-09).
 ///
-/// **Check order.** A unit is checked in this order and refused with the first failure:
-/// 1. its shape ([`UnitOfWork::check_shape`]) → [`AppendError::Malformed`], whatever is stored;
-/// 2. its receipt's command id → [`AppendError::DuplicateCommand`], carrying the original
-///    receipt, so a repeated command gets its first answer even though the streams have moved;
-/// 3. its inbox entry → [`AppendError::DuplicateMessage`], for the same reason on redelivery;
-/// 4. each stream's expected revision, in the unit's order → [`AppendError::WrongExpectedRevision`];
-/// 5. each event id against the registry → [`AppendError::DuplicateEventId`];
-/// 6. each outbox write, in order → `DuplicateDirective`, `UnknownDirective`,
-///    `OutboxStatusMismatch`, `IllegalOutboxTransition`.
+/// **Unknown outcomes (ES-I18).** Every error but [`AppendError::OutcomeUnknown`] means
+/// nothing was committed. On `OutcomeUnknown` the caller re-appends the identical unit: its
+/// receipt answers (`CommandReplayed`), or `DuplicateEventId` names an id that
+/// [`Journal::lookup_event`] finds where the unit put it, or the unit commits now because the
+/// first one never did (JC-25). It never guesses.
 ///
-/// Steps 2 and 3 before step 4 are contract cases (`receipt_replay`, `inbox_dedupe`).
+/// **Cancellation.** Dropping an `append` future once polled leaves the unit wholly committed
+/// or wholly absent, never part of it; the caller learns which as for `OutcomeUnknown`. Every
+/// read is cancel-safe (it has no effect).
 ///
-/// **Cancellation.** `append` is not cancel-safe in the sense of having no effect: once polled,
-/// a dropped future leaves the unit wholly committed or wholly absent, never part of it; the
-/// caller learns which from the receipt (`MemoryJournal` commits within one poll; ES-02's
-/// writer thread must keep the same promise). Every read is cancel-safe (it has no effect).
-///
-/// **Time.** The journal reads no clock: `recorded_at` comes in the unit (ADR 0020).
+/// **Time.** The journal reads no clock: `recorded_at` comes in the unit (ADR 0020) and
+/// nothing orders or decides by it.
 pub trait Journal: Send + Sync {
-    /// Commits `unit` atomically and returns the events it recorded.
+    /// Commits `unit` atomically and returns what it appended.
     ///
     /// # Errors
     /// See [`AppendError`]; every variant but `OutcomeUnknown` means nothing was committed.
@@ -81,42 +111,30 @@ pub trait Journal: Send + Sync {
         unit: UnitOfWork,
     ) -> impl Future<Output = Result<Appended, AppendError>> + Send;
 
-    /// The stream head: the stream's current revision ([`StreamRevision::EMPTY`] when it has no
-    /// events).
+    /// The stream's head, or `None` when it has no event (contract case JC-01).
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
-    fn stream_revision(
+    fn head(
         &self,
         stream: &StreamId,
-    ) -> impl Future<Output = Result<StreamRevision, StorageError>> + Send;
+    ) -> impl Future<Output = Result<Option<StreamHead>, StorageError>> + Send;
 
-    /// Up to `limit` of the stream's events with a revision after `after`, in revision order:
-    /// how an aggregate is loaded and how a consumer reads past its per-stream checkpoint.
+    /// The stream's events with a revision after `after` (from its first when `None`) and at
+    /// most `through` (to its head when `None`), in revision order: how an aggregate is loaded
+    /// and how a consumer reads past its checkpoint. Never refused for an epoch (ES-I12).
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
     fn read_stream(
         &self,
         stream: &StreamId,
-        after: StreamRevision,
-        limit: usize,
+        after: Option<StreamRevision>,
+        through: Option<StreamRevision>,
     ) -> impl Future<Output = Result<Vec<RecordedEvent>, StorageError>> + Send;
 
-    /// Up to `limit` streams that have events, in ascending stream id order, after `after`
-    /// (from the first when `None`): the enumeration a rebuild or a new consumer pages through.
-    /// Ordered by id, never by time or position.
-    ///
-    /// # Errors
-    /// [`StorageError`] when the store fails.
-    fn streams(
-        &self,
-        after: Option<&StreamId>,
-        limit: usize,
-    ) -> impl Future<Output = Result<Vec<StreamId>, StorageError>> + Send;
-
-    /// Where `event_id` was recorded, if it was: the event-id registry, through which a retried
-    /// append whose ids are stored finds its committed batch.
+    /// Where `event_id` was recorded, if it was: the event-id registry (ES-I4), through which a
+    /// writer that lost a commit's reply finds its batch.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
@@ -125,16 +143,7 @@ pub trait Journal: Send + Sync {
         event_id: EventId,
     ) -> impl Future<Output = Result<Option<EventLocation>, StorageError>> + Send;
 
-    /// Every event kind with at least one recorded event, ascending: the event-kind manifest
-    /// the start-up check compares with the kinds this build decodes.
-    ///
-    /// # Errors
-    /// [`StorageError`] when the store fails.
-    fn recorded_kinds(
-        &self,
-    ) -> impl Future<Output = Result<Vec<RecordedKind>, StorageError>> + Send;
-
-    /// The receipt of `command_id`, if it ran.
+    /// The receipt of `command_id`, if one is stored.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
@@ -143,37 +152,38 @@ pub trait Journal: Send + Sync {
         command_id: CommandId,
     ) -> impl Future<Output = Result<Option<CommandReceipt>, StorageError>> + Send;
 
-    /// When `entry` was processed (its unit's `recorded_at`), if it was.
+    /// Whether a committed unit consumed `key`.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
-    fn processed_at(
+    fn inbox_contains(
         &self,
-        entry: &InboxEntry,
-    ) -> impl Future<Output = Result<Option<Millis>, StorageError>> + Send;
+        key: &InboxKey,
+    ) -> impl Future<Output = Result<bool, StorageError>> + Send;
 
-    /// The outbox row of `directive_id`, if any.
+    /// Up to `limit` (clamped to [`MAX_PAGE`]) stream heads with an id above `after` (from the
+    /// first when `None`), in byte order of the id: enumeration by key, never by time or
+    /// position (`COLLATE "C"` on PostgreSQL). How a rebuild or a new consumer pages through
+    /// the journal (contract case JC-20).
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
-    fn directive(
+    fn streams(
         &self,
-        directive_id: DirectiveId,
-    ) -> impl Future<Output = Result<Option<OutboxRow>, StorageError>> + Send;
+        after: Option<&StreamId>,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<StreamHead>, StorageError>> + Send;
 
-    /// Up to `limit` outbox rows in `status`, ordered by `next_attempt_at`, then directive id.
-    /// The outbox is a queue of effects to send, not a feed of the journal: nothing reads events
-    /// through it.
+    /// Every event kind with at least one committed event, ascending: the event-kind manifest
+    /// the start-up check compares with the kinds this build decodes (`doc/event-store.md`
+    /// §6.3; contract case JC-17).
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
-    fn directives(
-        &self,
-        status: OutboxStatus,
-        limit: usize,
-    ) -> impl Future<Output = Result<Vec<OutboxRow>, StorageError>> + Send;
+    fn stored_kinds(&self) -> impl Future<Output = Result<Vec<StoredKind>, StorageError>> + Send;
 
-    /// The projection row `key` of `projection`, if present.
+    /// The projection row `key` of `projection`, if present. An interim read until ES-04's
+    /// `ProjectionStore` takes projection rows, with their generations, off this port.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
