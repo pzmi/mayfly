@@ -22,7 +22,8 @@
 //! `macro_export` attributes, include-family macros, item declarations, test functions) with
 //! their file, line and context (production or test code); `rules_purity`, `rules_include`,
 //! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs`,
-//! `rules_transition`, `rules_seams` and `rules_store` turn facts into diagnostics, and
+//! `rules_transition`, `rules_seams`, `rules_store`, `rules_append`, `rules_order`,
+//! `rules_journal_sql` and `rules_locks` turn facts into diagnostics, and
 //! `rules_clippy` checks the pure crates' Clippy configuration, the
 //! semantic layer behind these syntactic rules.
 
@@ -35,6 +36,9 @@ mod rules_cqrs;
 mod rules_events;
 mod rules_hygiene;
 mod rules_include;
+mod rules_journal_sql;
+mod rules_locks;
+mod rules_order;
 mod rules_purity;
 mod rules_runtime;
 mod rules_seams;
@@ -448,12 +452,15 @@ pub fn check(
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(rules_store::check(root, facts));
         out.extend(rules_append::check(facts, policy));
+        out.extend(rules_order::check(root, facts, policy));
+        out.extend(rules_journal_sql::check(root, facts, policy));
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));
     out.extend(rules_transition::check(&every, policy));
     out.extend(rules_events::check(&every));
     out.extend(rules_seams::check(&every));
+    out.extend(rules_locks::check(root, &every));
     out.extend(hygiene.finish());
     // Line numbers are computed; the parsed sources need not stay in this thread's span map.
     proc_macro2::extra::invalidate_current_thread_spans();
@@ -476,6 +483,7 @@ fn selector_crates() -> BTreeSet<String> {
             &rules_events::VALUES_CRATE,
         ])
         .chain(rules_seams::USERS)
+        .chain(rules_journal_sql::STORE_ADAPTERS)
         .chain(rules_runtime::SPAWN_MODULES.iter().map(|(name, _)| name))
         .map(|name| (*name).to_owned())
         .collect();

@@ -69,7 +69,7 @@ pub fn check(root: &Path, facts: &Facts) -> Vec<Diagnostic> {
     out
 }
 
-fn sql_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+pub(super) fn sql_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -83,7 +83,7 @@ fn sql_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-fn without_sql_comment(line: &str) -> &str {
+pub(super) fn without_sql_comment(line: &str) -> &str {
     line.split_once("--").map_or(line, |(code, _)| code)
 }
 
@@ -115,7 +115,7 @@ fn forbidden(sql: &str) -> Vec<&'static str> {
 }
 
 /// Words (`[A-Z0-9_]+`), the operators `->` and `->>`, and single other characters.
-fn tokens(sql: &str) -> Vec<String> {
+pub(super) fn tokens(sql: &str) -> Vec<String> {
     let mut out = Vec::new();
     let chars: Vec<char> = sql.chars().collect();
     let mut i = 0;
@@ -146,7 +146,7 @@ fn tokens(sql: &str) -> Vec<String> {
 /// Every string literal of Rust source `text` (plain, raw and byte strings), with its first
 /// line, outside comments. Character literals and lifetimes are told apart so a `'"'` does
 /// not open a string.
-fn string_literals(text: &str) -> Vec<(usize, String)> {
+pub(super) fn string_literals(text: &str) -> Vec<(usize, String)> {
     let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut line = 1;

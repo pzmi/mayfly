@@ -143,7 +143,7 @@ mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["defa
 mayfly-control = { serde_json = ["default"], sha2 = ["default"] }
 mayfly-testkit = { serde_json = ["default"] }
 mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], toml = ["default"] }
-xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
+xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], sha2 = ["default"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
 
 [external.dev]
 mayfly-domain = { proptest = ["std"] }

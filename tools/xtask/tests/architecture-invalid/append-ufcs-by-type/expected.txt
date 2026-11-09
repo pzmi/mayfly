@@ -1,0 +1,4 @@
+rule: ARCH-single-append
+at: crates/mayfly-control/src/lib.rs:18
+contains: by path
+only: true

@@ -1,0 +1,2 @@
+-- 0001: released.
+CREATE TABLE stream_head (stream_id TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;

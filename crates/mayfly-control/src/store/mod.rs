@@ -24,7 +24,8 @@
 //! 5. **Append** the unit. `WrongExpectedRevision` becomes [`SaveError::Conflict`], which only
 //!    [`AggregateStore::with_revision_retry`] retries (load and decide inside its closure, three
 //!    attempts, full-jitter backoff through the [`Rng`] and [`Clock`] ports); `Busy`, `Storage`
-//!    and refusals are returned. `OutcomeUnknown` is resolved before answering by re-appending
+//!    and refusals are returned. ES-12's projection-generation conflict joins `Conflict` as the
+//!    second retried error when it exists (`SaveError` is `#[non_exhaustive]`). `OutcomeUnknown` is resolved before answering by re-appending
 //!    the identical unit: its receipt answers, or `DuplicateEventId` names an id that
 //!    `lookup_event` finds exactly where this unit would have put it; an id found anywhere else
 //!    is a genuine collision ([`SaveError::EventIdCollision`]), never a success.
@@ -64,8 +65,12 @@ use crate::journal::{
 const RESOLVE_ATTEMPTS: u32 = 3;
 
 /// How [`AggregateStore::with_revision_retry`] retries a conflict: up to `attempts` decisions
-/// in all, waiting a uniformly random `0..=min(cap, base * 2^n)` before the n-th retry (full
+/// in all, waiting a uniformly random `0..=min(cap, base * 2^(n-1))` before the n-th retry (full
 /// jitter), so writers that collided spread out instead of colliding again.
+///
+/// Pinned by: `tests/store/save.rs::should_retry_only_conflicts_when_a_stream_moves_under_the_decision`
+/// (three decisions, two waits per exhausted run, every wait within the default 10 and 20 ms
+/// ceilings) and `should_not_retry_when_the_policy_allows_one_decision`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Decisions in all, the first included (at least 1).
@@ -361,14 +366,22 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
     }
 
     /// [`AggregateStore::save`] under [`AggregateStore::with_revision_retry`]: the usual way to
-    /// run a command whose decision reads only its own stream.
+    /// run a command whose decision reads only its own stream. A request with
+    /// [`SaveRequest::reads`] is refused [`SaveError::ReadsOutsideRetry`] before any read: the
+    /// retry would re-check the same stale revisions, so such a caller builds its reads inside
+    /// its own `with_revision_retry` closure (pinned by
+    /// `tests/store/save.rs::should_refuse_reads_in_execute_when_a_retry_could_not_rebuild_them`
+    /// and `should_rebuild_reads_in_the_closure_when_a_read_stream_moves`).
     ///
     /// # Errors
-    /// See [`AggregateStore::save`].
+    /// See [`AggregateStore::save`]; [`SaveError::ReadsOutsideRetry`] as above.
     pub async fn execute<A: Aggregate>(
         &self,
         request: SaveRequest<A::Body>,
     ) -> Result<Outcome<A::Rejection>, SaveError> {
+        if !request.reads.is_empty() {
+            return Err(SaveError::ReadsOutsideRetry);
+        }
         self.with_revision_retry(|| self.save::<A>(request.clone()))
             .await
     }
@@ -393,7 +406,22 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
     }
 
     /// Appends `unit` and settles what happened, resolving a lost commit reply by re-appending
-    /// the identical unit (ES-I18).
+    /// the identical unit (ES-I18), at most [`RESOLVE_ATTEMPTS`] times:
+    ///
+    /// - the first append answers directly: committed, replayed by a receipt (another run's
+    ///   outcome, so `save` kicks nothing), or `DuplicateEventId`, which on a first append is
+    ///   always a collision;
+    /// - after a lost reply, a receipt answers as this call's own commit when [`own_commit`] says
+    ///   it records exactly this unit, else as another run's; `DuplicateEventId` is this
+    ///   unit's commit only when `lookup_event` finds the id exactly where this unit placed it,
+    ///   anywhere else a collision; a definite error is returned as it is; replies lost on
+    ///   every re-append end in [`SaveError::OutcomeUnknown`], never in success.
+    ///
+    /// Pinned by: `tests/store/save.rs::should_resolve_a_lost_reply_by_its_receipt_when_the_commit_landed_or_not`,
+    /// `should_answer_from_the_twin_receipt_when_the_same_command_commits_first`,
+    /// `should_confirm_a_lost_reply_by_lookup_when_the_id_sits_where_the_unit_wrote_it`,
+    /// `should_report_a_collision_when_a_derived_id_lives_elsewhere` and
+    /// `should_settle_a_lost_refusal_reply_as_its_own_commit_when_the_receipt_landed`.
     async fn settle(&self, unit: UnitOfWork) -> Result<Settled, SaveError> {
         let lost = match self.journal.append(unit.clone()).await {
             Ok(appended) => return Ok(Settled::Committed(appended)),
@@ -542,8 +570,16 @@ fn where_written(appended: &Appended, event_id: mayfly_domain::EventId) -> Optio
 
 /// Whether `receipt`, answering a re-append after a lost reply, records this unit's own commit:
 /// an acceptance of exactly the events this unit placed where it placed them, or a refusal bound
-/// to exactly this unit's reads. Then the save committed (and kicks); otherwise another run
-/// answered.
+/// to exactly this unit's reads. Then the save committed; otherwise another run answered.
+///
+/// An own acceptance returns what it appended, so `save` kicks the consumers once. An own
+/// refusal returns `Appended::default()`, no stream: the refusal receipt is this call's write,
+/// `save` answers `Outcome::Refused { replayed: false }` and kicks nothing, since no stream
+/// moved. Pinned by:
+/// `tests/store/save.rs::should_resolve_a_lost_reply_by_its_receipt_when_the_commit_landed_or_not`
+/// (an own acceptance, kicked) and
+/// `should_settle_a_lost_refusal_reply_as_its_own_commit_when_the_receipt_landed` (an own
+/// refusal, not replayed, no kick).
 fn own_commit(unit: &UnitOfWork, receipt: &CommandReceipt) -> Option<Appended> {
     let decision = &unit.receipt.as_ref()?.decision;
     match (&receipt.outcome, decision) {

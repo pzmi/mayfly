@@ -1,0 +1,6 @@
+# migrations.lock: the SHA-256 of every store migration (`crates/*/src/migrations/**.sql`),
+# checked by `cargo xtask architecture` (ARCH-migration-frozen; foundation.md section 6 rule 6).
+# A migration is released once its line is here: it is never edited, removed or renamed again.
+# A new migration adds its line in the commit that adds it (the checker prints the line).
+# Format: `sha256sum` (`<64 lowercase hex>  <path>`), so `sha256sum -c migrations.lock` works too.
+abc0dfa5106fa565f9f1246f8eb6ad05ce71d11be888018dad4a27002ca2e91a  crates/mayfly-adapter-sqlite/src/migrations/0001_journal.sql

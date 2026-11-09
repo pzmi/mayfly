@@ -136,12 +136,14 @@ and on an orphan fixture.
 Rules:
 
 1. **Existing event and protocol fixtures are frozen** (every sample and expectation alike).
-   Planned (ES-03R): their hashes listed in `fixtures.lock`, so changing one fails; until then
-   the rule is kept by review and by the byte-identical round trip. A shape change adds a new fixture (new version or new
+   Every fixture under `crates/*/tests/fixtures/` has its SHA-256 in `fixtures.lock` at the
+   repository root (`sha256sum` format), and `ARCH-fixtures-lock` (`cargo xtask architecture`,
+   ES-03R) fails on a changed, removed or unlisted file, printing the line a new fixture needs;
+   a frozen fixture's line never changes. A shape change adds a new fixture (new version or new
    type) beside the old; the old one stays for ever, because the journal is backward-transitive
    (fnd §6).
-2. Other families may be regenerated, but only deliberately: the commit says which fixture
-   changed and why. Never to get green.
+2. Other families may be regenerated, but only deliberately: the commit updates the fixture's
+   `fixtures.lock` line and says which fixture changed and why. Never to get green.
 3. Fixtures are synthetic or redacted: no real token, hostname, repository or personal path.
 4. Golden files seed the fuzz corpora (VER-06).
 

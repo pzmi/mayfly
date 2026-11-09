@@ -1,0 +1,5 @@
+rule: ARCH-fixtures-lock
+at: crates/mayfly-adapter-sqlite/tests/fixtures/schema-0001.sql
+contains: golden fixture
+contains: differs from its fixtures.lock line
+only: true

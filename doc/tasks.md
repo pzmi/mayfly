@@ -551,6 +551,10 @@ Landed with ADR 0041: refusal receipts bound to every stream the decision read (
 SQLite, JC-28's two-read half); `CommandBody`; `ARCH-single-append`. The epoch rule holds by
 construction (epochs come from the registry) and in the golden harness. The global-order fixture,
 `ARCH-journal-sql`, `ARCH-migration-frozen` and `fixtures.lock` moved to ES-03R.
+`with_revision_retry` retries `Conflict` (`WrongExpectedRevision`) only: `ProjectionGenerationMoved`
+does not exist before ES-12, which adds it as the second retried error (`SaveError` is
+`#[non_exhaustive]`, and `definite` matches `AppendError` exhaustively so the new variant fails to
+compile until its retry is decided).
 
 #### ES-03R Remaining store rules
 Cites: event-store §4.3, §6.1; fnd §3.3; ver §4.1; ADR 0041. `ARCH-no-global-order` (adapter SQL
@@ -559,6 +563,10 @@ events of several streams), `ARCH-journal-sql`, `ARCH-migration-frozen` over `mi
 `fixtures.lock` (the hashes of every frozen event fixture, checked by the golden harness).
 Accept: each rule's negative fixture fails it; changing a frozen fixture or a released migration
 fails the gate.
+Landed with ADR 0041's amendment: the four rules (`fixtures.lock` as `ARCH-fixtures-lock`, in the
+architecture stage rather than the golden harness, so one check covers every family and crate),
+`migrations.lock` and `fixtures.lock` at the repository root; the ES-03 review's fixes
+(`ARCH-single-append` by path shape, narrowed exemptions, `execute` refusing reads).
 
 #### ES-04 ⛳ Projections
 Cites: event-store §3.6, §6.1, §6.4, I16. `ProjectionSpec`, stream-local inline projections computed
@@ -582,6 +590,9 @@ append for registered consumers, `DeliveryWorker`, `catch_up`, kicks, `retry_aft
 backoff, DC-01..DC-25 with `UnfencedLedger`, `ClearAllMarksLedger`, `HeadTrustingWorker`,
 `SkippingLedger`; the `DirectiveIssued` event shape and the `directive_relay` consumer skeleton.
 Accept: DC green on memory and SQLite (all modes); every broken ledger fails its cases.
+ES-03 (ADR 0041 rule 6): a refusal consumes no inbox key, so a consumer or observation handler
+that deduplicates by inbox treats `Outcome::Refused` as handled (acked) and never reads
+"not in the inbox" as "not yet decided"; the refusal receipt answers a redelivery.
 
 #### ES-07 Event-store conformance driver
 Cites: event-store §7.3, ver §6.2. Driver over memory (`step`) and SQLite (`implStepSerial`, two
@@ -851,6 +862,11 @@ Accept: component tests F08, F09, F10, F11, F25, F27 (ver §8.4) on fakes.
 DEC-01: the record step is one unit with `InboxKey { github, message_id }`; ack after commit;
 `DuplicateMessage` acked without a write; `PlanAcquire` before `AcquireJobs` (I23, I32); wire
 behaviour of pause, drain and safe mode (ADR 0029); adds F41, F42, F44.
+ES-03 (ADR 0041 rule 6): a refused command's unit carries no inbox key, so `inbox_contains` stays
+false after a refusal. The listener acks a refused message once `save` answered
+`Outcome::Refused` (the refusal receipt committed), never by `inbox_contains`; a redelivery after
+a lost ack is answered by that receipt while its bound streams are unchanged and decided afresh
+once they moved. A component test pins the ack of a refused message and its redelivery.
 
 #### E2E-02 ⛳ Scale-set end to end
 Cites: plan §7.2, §9. `mayflyd` + fake-tart + fake-github: queue 1 job → 1 VM → job done → deleted;

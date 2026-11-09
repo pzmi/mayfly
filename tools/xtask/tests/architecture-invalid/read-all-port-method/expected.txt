@@ -1,0 +1,4 @@
+rule: ARCH-no-global-order
+at: crates/mayfly-control/src/lib.rs:10
+contains: declares `read_all`, a global read
+only: true

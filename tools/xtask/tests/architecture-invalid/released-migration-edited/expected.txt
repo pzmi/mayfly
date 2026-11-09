@@ -1,0 +1,5 @@
+rule: ARCH-migration-frozen
+at: crates/mayfly-adapter-sqlite/src/migrations/0001_journal.sql
+contains: released migration
+contains: differs from its migrations.lock line
+only: true

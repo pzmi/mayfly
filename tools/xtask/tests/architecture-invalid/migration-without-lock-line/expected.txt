@@ -1,0 +1,4 @@
+rule: ARCH-migration-frozen
+at: crates/mayfly-adapter-sqlite/src/migrations/0002_inbox.sql
+contains: is not in migrations.lock
+only: true

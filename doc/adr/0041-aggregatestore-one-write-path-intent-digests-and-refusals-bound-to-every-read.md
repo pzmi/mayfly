@@ -91,3 +91,49 @@ ES-03 builds `AggregateStore`, the only caller of `Journal::append` (`doc/event-
   but one more encoding to keep exhaustive by hand for every body.
 - Recognise a journal append by type: the checker resolves no types; a per-file allowlist of
   callers would miss a call in a new file, which the shape test catches.
+
+## Amendment (2026-11-09): ES-03R, the remaining store rules and the review of ES-03
+
+The ES-03 review bypassed rule 7 without touching the journal: a path call by the concrete type
+(`MemoryJournal::append(&j, u)`), by a generic (`T::append(j, u)`), by `Self::` or through an
+alias (`use Journal as J; J::append(j, u)`) named no `Journal` the rule looked for, and
+`Journal :: append` inside a macro's tokens was not scanned. Its exemptions were also wider than
+their reasons: every `impl Journal` block anywhere, and all of an adapter's test code.
+
+1. **Rule 7 by shape, not name.** A path call whose last segment is `append` (two segments or
+   more, or a qualified self type) is refused unless its first argument, the receiver, is
+   `&mut ..` (`Vec::append(&mut a, &mut b)`); an uncalled `P::append` is refused; both also in
+   macro tokens. `impl Journal` blocks are exempt only in journal adapter crates, the test kit
+   and test code (a production `impl Journal` elsewhere is itself refused), and an adapter's test
+   code only in its contract test files (`tests/*_contract.rs`).
+2. **`execute` takes no reads.** `AggregateStore::execute` retries the request as it was built,
+   so a read of another stream taken before the first attempt would be re-checked at its old
+   revision and conflict on every attempt. A request with reads is refused
+   (`SaveError::ReadsOutsideRetry`, before any read); a decision that reads other streams builds
+   them inside its own `with_revision_retry` closure. The alternative, documenting the trap and
+   leaving it to callers, would turn a programming error into three wasted decisions and a
+   misleading `Conflict`.
+3. **Content locks.** `migrations.lock` and `fixtures.lock` at the repository root list the
+   SHA-256 of every store migration (`crates/*/src/migrations/**.sql`) and every golden fixture
+   (`crates/*/tests/fixtures/**`) in the `sha256sum` format. A migration is **released once its
+   line is in the lock**, which the commit adding it writes; `ARCH-migration-frozen` and
+   `ARCH-fixtures-lock` fail on a changed, removed or unlisted file and print the line a new file
+   needs, and the checker never writes a lock. A fixture of a regenerable family is changed with
+   its line in the same commit and the reason in the commit body (verification.md §4 rule 2);
+   an event, protocol or migration line never changes. The rules run in the architecture stage,
+   so `check` and CI already run them and no stage list changes. Considered: a `fixtures`
+   stage of its own (two more places to keep in lockstep for no extra power); comparing with the
+   committed lock through `git` (a checker that behaves differently in a tarball, a shallow
+   clone and a fixture directory, and that a commit editing both file and line passes anyway).
+   What a lock cannot refuse, a commit that changes a released file and its line together, is
+   the one edit it makes conspicuous in review.
+4. **`ARCH-no-global-order` and `ARCH-journal-sql`** hold what is checkable of ES-I17 and of
+   "nothing rewrites history": ordering keys in the store adapter's SQL, global-read names and
+   multi-stream event returns in the control plane's API; store tables named only by the store
+   adapter, and no `UPDATE`/`DELETE` of `journal_event` or `journal_identity` outside the
+   adapter's tests (JC-27). Their limits (SQL assembled at run time, an order taken in Rust) are
+   documented in the rule modules and kept by review.
+
+A redelivered message whose command was refused is decided again (rule 6), so the scale-set
+listener acks it after the refusal receipt commits, as after an acceptance; a lost ack's
+redelivery is answered by that receipt while the bound streams are unchanged (GH-04, ES-05).

@@ -103,6 +103,14 @@ pub enum SaveError {
     },
     /// The store refused the unit as malformed: a programming error.
     Malformed(MalformedUnit),
+    /// `AggregateStore::execute` was given reads of other streams: a programming error, refused
+    /// before any read. `execute` retries the request as it was built, so a read taken before
+    /// the first attempt would be checked at its old revision again and conflict on every
+    /// attempt; a decision that reads other streams builds them inside a `with_revision_retry`
+    /// closure, fresh on each attempt (pinned by
+    /// `tests/store/save.rs::should_refuse_reads_in_execute_when_a_retry_could_not_rebuild_them`
+    /// and `should_rebuild_reads_in_the_closure_when_a_read_stream_moves`).
+    ReadsOutsideRetry,
     /// A decided event needs a higher epoch than this build supports for the aggregate.
     EpochAboveBuild {
         /// The stream.
@@ -174,6 +182,9 @@ impl fmt::Display for SaveError {
                 "derived event id {event_id} is recorded where this command did not write it"
             ),
             Self::Malformed(m) => write!(f, "the store refused the unit: {m}"),
+            Self::ReadsOutsideRetry => f.write_str(
+                "execute retries a request as built: rebuild other streams' reads in a with_revision_retry closure",
+            ),
             Self::EpochAboveBuild { stream } => write!(
                 f,
                 "an event for stream {stream} needs a higher epoch than this build supports"

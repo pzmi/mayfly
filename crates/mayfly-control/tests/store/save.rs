@@ -618,6 +618,68 @@ fn should_not_retry_when_the_policy_allows_one_decision() {
 }
 
 #[test]
+fn should_refuse_reads_in_execute_when_a_retry_could_not_rebuild_them() {
+    // given
+    let h = harness(&MemoryJournal::new());
+    let pool = stream("counter-pool");
+    let request = inc(1, 1, 9).with_read(pool.clone(), ExpectedRevision::NoStream);
+
+    // when
+    let outcome = block_on(h.store.execute::<Counter>(request));
+
+    // then
+    assert_eq!(outcome, Err(SaveError::ReadsOutsideRetry));
+    assert_eq!(head(&h.journal, "counter-1"), None);
+    let receipt =
+        block_on(h.journal.receipt(CommandId::from_u128(1))).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(receipt, None, "refused before any write");
+}
+
+#[test]
+fn should_rebuild_reads_in_the_closure_when_a_read_stream_moves() {
+    // given
+    let h = harness(&MemoryJournal::new());
+    let pool = stream("counter-pool");
+    save(
+        &h.store,
+        SaveRequest::new(
+            "pool",
+            command(10, CounterBody::Increment { by: 1, limit: 9 }),
+        ),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    h.journal.play(Script::Race {
+        stream: pool.clone(),
+        n: 1,
+    });
+    let store = &h.store;
+
+    // when
+    let outcome = block_on(store.with_revision_retry(|| {
+        let pool = pool.clone();
+        async move {
+            let read = store
+                .journal()
+                .head(&pool)
+                .await
+                .map_err(SaveError::Storage)?
+                .map(|h| h.revision);
+            store
+                .save::<Counter>(inc(2, 1, 9).with_read(pool, ExpectedRevision::of(read)))
+                .await
+        }
+    }));
+
+    // then
+    assert_eq!(outcome, Ok(accepted("counter-1", 0, &[(2, 0)], false)));
+    assert_eq!(h.clock.sleeps().len(), 1, "one conflict, one retry");
+    assert_eq!(
+        head(&h.journal, "counter-pool"),
+        Some(StreamRevision::new(1))
+    );
+}
+
+#[test]
 fn should_name_what_failed_when_each_save_error_is_displayed() {
     // given
     let s = stream("counter-1");
@@ -661,6 +723,7 @@ fn should_name_what_failed_when_each_save_error_is_displayed() {
             location: None,
         },
         SaveError::Malformed(mayfly_control::journal::MalformedUnit::Empty),
+        SaveError::ReadsOutsideRetry,
         SaveError::EpochAboveBuild { stream: s.clone() },
         SaveError::Busy,
         SaveError::Storage(mayfly_control::journal::StorageError::new("io")),
@@ -683,6 +746,7 @@ fn should_name_what_failed_when_each_save_error_is_displayed() {
         "already consumed",
         "where this command did not write it",
         "refused the unit",
+        "rebuild other streams' reads",
         "needs a higher epoch",
         "busy",
         "io; nothing was committed",

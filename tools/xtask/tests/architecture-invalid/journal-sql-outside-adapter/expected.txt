@@ -1,0 +1,4 @@
+rule: ARCH-journal-sql
+at: crates/mayfly-control/src/lib.rs:4
+contains: names the store table `journal_event`
+only: true

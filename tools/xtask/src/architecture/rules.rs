@@ -205,8 +205,20 @@ rules! {
         "A string literal or .sql file under mayfly-adapter-sqlite's src/ uses a form only SQLite has: INSERT OR ..., REPLACE INTO, AUTOINCREMENT, rowid, _rowid_, oid, a json...() function or the -> and ->> operators (WITHOUT ROWID is allowed): the PostgreSQL adapter would have to fake it (doc/event-store.md section 4.3).",
         ["store-sql-insert-or-ignore"];
     SingleAppend => "ARCH-single-append", "ES-03",
-        "A control-plane or both-planes crate calls Journal::append (`.append(x)` with a by-value, non-literal argument, also in macro tokens, or the path Journal::append) outside AggregateStore's save and settle in mayfly-control, an impl Journal block, the testkit contract suite or an adapter's own test code.",
-        ["second-append-caller"];
+        "A control-plane or both-planes crate calls Journal::append (`.append(x)` with a by-value, non-literal argument; a path call `P::append(r, ..)` by any name whose receiver is not `&mut`; an uncalled `P::append`; also in macro tokens) outside AggregateStore's save and settle in mayfly-control, an impl Journal block of an adapter, the testkit or test code, the testkit contract suite or an adapter's contract test files; or declares a production impl Journal elsewhere.",
+        ["append-generic-path", "append-path-in-macro", "append-through-alias", "append-ufcs-by-type", "second-append-caller"];
+    NoGlobalOrder => "ARCH-no-global-order", "ES-03R",
+        "A journal adapter's SQL orders by a row position, a time, a global position or a revision across streams; or a control-plane or both-planes crate declares a global read (read_all, all_events, global_position, ..) or a production function returning recorded events without a StreamId parameter (ES-I17).",
+        ["global-order-by-recorded-at", "read-all-port-method"];
+    JournalSql => "ARCH-journal-sql", "ES-03R",
+        "SQL names a store table of doc/event-store.md section 4.1 outside the store adapter, or updates, deletes, truncates or replaces journal_event or journal_identity anywhere but the adapter's tests (JC-27).",
+        ["journal-event-delete", "journal-sql-outside-adapter"];
+    MigrationFrozen => "ARCH-migration-frozen", "ES-03R",
+        "A store migration (src/migrations/**.sql) differs from its migrations.lock line, a listed migration is gone, a migration is not listed, or the lock is malformed or missing.",
+        ["migration-without-lock-line", "released-migration-edited"];
+    FixturesLock => "ARCH-fixtures-lock", "ES-03R",
+        "A golden fixture (tests/fixtures/**) differs from its fixtures.lock line, a listed fixture is gone, a fixture is not listed, or the lock is malformed or missing.",
+        ["frozen-fixture-changed"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

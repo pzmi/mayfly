@@ -1,0 +1,4 @@
+rule: ARCH-single-append
+at: crates/mayfly-control/src/lib.rs:12
+contains: in a macro's tokens
+only: true

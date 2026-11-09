@@ -1,0 +1,4 @@
+rule: ARCH-journal-sql
+at: crates/mayfly-adapter-sqlite/src/lib.rs:4
+contains: rewrites history: `DELETE FROM journal_event`
+only: true

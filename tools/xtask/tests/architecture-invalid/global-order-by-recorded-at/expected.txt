@@ -1,0 +1,4 @@
+rule: ARCH-no-global-order
+at: crates/mayfly-adapter-sqlite/src/lib.rs:8
+contains: orders by `recorded_at` (a time)
+only: true
