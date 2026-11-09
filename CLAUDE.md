@@ -63,7 +63,7 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
 - **Dependency law** (fnd §2, §3; plan §4): cli → composition → adapters → application
   (`mayfly-control`, `mayfly-data`) → pure crates. Adapters never reference sibling adapters or
   composition. Production crates never depend on `mayfly-testkit`, `mayfly-conformance` or the
-  fakes; `tools/faultlab` and the fakes import no production crate (D11). A new crate gets its
+  fakes; `tools/faultlab` and the fakes import no production crate (D11). A new crate gets its `[planes]` entry,
   `members` entry, `architecture.toml` entry and external allowlist in the same commit. Fix an
   architecture failure in the structure, never by loosening `architecture.toml`.
 - **Control plane / data plane** (plan §3.4, D1): no `mayfly-control*` crate or CP adapter
@@ -75,12 +75,16 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
   `mayfly-data-domain`): no `std::{fs,net,process,env}`, clock, randomness, Tokio, HTTP or SQL.
   Application crates take time and ids only through ports. `std::process` only in
   `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition` and test tools.
+  Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,
+  locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`).
+  Test kits are per plane (ADR 0019): `mayfly-testkit` is the control plane's; data-plane crates
+  never dev-depend on it or on `mayfly-conformance`. Spawns only in the modules fnd §3 lists.
 - **Language**: `unsafe_code` forbidden; no `todo!`, `unimplemented!`, `dbg!`, `#[ignore]`; no
   `#[allow]`/`#[expect]` without an `architecture.toml` exception citing an ADR; zero clippy
   warnings; platform code by `#[cfg]` items or blocks, never a `cfg!(target_os…)` branch.
 - **Tests** (ver §2): `should_<outcome>_when_<condition>` with `// given`, `// when`, `// then`;
   at the lowest level that can fail for the reason it exists. No sleeps (fake clock,
-  `tokio::time::pause`, channels; a real-OS wait only through `mayfly-testkit::poll`, bounded,
+  `tokio::time::pause`, channels; a real-OS wait only through the shared test kit's `poll` helper (FND-05), bounded,
   with a reason). Real objects or testkit fakes, no mocking frameworks; tempdirs, port 0. A port
   with a fake and a real adapter runs one contract suite against both (ver §5), and the suite's
   own tests prove a deliberately broken implementation fails it. Never delete a failing test,
