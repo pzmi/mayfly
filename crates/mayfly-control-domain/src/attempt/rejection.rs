@@ -46,6 +46,9 @@ pub enum AttemptRejection {
     NotListening,
     /// A second job (I14).
     JobAlreadyBound,
+    /// The runner's JIT config is presumed leaked (its handle was orphaned by a restart while
+    /// the launch was in flight): it never gets a job (I22).
+    JitPresumedLeaked,
     /// A busy attempt is never retired, only finished or forced.
     Busy,
     /// Retirement is already requested or decided.
@@ -88,6 +91,7 @@ impl Rejection for AttemptRejection {
         "jit_already_issued",
         "not_listening",
         "job_already_bound",
+        "jit_presumed_leaked",
         "busy",
         "already_retiring",
         "terminal",
@@ -119,6 +123,7 @@ impl Rejection for AttemptRejection {
             Self::JitAlreadyIssued => "jit_already_issued",
             Self::NotListening => "not_listening",
             Self::JobAlreadyBound => "job_already_bound",
+            Self::JitPresumedLeaked => "jit_presumed_leaked",
             Self::Busy => "busy",
             Self::AlreadyRetiring => "already_retiring",
             Self::Terminal => "terminal",

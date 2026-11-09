@@ -82,6 +82,9 @@ module lifecycle {
     freshEpoch: int,
     // "none" | "issued" | "taken" | "orphaned"
     jit: str,
+    // the JIT config is presumed leaked (a launch of unknown outcome, or a handle orphaned by a
+    // restart): the runner, if one starts, never gets a job
+    jitLeaked: bool,
     job: int,
     retireRequested: bool,
     // "none" | "exported" | "lost"
@@ -170,18 +173,26 @@ module lifecycle {
       else NO_DIRECTIVE
     else if (x.phase == DELETING) DELETE_VM
     else if (x.phase == QUARANTINED)
-      if (x.vmRunning and not(jobLive(x))) STOP_VM else NO_DIRECTIVE
+      // stopped with proof, never deleted; a VM without a recorded instance id is not touched
+      if (x.vmRunning and not(jobLive(x)) and x.instance != NONE) STOP_VM else NO_DIRECTIVE
     else NO_DIRECTIVE
 
   pure def isStageDirective(d: str): bool = Set(CLONE_VM, START_VM, VERIFY_GUEST).contains(d)
 
+  pure def isCleanupDirective(d: str): bool = Set(STOP_VM, DELETE_VM).contains(d)
+
+  /// Directives counted against the retry budget: the stage directives, stops and deletes.
+  pure def isCounted(d: str): bool = isStageDirective(d) or isCleanupDirective(d)
+
   /// Retirement decided: cleanup begins, or ends at once when no VM was ever cloned.
   pure def retire(x: Attempt): Attempt =
     { ...x, phase: if (x.instance == NONE) DELETED else RETIRING, retireRequested: false,
-      pending: NO_DIRECTIVE, unknown: false }
+      pending: NO_DIRECTIVE, unknown: false, tries: 0 }
 
+  /// Quarantine; entering it restarts the count of stops, staying in it does not.
   pure def quarantine(x: Attempt): Attempt =
-    { ...x, phase: QUARANTINED, pending: NO_DIRECTIVE, unknown: false, retireRequested: false }
+    { ...x, phase: QUARANTINED, pending: NO_DIRECTIVE, unknown: false, retireRequested: false,
+      tries: if (x.phase == QUARANTINED) x.tries else 0 }
 
   /// A stage directive failed definitely (refused, or observed not applied).
   pure def stageFailed(x: Attempt): Attempt =
@@ -195,7 +206,11 @@ module lifecycle {
     else if (x.pending == LAUNCH_RUNNER) retire(x)
     else if (x.pending == EXPORT_DIAGNOSTICS)
       { ...x, diagnostics: "lost", pending: NO_DIRECTIVE, unknown: false }
-    else { ...x, pending: NO_DIRECTIVE, unknown: false }
+    // a stop or delete is retried within the budget; spent, cleanup ends in quarantine
+    // (`delete_refused_repeatedly`), and inside quarantine the stops simply stop
+    else if (x.tries < BUDGET or x.phase == QUARANTINED)
+      { ...x, pending: NO_DIRECTIVE, unknown: false }
+    else quarantine(x)
 
   pure def servedPhase(phase: str): bool = Set(LISTENING, BUSY, FINISHED).contains(phase)
 
@@ -224,7 +239,14 @@ module lifecycle {
 
   // ---- guards (shared by the actions and the scenarios) -------------------------------------
 
-  pure def canIssueNext(x: Attempt): bool = idle(x) and nextDirective(x) != NO_DIRECTIVE
+  pure def canIssueNext(x: Attempt): bool = {
+    val d = nextDirective(x)
+    and {
+      idle(x),
+      d != NO_DIRECTIVE,
+      not(isCleanupDirective(d)) or x.tries < BUDGET,
+    }
+  }
 
   pure def canBeginActivation(x: Attempt): bool = x.phase == PREPARED and idle(x)
 
@@ -236,7 +258,12 @@ module lifecycle {
     x.jit == "none",
   }
 
-  pure def canBindJob(x: Attempt): bool = x.phase == LISTENING and x.job == NONE and idle(x)
+  pure def canBindJob(x: Attempt): bool = and {
+    x.phase == LISTENING,
+    x.job == NONE,
+    idle(x),
+    not(x.jitLeaked),
+  }
 
   pure def canRequestRetirement(x: Attempt): bool = and {
     idle(x),
@@ -255,7 +282,8 @@ module lifecycle {
       a' = {
         phase: RESERVED, stage: "clone", tries: 0, pending: NO_DIRECTIVE, unknown: false,
         name: name, generation: generation, instance: NONE, vmRunning: false, epoch: 1,
-        granted: false, freshEpoch: NONE, jit: "none", job: NONE, retireRequested: false,
+        granted: false, freshEpoch: NONE, jit: "none", jitLeaked: false, job: NONE,
+        retireRequested: false,
         diagnostics: "none", runnerExited: false,
       },
       w' = { exists: false, instance: NONE, running: false, applied: false },
@@ -291,7 +319,7 @@ module lifecycle {
             else if (a.phase == BACKOFF) stagePhase(a.stage)
             else if (d == DELETE_VM) DELETING
             else a.phase,
-          tries: if (isStageDirective(d)) a.tries + 1 else a.tries,
+          tries: if (isCounted(d)) a.tries + 1 else a.tries,
         },
         { ...w, applied: false },
         {
@@ -332,9 +360,11 @@ module lifecycle {
     else if (x.pending == VERIFY_GUEST)
       if (x.phase == ACTIVATING) { ...cleared, freshEpoch: x.epoch, tries: 0 }
       else { ...cleared, phase: PREPARED, tries: 0 }
-    else if (x.pending == LAUNCH_RUNNER) { ...cleared, phase: LISTENING, jit: "taken" }
+    // a launch answered after a restart orphaned its handle keeps the handle orphaned
+    else if (x.pending == LAUNCH_RUNNER)
+      { ...cleared, phase: LISTENING, jit: if (x.jit == "issued") "taken" else x.jit }
     else if (x.pending == EXPORT_DIAGNOSTICS) { ...cleared, diagnostics: "exported" }
-    else if (x.pending == STOP_VM) { ...cleared, vmRunning: false }
+    else if (x.pending == STOP_VM) { ...cleared, vmRunning: false, tries: 0 }
     else { ...cleared, phase: DELETED, vmRunning: false }
   }
 
@@ -374,13 +404,14 @@ module lifecycle {
     commit("observation", notApplied(a), g),
   }
 
-  /// `DirectiveRefused{proof_mismatch}` for a stop or delete whose target's instance id differs
-  /// from the recorded one: quarantine (ADR 0026).
+  /// `DirectiveRefused{proof_mismatch}` for a stop, a delete or a launch whose target's
+  /// instance id differs from the recorded one: quarantine (ADR 0026, ADR 0038); inside
+  /// quarantine it is one more refused stop.
   action replyProofRefused = all {
-    Set(STOP_VM, DELETE_VM).contains(a.pending),
+    Set(STOP_VM, DELETE_VM, LAUNCH_RUNNER).contains(a.pending),
     not(w.exists and w.instance == a.instance),
     w.exists,
-    commit("observation", quarantine(a), g),
+    commit("observation", if (a.phase == QUARANTINED) notApplied(a) else quarantine(a), g),
   }
 
   /// `GuestRejected`: the guest failed its identity challenge (U3).
@@ -412,7 +443,9 @@ module lifecycle {
   /// and never launched again (I22).
   action replyLaunchUnknown = all {
     a.pending == LAUNCH_RUNNER,
-    commit("observation", { ...a, pending: NO_DIRECTIVE, unknown: false, jit: "taken" },
+    commit("observation",
+      { ...a, pending: NO_DIRECTIVE, unknown: false,
+        jit: if (a.jit == "issued") "taken" else a.jit, jitLeaked: true },
       { ...g, leaked: true }),
   }
 
@@ -456,7 +489,8 @@ module lifecycle {
       if (x.pending == DELETE_VM) { ...x, phase: DELETED, vmRunning: false, pending: NO_DIRECTIVE,
                                     unknown: false }
       else if (x.pending == CLONE_VM) (if (x.unknown) notApplied(x) else x)
-      else if (x.instance == NONE) x
+      // a quarantined VM of our name that we never recorded is released when it is gone
+      else if (x.instance == NONE and x.phase != QUARANTINED) x
       else { ...x, phase: LOST, vmRunning: false, pending: NO_DIRECTIVE, unknown: false }
     all {
       not(w.exists),
@@ -568,13 +602,16 @@ module lifecycle {
   }
 
   /// `Adopt{inventory_ref}` under a new run epoch (restart): the broker is empty by
-  /// construction, so a handle issued and not taken is orphaned; a verification from the old
-  /// epoch is no longer fresh.
+  /// construction, so a handle issued and not taken is orphaned and presumed leaked, even with
+  /// its launch in flight (the launcher may have taken it); a late launch reply is still
+  /// recorded, but that runner never gets a job. A verification from the old epoch is no
+  /// longer fresh. Adoption is allowed with a directive pending: it moves nothing.
   action adopt = all {
     not(terminal(a)),
     a.epoch < 3,
     commit("command",
-      { ...a, epoch: a.epoch + 1, jit: if (a.jit == "issued") "orphaned" else a.jit },
+      { ...a, epoch: a.epoch + 1, jit: if (a.jit == "issued") "orphaned" else a.jit,
+        jitLeaked: a.jitLeaked or a.jit == "issued" },
       { ...g, leaked: g.leaked or a.jit == "issued" }),
   }
 
@@ -640,6 +677,65 @@ module lifecycle {
     confirmRetirement,
     adopt,
     close,
+  }
+
+  /// The whole preparation at once (clone, boot and verification all answered), from
+  /// `Reserved`, optionally followed by the grant and the fresh verification of activation: a
+  /// shortcut for `activationStep` only, so a bounded check spends its depth on activation,
+  /// restarts, refusals and quarantine instead of on the preparation `step` and `serveStep`
+  /// already cover. It records what those stimuli record.
+  action prepareAtOnceWith(instance: int, activated: bool): bool = all {
+    a.phase == RESERVED,
+    idle(a),
+    not(w.exists),
+    commitWorld("observation",
+      {
+        ...a,
+        phase: if (activated) ACTIVATING else PREPARED,
+        instance: instance,
+        vmRunning: true,
+        tries: 0,
+        granted: activated,
+        freshEpoch: if (activated) a.epoch else NONE,
+      },
+      { exists: true, instance: instance, running: true, applied: true },
+      {
+        ...g,
+        cloneTargets: g.cloneTargets.union(Set((a.name, a.generation))),
+        clones: g.clones + 1,
+        providerInstances: g.providerInstances.union(Set(instance)),
+      }),
+  }
+
+  action prepareAtOnce = {
+    nondet instance = INSTANCES.oneOf()
+    nondet activated = Set(true, false).oneOf()
+    prepareAtOnceWith(instance, activated)
+  }
+
+  /// Activation under stress: after a preparation (and possibly the grant and fresh
+  /// verification) done at once, the JIT handle, the launch and the job meet restarts, lost
+  /// replies, launch outcomes, refused proofs, a replaced VM, quarantine and retirement. This
+  /// is where a restart with a launch in flight once let a presumed-leaked runner get a job
+  /// (`adoptDuringLaunchNeverServesTest`); `step` needed more depth than Apalache reaches to
+  /// find it.
+  action activationStep = any {
+    prepareAtOnce,
+    issueNext,
+    replySucceeded,
+    replyRefused,
+    replyProofRefused,
+    replyLost,
+    replyLaunchUnknown,
+    inventoryPresent,
+    vmReplacedOrRemoved,
+    beginActivation,
+    recordJitHandle,
+    bindJob,
+    requestRetirement,
+    confirmRetirement,
+    quarantineCommand,
+    adopt,
   }
 
   // ---- invariants ---------------------------------------------------------------------------
@@ -827,5 +923,45 @@ module lifecycle {
       .then(vmReplacedOrRemovedWith(2, false))
       .then(replyProofRefused)
       .expect(a.phase == QUARANTINED and allInvariants)
+  }
+
+  // H1 of the KER-04 review: a restart while the launch is in flight orphans the handle; the
+  // late launch reply is recorded, and that runner never gets a job.
+  run adoptDuringLaunchNeverServesTest = {
+    initWith(1, 1).then(toPrepared).then(beginActivation).then(issueNext).then(ok)
+      .then(recordJitHandle).then(issueNext).expect(a.pending == LAUNCH_RUNNER)
+      .then(adopt).expect(a.jit == "orphaned" and a.jitLeaked and a.pending == LAUNCH_RUNNER)
+      .then(ok).expect(a.phase == LISTENING and a.jit == "orphaned")
+      .expect(not(canBindJob(a)))
+      .then(requestRetirement).then(confirmRetirement)
+      .expect(a.phase == RETIRING and g.jobsBound.size() == 0 and allInvariants)
+  }
+
+  // A delete the data plane keeps refusing ends in quarantine, within the budget.
+  run deleteRefusedRepeatedlyQuarantinesTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).then(ok)
+      .then(issueNext).expect(a.pending == DELETE_VM and a.tries == 1)
+      .then(replyRefused).expect(a.phase == DELETING and a.pending == NO_DIRECTIVE)
+      .then(issueNext).expect(a.tries == 2)
+      .then(replyRefused).expect(a.phase == QUARANTINED)
+      .expect(not(canIssueNext(a)) and quarantineNeverAutoDeleted)
+  }
+
+  // Inside quarantine, refused stops (a proof refused included) are bounded too.
+  run quarantinedStopsAreBoundedTest = {
+    initWith(1, 1).then(issueNext).then(ok).then(issueNext).then(ok)
+      .then(issueNext).then(replyGuestRejected).expect(a.phase == QUARANTINED and a.tries == 0)
+      .then(issueNext).then(replyRefused)
+      .then(vmReplacedOrRemovedWith(2, false))
+      .then(issueNext).then(replyProofRefused)
+      .expect(a.phase == QUARANTINED and a.tries == 2 and not(canIssueNext(a)))
+  }
+
+  // The activation relation's shortcut lands where the preparation does.
+  run prepareAtOnceTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, false))
+      .expect(a.phase == PREPARED and a.vmRunning and w.running and allInvariants)
+      .then(beginActivation).then(issueNext).expect(a.pending == VERIFY_GUEST)
   }
 }

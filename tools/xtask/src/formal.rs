@@ -51,7 +51,7 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         file: "lifecycle.qnt",
-        steps: &["step", "serveStep"],
+        steps: &["step", "serveStep", "activationStep"],
     },
 ];
 

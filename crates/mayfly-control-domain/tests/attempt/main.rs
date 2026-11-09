@@ -3,4 +3,5 @@
 
 mod lifecycle;
 mod matrix;
+mod properties;
 mod support;

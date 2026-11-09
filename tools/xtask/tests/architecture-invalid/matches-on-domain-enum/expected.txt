@@ -1,0 +1,4 @@
+rule: ARCH-exhaustive-transition
+at: crates/mayfly-control-domain/src/lib.rs:11
+contains: `matches!`
+only: true

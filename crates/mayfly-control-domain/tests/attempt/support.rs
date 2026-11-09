@@ -299,6 +299,52 @@ pub fn unknown_clone() -> Vec<Step> {
     )
 }
 
+/// A restart while the launch is in flight, then the launch re-observed in the new epoch: a
+/// runner whose JIT config is presumed leaked.
+pub fn launched_after_restart() -> Vec<Step> {
+    let mut path = then(jit_issued(), [issue(5)]);
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    ));
+    path.push(at(
+        2,
+        SAGA,
+        observe_in(
+            2,
+            Fact::RunnerLaunched {
+                directive_id: directive(5),
+            },
+        ),
+    ));
+    path
+}
+
+/// An observation from data-plane epoch `epoch`.
+pub fn observe_in(epoch: u64, fact: Fact) -> AttemptCommand {
+    AttemptCommand::RecordObservation(Observation {
+        observation_id: ObservationId::from_u128(0x0B8),
+        epoch: Epoch::new(epoch),
+        generation: Generation::FIRST,
+        fact,
+    })
+}
+
+/// A VM of our exact name that this attempt never recorded cloning: quarantined for
+/// ownership doubt, with no instance id to prove anything with.
+pub fn doubted() -> Vec<Step> {
+    then(
+        started(),
+        [observe(Fact::VmPresent {
+            instance_id: instance(),
+            running: true,
+        })],
+    )
+}
+
 fn unknown(path: Vec<Step>, n: u128) -> Vec<Step> {
     then(
         path,
@@ -334,6 +380,7 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
         ),
         ("activating/launching", then(jit_issued(), [issue(5)])),
         ("listening", listening()),
+        ("listening/leaked", launched_after_restart()),
         ("busy", busy()),
         ("finished", finished()),
         ("retiring", retiring()),
@@ -372,6 +419,11 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
         ("backoff", backoff()),
         ("quarantined", quarantined()),
         ("quarantined/in_flight", then(quarantined(), [issue(10)])),
+        (
+            "quarantined/unknown",
+            unknown(then(quarantined(), [issue(10)]), 10),
+        ),
+        ("quarantined/doubted", doubted()),
         ("closed", closed()),
     ];
     paths

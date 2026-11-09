@@ -7,6 +7,7 @@ code busy
 code closed
 code directive_pending
 code jit_already_issued
+code jit_presumed_leaked
 code job_already_bound
 code no_fresh_verification
 code no_grant
@@ -50,6 +51,7 @@ case guest_rejected_quarantines accepted
 case issue_clone accepted
   directive_issued/v1 {"directive_id":"0000000000000000000000000000d001","kind":"clone_vm","deadline":60000}
 case jit_already_issued refused jit_already_issued
+case jit_presumed_leaked refused jit_presumed_leaked
 case job_already_bound refused job_already_bound
 case launch_runner accepted
   directive_issued/v1 {"directive_id":"0000000000000000000000000000d005","kind":{"launch_runner":{"handle_id":"000000000000000000000000000005ec"}},"deadline":60000}

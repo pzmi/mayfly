@@ -446,12 +446,12 @@ pub fn check(
         out.extend(rules_include::check(facts, policy));
         out.extend(rules_runtime::check(facts, policy));
         out.extend(rules_cqrs::check(facts, policy));
-        out.extend(rules_transition::check(facts, policy));
         out.extend(rules_store::check(root, facts));
         out.extend(rules_append::check(facts, policy));
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));
+    out.extend(rules_transition::check(&every, policy));
     out.extend(rules_events::check(&every));
     out.extend(rules_seams::check(&every));
     out.extend(hygiene.finish());

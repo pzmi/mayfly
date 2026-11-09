@@ -1,42 +1,70 @@
 //! `ARCH-exhaustive-transition` (foundation.md sections 3.3 and 6.2, plan section 6 rule 8):
 //! every pair of a state machine's states and stimuli is a defined transition or a defined
-//! refusal, so a match in a transition function never falls through a catch-all arm. A new
-//! state or stimulus then fails to compile until each transition function says what it does
-//! with it, instead of being swallowed by `_ => ...`.
+//! refusal, so no match over them falls through a catch-all. A new state or stimulus then fails
+//! to compile until every function that reads it says what it does with it, instead of being
+//! swallowed by `_ => ...`.
 //!
-//! In the production code of every `[purity] pure` crate, inside a function named `decide`,
-//! `evolve` or `step`, or starting with `decide_`, `evolve_` or `step_` (free functions and
-//! associated functions alike, closures inside them included), a `match` arm is refused when
-//! its pattern is, or has as an alternative or as a direct element of a tuple pattern:
+//! In the production code of every `[purity] pure` crate:
 //!
-//! - the wildcard `_`;
-//! - a bare binding (`other =>`, `_x =>`, also with a guard), which matches everything;
-//! - the rest pattern `..` among a tuple's elements (`(State::Idle, ..)`).
+//! 1. inside a function named `decide`, `evolve` or `step`, or starting with `decide_`,
+//!    `evolve_` or `step_` (closures inside included), no `match` arm is a catch-all;
+//! 2. in any function, no `match` whose arms name a variant of an enum declared in a pure
+//!    crate (`Phase::Busy`, `Self::Issued` inside `impl Jit`) has a catch-all arm; and
+//! 3. in any function, no `matches!`, `if let`, `while let` or `let .. else` tests a pattern
+//!    that names such a variant: each is a match with an implicit catch-all. Write the
+//!    exhaustive `match` instead.
 //!
-//! Wildcards inside a variant's payload (`Some(_)`, `Phase::Backoff { .. }`) are allowed: they
-//! ignore data, not states or stimuli. Matches written inside macros are not read (the macro
-//! that generates event sets uses if-chains, not match arms). Test-only items (`#[cfg(test)]`,
+//! A catch-all is the wildcard `_`, a bare binding (`other =>`, `_x =>`), or `..` among a
+//! tuple pattern's elements, also behind a guard or as an or-pattern's alternative. Wildcards
+//! inside a variant's payload (`Some(_)`, `Phase::Backoff { .. }`) are allowed: they ignore
+//! data, not states or stimuli. Enums of other crates (`Option`, `Result`) are not selected by
+//! rules 2 and 3. Code inside macro definitions is not read (the macro that generates event
+//! sets uses if-chains); `matches!` invocations are. Test-only items (`#[cfg(test)]`,
 //! `#[test]`, a `#[cfg(test)] mod name;` file) are not checked.
 //!
-//! Pinned by `should_report_catch_all_arms_when_a_transition_function_matches` and
-//! `should_ignore_other_functions_and_payload_wildcards_when_matching`, and by the negative
-//! fixture `wildcard-transition-arm`.
+//! Pinned by `should_report_catch_all_arms_when_a_transition_function_matches`,
+//! `should_ignore_other_functions_and_payload_wildcards_when_matching`,
+//! `should_report_implicit_catch_alls_when_a_domain_enum_is_tested` and the negative fixtures
+//! `wildcard-transition-arm`, `helper-wildcard-on-domain-enum` and `matches-on-domain-enum`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use syn::parse::{ParseStream, Parser};
 use syn::visit::{self, Visit};
-use syn::{ExprMatch, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Pat};
+use syn::{
+    Expr, ExprLet, ExprMacro, ExprMatch, ImplItemFn, Item, ItemFn, ItemImpl, ItemMod, Local, Pat,
+    StmtMacro, Token, Type,
+};
 
 use super::super::policy::Policy;
 use super::super::report::{Diagnostic, Rule};
-use super::{Facts, is_test_only};
+use super::{Context, Facts, is_test_only};
 
 /// The names (and, followed by `_`, the prefixes) of transition functions.
 pub const TRANSITION_FNS: &[&str] = &["decide", "evolve", "step"];
 
-/// The diagnostics of this rule for one package.
-pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
+/// The enums declared in the production code of the pure crates, by name.
+fn domain_enums(every: &[Facts], policy: &Policy) -> BTreeSet<String> {
+    every
+        .iter()
+        .filter(|facts| policy.purity.pure.contains(&facts.package))
+        .flat_map(|facts| &facts.types)
+        .filter(|decl| decl.is_enum && decl.site.context == Context::Production)
+        .map(|decl| decl.name.clone())
+        .collect()
+}
+
+/// The diagnostics of this rule over every package.
+pub fn check(every: &[Facts], policy: &Policy) -> Vec<Diagnostic> {
+    let enums = domain_enums(every, policy);
+    every
+        .iter()
+        .flat_map(|facts| check_package(facts, policy, &enums))
+        .collect()
+}
+
+fn check_package(facts: &Facts, policy: &Policy, enums: &BTreeSet<String>) -> Vec<Diagnostic> {
     if !policy.purity.pure.contains(&facts.package) {
         return Vec::new();
     }
@@ -60,7 +88,9 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
         let mut scan = Scan {
             package: &facts.package,
             file: path,
+            enums,
             transition: Vec::new(),
+            self_types: Vec::new(),
             out: &mut out,
         };
         scan.visit_file(file);
@@ -135,11 +165,54 @@ fn catch_all(pat: &Pat) -> Option<(&'static str, usize)> {
     }
 }
 
+/// The paths a pattern names: `Phase::Busy`, `Jit::Issued(..)`, through nested patterns.
+fn pattern_paths<'p>(pat: &'p Pat, out: &mut Vec<&'p syn::Path>) {
+    match pat {
+        Pat::Path(path) => out.push(&path.path),
+        Pat::TupleStruct(tuple) => {
+            out.push(&tuple.path);
+            tuple.elems.iter().for_each(|e| pattern_paths(e, out));
+        }
+        Pat::Struct(strukt) => {
+            out.push(&strukt.path);
+            strukt
+                .fields
+                .iter()
+                .for_each(|field| pattern_paths(&field.pat, out));
+        }
+        Pat::Ident(binding) => {
+            if let Some((_, sub)) = &binding.subpat {
+                pattern_paths(sub, out);
+            }
+        }
+        Pat::Or(or) => or.cases.iter().for_each(|case| pattern_paths(case, out)),
+        Pat::Guard(guarded) => pattern_paths(&guarded.pat, out),
+        Pat::Paren(paren) => pattern_paths(&paren.pat, out),
+        Pat::Reference(reference) => pattern_paths(&reference.pat, out),
+        Pat::Tuple(tuple) => tuple.elems.iter().for_each(|e| pattern_paths(e, out)),
+        Pat::Slice(slice) => slice.elems.iter().for_each(|e| pattern_paths(e, out)),
+        _ => {}
+    }
+}
+
+/// `matches!`'s pattern, after the scrutinee and its comma (a guard is ignored).
+fn matches_pattern(input: ParseStream<'_>) -> syn::Result<Pat> {
+    let _scrutinee: Expr = input.parse()?;
+    input.parse::<Token![,]>()?;
+    let pat = Pat::parse_multi_with_leading_vert(input)?;
+    let _rest: proc_macro2::TokenStream = input.parse()?;
+    Ok(pat)
+}
+
 struct Scan<'a> {
     package: &'a str,
     file: &'a str,
+    /// The enums of the pure crates, by name.
+    enums: &'a BTreeSet<String>,
     /// The transition functions being visited, innermost last.
     transition: Vec<String>,
+    /// The self type of each `impl` being visited, innermost last (`None` when not a path).
+    self_types: Vec<Option<String>>,
     out: &'a mut Vec<Diagnostic>,
 }
 
@@ -154,6 +227,49 @@ impl Scan<'_> {
             visit(self);
         }
     }
+
+    /// The domain enum a pattern names a variant of, with the line, if any.
+    fn domain_enum(&self, pat: &Pat) -> Option<(String, usize)> {
+        let mut paths = Vec::new();
+        pattern_paths(pat, &mut paths);
+        paths.into_iter().find_map(|path| {
+            let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let line = path.segments.first()?.ident.span().start().line;
+            let owner = match segments.as_slice() {
+                [.., owner, _] if owner == "Self" => self.self_types.last().cloned().flatten(),
+                [.., owner, _] => Some(owner.clone()),
+                _ => None,
+            }?;
+            self.enums.contains(&owner).then_some((owner, line))
+        })
+    }
+
+    fn implicit(&mut self, what: &str, owner: &str, line: usize) {
+        self.out.push(Diagnostic::new(
+            Rule::ExhaustiveTransition,
+            format!(
+                "{} tests a `{owner}` variant with {what}, which matches every other variant implicitly: write an exhaustive `match` (plan section 6 rule 8)",
+                self.package
+            ),
+            format!("{}:{line}", self.file),
+        ));
+    }
+
+    fn matches_macro(&mut self, mac: &syn::Macro) {
+        if mac
+            .path
+            .segments
+            .last()
+            .is_none_or(|s| s.ident != "matches")
+        {
+            return;
+        }
+        if let Ok(pat) = matches_pattern.parse2(mac.tokens.clone())
+            && let Some((owner, line)) = self.domain_enum(&pat)
+        {
+            self.implicit("`matches!`", &owner, line);
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for Scan<'_> {
@@ -165,7 +281,13 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
         if !is_test_only(&item.attrs) {
+            let self_type = match &*item.self_ty {
+                Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
+                _ => None,
+            };
+            self.self_types.push(self_type);
             visit::visit_item_impl(self, item);
+            self.self_types.pop();
         }
     }
 
@@ -183,20 +305,60 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         }
     }
 
+    fn visit_expr_let(&mut self, expr: &'ast ExprLet) {
+        if let Some((owner, line)) = self.domain_enum(&expr.pat) {
+            self.implicit("`if let`/`while let`", &owner, line);
+        }
+        visit::visit_expr_let(self, expr);
+    }
+
+    fn visit_local(&mut self, local: &'ast Local) {
+        let diverges = local
+            .init
+            .as_ref()
+            .is_some_and(|init| init.diverge.is_some());
+        if diverges && let Some((owner, line)) = self.domain_enum(&local.pat) {
+            self.implicit("`let .. else`", &owner, line);
+        }
+        visit::visit_local(self, local);
+    }
+
+    fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
+        self.matches_macro(&expr.mac);
+        visit::visit_expr_macro(self, expr);
+    }
+
+    fn visit_stmt_macro(&mut self, stmt: &'ast StmtMacro) {
+        self.matches_macro(&stmt.mac);
+        visit::visit_stmt_macro(self, stmt);
+    }
+
     fn visit_expr_match(&mut self, expr: &'ast ExprMatch) {
-        if let Some(function) = self.transition.last() {
-            for arm in &expr.arms {
-                if let Some((what, line)) = catch_all(&arm.pat) {
-                    self.out.push(Diagnostic::new(
-                        Rule::ExhaustiveTransition,
-                        format!(
-                            "{} matches with {what} in the transition function `{function}`: list every state and stimulus, so a new one is a compile error instead of falling through (plan section 6 rule 8)",
-                            self.package
-                        ),
-                        format!("{}:{line}", self.file),
-                    ));
-                }
-            }
+        let over_enum = expr
+            .arms
+            .iter()
+            .find_map(|arm| self.domain_enum(&arm.pat))
+            .map(|(owner, _)| owner);
+        for arm in &expr.arms {
+            let Some((what, line)) = catch_all(&arm.pat) else {
+                continue;
+            };
+            let message = match (self.transition.last(), &over_enum) {
+                (Some(function), _) => format!(
+                    "{} matches with {what} in the transition function `{function}`: list every state and stimulus, so a new one is a compile error instead of falling through (plan section 6 rule 8)",
+                    self.package
+                ),
+                (None, Some(owner)) => format!(
+                    "{} matches `{owner}` with {what}: list every variant, so a new one is a compile error instead of falling through (plan section 6 rule 8)",
+                    self.package
+                ),
+                (None, None) => continue,
+            };
+            self.out.push(Diagnostic::new(
+                Rule::ExhaustiveTransition,
+                message,
+                format!("{}:{line}", self.file),
+            ));
         }
         visit::visit_expr_match(self, expr);
     }
@@ -207,53 +369,64 @@ mod tests {
     use super::super::testing::{facts_for, policy, rendered};
     use super::*;
 
+    fn run(package: &str, files: &[(&str, &str)]) -> Vec<String> {
+        rendered(&check(&[facts_for(package, files)], &policy()))
+    }
+
+    fn lines(got: &[String]) -> Vec<&str> {
+        got.iter()
+            .map(|d| d.rsplit(':').next().unwrap_or(""))
+            .collect()
+    }
+
     #[test]
     fn should_report_catch_all_arms_when_a_transition_function_matches() {
         // given
-        let source = "pub enum S { A, B }\npub fn decide(s: S, t: (S, S)) -> u8 {\n    match s {\n        S::A => 0,\n        _ => 1,\n    };\n    match t {\n        (S::A, ..) => 0,\n        (S::B, other) => 1,\n    }\n}\npub struct M;\nimpl M {\n    fn evolve_phase(s: S) -> u8 {\n        match s {\n            S::A | rest => 2,\n        }\n    }\n}\npub fn step_once(s: S) -> u8 {\n    let f = |x: S| match x {\n        y if true => 3,\n    };\n    f(s)\n}\n";
+        let source = "pub fn decide(s: u8, t: (u8, u8)) -> u8 {\n    match s {\n        0 => 0,\n        _ => 1,\n    };\n    match t {\n        (0, ..) => 0,\n        (1, other) => 1,\n    }\n}\npub struct M;\nimpl M {\n    fn evolve_phase(s: u8) -> u8 {\n        match s {\n            0 | rest => 2,\n        }\n    }\n}\npub fn step_once(s: u8) -> u8 {\n    let f = |x: u8| match x {\n        y if true => 3,\n    };\n    f(s)\n}\n";
 
         // when
-        let got = rendered(&check(
-            &facts_for("mayfly-data-domain", &[("src/lib.rs", source)]),
-            &policy(),
-        ));
+        let got = run("mayfly-data-domain", &[("src/lib.rs", source)]);
 
         // then
-        let lines: Vec<&str> = got
-            .iter()
-            .map(|d| d.rsplit(':').next().unwrap_or(""))
-            .collect();
-        assert_eq!(lines, ["5)", "8)", "9)", "16)", "22)"], "{got:?}");
+        assert_eq!(lines(&got), ["4)", "7)", "8)", "15)", "21)"], "{got:?}");
         assert!(got[0].starts_with("ARCH-exhaustive-transition"), "{got:?}");
     }
 
     #[test]
     fn should_ignore_other_functions_and_payload_wildcards_when_matching() {
         // given
-        let source = "pub enum S { A(u8), B { n: u8 }, C }\npub fn decide(s: S, o: Option<u8>) -> u8 {\n    match s {\n        S::A(_) | S::B { .. } => 0,\n        S::C => match o {\n            Some(_) | None => 1,\n        },\n    }\n}\npub fn other(s: S) -> u8 {\n    match s {\n        S::A(_) => 0,\n        _ => 1,\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn decide(s: u8) -> u8 { match s { _ => 0 } }\n}\n#[cfg(test)]\nmod more;\n";
+        let source = "pub enum S { A(u8), B { n: u8 }, C }\npub fn decide(s: S, o: Option<u8>) -> u8 {\n    match s {\n        S::A(_) | S::B { .. } => 0,\n        S::C => match o {\n            Some(_) | None => 1,\n        },\n    }\n}\npub fn other(o: Option<u8>) -> u8 {\n    if let Some(v) = o { return v; }\n    match o {\n        Some(1) => 0,\n        _ => 1,\n    }\n}\n#[cfg(test)]\nmod tests {\n    fn decide(s: super::S) -> u8 { match s { super::S::C => 0, _ => 1 } }\n}\n#[cfg(test)]\nmod more;\n";
         let more = "pub fn decide(s: u8) -> u8 { match s { _ => 0 } }\n";
 
         // when
-        let pure = check(
-            &facts_for(
-                "mayfly-control-domain",
-                &[("src/lib.rs", source), ("src/more.rs", more)],
-            ),
-            &policy(),
+        let pure = run(
+            "mayfly-control-domain",
+            &[("src/lib.rs", source), ("src/more.rs", more)],
         );
-        let impure = check(
-            &facts_for(
-                "mayfly-control",
-                &[(
-                    "src/lib.rs",
-                    "pub fn decide(s: u8) -> u8 { match s { _ => 0 } }\n",
-                )],
-            ),
-            &policy(),
+        let impure = run(
+            "mayfly-control",
+            &[(
+                "src/lib.rs",
+                "pub enum S { A, B }\npub fn decide(s: S) -> u8 { match s { S::A => 0, _ => 1 } }\n",
+            )],
         );
 
         // then
-        assert_eq!(rendered(&pure), Vec::<String>::new());
-        assert_eq!(rendered(&impure), Vec::<String>::new());
+        assert_eq!(pure, Vec::<String>::new());
+        assert_eq!(impure, Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_report_implicit_catch_alls_when_a_domain_enum_is_tested() {
+        // given
+        let source = "pub enum Phase { A, B(u8), C }\nimpl Phase {\n    pub fn busy(self) -> bool {\n        matches!(self, Self::A)\n    }\n}\npub fn helper(p: Phase) -> u8 {\n    match p {\n        Phase::A => 0,\n        _ => 1,\n    }\n}\npub fn tested(p: Phase) -> u8 {\n    if let Phase::B(n) = p {\n        return n;\n    }\n    let Phase::C = p else {\n        return 0;\n    };\n    u8::from(matches!(p, Phase::A | Phase::C))\n}\n";
+
+        // when
+        let got = run("mayfly-control-domain", &[("src/lib.rs", source)]);
+
+        // then
+        assert_eq!(lines(&got), ["4)", "10)", "14)", "17)", "20)"], "{got:?}");
+        assert!(got[1].contains("matches `Phase` with `_`"), "{got:?}");
+        assert!(got[0].contains("`matches!`"), "{got:?}");
     }
 }

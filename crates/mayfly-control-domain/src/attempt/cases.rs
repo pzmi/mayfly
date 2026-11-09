@@ -274,6 +274,32 @@ fn doubted() -> Vec<Step> {
     )
 }
 
+/// A restart while the launch is in flight: the handle is orphaned, and the launch the data
+/// plane re-observes in the new epoch is recorded.
+fn launched_after_restart() -> Vec<Step> {
+    let mut path = then(jit_issued(), [issue(5)]);
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    ));
+    path.push(at(
+        2,
+        SAGA,
+        AttemptCommand::RecordObservation(Observation {
+            observation_id: ObservationId::from_u128(0x0B9),
+            epoch: Epoch::new(2),
+            generation: Generation::FIRST,
+            fact: Fact::RunnerLaunched {
+                directive_id: directive(5),
+            },
+        }),
+    ));
+    path
+}
+
 fn adopted() -> Vec<Step> {
     let mut path = prepared();
     path.push(at(
@@ -360,6 +386,7 @@ pub(super) fn paths() -> Vec<Vec<Step>> {
         unknown_clone(),
         doubted(),
         adopted(),
+        launched_after_restart(),
     ]
 }
 
@@ -572,6 +599,18 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             AttemptCommand::BindJob {
                 request_id: RunnerRequestId(2),
             },
+        ),
+        case(
+            "jit_presumed_leaked",
+            launched_after_restart(),
+            at(
+                2,
+                SAGA,
+                AttemptCommand::BindJob {
+                    request_id: RunnerRequestId(1),
+                },
+            ),
+            Expect::Refused,
         ),
         refused(
             "busy",

@@ -599,6 +599,24 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `StaleObservationIgnored{generation|epoch|directive}` (sampled), `AttemptClosed`. An operator's
   resolution of the quarantine case is `AttemptRetired{quarantine_resolved}`: cleanup then stops
   and deletes with proof (KER-04).
+- **Behaviour decided by KER-04F (accepted as stated, owner may override):**
+  - *Adoption with a launch in flight.* The broker is empty after a restart, so an issued handle
+    is orphaned and the JIT presumed leaked even when its `LaunchRunner` is pending (the
+    launcher may have taken it). The launch the data plane re-observes is still recorded
+    (`RunnerLaunched`: the attempt is Listening, its runner real and registered), but that
+    runner never gets a job (`BindJob` refused `jit_presumed_leaked`); P13 retires it after
+    deregistration.
+  - *Bounded cleanup.* Stops and deletes count against the attempt's retry budget like the
+    stage directives. A stop or delete the data plane keeps refusing ends in
+    `AttemptQuarantined{delete_refused_repeatedly}`; a refused proof quarantines
+    (`provider_identity_mismatch`, also for `LaunchRunner`, ADR 0038). Inside quarantine,
+    automation stops a running VM with proof unless a job is live, a bounded number of times
+    (a refused proof counts as one more refusal), and never deletes it. A VM quarantined for
+    `ownership_doubt` has no recorded instance id, so no proof: it is neither stopped nor
+    deleted, and a complete inventory without it releases it (`AttemptLost`).
+  - *Actor.* Who issued each command (operator uid, policy, startup) is recorded in the event
+    envelope, not the payload; `ResolveQuarantine` is refused unless the actor is an operator,
+    so an `AttemptRetired{quarantine_resolved}` event's envelope names that operator.
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
   nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per

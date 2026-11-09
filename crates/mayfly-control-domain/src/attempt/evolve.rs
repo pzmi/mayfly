@@ -34,10 +34,15 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
                 outcome: Outcome::InFlight,
                 deadline: e.deadline,
             });
-            if matches!(
-                tag,
-                DirectiveTag::CloneVm | DirectiveTag::StartVm | DirectiveTag::VerifyGuest
-            ) {
+            let counted = match tag {
+                DirectiveTag::CloneVm
+                | DirectiveTag::StartVm
+                | DirectiveTag::VerifyGuest
+                | DirectiveTag::StopVm
+                | DirectiveTag::DeleteVm => true,
+                DirectiveTag::LaunchRunner | DirectiveTag::ExportDiagnostics => false,
+            };
+            if counted {
                 s.tries = s.tries.saturating_add(1);
             }
             s.phase = evolve_issued_phase(s.phase, tag);
@@ -117,6 +122,7 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
             s.retire_reason = Some(e.reason);
             s.retirement_requested = None;
             s.pending = None;
+            s.tries = 0;
             s.phase = match s.instance_id {
                 Some(..) => Phase::Retiring,
                 None => Phase::Deleted,
@@ -133,6 +139,7 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
         AttemptEvent::VmStopped(..) => {
             s.pending = None;
             s.vm_running = false;
+            s.tries = 0;
             s.phase = evolve_stopped_phase(s.phase);
         }
         AttemptEvent::VmDeleted(..) => {
@@ -146,6 +153,26 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
             s.phase = Phase::Lost;
         }
         AttemptEvent::AttemptQuarantined(e) => {
+            // entering quarantine restarts the count of stops; staying in it does not
+            s.tries = match s.phase {
+                Phase::Quarantined { .. } => s.tries,
+                Phase::NotStarted
+                | Phase::Reserved
+                | Phase::Cloning
+                | Phase::Booting
+                | Phase::Verifying
+                | Phase::Prepared
+                | Phase::Activating
+                | Phase::Listening
+                | Phase::Busy
+                | Phase::Finished
+                | Phase::Retiring
+                | Phase::Deleting
+                | Phase::Deleted
+                | Phase::Lost
+                | Phase::Backoff { .. }
+                | Phase::Closed => 0,
+            };
             s.pending = None;
             s.retirement_requested = None;
             s.phase = Phase::Quarantined {

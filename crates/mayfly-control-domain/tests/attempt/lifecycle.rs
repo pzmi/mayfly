@@ -8,9 +8,10 @@ use mayfly_control_domain::attempt::{
 use mayfly_control_domain::{Actor, Rejection};
 
 use super::support::{
-    OPERATOR, SAGA, activating, apply, at, booting, busy, cloning, directive, event, facts,
-    finished, handle, instance, issue, jit_issued, listening, observe, prepared, quarantined,
-    reach, retiring, saga, stimuli, stopped, then, unknown_clone, verified_activation, verifying,
+    OPERATOR, SAGA, activating, apply, at, booting, busy, cloning, directive, doubted, event,
+    facts, finished, handle, instance, issue, jit_issued, listening, observe, observe_in, prepared,
+    quarantined, reach, retiring, saga, stimuli, stopped, then, unknown_clone, verified_activation,
+    verifying,
 };
 
 fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
@@ -653,4 +654,171 @@ fn should_finish_a_presumed_leaked_runner_when_it_exits() {
     assert_eq!(code(twice), Some("already_retiring"));
     assert_eq!(withdrawn.map(|(s, _)| s.retirement_requested), Ok(None));
     assert_eq!(exited.map(|(s, _)| s.phase), Ok(Phase::Finished));
+}
+
+#[test]
+fn should_record_a_late_launch_and_never_bind_a_job_when_a_restart_orphaned_its_handle() {
+    // given
+    let (launching, _) = reach(&then(jit_issued(), [issue(5)]));
+    let (adopted, adopt_events) = apply(
+        &launching,
+        at(
+            2,
+            Actor::Startup,
+            AttemptCommand::Adopt {
+                inventory_ref: event(3),
+            },
+        ),
+    )
+    .unwrap_or_else(|r| panic!("{r:?}"));
+    // when
+    let launched = apply(
+        &adopted,
+        at(
+            2,
+            SAGA,
+            observe_in(
+                2,
+                Fact::RunnerLaunched {
+                    directive_id: directive(5),
+                },
+            ),
+        ),
+    );
+    // then
+    assert!(matches!(
+        adopt_events.as_slice(),
+        [
+            AttemptEvent::AttemptAdopted(..),
+            AttemptEvent::JitHandleOrphaned(..)
+        ]
+    ));
+    let (state, _) = launched.unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!(
+        (state.phase, state.pending, state.jit),
+        (Phase::Listening, None, Jit::Orphaned(handle()))
+    );
+    let bind = at(
+        2,
+        SAGA,
+        AttemptCommand::BindJob {
+            request_id: RunnerRequestId(1),
+        },
+    );
+    assert_eq!(code(apply(&state, bind)), Some("jit_presumed_leaked"));
+    let retire = at(
+        2,
+        SAGA,
+        AttemptCommand::RequestRetirement {
+            reason: RetireReason::JitPresumedLeaked,
+        },
+    );
+    assert_eq!(
+        apply(&state, retire).map(|(s, _)| s.retirement_requested),
+        Ok(Some(RetireReason::JitPresumedLeaked))
+    );
+}
+
+#[test]
+fn should_quarantine_when_a_delete_is_refused_again_and_again() {
+    // given
+    let (stopped, _) = reach(&stopped());
+    let refuse = |n| {
+        saga(observe(Fact::DirectiveRefused {
+            directive_id: directive(n),
+            reason: RefusalReason::SafeMode,
+        }))
+    };
+    // when
+    let after = apply(&stopped, saga(issue(8)))
+        .and_then(|(s, _)| apply(&s, refuse(8)))
+        .and_then(|(s, _)| {
+            assert_eq!((s.phase, s.pending), (Phase::Deleting, None));
+            apply(&s, saga(issue(9)))
+        })
+        .and_then(|(s, _)| apply(&s, refuse(9)));
+    // then
+    let (state, _) = after.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        state.phase,
+        Phase::Quarantined {
+            reason: QuarantineReason::DeleteRefusedRepeatedly,
+            ..
+        }
+    ));
+    assert_eq!(
+        code(apply(&state, saga(issue(10)))),
+        Some("nothing_to_issue")
+    );
+}
+
+#[test]
+fn should_stop_trying_when_quarantined_stops_are_refused() {
+    // given
+    let (held, _) = reach(&quarantined());
+    let refuse = |n, reason| {
+        saga(observe(Fact::DirectiveRefused {
+            directive_id: directive(n),
+            reason,
+        }))
+    };
+    // when
+    let after = apply(&held, saga(issue(10)))
+        .and_then(|(s, _)| apply(&s, refuse(10, RefusalReason::ProofMismatch)))
+        .and_then(|(s, events)| {
+            assert_eq!(events.len(), 1, "{events:?}");
+            apply(&s, saga(issue(11)))
+        })
+        .and_then(|(s, _)| apply(&s, refuse(11, RefusalReason::SafeMode)));
+    // then
+    let (state, _) = after.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        state.phase,
+        Phase::Quarantined {
+            reason: QuarantineReason::GuestIdentityRefused,
+            ..
+        }
+    ));
+    assert_eq!(
+        code(apply(&state, saga(issue(12)))),
+        Some("nothing_to_issue")
+    );
+}
+
+#[test]
+fn should_resolve_an_unknown_stop_when_quarantined_and_the_inventory_shows_the_vm() {
+    // given
+    let (unknown, _) = reach(&then(
+        quarantined(),
+        [
+            issue(10),
+            observe(Fact::OutcomeUnknown {
+                directive_id: directive(10),
+            }),
+        ],
+    ));
+    // when
+    let resolved = apply(
+        &unknown,
+        saga(observe(Fact::VmPresent {
+            instance_id: instance(),
+            running: false,
+        })),
+    );
+    // then
+    let (state, _) = resolved.unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!((state.pending, state.vm_running), (None, false));
+    assert!(matches!(state.phase, Phase::Quarantined { .. }));
+}
+
+#[test]
+fn should_release_a_doubted_quarantine_when_the_vm_is_gone() {
+    // given
+    let (doubted, _) = reach(&doubted());
+    // when
+    let stop = apply(&doubted, saga(issue(10)));
+    let gone = apply(&doubted, saga(observe(Fact::VmAbsent)));
+    // then
+    assert_eq!(code(stop), Some("nothing_to_issue"));
+    assert_eq!(gone.map(|(s, _)| s.phase), Ok(Phase::Lost));
 }

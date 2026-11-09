@@ -205,11 +205,23 @@ fn decide_issue_next(
         Phase::Backoff { stage, .. } => Some(stage_directive(stage)),
         Phase::Activating => activation_directive(state),
         Phase::Retiring => cleanup_directive(state)?,
-        Phase::Deleting => Some(DirectiveKind::DeleteVm {
-            proof: proof(state)?,
-        }),
+        Phase::Deleting => {
+            if within_budget(state) {
+                Some(DirectiveKind::DeleteVm {
+                    proof: proof(state)?,
+                })
+            } else {
+                None
+            }
+        }
         Phase::Quarantined { .. } => {
-            if state.vm_running && !job_live(state) {
+            // stopped with proof unless a job is live, never deleted; a VM without a recorded
+            // instance id (ownership doubt) cannot be proven ours and is not touched
+            let stoppable = state.vm_running
+                && !job_live(state)
+                && state.instance_id.is_some()
+                && within_budget(state);
+            if stoppable {
                 Some(DirectiveKind::StopVm {
                     proof: proof(state)?,
                 })
@@ -255,10 +267,29 @@ fn activation_directive(state: &AttemptState) -> Option<DirectiveKind> {
     }
 }
 
-/// Cleanup: diagnostics while the VM runs, then the stop, then the delete, each with proof.
+/// Whether another stop or delete may be issued: they count against the retry budget like the
+/// stage directives, so cleanup the data plane keeps refusing ends (pinned by
+/// `tests/attempt/lifecycle.rs::should_quarantine_when_a_delete_is_refused_again_and_again`).
+fn within_budget(state: &AttemptState) -> bool {
+    state.tries
+        < state
+            .identity
+            .as_ref()
+            .map_or(1, |identity| identity.retry_budget)
+}
+
+/// Cleanup: diagnostics while the VM runs, then the stop, then the delete, each with proof and
+/// within the retry budget.
 fn cleanup_directive(state: &AttemptState) -> Result<Option<DirectiveKind>, AttemptRejection> {
-    if state.vm_running && state.diagnostics == Diagnostics::NotTaken {
+    let diagnostics_pending = match state.diagnostics {
+        Diagnostics::NotTaken => true,
+        Diagnostics::Exported | Diagnostics::Lost => false,
+    };
+    if state.vm_running && diagnostics_pending {
         return Ok(Some(DirectiveKind::ExportDiagnostics));
+    }
+    if !within_budget(state) {
+        return Ok(None);
     }
     if state.vm_running {
         return Ok(Some(DirectiveKind::StopVm {
@@ -378,8 +409,12 @@ fn decide_record_jit_handle(
 /// of I21).
 fn decide_bind_job(state: &AttemptState, request_id: RunnerRequestId) -> Decision {
     match state.phase {
-        Phase::Listening => match state.job_binding {
-            None => {
+        Phase::Listening => match (state.job_binding, state.jit) {
+            (Some(..), Jit::None | Jit::Issued(..) | Jit::Taken(..) | Jit::Orphaned(..)) => {
+                Err(AttemptRejection::JobAlreadyBound)
+            }
+            (None, Jit::Orphaned(..)) => Err(AttemptRejection::JitPresumedLeaked),
+            (None, Jit::None | Jit::Issued(..) | Jit::Taken(..)) => {
                 let bound = AttemptEvent::JobBound(JobBound { request_id });
                 match state.retirement_requested {
                     Some(..) => Ok(vec![
@@ -389,7 +424,6 @@ fn decide_bind_job(state: &AttemptState, request_id: RunnerRequestId) -> Decisio
                     None => Ok(vec![bound]),
                 }
             }
-            Some(..) => Err(AttemptRejection::JobAlreadyBound),
         },
         Phase::Busy | Phase::Finished => match state.job_binding {
             Some(bound) if bound == request_id => Ok(Vec::new()),
@@ -725,9 +759,12 @@ fn decide_answer(
                     AttemptEvent::JitHandleTaken(JitHandleTaken { handle_id }),
                     AttemptEvent::RunnerLaunched(RunnerLaunched { directive_id }),
                 ]),
-                Jit::None | Jit::Taken(..) | Jit::Orphaned(..) => {
-                    Err(AttemptRejection::ObservationMismatch)
-                }
+                // a restart orphaned the handle while the launch was in flight: the runner is
+                // recorded, and never gets a job (`jit_presumed_leaked`)
+                Jit::Orphaned(..) => Ok(vec![AttemptEvent::RunnerLaunched(RunnerLaunched {
+                    directive_id,
+                })]),
+                Jit::None | Jit::Taken(..) => Err(AttemptRejection::ObservationMismatch),
             }
         }
         Fact::RunnerLaunchUnknown { .. } => {
@@ -802,17 +839,46 @@ fn decide_guest_verified(
 }
 
 /// A refusal means nothing happened. A proof the data plane refused for a stop, a delete or a
-/// launch quarantines the attempt (ADR 0026); any other refusal is a stage failure or a retry.
+/// launch quarantines the attempt (ADR 0026, ADR 0038); inside quarantine it is one more
+/// refused stop, so it cannot loop. Any other refusal is a stage failure or a bounded retry.
 fn refused(state: &AttemptState, pending: Pending, reason: RefusalReason) -> Vec<AttemptEvent> {
     let refusal = AttemptEvent::DirectiveRefused(DirectiveRefused {
         directive_id: pending.directive_id,
         reason,
     });
-    let proof_refused = reason == RefusalReason::ProofMismatch
-        && matches!(
-            pending.tag,
-            DirectiveTag::StopVm | DirectiveTag::DeleteVm | DirectiveTag::LaunchRunner
-        );
+    let proof_checked = match pending.tag {
+        DirectiveTag::StopVm | DirectiveTag::DeleteVm | DirectiveTag::LaunchRunner => true,
+        DirectiveTag::CloneVm
+        | DirectiveTag::StartVm
+        | DirectiveTag::VerifyGuest
+        | DirectiveTag::ExportDiagnostics => false,
+    };
+    let in_quarantine = match state.phase {
+        Phase::Quarantined { .. } => true,
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Retiring
+        | Phase::Deleting
+        | Phase::Deleted
+        | Phase::Lost
+        | Phase::Backoff { .. }
+        | Phase::Closed => false,
+    };
+    let proof_refused = match reason {
+        RefusalReason::ProofMismatch => proof_checked && !in_quarantine,
+        RefusalReason::InsufficientResources
+        | RefusalReason::SafeMode
+        | RefusalReason::StaleEpoch
+        | RefusalReason::EffectFailed => false,
+    };
     if proof_refused {
         return vec![
             refusal,
@@ -855,7 +921,40 @@ fn not_applied(state: &AttemptState, pending: Pending) -> Vec<AttemptEvent> {
             directive_id: pending.directive_id,
             reason: DiagnosticsLoss::Refused,
         })],
-        DirectiveTag::StopVm | DirectiveTag::DeleteVm => Vec::new(),
+        DirectiveTag::StopVm | DirectiveTag::DeleteVm => cleanup_refused(state),
+    }
+}
+
+/// A stop or delete that did not happen is retried within the budget; spent, cleanup ends in
+/// quarantine (`delete_refused_repeatedly`), and inside quarantine the stops simply end.
+fn cleanup_refused(state: &AttemptState) -> Vec<AttemptEvent> {
+    match state.phase {
+        Phase::Quarantined { .. } => Vec::new(),
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Retiring
+        | Phase::Deleting
+        | Phase::Deleted
+        | Phase::Lost
+        | Phase::Backoff { .. }
+        | Phase::Closed => {
+            if within_budget(state) {
+                Vec::new()
+            } else {
+                vec![quarantined(
+                    state,
+                    QuarantineReason::DeleteRefusedRepeatedly,
+                )]
+            }
+        }
     }
 }
 
@@ -988,10 +1087,22 @@ fn decide_vm_present(
     instance_id: &ProviderInstanceId,
     running: bool,
 ) -> Decision {
-    match state.phase {
-        Phase::Deleted | Phase::Lost | Phase::Quarantined { .. } => return Ok(Vec::new()),
+    // Quarantined is read like the others: an Unknown stop is resolved, and another VM under
+    // our name is recorded as an identity mismatch (once, while nothing is pending)
+    let already_mismatched = match state.phase {
+        Phase::Deleted | Phase::Lost => return Ok(Vec::new()),
         Phase::NotStarted => return Err(AttemptRejection::NotStarted),
         Phase::Closed => return Err(AttemptRejection::Closed),
+        Phase::Quarantined { reason, .. } => match reason {
+            QuarantineReason::ProviderIdentityMismatch => state.pending.is_none(),
+            QuarantineReason::OwnershipDoubt
+            | QuarantineReason::GuestIdentityRefused
+            | QuarantineReason::JitPresumedLeaked
+            | QuarantineReason::DeleteRefusedRepeatedly
+            | QuarantineReason::RedactionViolation
+            | QuarantineReason::ForensicRetention
+            | QuarantineReason::OutcomeUnprovable => false,
+        },
         Phase::Reserved
         | Phase::Cloning
         | Phase::Booting
@@ -1003,15 +1114,19 @@ fn decide_vm_present(
         | Phase::Finished
         | Phase::Retiring
         | Phase::Deleting
-        | Phase::Backoff { .. } => {}
-    }
+        | Phase::Backoff { .. } => false,
+    };
     if let Some(recorded) = &state.instance_id
         && recorded != instance_id
     {
-        return Ok(vec![quarantined(
-            state,
-            QuarantineReason::ProviderIdentityMismatch,
-        )]);
+        return Ok(if already_mismatched {
+            Vec::new()
+        } else {
+            vec![quarantined(
+                state,
+                QuarantineReason::ProviderIdentityMismatch,
+            )]
+        });
     }
     match state.pending {
         Some(
@@ -1025,8 +1140,25 @@ fn decide_vm_present(
             ..
         }) => Ok(Vec::new()),
         None => {
-            let never_cloned = state.instance_id.is_none()
-                && matches!(state.phase, Phase::Reserved | Phase::Backoff { .. });
+            let before_clone = match state.phase {
+                Phase::Reserved | Phase::Backoff { .. } => true,
+                Phase::NotStarted
+                | Phase::Cloning
+                | Phase::Booting
+                | Phase::Verifying
+                | Phase::Prepared
+                | Phase::Activating
+                | Phase::Listening
+                | Phase::Busy
+                | Phase::Finished
+                | Phase::Retiring
+                | Phase::Deleting
+                | Phase::Deleted
+                | Phase::Lost
+                | Phase::Quarantined { .. }
+                | Phase::Closed => false,
+            };
+            let never_cloned = state.instance_id.is_none() && before_clone;
             if !never_cloned {
                 return Ok(Vec::new());
             }
@@ -1105,11 +1237,35 @@ fn decide_vm_absent(state: &AttemptState) -> Decision {
         | Phase::Backoff { .. }
         | Phase::Quarantined { .. } => {}
     }
-    let lost = || match state.instance_id {
-        Some(..) => Ok(vec![AttemptEvent::AttemptLost(AttemptLost {
-            evidence: LostEvidence::InventoryAbsent,
-        })]),
-        None => Ok(Vec::new()),
+    // a VM we recorded is lost; so is a quarantined VM of our name we never recorded cloning
+    // (ownership doubt), which its absence releases
+    let quarantined_now = match state.phase {
+        Phase::Quarantined { .. } => true,
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Retiring
+        | Phase::Deleting
+        | Phase::Deleted
+        | Phase::Lost
+        | Phase::Backoff { .. }
+        | Phase::Closed => false,
+    };
+    let lost = || {
+        if state.instance_id.is_some() || quarantined_now {
+            Ok(vec![AttemptEvent::AttemptLost(AttemptLost {
+                evidence: LostEvidence::InventoryAbsent,
+            })])
+        } else {
+            Ok(Vec::new())
+        }
     };
     match state.pending {
         Some(Pending {

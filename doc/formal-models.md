@@ -86,7 +86,7 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
-| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep` | 8 steps each | about 45 s for `step`, 40 s for `serveStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04) | KER-04 |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F) | KER-04, KER-04F |
 
 The planned models are listed in verification §6.1: `scheduling` (KER-05), `scaleset` (KER-06), `recovery` (KER-07), `link` (KER-02) and `registration` (KER-09).
 
@@ -125,7 +125,23 @@ effect happening or not, then `Unknown`. `step` offers every stimulus at every s
 `serveStep` is the biased relation of verification §6 (no policy retirement before the job ends,
 no interference with the provider), because a uniform random walk of `step` almost never strings
 the fifteen stimuli of the happy path together: `serveStep` reaches Busy, Finished and Closed in
-simulation, `step` does not.
+simulation, `step` does not. `activationStep` (KER-04F) starts with `prepareAtOnce`, which turns
+the preparation (and, nondeterministically, the grant and the fresh verification) into one
+step, then offers the stimuli around activation: the JIT handle, the launch, the job, restarts,
+lost replies, launch outcomes, refused proofs, a replaced VM, quarantine and retirement. It
+exists because the KER-04 review found a counterexample nine steps from `init` (a restart with
+the launch in flight, the late launch reply, a job bound to a runner whose JIT was presumed
+leaked) that `step` at depth 8 could not reach and random simulation did not sample; at depth 8
+of `activationStep` it is six steps deep.
+
+**What the invariants are evidence of.** Most invariants hold in the model because its guards
+enforce them (`recordJitHandle` needs the grant and the fresh verification, so
+`illegalMint` stays false): checking them proves that the guards and the transitions of the
+model, taken together, cannot reach a violating state, including through interleavings nobody
+wrote down, which is how the review's counterexample was a real defect of the model. They are
+evidence about the Rust code only through the matrix golden and the Rust tests named below,
+and fully once VER-01's conformance replay drives the aggregate with the model's traces; until
+then a guard the Rust code lacks is caught only if a Rust test exercises it.
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
@@ -134,7 +150,7 @@ simulation, `step` does not.
 | `i10UnknownLeavesOnlyOnObservation` | I10: when the pending outcome stops being `Unknown`, the last stimulus was an observation | `formal-verify`; `tests/attempt/lifecycle.rs::should_leave_unknown_only_on_an_observation_when_every_command_is_tried` (mutant 27) |
 | `i13NoDuplicateClones` | I13: no directive issued while one is pending, every clone targets the one (name, generation), clones bounded by the retry budget | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
 | `i14OneJob` | I14: at most one job is ever bound | `formal-verify`; `tests/attempt/lifecycle.rs::should_bind_one_job_when_a_second_is_offered` |
-| `i22JitMintedOnceAfterGrantAndVerification` | I22 (attempt half): a JIT handle only with the grant and a verification of the current epoch, at most one launch, no job once the JIT is presumed leaked | `formal-verify`; `tests/attempt/lifecycle.rs::should_refuse_a_jit_handle_when_activation_lacks_a_grant_or_a_fresh_verification`, `should_never_launch_again_when_a_launch_outcome_is_unknown` |
+| `i22JitMintedOnceAfterGrantAndVerification` | I22 (attempt half): a JIT handle only with the grant and a verification of the current epoch, at most one launch, no job once the JIT is presumed leaked (a launch of unknown outcome, or a handle a restart orphaned, even with its launch in flight) | `formal-verify`; `tests/attempt/lifecycle.rs::should_refuse_a_jit_handle_when_activation_lacks_a_grant_or_a_fresh_verification`, `should_never_launch_again_when_a_launch_outcome_is_unknown`, `should_record_a_late_launch_and_never_bind_a_job_when_a_restart_orphaned_its_handle` |
 | `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
 | `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
 | `quarantineNeverAutoDeleted` | I28: no `DeleteVm` while quarantined and unresolved | the same |
@@ -145,7 +161,17 @@ Tests (`quint test`, stage `formal-test`, all deterministic): `happyPathTest`,
 `stageFailureBacksOffThenRetiresTest`, `guestRejectedIsQuarantinedTest`,
 `activationNeedsGrantAndFreshVerificationTest`, `launchUnknownNeverServesTest`,
 `busyServesOneJobTest`, `retirementWaitsForDeregistrationTest`,
-`replacedVmQuarantinesOnDeleteTest`. Negative controls tried: dropping the fresh-verification
+`replacedVmQuarantinesOnDeleteTest`, and from KER-04F `adoptDuringLaunchNeverServesTest` (the
+review's counterexample, kept as a regression), `deleteRefusedRepeatedlyQuarantinesTest`,
+`quarantinedStopsAreBoundedTest`, `prepareAtOnceTest`. Stops and deletes count against the
+retry budget like the stage directives: a cleanup the data plane keeps refusing ends in
+quarantine (`delete_refused_repeatedly`), and inside quarantine the stops, a refused proof
+included, end. The Rust code asserts the model's invariants on every accepted transition two
+stimuli deep from every matrix state
+(`tests/attempt/properties.rs::should_keep_the_lifecycle_invariants_when_any_two_stimuli_are_accepted`).
+Negative controls tried: removing the `jitLeaked` guard of `bindJob` (the KER-04 model) makes
+`quint verify --step activationStep` report `[violation]` of
+`i22JitMintedOnceAfterGrantAndVerification` at depth 6 in about a minute; dropping the fresh-verification
 guard of `recordJitHandle` makes simulation of `serveStep` report `[violation]` of
 `i22JitMintedOnceAfterGrantAndVerification`; letting `requestRetirement` run while a directive
 is pending (mutant 27) makes simulation of `step` report `[violation]` of

@@ -436,7 +436,7 @@ impl State {
                 self.visited.insert(item.clone());
             }
             Some(Aim::Retry(path)) if !self.reached => self.gap(path, Gap::Unreached),
-            _ => {}
+            Some(Aim::Item(..) | Aim::Retry(..)) | None => {}
         }
     }
 

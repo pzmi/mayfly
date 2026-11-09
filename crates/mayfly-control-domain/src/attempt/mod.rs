@@ -27,6 +27,17 @@
 //!   attempt out of quarantine; no automation issues its delete
 //!   (`tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves`).
 //! - **I18**: an older run epoch is refused (`stale_run`); a newer one waits for `Adopt`.
+//! - **Adoption with a launch in flight** orphans the handle; the late launch is recorded and
+//!   that runner never gets a job
+//!   (`tests/attempt/lifecycle.rs::should_record_a_late_launch_and_never_bind_a_job_when_a_restart_orphaned_its_handle`).
+//! - **Bounded cleanup**: stops and deletes count against the retry budget; refused again and
+//!   again, cleanup ends in quarantine
+//!   (`tests/attempt/lifecycle.rs::should_quarantine_when_a_delete_is_refused_again_and_again`).
+//!
+//! The actor of each command is recorded in the event envelope; `ResolveQuarantine` accepts
+//! only an operator. Every invariant above is also asserted on every accepted transition two
+//! stimuli deep from every matrix state
+//! (`tests/attempt/properties.rs::should_keep_the_lifecycle_invariants_when_any_two_stimuli_are_accepted`).
 
 mod cases;
 mod command;
