@@ -147,5 +147,14 @@ mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
 
 # Approved departures, each citing an ADR. `[exceptions.sources]` maps a non-crates.io source
 # (without query or revision) to `{ adr = "NNNN" }`; `[[exceptions.lints]]` approves one
-# `allow`/`expect`/`coverage(off)`/`todo!` in one file: `{ path, lint, adr }`.
+# `allow`/`expect`/`coverage(off)`/`todo!`, or a `#[macro_export]` (lint = "macro_export"), in
+# one file: `{ path, lint, adr }`.
 [exceptions]
+
+# `event_set!` declares a crate's event enum and its codec (ADR 0018); the control plane's
+# crates invoke it, so it is exported. Its body is checked as pure code where it is written and
+# names only `$crate` items, serde through `$crate::__serde`, and core/std value types.
+[[exceptions.lints]]
+path = "crates/mayfly-control-domain/src/event.rs"
+lint = "macro_export"
+adr = "0018"

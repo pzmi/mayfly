@@ -73,3 +73,25 @@ Alternatives considered:
   `policy-lets-data-reach-control`), `ARCH-plane-vocabulary` (`control-names-vm-provider`,
   `data-names-journal-via-shared`) and `ARCH-layer-isolation`
   (`data-test-names-sqlite-adapter`); introduced by ARCH-01.
+
+## Amendment (2026-11-09): shared crates' tests use only shared crates
+
+Decision 2 said "a shared crate's tests may use a plane's kit: they cross into no plane's code
+under test". The second adversarial review of the FND-04 checkpoint showed the gap that leaves:
+a kernel or protocol test that dev-depends on `mayfly-testkit` or `mayfly-conformance` builds
+and drives a plane's crates (the control plane's aggregates through the testkit's harnesses, or
+both planes through conformance), so the shared crates' test suites would start depending on
+one plane's behaviour, and a plane-neutral helper would drift into a plane's kit because the
+kernel could reach it there. Since FND-05 created `mayfly-testkit-shared`, the shared crates
+have a kit of their own, so the allowance is no longer needed.
+
+Decision 2 is amended: **a shared crate dev-depends only on shared crates** (the shared test
+kit and the other shared crates); never on a plane's kit, on `mayfly-conformance` (`both`) or on
+a crate in no plane (the fakes). A plane-neutral helper a shared crate's tests need goes to
+`mayfly-testkit-shared`. Control and data crates keep the rule of decision 2: a dev edge is
+legal when its target's production closure stays within the dependent's plane and the shared
+crates.
+
+Enforced by `ARCH-plane-separation` over the resolved graph (fixture
+`shared-dev-depends-on-testkit`); fnd §2.2 rules 2 and 3 say so. The positive fixture's kernel
+now dev-depends on the shared kit; the repository had no such edge.

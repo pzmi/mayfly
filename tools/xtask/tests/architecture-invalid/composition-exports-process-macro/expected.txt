@@ -1,0 +1,4 @@
+rule: ARCH-macro-export
+at: crates/mayfly-composition/src/lib.rs:3
+contains: mayfly-composition exports a macro with `#[macro_export]`
+only: true

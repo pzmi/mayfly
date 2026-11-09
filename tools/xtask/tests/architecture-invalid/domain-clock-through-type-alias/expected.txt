@@ -1,0 +1,4 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-domain/src/lib.rs:9
+contains: names `std::time::SystemTime::now` (written `Wall::now`)
+only: true

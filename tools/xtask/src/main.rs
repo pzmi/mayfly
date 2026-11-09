@@ -30,6 +30,15 @@ use cli::{AdrAction, Cli, Command};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Err(err) = repo::preflight(
+        &repo::root(),
+        &cwd,
+        std::env::var_os("CLIPPY_CONF_DIR").as_deref(),
+    ) {
+        eprintln!("xtask: {err}");
+        return ExitCode::from(2);
+    }
     let code = match &cli.command {
         Command::Quick => quick::run(),
         Command::Test { only } => test::run(only.as_deref()),

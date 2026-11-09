@@ -18,10 +18,38 @@ pub const APPLICATIONS: &[&str] = &["mayfly-control", "mayfly-data"];
 /// randomness (a std `HashMap`/`HashSet` iterates in a per-process random order, so a
 /// `decide` over one is not deterministic; `BTreeMap`/`BTreeSet` are the deterministic
 /// choice), a backtrace (it reads `RUST_BACKTRACE`), global mutable state (atomics, locks,
-/// lazy statics, `thread_local!`), async runtimes and executors, HTTP, SQL, console output and
-/// the outer layers. Bare names are prelude macros (`println!`, `env!`).
+/// lazy statics, `thread_local!`), process-global hooks and OS errors, async runtimes and
+/// executors, HTTP, SQL, console output and the outer layers. Bare names are prelude macros
+/// (`println!`, `env!`). `std::path` is pure except for the functions that read the file
+/// system; their method-call form (`path.exists()`) is not type-resolved here and is left to
+/// the crate's `clippy.toml` (`ARCH-pure-clippy-config`).
 const PURE_FORBIDDEN: &[&[&str]] = &[
     &["std", "fs"],
+    &["std", "path", "absolute"],
+    &["std", "path", "Path", "exists"],
+    &["std", "path", "Path", "try_exists"],
+    &["std", "path", "Path", "is_file"],
+    &["std", "path", "Path", "is_dir"],
+    &["std", "path", "Path", "is_symlink"],
+    &["std", "path", "Path", "metadata"],
+    &["std", "path", "Path", "symlink_metadata"],
+    &["std", "path", "Path", "read_dir"],
+    &["std", "path", "Path", "read_link"],
+    &["std", "path", "Path", "canonicalize"],
+    &["std", "path", "PathBuf", "exists"],
+    &["std", "path", "PathBuf", "try_exists"],
+    &["std", "path", "PathBuf", "is_file"],
+    &["std", "path", "PathBuf", "is_dir"],
+    &["std", "path", "PathBuf", "is_symlink"],
+    &["std", "path", "PathBuf", "metadata"],
+    &["std", "path", "PathBuf", "symlink_metadata"],
+    &["std", "path", "PathBuf", "read_dir"],
+    &["std", "path", "PathBuf", "read_link"],
+    &["std", "path", "PathBuf", "canonicalize"],
+    &["std", "panic", "set_hook"],
+    &["std", "panic", "take_hook"],
+    &["std", "panic", "update_hook"],
+    &["std", "io", "Error", "last_os_error"],
     &["std", "net"],
     &["std", "process"],
     &["std", "env"],
@@ -462,7 +490,9 @@ fn context_word(context: Context) -> &'static str {
 
 /// `ARCH-plane-vocabulary`: a crate of a plane, or a shared crate, names a word another plane
 /// owns (`[planes.vocabulary]`), as a segment of what it writes or of any candidate (a
-/// shared crate's re-export of `Journal` still names `Journal`), in production and test code.
+/// shared crate's re-export of `Journal` still names `Journal`), or declares an item, an
+/// associated item or a macro by that name, in production and test code. Pinned by
+/// `should_report_vocabulary_when_a_plane_declares_the_other_planes_types`.
 fn vocabulary(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let Some(plane) = policy.planes.of(&facts.package) else {
@@ -482,6 +512,21 @@ fn vocabulary(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
         .collect();
     if words.is_empty() {
         return out;
+    }
+    for declaration in &facts.declarations {
+        if let Some((word, owner)) = words.iter().find(|(w, _)| *w == declaration.name) {
+            out.push(Diagnostic::new(
+                Rule::PlaneVocabulary,
+                format!(
+                    "{} crate {} declares {} `{word}` in {} code: `{word}` belongs to the {owner} plane alone",
+                    plane.key(),
+                    facts.package,
+                    declaration.kind,
+                    context_word(declaration.site.context),
+                ),
+                declaration.site.at(),
+            ));
+        }
     }
     for reference in &facts.references {
         let segments = reference
@@ -773,6 +818,48 @@ mod tests {
         assert_eq!(count(&in_data), 2, "{in_data:?}");
         assert_eq!(count(&in_control), 1, "{in_control:?}");
         assert_eq!(count(&in_shared), 2, "{in_shared:?}");
+    }
+
+    #[test]
+    fn should_report_vocabulary_when_a_plane_declares_the_other_planes_types() {
+        // given
+        let data = "pub trait Journal {}\npub struct AggregateStore;\nimpl AggregateStore {\n    pub fn Journal() {}\n}\nmacro_rules! Journal { () => {} }\n";
+        let shared = "pub trait VmProvider {\n    type Journal;\n}\n";
+
+        // when
+        let in_data = diagnostics("mayfly-data", &[("src/lib.rs", data)]);
+        let in_shared = diagnostics("mayfly-protocol", &[("src/lib.rs", shared)]);
+        let in_control = diagnostics("mayfly-control", &[("src/lib.rs", data)]);
+
+        // then
+        let lines = |found: &[String]| -> Vec<String> {
+            found
+                .iter()
+                .filter(|d| d.starts_with("ARCH-plane-vocabulary") && d.contains(" declares "))
+                .map(|d| d.rsplit(':').next().unwrap_or("").to_owned())
+                .collect()
+        };
+        assert_eq!(lines(&in_data), ["1)", "2)", "4)", "6)"], "{in_data:?}");
+        assert_eq!(lines(&in_shared), ["1)", "2)"], "{in_shared:?}");
+        assert!(lines(&in_control).is_empty(), "{in_control:?}");
+    }
+
+    #[test]
+    fn should_report_domain_when_clock_or_fs_is_reached_through_alias_self_or_path() {
+        // given
+        let source = "use std::time::SystemTime;\ntype T = SystemTime;\npub fn a() -> T {\n    T::now()\n}\npub trait Now {\n    fn n() -> Self;\n}\nimpl Now for SystemTime {\n    fn n() -> Self {\n        Self::now()\n    }\n}\npub fn p(x: &std::path::Path) -> bool {\n    std::path::Path::exists(x) || std::path::absolute(x).is_ok()\n}\npub fn h() {\n    std::panic::set_hook(Box::new(|_| {}));\n    let _ = std::io::Error::last_os_error();\n}\n";
+
+        // when
+        let got = diagnostics(DOMAIN, &[("src/lib.rs", source)]);
+
+        // then
+        let mut lines: Vec<&str> = got
+            .iter()
+            .filter(|d| d.starts_with("ARCH-domain-purity"))
+            .map(|d| d.rsplit(':').next().unwrap_or(""))
+            .collect();
+        lines.dedup();
+        assert_eq!(lines, ["4)", "11)", "15)", "18)", "19)"], "{got:?}");
     }
 
     #[test]

@@ -1,0 +1,4 @@
+rule: ARCH-pure-clippy-config
+at: crates/mayfly-domain/clippy.toml
+contains: pure crate mayfly-domain has no clippy.toml
+only: true

@@ -333,7 +333,8 @@ pub struct Exceptions {
     #[serde(default)]
     pub sources: BTreeMap<String, SourceException>,
     /// `[[exceptions.lints]]`: approved lint suppressions (`#[allow]`, `#[expect]`,
-    /// `#[coverage(off)]`) and production `todo!`/`unimplemented!`/`dbg!` calls, by file.
+    /// `#[coverage(off)]`), production `todo!`/`unimplemented!`/`dbg!` calls and
+    /// `#[macro_export]`s, by file.
     #[serde(default)]
     pub lints: Vec<LintException>,
     /// `[exceptions.vendor]`: a `directory` source, relative to the workspace root, that a
@@ -351,7 +352,8 @@ pub struct LintException {
     pub path: String,
     /// The lint as written in the attribute (`clippy::too_many_lines`, `dead_code`), or
     /// `coverage` for `#[coverage(off)]`. `todo!`, `unimplemented!` and `dbg!` are the
-    /// clippy lints `clippy::todo`, `clippy::unimplemented` and `clippy::dbg_macro`.
+    /// clippy lints `clippy::todo`, `clippy::unimplemented` and `clippy::dbg_macro`;
+    /// `#[macro_export]` is `macro_export`.
     pub lint: String,
     /// The approving ADR's number; `doc/adr/<adr>-*.md` must exist.
     pub adr: String,

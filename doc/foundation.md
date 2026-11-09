@@ -107,18 +107,21 @@ Rules over the table:
    (normal and build) of a control crate holds no data crate, of a data crate no control crate,
    and of a shared crate neither. Over the resolved Cargo graph: from a control or data crate,
    its normal, build and dev edges as the first hop, then normal and build edges, reach no crate
-   of the other plane; from a shared crate, normal and build edges reach neither plane. Only
-   the *both* row of §2.1 sees both planes. The adapters of one plane never name a sibling
-   adapter, composition or the CLI (`ARCH-layer-isolation`).
+   of the other plane; from a shared crate, normal and build edges reach neither plane, and its
+   dev edges target only shared crates (`mayfly-testkit-shared` and the kernel; never a plane's
+   kit, `mayfly-conformance` or a fake: ADR 0019, amended 2026-11-09). Only the *both* row of
+   §2.1 sees both planes. The adapters of one plane never name a sibling adapter, composition
+   or the CLI (`ARCH-layer-isolation`).
 3. **Dev edges.** A dev-dependency may target a test_only crate or a crate already in the
    dependent's normal list (`ARCH-forbidden-dev-edge`), and by rule 2 only a test crate whose
    production closure stays within the dependent's plane and the shared crates: a DP crate's
-   tests do not use the SQLite adapter, not even through `mayfly-conformance` (ADR 0019).
+   tests do not use the SQLite adapter, not even through `mayfly-conformance` (ADR 0019), and
+   a shared crate's tests use only the shared kit and other shared crates.
    Test support is therefore split per plane: `mayfly-testkit` is the control plane's kit; the
    shared kit `mayfly-testkit-shared` (the poll helper, FND-05; the link contract suite,
-   DP-02) depends on no workspace crate, so every plane's tests may use it; the data plane's
-   kit (fake provider, `VmProvider` contract suite) is created, with its policy entry, by the
-   first task that needs it (DP-01).
+   DP-02) depends on no workspace crate, so every plane's tests, and the shared crates', may
+   use it; the data plane's kit (fake provider, `VmProvider` contract suite) is created, with
+   its policy entry, by the first task that needs it (DP-01).
 4. **Production closure.** No production crate reaches a test_only or tool_only crate by a
    normal or build edge, directly or through any package (`ARCH-production-closure`).
 5. **Build dependencies** are declared in `[dependencies.build]` (`ARCH-undeclared-build-dep`);
@@ -131,10 +134,15 @@ Rules over the table:
 
 The crates in `[purity] pure` — `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`
 and `mayfly-data-domain` — name none of the following in production code, in any `cfg` branch,
-through any alias, glob, `use` re-export (another workspace crate's included), qualified self
-type (`<std::time::SystemTime>::now`) or macro body (`ARCH-domain-purity`):
+through any alias, glob, `use` re-export (another workspace crate's included), type alias
+(`type T = SystemTime; T::now()`), `Self` in an impl, qualified self type
+(`<std::time::SystemTime>::now`) or macro body (`ARCH-domain-purity`):
 
-- `std::{fs, net, process, env, thread, os}`, `std::io::{stdin, stdout, stderr}`;
+- `std::{fs, net, process, env, thread, os}`, `std::io::{stdin, stdout, stderr}`; the
+  file-system functions of `std::path` (`Path::{exists, try_exists, is_file, is_dir,
+  is_symlink, metadata, symlink_metadata, read_dir, read_link, canonicalize}`, the same on
+  `PathBuf`, and `std::path::absolute`); the process-global `std::panic::{set_hook, take_hook,
+  update_hook}` and `std::io::Error::last_os_error`;
 - the clock: `SystemTime::now`, `Instant::now`, `SystemTime::elapsed`, `Instant::elapsed`,
   `std::time::UNIX_EPOCH` and `SystemTime::UNIX_EPOCH`, and any method call named `elapsed`;
 - randomness: `RandomState`, `std::collections::{HashMap, HashSet, hash_map, hash_set}` and
@@ -154,6 +162,23 @@ type (`<std::time::SystemTime>::now`) or macro body (`ARCH-domain-purity`):
 
 The pure crates also name no instrumentation crate (`tracing`, `log`, `metrics`;
 `ARCH-observability-isolation`).
+
+**The semantic layer** (`ARCH-pure-clippy-config`). The rules above read paths as written; a
+call through an associated type (`<Z as K>::C::now()`) or a method on a value
+(`path.exists()`, `UNIX_EPOCH.elapsed()`) is not resolved by them. Each pure crate therefore
+carries a `clippy.toml` whose `disallowed-methods` and `disallowed-types` list the clock, file
+system (`std::fs` and the `std::path` functions above), environment, process, thread, channel,
+hook, OS-error, backtrace, std hash containers, locks, once-cells and atomics; Clippy resolves
+them after macro expansion, through aliases, `Self` and associated types, and the workspace's
+`clippy::all = "deny"` makes each hit an error in the `clippy` and `cross-check` stages
+(pinned by
+`should_fail_clippy_stage_when_a_pure_crate_reaches_the_clock_through_names_the_checker_cannot_resolve`).
+Clippy reads the nearest `clippy.toml` at or above a crate's manifest, so the file applies to
+that crate alone. The checker fails when a pure crate lacks the file, has a `.clippy.toml`
+that shadows it, misses an entry of its required list or sets `allow-invalid` on one, or when a
+`.cargo/config.toml` `[env]` sets `CLIPPY_CONF_DIR`; `cargo xtask` refuses to run with
+`CLIPPY_CONF_DIR` in its environment. The file covers test code too, so a pure crate's tests
+reach files and time through the test kits, not `std` directly.
 
 Time, ids and randomness arrive as values on commands and directives (plan §5.1). The pure
 crates may hold `async` trait *declarations* (link ports in `mayfly-protocol`) but never an
@@ -290,7 +315,7 @@ independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
 [exceptions]
 # [exceptions.sources] "<source>" = { adr = "NNNN" }
 # [exceptions.vendor] "<dir>" = { adr = "NNNN" }   # an approved vendored `directory` source
-# [[exceptions.lints]] path = "...", lint = "...", adr = "NNNN"
+# [[exceptions.lints]] path = "...", lint = "...", adr = "NNNN"   # lint = "macro_export" approves a #[macro_export]
 
 [semantic]
 # absent = [ ... ]            # fixtures only: code-named crates this workspace lacks
@@ -309,12 +334,16 @@ Ported from site-preview (D3) with its module layout: policy parse, source inven
 `members` vs policy, the Cargo graph from `cargo metadata --locked` per target (§2.2 rule 6)
 with edges by kind and full dependency paths in each diagnostic, the external allowlist, and
 the semantic visitor. The visitor walks each target from its root through `mod` (with
-`#[path]` and `cfg_attr(.., path)`), inline modules and literal `include!`; resolves names
-through `use`, globs, `extern crate`, manifest renames and qualified self types, and follows a
-reference to another workspace crate through that crate's library `use` items (re-exports and
-renames, chained across crates); scans macro token streams conservatively; and reads every
-`cfg` branch. A target root, `#[path]` or `include!` that resolves outside the package
-directory is refused and not loaded (`ARCH-foreign-source`). Diagnostics are
+`#[path]` and `cfg_attr(.., path)`), inline modules and `include!` written by its own name with
+a literal path, whose file it parses and analyses like a module; resolves names through `use`,
+globs, `extern crate`, manifest renames, type aliases (`type T = path;` stands for `path` too),
+`Self` in an impl and qualified self types, and follows a reference to another workspace crate
+through that crate's library `use` items and `pub type` aliases (chained across crates); scans
+macro token streams conservatively; and reads every `cfg` branch. A target root, `#[path]` or
+`include!` that resolves outside the package directory is refused and not loaded
+(`ARCH-foreign-source`), as is a production crate's `include_str!`/`include_bytes!` of a file
+outside it. An include-family macro reached under another name, or an `include!` inside a
+macro's tokens, is refused (`ARCH-include-macro`): the file it compiles could not be analysed. Diagnostics are
 `ARCH-<id>: message (at path[:line])`. Rules are declared in one `rules!` table (id, owning
 task, description, fixtures) that also feeds `list-checks`; the run then checks every negative
 fixture, every positive fixture and the catalog's completeness (§3.4).
@@ -336,12 +365,14 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-independent-oracle` | an `[purity] independent` crate with any edge to a workspace crate | FND-02 |
 | `ARCH-unlisted-external`, `ARCH-external-feature`, `ARCH-external-source` | §2.4 | FND-02 |
 | `ARCH-source-parse` | a reachable file that does not parse, a missing module file, a non-literal `include!`/`#[path]` | FND-02 |
-| `ARCH-foreign-source` | a target root, `#[path]` module or `include!` resolving outside the package directory | ARCH-01 |
-| `ARCH-plane-separation` | §2.2 rule 2 and the `[planes]` completeness of §3.1 | ARCH-01 |
-| `ARCH-plane-vocabulary` | a crate naming a word another plane owns (`[planes.vocabulary]`): a CP word in a data or shared crate, a DP word in a control or shared crate; production and test code, through any crate | ARCH-01 |
-| `ARCH-domain-purity` | §2.3 in a `[purity] pure` crate | FND-02 (widened by ARCH-01) |
-| `ARCH-process-authority` | §2.3 process authority outside `[purity] process_authority` | FND-02 |
-| `ARCH-layer-isolation` | a crate naming a crate it must not reach (the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI); production **and** test code, test code may name test-only crates | FND-02 (test code from ARCH-01) |
+| `ARCH-foreign-source` | a target root, `#[path]` module or `include!` resolving outside the package directory; a production crate's `include_str!`/`include_bytes!` of a file outside it | ARCH-01 (data includes from ARCH-02) |
+| `ARCH-include-macro` | `include!`, `include_str!` or `include_bytes!` reached under another name (a `use` of `std`/`core::include*`, with or without `as`), or `include!` inside a macro's tokens (a `macro_rules!` body, another macro's arguments), in any crate | ARCH-02 |
+| `ARCH-plane-separation` | §2.2 rule 2 (a shared crate's dev edges included) and the `[planes]` completeness of §3.1 | ARCH-01 (shared dev edges from ARCH-02) |
+| `ARCH-plane-vocabulary` | a crate naming or declaring (struct, enum, union, trait, type, fn, mod, const, static, macro, associated item) a word another plane owns (`[planes.vocabulary]`): a CP word in a data or shared crate, a DP word in a control or shared crate; production and test code, through any crate | ARCH-01 (declarations from ARCH-02) |
+| `ARCH-domain-purity` | §2.3 in a `[purity] pure` crate | FND-02 (widened by ARCH-01, ARCH-02) |
+| `ARCH-pure-clippy-config` | a pure crate without its `clippy.toml`, with a `.clippy.toml` shadowing it, missing a required `disallowed-methods`/`disallowed-types` entry or setting `allow-invalid`; a `.cargo/config.toml` `[env]` setting `CLIPPY_CONF_DIR` (§2.3, the semantic layer) | ARCH-02 |
+| `ARCH-process-authority` | §2.3 process authority outside `[purity] process_authority`, also through another crate's `pub type` alias | FND-02 (aliases from ARCH-02) |
+| `ARCH-layer-isolation` | a crate naming a crate it must not reach (the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI), also through another crate's re-export or `pub type` alias; production **and** test code, test code may name test-only crates | FND-02 (test code from ARCH-01, aliases from ARCH-02) |
 | `ARCH-unsafe-code` | `unsafe` blocks, fns, impls, traits, extern blocks or `#[unsafe(..)]`, anywhere | FND-02 |
 | `ARCH-missing-selector` | a crate named by a code selector that is not a member and not in `[semantic] absent`, or a stale `absent` entry | FND-02 |
 | `ARCH-lint-config` | a member without `[lints] workspace = true`, a workspace lint set to allow, lint caps in rustflags, `clippy.toml` allows, a `[source]` replacement in a `.cargo/config.toml` other than an `[exceptions.vendor]`-approved vendored directory | FND-02 (sources from ARCH-01) |
@@ -359,6 +390,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-detached-spawn` | `tokio::spawn`, `tokio::task::{spawn, spawn_blocking, spawn_local, block_in_place}`, `std::thread::{spawn, Builder}` in a production crate outside `mayfly-composition::supervision`, `mayfly-adapter-sqlite::writer`, `mayfly-adapter-link::transport`, `mayfly-adapter-{tart,guest}::process` (tasks are spawned on a tracker handed down) | ARCH-01 |
 | `ARCH-secret-serialize` | a type that is or transitively holds `Secret` deriving or implementing `Serialize`; `Secret` deriving `Debug`/`Display`; `Debug`/`Display` for `Secret` implemented outside the file that defines it | ARCH-01 (exercised from KER-02, RT-01) |
 | `ARCH-aggregate-registered` | an `impl Aggregate for X` in `mayfly-control-domain` production code without `visitor.visit::<X>()` in `ControlAggregates::accept` (the harnesses would skip it) | ARCH-01 |
+| `ARCH-macro-export` | a `#[macro_export]` in a production crate without an `[[exceptions.lints]]` row (`lint = "macro_export"`) citing an ADR: an exported macro's body is checked under its own crate's rules but expands in another (composition's spawn in the CLI); `event_set!` is approved by ADR 0018 | ARCH-02 |
 
 Catalog completeness is part of every run, not a rule id: each rule names at least one
 negative fixture whose `expected.txt` names it, and each fixture belongs to a rule.
@@ -392,7 +424,8 @@ Rules planned by later tasks, which bind by review until then:
 ### 3.5 Hygiene
 
 - Workspace lints only (§4.2); no crate-level overrides.
-- No `#[allow]`/`#[expect]` without an ADR-backed exception row; no `#[ignore]`.
+- No `#[allow]`/`#[expect]` or `#[macro_export]` in a production crate without an ADR-backed
+  exception row; no `#[ignore]`.
 - Tests named `should_<outcome>_when_<condition>` with `// given`, `// when`, `// then`.
 - No mocking frameworks; real objects over testkit fakes; tempdirs and port 0.
 - A rule is never loosened to get green. A change to `architecture.toml` that widens an edge,
@@ -658,7 +691,10 @@ Every repeatable job is an xtask subcommand; an ad-hoc command that becomes repe
 subcommand. `quick` is not `check`; never report one as the other. A command whose task has not
 landed does not exist yet: clap rejects it as an unrecognised subcommand and exits 2. A
 `check --only` stage that does not exist yet is likewise an unknown name (exit 2, listing the
-valid ones), never a skipped stage.
+valid ones), never a skipped stage. The repository root is compiled into the xtask binary, so
+every command first refuses (exit 2) to run from outside that checkout, which a target
+directory shared between worktrees would otherwise allow, and refuses a `CLIPPY_CONF_DIR` in
+its environment (§2.3).
 
 | Command | What it does | Task |
 |:--|:--|:--|

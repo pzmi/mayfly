@@ -1,0 +1,4 @@
+rule: ARCH-layer-isolation
+at: crates/mayfly-cli/src/lib.rs:4
+contains: mayfly-cli names `mayfly_adapter_sqlite::Store`
+only: true

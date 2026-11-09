@@ -13,9 +13,10 @@ use syn::{Attribute, Item, Meta};
 use super::flow;
 use super::paths::{self, Scopes, TokenScan, Written, scan_tokens, use_leaves};
 use super::{
-    AttributeUse, Context, Facts, HiddenItem, ImplDecl, MethodCall, MutParam, RefKind, Reference,
-    Site, TestFn, TypeDecl, Unit, effective_metas, foreign_message, include_path, is_doc_hidden,
-    is_include, is_test_attribute, is_test_only, non_literal, outside_package, relative,
+    AttributeUse, Context, Declaration, Facts, HiddenItem, INCLUDE_FAMILY, ImplDecl, IncludeKind,
+    IncludeUse, MethodCall, MutParam, RefKind, Reference, Site, TestFn, TypeDecl, Unit,
+    effective_metas, foreign_message, include_path, is_doc_hidden, is_include, is_test_attribute,
+    is_test_only, non_literal, outside_package, relative,
 };
 
 /// Where a target is: the workspace root, its package's directory, and whether it is the
@@ -68,6 +69,7 @@ pub fn collect_target(
             package_dir: target.package_dir,
             library: target.library,
             registry: false,
+            self_ty: None,
         };
         for attr in &unit.attrs {
             collector.visit_attribute(attr);
@@ -207,6 +209,16 @@ impl<'ast> Visit<'ast> for Binder<'_> {
         if let Some(name) = name {
             self.scopes.add_item(&self.module, paths::name(name));
         }
+        if let Item::Type(alias) = item
+            && let syn::Type::Path(target) = alias.ty.as_ref()
+            && target.qself.is_none()
+        {
+            self.scopes.add_alias(
+                &self.module,
+                paths::name(&alias.ident),
+                Written::from_syn(&target.path),
+            );
+        }
         match item {
             Item::Use(u) => self.scopes.add_use(&self.module, u),
             Item::ExternCrate(e) => self.scopes.add_extern_crate(&self.module, e),
@@ -253,6 +265,8 @@ struct Collector<'a> {
     library: bool,
     /// Inside `impl AggregateRegistry for ControlAggregates`.
     registry: bool,
+    /// The self type of the enclosing `impl`, when it is a plain path: what `Self` names.
+    self_ty: Option<Written>,
 }
 
 impl Collector<'_> {
@@ -270,10 +284,33 @@ impl Collector<'_> {
 
     fn reference(&mut self, path: &Written, line: usize, kind: RefKind, open_tail: bool) {
         // An unbound macro name is a prelude macro (`todo!`), not a local value.
-        let resolved = self
-            .scopes
-            .resolve_through(&self.module, path, kind == RefKind::Macro);
-        self.push(path, resolved, line, kind, (open_tail, false));
+        let (mut resolved, mut through) =
+            self.scopes
+                .resolve_through(&self.module, path, kind == RefKind::Macro);
+        // `Self::now()` in `impl Trait for SystemTime` names `SystemTime::now`: the impl's
+        // self type continued by the rest (pinned by
+        // `should_report_domain_when_clock_or_fs_is_reached_through_alias_self_or_path`).
+        if let Some(self_ty) = &self.self_ty
+            && !path.absolute
+            && path.segments.first().is_some_and(|s| s == "Self")
+        {
+            let mut segments = self_ty.segments.clone();
+            segments.extend_from_slice(&path.segments[1..]);
+            let substituted = Written {
+                absolute: self_ty.absolute,
+                segments,
+            };
+            let (more, more_through) =
+                self.scopes
+                    .resolve_through(&self.module, &substituted, false);
+            for candidate in more {
+                if !resolved.contains(&candidate) {
+                    resolved.push(candidate);
+                }
+            }
+            through.extend(more_through);
+        }
+        self.push(path, (resolved, through), line, kind, (open_tail, false));
     }
 
     fn push(
@@ -418,6 +455,15 @@ impl Collector<'_> {
         }
         for (name, line) in flow::token_method_calls(tokens) {
             self.method_call(name, line);
+        }
+        for (name, line, literal) in token_includes(tokens) {
+            self.include_use(
+                &name,
+                &name,
+                line,
+                literal.as_deref(),
+                IncludeKind::InTokens,
+            );
         }
         for test in scan.test_fns {
             let site = self.site(test.line);
@@ -568,6 +614,42 @@ impl Collector<'_> {
         self.test = outer;
     }
 
+    /// Records an include-family macro (`include`, `include_str`, `include_bytes`) written as
+    /// `written` at `line`, with the file its literal path names when that lies outside the
+    /// package.
+    fn include_use(
+        &mut self,
+        name: &str,
+        written: &str,
+        line: usize,
+        literal: Option<&str>,
+        kind: IncludeKind,
+    ) {
+        let outside = literal.and_then(|path| {
+            let file = self.file.parent().unwrap_or(Path::new("")).join(path);
+            outside_package(&file, self.package_dir)
+                .then(|| foreign_message(&format!("`{name}!`"), self.root, &file))
+        });
+        let site = self.site(line);
+        self.facts.includes.push(IncludeUse {
+            site,
+            name: name.to_owned(),
+            written: written.to_owned(),
+            kind,
+            outside,
+        });
+    }
+
+    /// Records the declaration of `ident` as a `kind` item.
+    fn declaration(&mut self, kind: &'static str, ident: &syn::Ident) {
+        let site = self.site(ident.span().start().line);
+        self.facts.declarations.push(Declaration {
+            site,
+            kind,
+            name: paths::name(ident),
+        });
+    }
+
     /// Visits the file an `include!` in expression or statement position names.
     fn include(&mut self, mac: &syn::Macro, line: usize) {
         let at = format!("{}:{line}", self.rel);
@@ -634,6 +716,61 @@ fn first_line(path: &syn::Path) -> usize {
         .map_or(0, |s| s.ident.span().start().line)
 }
 
+/// The include-family macros that read a file as data rather than compile it.
+const DATA_INCLUDES: &[&str] = &["include_str", "include_bytes"];
+
+/// Every include-family invocation (`include!`, `include_str!`, `include_bytes!`, under any
+/// path) in a token stream, at any depth: its name, line and literal path, if it has one.
+fn token_includes(tokens: &proc_macro2::TokenStream) -> Vec<(String, usize, Option<String>)> {
+    let mut out = Vec::new();
+    let trees: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
+    for (i, tree) in trees.iter().enumerate() {
+        match tree {
+            proc_macro2::TokenTree::Group(group) => out.extend(token_includes(&group.stream())),
+            proc_macro2::TokenTree::Ident(ident)
+                if INCLUDE_FAMILY.contains(&paths::name(ident).as_str())
+                    && matches!(trees.get(i + 1), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '!') =>
+            {
+                let literal = match trees.get(i + 2) {
+                    Some(proc_macro2::TokenTree::Group(group)) => include_path(&group.stream()),
+                    _ => None,
+                };
+                out.push((paths::name(ident), ident.span().start().line, literal));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The kind and name of an item that declares one.
+fn declared(item: &Item) -> Option<(&'static str, &syn::Ident)> {
+    Some(match item {
+        Item::Const(i) => ("const", &i.ident),
+        Item::Enum(i) => ("enum", &i.ident),
+        Item::Fn(i) => ("fn", &i.sig.ident),
+        Item::Mod(i) => ("mod", &i.ident),
+        Item::Static(i) => ("static", &i.ident),
+        Item::Struct(i) => ("struct", &i.ident),
+        Item::Trait(i) => ("trait", &i.ident),
+        Item::TraitAlias(i) => ("trait", &i.ident),
+        Item::Type(i) => ("type", &i.ident),
+        Item::Union(i) => ("union", &i.ident),
+        Item::Macro(i) => ("macro", i.ident.as_ref()?),
+        _ => return None,
+    })
+}
+
+/// The line of a `#[macro_export]` among `attrs`, also through `cfg_attr`.
+fn macro_export_line(attrs: &[Attribute]) -> Option<usize> {
+    attrs.iter().find_map(|attr| {
+        effective_metas(&attr.meta)
+            .iter()
+            .any(|meta| meta.path().is_ident("macro_export"))
+            .then(|| attr.pound_token.span.start().line)
+    })
+}
+
 impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
         let attrs: &[Attribute] = match item {
@@ -654,7 +791,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             Item::Use(i) => &i.attrs,
             _ => &[],
         };
-        self.scoped(attrs, |this| visit::visit_item(this, item));
+        self.scoped(attrs, |this| {
+            if let Some((kind, ident)) = declared(item) {
+                this.declaration(kind, ident);
+            }
+            if let Item::Macro(mac) = item
+                && mac.ident.is_some()
+                && let Some(line) = macro_export_line(&mac.attrs)
+            {
+                let site = this.site(line);
+                this.facts.macro_exports.push(site);
+            }
+            visit::visit_item(this, item);
+        });
     }
 
     fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
@@ -665,7 +814,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             syn::ImplItem::Macro(i) => &i.attrs,
             _ => &[],
         };
-        self.scoped(attrs, |this| visit::visit_impl_item(this, item));
+        let declared = match item {
+            syn::ImplItem::Const(i) => Some(("const", &i.ident)),
+            syn::ImplItem::Fn(i) => Some(("fn", &i.sig.ident)),
+            syn::ImplItem::Type(i) => Some(("type", &i.ident)),
+            _ => None,
+        };
+        self.scoped(attrs, |this| {
+            if let Some((kind, ident)) = declared {
+                this.declaration(kind, ident);
+            }
+            visit::visit_impl_item(this, item);
+        });
     }
 
     fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
@@ -676,7 +836,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             syn::TraitItem::Macro(i) => &i.attrs,
             _ => &[],
         };
-        self.scoped(attrs, |this| visit::visit_trait_item(this, item));
+        let declared = match item {
+            syn::TraitItem::Const(i) => Some(("const", &i.ident)),
+            syn::TraitItem::Fn(i) => Some(("fn", &i.sig.ident)),
+            syn::TraitItem::Type(i) => Some(("type", &i.ident)),
+            _ => None,
+        };
+        self.scoped(attrs, |this| {
+            if let Some((kind, ident)) = declared {
+                this.declaration(kind, ident);
+            }
+            visit::visit_trait_item(this, item);
+        });
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
@@ -707,6 +878,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
         if is_include(&mac.path) {
             self.include(mac, line);
+        } else if let Some(last) = mac.path.segments.last()
+            && DATA_INCLUDES.contains(&paths::name(&last.ident).as_str())
+        {
+            let name = paths::name(&last.ident);
+            let literal = include_path(&mac.tokens);
+            let written = Written::from_syn(&mac.path).render();
+            self.include_use(
+                &name,
+                &written,
+                line,
+                literal.as_deref(),
+                IncludeKind::Direct,
+            );
         }
         if let Some(predicate) = platform_cfg(mac) {
             let site = self.site(line);
@@ -854,6 +1038,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 self_idents: type_idents(&item.self_ty),
             });
         }
+        let self_ty = match item.self_ty.as_ref() {
+            syn::Type::Path(p) if p.qself.is_none() => Some(Written::from_syn(&p.path)),
+            _ => None,
+        };
+        let outer_self = std::mem::replace(&mut self.self_ty, self_ty);
         let outer_registry = std::mem::replace(&mut self.registry, registry);
         let outer = std::mem::replace(
             &mut self.impl_generics,
@@ -865,6 +1054,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         visit::visit_item_impl(self, item);
         self.impl_generics = outer;
         self.registry = outer_registry;
+        self.self_ty = outer_self;
     }
 
     fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {

@@ -1,0 +1,4 @@
+rule: ARCH-foreign-source
+at: crates/mayfly-domain/src/lib.rs:4
+contains: `include_str!` resolves to `crates/mayfly-adapter-tart/src/lib.rs`
+only: true

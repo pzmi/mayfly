@@ -223,8 +223,10 @@ pub fn check(
 /// it. For a control or data crate its own dev edges count as the first hop, so a dev edge to
 /// a test crate is legal only when that crate's production closure stays within the
 /// dependent's plane and the shared crates (ADR 0019): a data-plane test cannot reach the
-/// SQLite adapter through `mayfly-conformance`. A shared crate's tests may use a plane's test
-/// kit: they cross into no plane's code under test.
+/// SQLite adapter through `mayfly-conformance`. A shared crate dev-depends only on shared
+/// crates (`mayfly-testkit-shared` and the kernel; ADR 0019, amended 2026-11-09): not on a
+/// plane's kit, `mayfly-conformance` or a fake, so a kernel test never drives either plane.
+/// Pinned by `should_report_plane_separation_when_a_shared_crate_dev_depends_outside_shared`.
 fn check_plane_closure(
     policy: &Policy,
     graph: &Graph,
@@ -239,9 +241,24 @@ fn check_plane_closure(
     if forbidden.is_empty() {
         return Vec::new();
     }
+    let mut out = Vec::new();
     let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut queue = VecDeque::new();
     for (to, kind) in graph.edges_from(start) {
+        if plane == Plane::Shared && *kind == Kind::Dev && graph.is_member(to) {
+            let name = graph.name_of(to);
+            let target = policy.planes.of(name);
+            if target != Some(Plane::Shared) {
+                out.push(Diagnostic::new(
+                    Rule::PlaneSeparation,
+                    format!(
+                        "shared crate `{from}` dev-depends on `{name}` ({}): a shared crate's tests use only shared crates, such as mayfly-testkit-shared (ADR 0019)",
+                        target.map_or("in no plane".to_owned(), |p| format!("{} plane", p.key()))
+                    ),
+                    at(from),
+                ));
+            }
+        }
         let first_hop = *kind != Kind::Dev || plane != Plane::Shared;
         if first_hop && !paths.contains_key(to) {
             paths.insert(to.clone(), vec![start.to_owned(), to.clone()]);
@@ -259,7 +276,6 @@ fn check_plane_closure(
             }
         }
     }
-    let mut out = Vec::new();
     for (id, path) in paths {
         if !graph.is_member(&id) {
             continue;
@@ -522,6 +538,31 @@ both = ["drive"]
             ),
             "{}",
             diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn should_report_plane_separation_when_a_shared_crate_dev_depends_outside_shared() {
+        // given
+        let edges = [
+            ("kit", "cp", Kind::Normal),
+            ("drive", "cp", Kind::Normal),
+            ("kernel", "kit", Kind::Dev),
+            ("kernel", "drive", Kind::Dev),
+            ("cp", "kit", Kind::Dev),
+        ];
+
+        // when
+        let diagnostics = plane_graph(&edges);
+
+        // then
+        let got: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            got,
+            [
+                "shared crate `kernel` dev-depends on `drive` (both plane): a shared crate's tests use only shared crates, such as mayfly-testkit-shared (ADR 0019)",
+                "shared crate `kernel` dev-depends on `kit` (control plane): a shared crate's tests use only shared crates, such as mayfly-testkit-shared (ADR 0019)",
+            ]
         );
     }
 

@@ -1,0 +1,4 @@
+rule: ARCH-include-macro
+at: crates/mayfly-domain/src/lib.rs:7
+contains: writes `include!` inside a macro's tokens
+only: true

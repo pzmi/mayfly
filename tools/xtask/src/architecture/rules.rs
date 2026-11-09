@@ -104,16 +104,22 @@ rules! {
         ["include-non-literal", "unparseable-source"];
     ForeignSource => "ARCH-foreign-source", "ARCH-01",
         "A target root, #[path] module or include! resolves outside the owning package's directory, so one crate would compile another's source under its own policy.",
-        ["control-path-into-data-domain", "faultlab-includes-adapter-source"];
+        ["control-path-into-data-domain", "faultlab-includes-adapter-source", "include-str-outside-package"];
+    IncludeMacro => "ARCH-include-macro", "ARCH-02",
+        "An include-family macro (include!, include_str!, include_bytes!) is reached under another name (a use of std/core::include*, an alias), or an include! is written inside a macro token stream, so the file it compiles is never analysed.",
+        ["include-in-macro-body", "include-through-alias"];
     DomainPurity => "ARCH-domain-purity", "FND-02",
-        "A [purity] pure crate names I/O, a process, env, a thread, the clock (also through <T>::now, UNIX_EPOCH or elapsed), randomness (also a std HashMap/HashSet), a backtrace, global mutable state (atomics, locks, lazy statics, thread_local!, static mut), a runtime or executor, HTTP, SQL, the console or an outer layer in production code.",
-        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-backtrace", "domain-fs-via-macro-head", "domain-hashmap-iteration", "domain-qself-clock", "domain-static-counter", "domain-std-fs", "domain-std-net", "domain-thread-local", "domain-tokio-via-macro-path", "domain-unix-epoch-elapsed"];
+        "A [purity] pure crate names I/O (also std::path's file-system functions), a process, env, a thread, the clock (also through <T>::now, a type alias, Self, UNIX_EPOCH or elapsed), randomness (also a std HashMap/HashSet), a backtrace, a process-global hook or OS error, global mutable state (atomics, locks, lazy statics, thread_local!, static mut), a runtime or executor, HTTP, SQL, the console or an outer layer in production code.",
+        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-backtrace", "domain-clock-through-type-alias", "domain-fs-via-macro-head", "domain-hashmap-iteration", "domain-path-fs", "domain-qself-clock", "domain-static-counter", "domain-std-fs", "domain-std-net", "domain-thread-local", "domain-tokio-via-macro-path", "domain-unix-epoch-elapsed"];
+    PureClippyConfig => "ARCH-pure-clippy-config", "ARCH-02",
+        "A [purity] pure crate has no clippy.toml, has one shadowed by a .clippy.toml, lacks a required disallowed-methods or disallowed-types entry or sets allow-invalid on one, or a .cargo/config.toml [env] sets CLIPPY_CONF_DIR: the semantic layer of the purity rules would be off.",
+        ["pure-clippy-config-missing-entry", "pure-crate-without-clippy-config"];
     ProcessAuthority => "ARCH-process-authority", "FND-02",
-        "Production code of a production crate outside [purity] process_authority names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export.",
-        ["cli-uses-reexported-command", "process-in-control"];
+        "Production code of a production crate outside [purity] process_authority names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export or type alias.",
+        ["cli-uses-composition-type-alias", "cli-uses-reexported-command", "process-in-control"];
     LayerIsolation => "ARCH-layer-isolation", "FND-02",
         "A crate names a crate it must not reach, in production or test code (test code may name test-only crates): the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI.",
-        ["adapter-names-sibling-adapter", "data-names-journal", "data-test-names-sqlite-adapter"];
+        ["adapter-names-sibling-adapter", "cli-names-adapter-through-alias", "data-names-journal", "data-test-names-sqlite-adapter"];
     UnsafeCode => "ARCH-unsafe-code", "FND-02",
         "Owned code contains an unsafe block, fn, impl, trait, extern block or unsafe attribute.",
         ["unsafe-block"];
@@ -157,11 +163,11 @@ rules! {
         "A crate other than mayfly-composition and mayfly-conformance names a #[doc(hidden)] item of mayfly-composition.",
         ["cli-calls-hidden-seam", "cli-names-hidden-trait"];
     PlaneSeparation => "ARCH-plane-separation", "ARCH-01",
-        "A production crate is in no [planes] list or in two, or a control, data or shared crate reaches a crate of a forbidden plane: in the [dependencies] allowlist, or over the resolved graph with its own dev edges as the first hop (ADR 0019).",
-        ["data-dev-depends-on-conformance", "policy-lets-data-reach-control"];
+        "A production crate is in no [planes] list or in two, a control, data or shared crate reaches a crate of a forbidden plane (in the [dependencies] allowlist, or over the resolved graph with its own dev edges as the first hop), or a shared crate dev-depends on a crate outside the shared plane (ADR 0019).",
+        ["data-dev-depends-on-conformance", "policy-lets-data-reach-control", "shared-dev-depends-on-testkit"];
     PlaneVocabulary => "ARCH-plane-vocabulary", "ARCH-01",
-        "A crate names a word of another plane's [planes.vocabulary] (a CP-only type such as Journal in a data or shared crate, a DP-only type such as VmProvider in a control or shared crate), in any context and through any crate.",
-        ["control-names-vm-provider", "data-names-journal-via-shared"];
+        "A crate names or declares a word of another plane's [planes.vocabulary] (a CP-only type such as Journal in a data or shared crate, a DP-only type such as VmProvider in a control or shared crate), in any context and through any crate.",
+        ["control-names-vm-provider", "data-declares-journal", "data-names-journal-via-shared", "shared-declares-vm-provider"];
     AnyhowInLibrary => "ARCH-anyhow-in-library", "ARCH-01",
         "Production code of a library target names anyhow; libraries return typed errors.",
         ["anyhow-in-library"];
@@ -177,6 +183,9 @@ rules! {
     AggregateRegistered => "ARCH-aggregate-registered", "ARCH-01",
         "An `impl Aggregate for X` in mayfly-control-domain production code has no visitor.visit::<X>() in ControlAggregates::accept, so the golden and determinism harnesses would skip it.",
         ["unregistered-aggregate"];
+    MacroExport => "ARCH-macro-export", "ARCH-02",
+        "A production crate declares a #[macro_export] macro without an [[exceptions.lints]] entry (lint = \"macro_export\") citing an ADR: its body would expand in other crates, outside the rules that hold where it is written.",
+        ["composition-exports-process-macro"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

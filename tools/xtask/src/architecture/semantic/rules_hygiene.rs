@@ -12,6 +12,9 @@ use super::super::policy::{LintException, Policy};
 use super::super::report::{Diagnostic, Rule};
 use super::{Context, Facts, RefKind, Site, first_hit};
 
+/// The `lint` an `[[exceptions.lints]]` entry names to approve a `#[macro_export]`.
+pub const MACRO_EXPORT: &str = "macro_export";
+
 /// Macros that mark unfinished code, with the clippy lint an exception names.
 const UNFINISHED: &[(&str, &str)] = &[
     ("todo", "clippy::todo"),
@@ -71,6 +74,7 @@ impl<'a> Hygiene<'a> {
         let mut out = Vec::new();
         self.unfinished(facts, &mut out);
         self.suppressions(facts, &mut out);
+        self.macro_exports(facts, &mut out);
         sleeps(facts, self.policy, &mut out);
         tests(facts, &mut out);
         platform_branches(facts, &mut out);
@@ -313,6 +317,35 @@ impl<'a> Hygiene<'a> {
                         facts.package
                     ),
                     reference.site.at(),
+                ));
+            }
+        }
+    }
+
+    /// `ARCH-macro-export`: a production crate exports no macro without an `[[exceptions.lints]]`
+    /// entry (`lint = "macro_export"`) citing an ADR. An exported macro's body is checked where
+    /// it is written, under that crate's rules (composition may spawn a process), and expands
+    /// in another crate (the CLI) that names nothing. Pinned by
+    /// `should_report_macro_export_when_production_crate_exports_without_exception`.
+    fn macro_exports(&mut self, facts: &Facts, out: &mut Vec<Diagnostic>) {
+        let production = self
+            .policy
+            .workspace
+            .production
+            .as_ref()
+            .is_some_and(|p| p.contains(&facts.package));
+        if !production {
+            return;
+        }
+        for site in &facts.macro_exports {
+            if let Err(reason) = self.excepted(site, MACRO_EXPORT) {
+                out.push(Diagnostic::new(
+                    Rule::MacroExport,
+                    format!(
+                        "{} exports a macro with `#[macro_export]`: its body expands in other crates, outside this crate's rules; {reason}",
+                        facts.package
+                    ),
+                    site.at(),
                 ));
             }
         }
@@ -585,6 +618,44 @@ mod tests {
         assert!(got[1].contains("inherits none"), "{got:?}");
         assert!(got[2].contains("`--cap-lints=warn`"), "{got:?}");
         assert!(hygiene.finish().is_empty());
+    }
+
+    #[test]
+    fn should_report_macro_export_when_production_crate_exports_without_exception() {
+        // given
+        let source = "#[macro_export]\nmacro_rules! spawn { () => { std::process::Command::new(\"sh\") }; }\n#[cfg_attr(all(), macro_export)]\nmacro_rules! other { () => {}; }\n";
+        let composition =
+            super::super::testing::facts_for("mayfly-composition", &[("src/lib.rs", source)]);
+        let excepted =
+            super::super::testing::facts_for("mayfly-control-domain", &[("src/lib.rs", source)]);
+        let tool = super::super::testing::facts_for("xtask", &[("src/lib.rs", source)]);
+        let mut policy = super::super::testing::policy();
+        policy.exceptions.lints.push(LintException {
+            path: "crates/mayfly-control-domain/src/lib.rs".to_owned(),
+            lint: MACRO_EXPORT.to_owned(),
+            adr: "0001".to_owned(),
+        });
+        let adr_exists = |adr: &str| adr == "0001";
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let got: Vec<String> = [&composition, &excepted, &tool]
+            .into_iter()
+            .flat_map(|facts| super::super::testing::rendered(&hygiene.check(facts)))
+            .filter(|d| d.starts_with("ARCH-macro-export"))
+            .collect();
+
+        // then
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got[0].ends_with("crates/mayfly-composition/src/lib.rs:1)"),
+            "{got:?}"
+        );
+        assert!(
+            got[1].ends_with("crates/mayfly-composition/src/lib.rs:3)"),
+            "{got:?}"
+        );
+        assert!(hygiene.finish().is_empty(), "{:?}", hygiene.finish());
     }
 
     #[test]

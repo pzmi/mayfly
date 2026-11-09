@@ -1,0 +1,4 @@
+rule: ARCH-plane-separation
+at: crates/mayfly-domain/Cargo.toml
+contains: shared crate `mayfly-domain` dev-depends on `mayfly-testkit` (control plane)
+only: true

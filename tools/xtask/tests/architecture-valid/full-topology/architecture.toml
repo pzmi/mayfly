@@ -1,6 +1,6 @@
 # Positive fixture: a workspace using every allowed edge kind, which must pass.
 # - normal workspace edges along the whole dependency law;
-# - dev edges to a test_only crate (a dev cycle with mayfly-domain), to a crate in the normal
+# - dev edges to a test_only crate (a dev cycle with mayfly-control), to a crate in the normal
 #   list (mayfly-cli -> mayfly-composition) and from the tool crate to a test_only crate;
 # - a listed workspace build edge (mayfly-composition -> mayfly-domain);
 # - third-party edges: a feature list, "default" with its implied features, a feature implied
@@ -11,9 +11,10 @@
 #   stub directory approved in [exceptions.vendor];
 # - both planes over the shared kernel and the protocol, with composition the only crate that
 #   sees both (plan section 3.4), every production crate in one [planes] list, a control
-#   crate dev-depending on the control-plane testkit and the shared kernel's tests using it
-#   too (ADR 0019), the shared test kit with no workspace edge (the poll helper's home), which
-#   a data-plane crate dev-depends on, the data-plane domain on the protocol; the fault lab as
+#   crate dev-depending on the control-plane testkit, the shared test kit with no workspace
+#   edge (the poll helper's home), which a data-plane crate and the shared kernel dev-depend
+#   on (a shared crate's tests use only shared crates, ADR 0019 as amended), the data-plane
+#   domain on the protocol; each pure crate with its clippy.toml; the fault lab as
 #   a tool crate
 #   reaching no workspace crate;
 # - semantic constructs that pass: process authority in the Tart adapter, composition and the

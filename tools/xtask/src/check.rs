@@ -281,82 +281,128 @@ mod tests {
         softened: Vec<String>,
     }
 
-    /// Reads the job table of a workflow without a YAML parser (the tests below read
-    /// `.github/workflows/ci.yml` through it and keep its jobs in lockstep with the catalog):
-    /// job ids at two spaces, steps as `      - ` items. Comment lines are ignored, so prose
-    /// naming the command counts for nothing. Every job but the `required` aggregate is a gate
-    /// job, and every step in it is a gate step (the macOS build, `doctor`, a tool install, not
-    /// only `cargo xtask check --only`): a step with `continue-on-error` or its own `if:`, or
-    /// any step of a job with `continue-on-error` or a job-level `if:` (four spaces), is listed
-    /// in `softened`, because the gate could then pass without that step having run or passed.
+    /// Reads the job table of a workflow with the YAML parser `action_pins` uses (the tests
+    /// below read `.github/workflows/ci.yml` through it and keep its jobs in lockstep with the
+    /// catalog), so quoting, flow mappings and comments mean what they mean to GitHub. Every job
+    /// but the `required` aggregate is a gate job, and every step in it is a gate step (the
+    /// macOS build, `doctor`, a tool install, not only `cargo xtask check --only`): a step with
+    /// `continue-on-error` or its own `if`, or a job with either key, is listed in `softened`,
+    /// because the gate could then pass without that step having run or passed. A workflow that
+    /// does not parse panics: these are tests.
     fn parse_ci(text: &str) -> ParsedCi {
+        use yaml_rust2::{Yaml, YamlLoader};
+
+        fn render(value: &Yaml) -> String {
+            match value {
+                Yaml::String(s) | Yaml::Real(s) => s.clone(),
+                Yaml::Boolean(b) => b.to_string(),
+                Yaml::Integer(i) => i.to_string(),
+                other => format!("{other:?}"),
+            }
+        }
+        fn soft_keys(map: &Yaml) -> Vec<String> {
+            map.as_hash()
+                .into_iter()
+                .flatten()
+                .filter_map(|(key, value)| {
+                    let key = key.as_str()?;
+                    matches!(key, "continue-on-error" | "if")
+                        .then(|| format!("{key}: {}", render(value)))
+                })
+                .collect()
+        }
+
         let mut out = ParsedCi::default();
-        let mut in_jobs = false;
-        let mut job = String::new();
-        let mut in_needs = false;
         let soften = |out: &mut ParsedCi, note: String| {
             if !out.softened.contains(&note) {
                 out.softened.push(note);
             }
         };
-        for line in text.lines() {
-            if line.trim_start().starts_with('#') {
-                continue;
-            }
-            if line == "jobs:" {
-                in_jobs = true;
-            } else if in_jobs && !line.starts_with(' ') && !line.is_empty() {
-                in_jobs = false;
-            }
-            if !in_jobs {
-                continue;
-            }
-            if let Some(id) = line
-                .strip_prefix("  ")
-                .and_then(|l| l.strip_suffix(':'))
-                .filter(|l| !l.starts_with([' ', '#']))
-            {
-                job = id.to_owned();
-                out.stages.entry(job.clone()).or_default();
-                out.needs.entry(job.clone()).or_default();
-                in_needs = false;
-                continue;
-            }
+        let docs = YamlLoader::load_from_str(text).expect("workflow parses as YAML");
+        let Some(jobs) = docs.first().and_then(|d| d["jobs"].as_hash()) else {
+            return out;
+        };
+        for (id, body) in jobs {
+            let job = id.as_str().expect("job ids are strings").to_owned();
             let gate_job = job != "required";
-            // A step's own keys: the item line itself (`      - if:`) or eight spaces in.
-            let key = if line.starts_with("      - ") {
-                line.trim_start().trim_start_matches("- ")
-            } else if line.starts_with("        ") && !line.starts_with("         ") {
-                line.trim_start()
-            } else {
-                ""
+            let needs: Vec<String> = match &body["needs"] {
+                Yaml::String(one) => vec![one.clone()],
+                Yaml::Array(many) => many
+                    .iter()
+                    .filter_map(Yaml::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => Vec::new(),
             };
-            let soft = |k: &str| k.starts_with("continue-on-error:") || k.starts_with("if:");
-            if gate_job && soft(key) {
-                soften(&mut out, format!("{job}: a gate step has `{key}`"));
+            out.needs.insert(job.clone(), needs);
+            let mut stages = Vec::new();
+            if gate_job {
+                // A job-level `if:` can skip the whole job (a skipped job satisfies `needs`).
+                for key in soft_keys(body) {
+                    soften(&mut out, format!("{job}: a gate job has `{key}`"));
+                }
             }
-            // A job-level `if:` can skip the whole job (a skipped job satisfies `needs`).
-            if gate_job && let Some(job_key) = line.strip_prefix("    ").filter(|k| soft(k)) {
-                soften(&mut out, format!("{job}: a gate job has `{job_key}`"));
+            for step in body["steps"].as_vec().into_iter().flatten() {
+                if gate_job {
+                    for key in soft_keys(step) {
+                        soften(&mut out, format!("{job}: a gate step has `{key}`"));
+                    }
+                }
+                let run = step["run"].as_str().unwrap_or_default();
+                for line in run.lines() {
+                    if let Some(args) = line.split("cargo xtask check --only ").nth(1) {
+                        // `--only a,b` and `--only a --only b` both name stages
+                        let args = args.replace("--only ", "");
+                        stages.extend(
+                            args.split(|c: char| c == ',' || c.is_whitespace())
+                                .filter(|n| !n.is_empty())
+                                .map(str::to_owned),
+                        );
+                    }
+                }
             }
-            if let Some(args) = line.split("cargo xtask check --only ").nth(1) {
-                // `--only a,b` and `--only a --only b` both name stages
-                let args = args.replace("--only ", "");
-                let list = out.stages.get_mut(&job).unwrap();
-                list.extend(
-                    args.split(|c: char| c == ',' || c.is_whitespace())
-                        .filter(|n| !n.is_empty())
-                        .map(str::to_owned),
-                );
-            } else if line.trim() == "needs:" {
-                in_needs = true;
-            } else if in_needs && let Some(name) = line.trim().strip_prefix("- ") {
-                out.needs.get_mut(&job).unwrap().push(name.to_owned());
-            } else {
-                in_needs = false;
-            }
+            out.stages.insert(job, stages);
         }
         out
+    }
+
+    #[test]
+    fn should_flag_a_gate_step_when_its_keys_are_quoted() {
+        // given
+        let text = "jobs:\n  a:\n    steps:\n      - name: Gate\n        \"continue-on-error\": true\n        'run': cargo xtask check --only clippy\n      - 'if': always()\n        run: cargo xtask doctor\n";
+
+        // when
+        let parsed = parse_ci(text);
+
+        // then
+        assert_eq!(parsed.stages["a"], ["clippy"]);
+        assert_eq!(
+            parsed.softened,
+            [
+                "a: a gate step has `continue-on-error: true`",
+                "a: a gate step has `if: always()`"
+            ]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_gate_step_when_it_is_a_flow_mapping() {
+        // given
+        let text = "jobs:\n  a: { continue-on-error: true, steps: [ { run: cargo xtask check --only clippy, if: failure() } ] }\n  required: { needs: [a], steps: [ { run: echo ok } ] }\n";
+
+        // when
+        let parsed = parse_ci(text);
+
+        // then
+        assert_eq!(parsed.stages["a"], ["clippy"]);
+        assert_eq!(parsed.needs["required"], ["a"]);
+        assert_eq!(
+            parsed.softened,
+            [
+                "a: a gate job has `continue-on-error: true`",
+                "a: a gate step has `if: failure()`"
+            ]
+        );
     }
 
     #[test]

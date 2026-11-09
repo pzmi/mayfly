@@ -104,7 +104,7 @@ dependencies = [
 name = "mayfly-domain"
 version = "0.1.0"
 dependencies = [
- "mayfly-testkit",
+ "mayfly-testkit-shared",
  "percent-encoding",
 ]
 

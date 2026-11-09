@@ -1,0 +1,4 @@
+rule: ARCH-pure-clippy-config
+at: crates/mayfly-domain/clippy.toml
+contains: `disallowed-methods` lacks `std::path::Path::exists`
+only: true

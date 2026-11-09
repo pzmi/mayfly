@@ -134,6 +134,15 @@ impl Scopes {
         self.bind(module, name, Binding::Item);
     }
 
+    /// Records `type name = target;` in `module` as an import of `target` too, so `name::now`
+    /// also resolves to `target::now` (`type T = std::time::SystemTime; T::now()`) and another
+    /// crate's `other::Alias` follows it ([`super::follow_reexports`]). The item binding stays:
+    /// both candidates are kept, so an alias can only add findings. Pinned by
+    /// `should_resolve_type_alias_to_its_target_when_alias_is_used`.
+    pub fn add_alias(&mut self, module: &[String], name: String, target: Written) {
+        self.bind(module, name, Binding::Import(target));
+    }
+
     /// Records the child module `name` of `module`.
     pub fn add_child(&mut self, module: &[String], name: &str) {
         let mut child = module.to_vec();
@@ -750,6 +759,23 @@ mod tests {
         // then
         assert_eq!(joined(now), ["std::time::Instant::now"]);
         assert_eq!(joined(module), ["std::time::SystemTime::now"]);
+    }
+
+    #[test]
+    fn should_resolve_type_alias_to_its_target_when_alias_is_used() {
+        // given
+        let mut scopes = scopes_of("use std::time::SystemTime;");
+        scopes.add_item(&[], "T".to_owned());
+        scopes.add_alias(&[], "T".to_owned(), written("SystemTime"));
+
+        // when
+        let resolved = scopes.resolve(&[], &written("T::now"));
+
+        // then
+        assert_eq!(
+            joined(resolved),
+            ["crate::T::now", "std::time::SystemTime::now"]
+        );
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //!
 //! For each Cargo target of each workspace package, the module tree is walked from the
 //! target's root file through `mod` declarations (`#[path]` and `cfg_attr(.., path)`
-//! included), inline modules and `include!` of a literal path. Every `cfg` branch is read:
+//! included), inline modules and `include!` of a literal path written by its own name (any
+//! other route to the include family is refused by `rules_include`). Every `cfg` branch is read:
 //! nothing is evaluated, so code for another platform is checked too. Code that cannot be
 //! analysed fails instead of passing: a file that does not parse, a module file that does
 //! not exist, and an `include!` or `#[path]` whose path is not a literal. A target root,
@@ -12,19 +13,25 @@
 //! source under its own policy.
 //!
 //! References to another workspace crate are followed through that crate's `use` items
-//! (re-exports, globs, renames), so `pub use std::process::Command as Spawner` in one crate
-//! still names `std::process::Command` where a second crate writes `other::Spawner`.
+//! (re-exports, globs, renames) and type aliases, so `pub use std::process::Command as
+//! Spawner` or `pub type Spawner = std::process::Command;` in one crate still names
+//! `std::process::Command` where a second crate writes `other::Spawner`. A type alias also
+//! stands for its target inside its own crate, and `Self` in an impl for the impl's type.
 //!
-//! The collector records facts (resolved path references, `unsafe` sites, lint and
-//! `ignore` attributes, test functions) with their file, line and context (production or
-//! test code); `rules_purity`, `rules_runtime`, `rules_types`, `rules_hygiene`, `rules_cqrs`
-//! and `rules_seams` turn facts into diagnostics.
+//! The collector records facts (resolved path references, `unsafe` sites, lint, `ignore` and
+//! `macro_export` attributes, include-family macros, item declarations, test functions) with
+//! their file, line and context (production or test code); `rules_purity`, `rules_include`,
+//! `rules_runtime`, `rules_types`, `rules_hygiene`, `rules_cqrs` and `rules_seams` turn facts
+//! into diagnostics, and `rules_clippy` checks the pure crates' Clippy configuration, the
+//! semantic layer behind these syntactic rules.
 
 mod collect;
 mod flow;
 mod paths;
+mod rules_clippy;
 mod rules_cqrs;
 mod rules_hygiene;
+mod rules_include;
 mod rules_purity;
 mod rules_runtime;
 mod rules_seams;
@@ -191,6 +198,53 @@ pub struct Facts {
     pub impls: Vec<ImplDecl>,
     /// The types `ControlAggregates::accept` visits (`visitor.visit::<X>()`), by last segment.
     pub registry_visits: Vec<String>,
+    /// Include-family macros the loader does not follow: data includes and every one written
+    /// inside a macro token stream (`ARCH-include-macro`, `ARCH-foreign-source`).
+    pub includes: Vec<IncludeUse>,
+    /// Named item declarations (`ARCH-plane-vocabulary`).
+    pub declarations: Vec<Declaration>,
+    /// `#[macro_export]` attributes, where they are (`ARCH-macro-export`).
+    pub macro_exports: Vec<Site>,
+}
+
+/// The include family: `include!` compiles a file, the other two embed one as data.
+pub const INCLUDE_FAMILY: &[&str] = &["include", "include_str", "include_bytes"];
+
+/// How an include-family macro was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncludeKind {
+    /// Written as an expression (`include_str!("x")`); an `include!` there is followed.
+    Direct,
+    /// Written inside a macro's token stream (a `macro_rules!` body or another invocation's
+    /// arguments), where the checker cannot follow the file.
+    InTokens,
+}
+
+/// One include-family macro the loader did not follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeUse {
+    /// Where its name is.
+    pub site: Site,
+    /// `include`, `include_str` or `include_bytes`.
+    pub name: String,
+    /// The macro path as written.
+    pub written: String,
+    /// Where it was found.
+    pub kind: IncludeKind,
+    /// The `ARCH-foreign-source` message when its literal path lies outside the package.
+    pub outside: Option<String>,
+}
+
+/// A named item: a struct, enum, union, trait, type, fn, mod, const, static or macro, also an
+/// associated fn, type or const.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    /// Where its name is.
+    pub site: Site,
+    /// `struct`, `trait`, `fn`, ..
+    pub kind: &'static str,
+    /// Its name.
+    pub name: String,
 }
 
 /// A struct or enum declaration.
@@ -276,6 +330,7 @@ pub fn check(
         .map(|p| relative(root, p.manifest_path.as_std_path()))
         .collect();
     out.extend(hygiene.config(root, &manifests));
+    out.extend(rules_clippy::check(root, metadata, policy, &manifests));
     let mut every = Vec::new();
     let mut libraries = BTreeMap::new();
     for package in metadata.workspace_packages() {
@@ -302,6 +357,7 @@ pub fn check(
             ));
         }
         out.extend(rules_purity::check(facts, policy));
+        out.extend(rules_include::check(facts, policy));
         out.extend(rules_runtime::check(facts, policy));
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(hygiene.check(facts));

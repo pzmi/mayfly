@@ -11,4 +11,4 @@ workspace = true
 percent-encoding = "1"
 
 [dev-dependencies]
-mayfly-testkit = { path = "../mayfly-testkit" }
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
