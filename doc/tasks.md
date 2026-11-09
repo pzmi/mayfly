@@ -60,6 +60,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0038](adr/0038-jit-delivery-through-tart-exec-with-a-checked-guest-identity.md) | JIT over `tart exec -i` stdin to the exact VM after the lock-PID and instance-id checks; GitHub confirms the runner online; no SSH (OD5). | Accepted |
 | [ADR 0039](adr/0039-clones-only-from-local-service-owned-image-bases.md) | Never pull at job time; clones only from local service-owned bases; `mayfly image refresh <pool>` (OD13). | Accepted |
 | [ADR 0040](adr/0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool, organisation scope, never deleted automatically (OD14). | Accepted |
+| [ADR 0041](adr/0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | `AggregateStore`'s write path; refusal receipts bound to every stream the decision read; `CommandBody` with a canonical intent digest; derived event ids; `ARCH-single-append`. Amends 0034 (E3). | Proposed |
 
 Open owner decisions (working assumptions, no ADR yet): **OD2** upgrade and rollback (any forward
 jump supported through an upgrade-matrix test from every released version; one-step rollback;
@@ -144,6 +145,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | ES-01F | Align the landed journal port with the owner's decisions and its review | ES-01, DEC-01 | opus | |
 | ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
 | ES-03 | `AggregateStore`: single write path, receipts, epochs, retry, reactors | ES-01F | opus | |
+| ES-03R | Remaining store rules: `ARCH-no-global-order`, `ARCH-journal-sql`, `ARCH-migration-frozen`, `fixtures.lock` | ES-02, ES-03 | opus | |
 | ES-04 | Projections: stream-local inline specs, generations, rebuild, first read models | ES-02, ES-03 | sonnet | ⛳ |
 | ES-06 | Event-store Quint model and scenarios | FND-06, ES-01F | opus | |
 | ES-05 | Durable delivery ledger, worker and `catch_up`; the directive relay | ES-02, ES-03, ES-06 | opus | |
@@ -545,6 +547,18 @@ golden-fixture `fixtures.lock` (fnd §3.3).
 Accept: fixtures fail a second `append` caller and a global-order query; a retried command returns
 its receipt; a refusal is replayed at the same revision and re-decided after it moved; a reused id
 with another intent is refused; an unknown stored kind starts safe mode.
+Landed with ADR 0041: refusal receipts bound to every stream the decision read (port, memory,
+SQLite, JC-28's two-read half); `CommandBody`; `ARCH-single-append`. The epoch rule holds by
+construction (epochs come from the registry) and in the golden harness. The global-order fixture,
+`ARCH-journal-sql`, `ARCH-migration-frozen` and `fixtures.lock` moved to ES-03R.
+
+#### ES-03R Remaining store rules
+Cites: event-store §4.3, §6.1; fnd §3.3; ver §4.1; ADR 0041. `ARCH-no-global-order` (adapter SQL
+ordering by `rowid`, a time column or a revision across streams; a store-port method returning
+events of several streams), `ARCH-journal-sql`, `ARCH-migration-frozen` over `migrations.lock`, and
+`fixtures.lock` (the hashes of every frozen event fixture, checked by the golden harness).
+Accept: each rule's negative fixture fails it; changing a frozen fixture or a released migration
+fails the gate.
 
 #### ES-04 ⛳ Projections
 Cites: event-store §3.6, §6.1, §6.4, I16. `ProjectionSpec`, stream-local inline projections computed

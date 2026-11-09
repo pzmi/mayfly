@@ -3,7 +3,7 @@
 //!
 //! Cases are named by their id in `doc/event-store.md` §7.1 (`JC-01` …). The suite holds the
 //! stream-scoped design (ADR 0021, ADR 0034): per-stream order on a stream head, an event-id
-//! registry, command receipts with intent digests and refusal receipts bound to a revision,
+//! registry, command receipts with intent digests and refusal receipts bound to the revisions they read,
 //! an inbox, stream epochs, and no global order to read (no method returns events of more
 //! than one stream; the suite reads the journal by enumerating streams). JC-26 (durability
 //! settings at open) and JC-27 (raw `UPDATE`/`DELETE` refused) need an engine: they are the
@@ -154,8 +154,9 @@ pub enum JournalCase {
     /// JC-25: only a fault at the commit is `OutcomeUnknown`; re-appending the identical unit
     /// resolves it.
     OutcomeUnknown,
-    /// JC-28: a refusal receipt answers at its revision and is re-decided and replaced after
-    /// the stream moved; one whose stream moved before commit is refused.
+    /// JC-28: a refusal receipt answers at its revisions and is re-decided and replaced after
+    /// any bound stream moved (a refusal decided over two streams included); one whose stream
+    /// moved before commit is refused.
     RefusalReceipts,
     /// JC-29: two units with one command id on different streams: exactly one commits.
     RacingCommandIds,
@@ -1727,10 +1728,10 @@ async fn store_refusal_leaves_no_receipt<F: JournalFactory>(factory: &F) -> Chec
         "the domain refusal's receipt",
         &io("receipt", journal.receipt(CommandId::from_u128(6)).await)?.map(|r| r.outcome),
         &Some(ReceiptOutcome::Refused {
-            bound: ReadCondition {
+            bound: vec![ReadCondition {
                 stream: s1.clone(),
                 expected: at(1),
-            },
+            }],
             rejection: rejection("pool_draining"),
         }),
     )?;
@@ -1844,10 +1845,10 @@ async fn refusal_receipts<F: JournalFactory>(factory: &F) -> Check {
         command_type: command_type(),
         intent: intent(1),
         outcome: ReceiptOutcome::Refused {
-            bound: ReadCondition {
+            bound: vec![ReadCondition {
                 stream: s1.clone(),
                 expected: at(0),
-            },
+            }],
             rejection: rejection("pool_draining"),
         },
     };
@@ -1904,10 +1905,10 @@ async fn refusal_receipts<F: JournalFactory>(factory: &F) -> Check {
         "the refusal receipt, now bound to revision 1",
         &io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.map(|r| r.outcome),
         &Some(ReceiptOutcome::Refused {
-            bound: ReadCondition {
+            bound: vec![ReadCondition {
                 stream: s1.clone(),
                 expected: at(1),
-            },
+            }],
             rejection: rejection("pool_draining"),
         }),
     )?;
@@ -1957,8 +1958,76 @@ async fn refusal_receipts<F: JournalFactory>(factory: &F) -> Check {
         journal
             .append(appending(unit(10_000), &s2, at(0), &[7]).with_receipt(accepted(3, 1)))
             .await,
+    )?;
+    refusal_over_two_reads(factory, journal).await
+}
+
+/// JC-28's multi-read half (ADR 0041): a decision that read two streams binds its refusal to
+/// both, named in any order and recorded in `StreamId` order; it answers only while both are
+/// where it read them, and once either moved the repeat is decided afresh.
+async fn refusal_over_two_reads<F: JournalFactory>(factory: &F, journal: F::Journal) -> Check {
+    let (target, pool) = (stream("attempt-3"), stream("pool-1"));
+    io(
+        "the pool the decision reads",
+        journal
+            .append(appending(unit(11_000), &pool, NEW, &[8]))
+            .await,
+    )?;
+    let refused_over = |pool_at: ExpectedRevision| {
+        unit(12_000)
+            .with_read(pool.clone(), pool_at)
+            .with_read(target.clone(), NEW)
+            .with_receipt(refusal(4, 1, "pool_draining"))
+    };
+    io(
+        "a refusal decided over the target and the pool",
+        journal.append(refused_over(at(0))).await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let bound_at = |pool_at: ExpectedRevision| {
+        vec![
+            ReadCondition {
+                stream: target.clone(),
+                expected: NEW,
+            },
+            ReadCondition {
+                stream: pool.clone(),
+                expected: pool_at,
+            },
+        ]
+    };
+    let recorded = CommandReceipt {
+        command_id: CommandId::from_u128(4),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Refused {
+            bound: bound_at(at(0)),
+            rejection: rejection("pool_draining"),
+        },
+    };
+    eq(
+        "a repeat while both read streams are unchanged",
+        &journal.append(refused_over(at(0))).await.map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(recorded))),
+    )?;
+    io(
+        "the pool moves; the target does not",
+        journal
+            .append(appending(unit(13_000), &pool, at(0), &[9]))
+            .await,
+    )?;
+    io(
+        "the repeat after only the pool moved, re-decided",
+        journal.append(refused_over(at(1))).await,
+    )?;
+    eq(
+        "the refusal receipt, now bound to the pool's new revision",
+        &io("receipt", journal.receipt(CommandId::from_u128(4)).await)?.map(|r| r.outcome),
+        &Some(ReceiptOutcome::Refused {
+            bound: bound_at(at(1)),
+            rejection: rejection("pool_draining"),
+        }),
     )
-    .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2726,10 +2795,10 @@ async fn survives_reopen<F: JournalFactory>(factory: &F) -> Check {
             command_type: command_type(),
             intent: intent(1),
             outcome: ReceiptOutcome::Refused {
-                bound: ReadCondition {
+                bound: vec![ReadCondition {
                     stream: s2.clone(),
                     expected: NEW,
-                },
+                }],
                 rejection: rejection("pool_draining"),
             },
         }))),
@@ -2895,10 +2964,10 @@ async fn lost_replies_without_events<F: JournalFactory>(
             command_type: command_type(),
             intent: intent(1),
             outcome: ReceiptOutcome::Refused {
-                bound: ReadCondition {
+                bound: vec![ReadCondition {
                     stream: s1.clone(),
                     expected: at(4),
-                },
+                }],
                 rejection: rejection("pool_draining"),
             },
         }))),

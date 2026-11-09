@@ -184,6 +184,15 @@ fn busy() -> Vec<Step> {
     )
 }
 
+fn retirement_requested() -> Vec<Step> {
+    then(
+        listening(),
+        [AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        }],
+    )
+}
+
 fn finished() -> Vec<Step> {
     then(busy(), [observe(Fact::RunnerExited { code: 0 })])
 }
@@ -341,6 +350,7 @@ pub(super) fn paths() -> Vec<Vec<Step>> {
         jit_issued(),
         listening(),
         busy(),
+        retirement_requested(),
         finished(),
         retiring(),
         stopped(),
@@ -403,6 +413,11 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             AttemptCommand::RequestRetirement {
                 reason: RetireReason::Surplus,
             },
+        ),
+        accepted(
+            "withdraw_retirement_when_github_says_busy",
+            retirement_requested(),
+            AttemptCommand::WithdrawRetirement,
         ),
         accepted(
             "retire_finished",

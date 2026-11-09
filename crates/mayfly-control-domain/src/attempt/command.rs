@@ -7,10 +7,11 @@ use mayfly_domain::{
 use serde::{Deserialize, Serialize};
 
 use super::state::{QuarantineReason, RetireReason, RunnerRequestId};
+use crate::aggregate::CommandBody;
 
 /// The commands of `doc/domain-model.md` §6.4. There is no `AssertOutcome`: an `Unknown`
 /// outcome leaves only on an observation (ADR 0025).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum AttemptCommand {
     /// Start the attempt from the Host's `SlotReserved` (policy P2).
     StartAttempt(StartAttempt),
@@ -67,9 +68,45 @@ pub enum AttemptCommand {
     Close,
 }
 
+impl CommandBody for AttemptCommand {
+    const TYPES: &'static [&'static str] = &[
+        "start_attempt",
+        "issue_next",
+        "record_observation",
+        "begin_activation",
+        "record_jit_handle",
+        "bind_job",
+        "request_retirement",
+        "confirm_retirement",
+        "withdraw_retirement",
+        "quarantine",
+        "adopt",
+        "resolve_quarantine",
+        "close",
+    ];
+
+    fn command_type(&self) -> &'static str {
+        match self {
+            Self::StartAttempt(_) => "start_attempt",
+            Self::IssueNext { .. } => "issue_next",
+            Self::RecordObservation(_) => "record_observation",
+            Self::BeginActivation { .. } => "begin_activation",
+            Self::RecordJitHandle { .. } => "record_jit_handle",
+            Self::BindJob { .. } => "bind_job",
+            Self::RequestRetirement { .. } => "request_retirement",
+            Self::ConfirmRetirement => "confirm_retirement",
+            Self::WithdrawRetirement => "withdraw_retirement",
+            Self::Quarantine { .. } => "quarantine",
+            Self::Adopt { .. } => "adopt",
+            Self::ResolveQuarantine => "resolve_quarantine",
+            Self::Close => "close",
+        }
+    }
+}
+
 /// `StartAttempt`: the reservation's values. The VM name is derived from them, never taken
 /// from elsewhere (I30).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StartAttempt {
     /// The attempt.
     pub attempt_id: AttemptId,
@@ -88,7 +125,7 @@ pub struct StartAttempt {
 }
 
 /// One data-plane observation about the attempt's VM, as the inbox routes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Observation {
     /// The inbox key.
     pub observation_id: ObservationId,
@@ -102,7 +139,7 @@ pub struct Observation {
 
 /// What an observation says. Answers name the directive they answer; inventory facts name
 /// none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Fact {
     /// The clone exists, with this instance id.
     VmCloned {

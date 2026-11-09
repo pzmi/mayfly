@@ -136,7 +136,7 @@ and on an orphan fixture.
 Rules:
 
 1. **Existing event and protocol fixtures are frozen** (every sample and expectation alike).
-   Planned (ES-03): their hashes listed in `fixtures.lock`, so changing one fails; until then
+   Planned (ES-03R): their hashes listed in `fixtures.lock`, so changing one fails; until then
    the rule is kept by review and by the byte-identical round trip. A shape change adds a new fixture (new version or new
    type) beside the old; the old one stays for ever, because the journal is backward-transitive
    (fnd §6).

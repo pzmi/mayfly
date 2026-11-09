@@ -21,6 +21,11 @@ pub trait DomainEvent: Serialize + DeserializeOwned {
     const EVENT_TYPE: &'static str;
     /// The payload version, from 1.
     const SCHEMA_VERSION: u32;
+    /// The lowest supported epoch a build needs to decide a stream once this event is in it
+    /// (`doc/event-store.md` §6.1, §6.2): 1 unless an **activate** release writes an event an
+    /// older build must not skip, which raises the stream's epoch so that build refuses to
+    /// append to it (`StreamEpochUnsupported`) while still reading it.
+    const REQUIRED_EPOCH: u32 = 1;
 }
 
 /// The `(type, version)` pair that identifies a payload's shape.
@@ -89,6 +94,13 @@ pub trait EventSet: Sized + Clone + fmt::Debug + PartialEq {
 
     /// The kind this event is written as.
     fn kind(&self) -> EventKind;
+
+    /// The epoch this event needs ([`DomainEvent::REQUIRED_EPOCH`] of its struct); what
+    /// `AggregateStore` records with it and what raises its stream's epoch (ES-I12). The
+    /// default, 1, is for sets written by hand in tests; [`crate::event_set!`] generates it.
+    fn required_epoch(&self) -> u32 {
+        1
+    }
 
     /// Serialises the payload (the event struct alone, not its kind).
     ///
@@ -187,6 +199,13 @@ macro_rules! event_set {
             fn kind(&self) -> $crate::event::EventKind {
                 match self {
                     $( Self::$variant(_) => $crate::event::EventKind::of::<$event>(), )+
+                }
+            }
+
+            fn required_epoch(&self) -> u32 {
+                match self {
+                    $( Self::$variant(_) =>
+                        <$event as $crate::event::DomainEvent>::REQUIRED_EPOCH, )+
                 }
             }
 

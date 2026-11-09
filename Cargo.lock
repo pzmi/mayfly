@@ -414,7 +414,12 @@ version = "0.1.0"
 name = "mayfly-control"
 version = "0.1.0"
 dependencies = [
+ "mayfly-control-domain",
  "mayfly-domain",
+ "mayfly-testkit",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -10,8 +10,8 @@ use tempfile::TempDir;
 
 use crate::support::{
     DOOR_CLOSED_V1, DOOR_CLOSED_V1_HAND, DOOR_CLOSED_V1_WIND, DOOR_OPENED_V1,
-    DOOR_OPENED_V1_EXPECTED, DOOR_OPENED_V2, Doors, DoorsAndFlaky, DoorsTwice, Gates, Jammed,
-    Ladders, Latches, Malformeds, Misrouted, NoAggregates, Shapelesses, SignalPosts, Twins,
+    DOOR_OPENED_V1_EXPECTED, DOOR_OPENED_V2, Doors, DoorsAndFlaky, DoorsTwice, Gates, Hatches,
+    Jammed, Ladders, Latches, Malformeds, Misrouted, NoAggregates, Shapelesses, SignalPosts, Twins,
 };
 
 const OPENED_V2: EventKind = EventKind {
@@ -668,6 +668,28 @@ fn should_fail_when_version_chain_has_a_gap() {
 }
 
 #[test]
+fn should_fail_when_a_sample_needs_more_than_the_aggregate_supports() {
+    // given
+    let dir = tree(&[("hatch_sealed/v1.json", "{}\n")]);
+    // when
+    let failures = verify::<Hatches>(dir.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![GoldenFailure::EpochAboveSupported {
+            aggregate: "hatch",
+            kind: EventKind {
+                event_type: "hatch_sealed",
+                schema_version: 1,
+            },
+            path: at(dir.path(), "hatch_sealed/v1.json"),
+            required: 2,
+            supported: 1,
+        }]
+    );
+}
+
+#[test]
 fn should_fail_when_legacy_version_is_not_older_than_current() {
     // given
     let dir = tree(&[
@@ -795,12 +817,20 @@ fn should_name_what_to_fix_when_each_failure_is_displayed() {
             ],
         },
         GoldenFailure::NoShape { kind: CLOSED_V1 },
+        GoldenFailure::EpochAboveSupported {
+            aggregate: "door",
+            kind: CLOSED_V1,
+            path: path.clone(),
+            required: 2,
+            supported: 1,
+        },
     ]);
     // when
     let report = failures.to_string();
     // then
     for expected in [
-        "8 golden fixture failure(s)",
+        "9 golden fixture failure(s)",
+        "door: door_closed/v1 (events/door_opened/v1.json) needs epoch 2, above the supported 1",
         "cannot list events/door_opened/v1.json: not a directory",
         "cannot read an entry of events/door_opened/v1.json: gone",
         "cannot read events/door_opened/v1.json: invalid UTF-8",

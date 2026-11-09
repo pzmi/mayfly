@@ -7,8 +7,9 @@ use std::fmt;
 
 use mayfly_control_domain::shape::Shape;
 use mayfly_control_domain::{
-    Actor, Aggregate, AggregateRegistry, AggregateVisitor, Command, DecodeError, DeterminismCase,
-    DeterminismCases, DomainEvent, EventKind, EventSet, Expect, Rejection, event_set,
+    Actor, Aggregate, AggregateRegistry, AggregateVisitor, Command, CommandBody, DecodeError,
+    DeterminismCase, DeterminismCases, DomainEvent, EventKind, EventSet, Expect, Rejection,
+    event_set,
 };
 use mayfly_domain::{CommandId, Epoch, Millis};
 use serde::{Deserialize, Serialize};
@@ -82,14 +83,35 @@ event_set! {
 }
 
 /// What a door can be asked to do.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum DoorBody {
     Open { by: u32 },
     Close,
 }
+impl CommandBody for DoorBody {
+    const TYPES: &'static [&'static str] = &["open", "close"];
+
+    fn command_type(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "open",
+            Self::Close => "close",
+        }
+    }
+}
+
+/// The body of an aggregate that is asked nothing in particular.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Nothing;
+impl CommandBody for Nothing {
+    const TYPES: &'static [&'static str] = &["nothing"];
+
+    fn command_type(&self) -> &'static str {
+        "nothing"
+    }
+}
 
 /// Why a door refused.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DoorRejection {
     AlreadyOpen,
     AlreadyClosed,
@@ -269,6 +291,107 @@ macro_rules! door_refusing {
     };
 }
 
+/// A door whose body is `$body`, a `DoorBody` behind another `CommandBody` impl, over
+/// `Door`'s cases.
+macro_rules! door_typed {
+    ($(#[$meta:meta])* $name:ident = $aggregate:literal, $body:ident) => {
+        $(#[$meta])*
+        pub struct $name;
+        impl Aggregate for $name {
+            const NAME: &'static str = $aggregate;
+            type State = bool;
+            type Body = $body;
+            type Event = DoorEvent;
+            type Rejection = DoorRejection;
+
+            fn initial() -> bool {
+                Door::initial()
+            }
+
+            fn decide(open: &bool, c: Command<$body>) -> Result<Vec<DoorEvent>, DoorRejection> {
+                Door::decide(
+                    open,
+                    Command::new(c.command_id, c.issued_at, c.run_epoch, c.actor, c.body.0),
+                )
+            }
+
+            fn evolve(open: bool, event: &DoorEvent) -> bool {
+                Door::evolve(open, event)
+            }
+        }
+        impl DeterminismCases for $name {
+            fn determinism_cases() -> Vec<DeterminismCase<Self>> {
+                Door::determinism_cases()
+                    .into_iter()
+                    .map(|c| DeterminismCase {
+                        name: c.name,
+                        history: c.history,
+                        command: Command::new(
+                            c.command.command_id,
+                            c.command.issued_at,
+                            c.command.run_epoch,
+                            c.command.actor,
+                            $body(c.command.body),
+                        ),
+                        expect: c.expect,
+                    })
+                    .collect()
+            }
+        }
+    };
+}
+
+/// A door body whose `TYPES` leave out `close`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Unlisted(pub DoorBody);
+impl CommandBody for Unlisted {
+    const TYPES: &'static [&'static str] = &["open"];
+
+    fn command_type(&self) -> &'static str {
+        self.0.command_type()
+    }
+}
+
+door_typed!(
+    /// A door whose cases decide a command type its `TYPES` do not list.
+    UnlistedDoor = "unlisted_door",
+    Unlisted
+);
+
+/// A door body whose `TYPES` list a type no case decides.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Boastful(pub DoorBody);
+impl CommandBody for Boastful {
+    const TYPES: &'static [&'static str] = &["open", "close", "slam"];
+
+    fn command_type(&self) -> &'static str {
+        self.0.command_type()
+    }
+}
+
+door_typed!(
+    /// A door that declares a command type none of its cases decides.
+    BoastfulDoor = "boastful_door",
+    Boastful
+);
+
+/// A door body whose `TYPES` hold a malformed type and one twice.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Mangled(pub DoorBody);
+impl CommandBody for Mangled {
+    const TYPES: &'static [&'static str] = &["Open", "close", "close", "open"];
+
+    fn command_type(&self) -> &'static str {
+        self.0.command_type()
+    }
+}
+
+door_typed!(
+    /// A door whose command `TYPES` are malformed.
+    MangledDoor = "mangled_door",
+    Mangled
+);
+
 door_with_cases!(
     /// A door whose module lists only accepted cases.
     OptimistDoor = "optimist_door",
@@ -348,7 +471,7 @@ impl DeterminismCases for FlakyDoor {
 }
 
 /// A refusal that carries hidden mutable state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Grudge {
     pub count: u32,
 }
@@ -369,7 +492,7 @@ door_refusing!(
 
 /// A refusal whose `PartialEq` and `Debug` hide the field its code reads: only `code()`
 /// tells two of them apart.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Moody {
     pub mood: u32,
 }
@@ -403,7 +526,7 @@ door_refusing!(
 );
 
 /// A refusal type whose `CODES` leave out `already_open`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Taciturn(pub DoorRejection);
 impl Rejection for Taciturn {
     const CODES: &'static [&'static str] = &["already_closed"];
@@ -421,7 +544,7 @@ door_refusing!(
 );
 
 /// A refusal type whose `CODES` list a code no refusal returns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Wordy(pub DoorRejection);
 impl Rejection for Wordy {
     const CODES: &'static [&'static str] = &["already_open", "already_closed", "jammed"];
@@ -439,7 +562,7 @@ door_refusing!(
 );
 
 /// A refusal type whose `CODES` list a malformed code and one twice.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Garbled(pub DoorRejection);
 impl Rejection for Garbled {
     const CODES: &'static [&'static str] = &[
@@ -708,7 +831,7 @@ impl DeterminismCases for JammedDoor {
 }
 
 /// Never refuses; only its events matter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Never;
 impl Rejection for Never {
     const CODES: &'static [&'static str] = &["never"];
@@ -726,13 +849,13 @@ macro_rules! event_holder {
         impl Aggregate for $name {
             const NAME: &'static str = $aggregate;
             type State = ();
-            type Body = ();
+            type Body = Nothing;
             type Event = $event;
             type Rejection = Never;
 
             fn initial() {}
 
-            fn decide(_state: &(), _command: Command<()>) -> Result<Vec<$event>, Never> {
+            fn decide(_state: &(), _command: Command<Nothing>) -> Result<Vec<$event>, Never> {
                 Ok(Vec::new())
             }
 
@@ -784,13 +907,13 @@ pub struct Gate;
 impl Aggregate for Gate {
     const NAME: &'static str = "gate";
     type State = ();
-    type Body = ();
+    type Body = Nothing;
     type Event = GateEvent;
     type Rejection = Never;
 
     fn initial() {}
 
-    fn decide(_state: &(), _command: Command<()>) -> Result<Vec<GateEvent>, Never> {
+    fn decide(_state: &(), _command: Command<Nothing>) -> Result<Vec<GateEvent>, Never> {
         Ok(vec![GateEvent::Swung(GateSwung {})])
     }
 
@@ -908,6 +1031,29 @@ event_holder!(
     /// An aggregate whose legacy version is newer than its current one.
     Latch = "latch",
     LatchEvent
+);
+
+/// A hatch was sealed: an event of an activate release, needing epoch 2.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HatchSealed {}
+impl DomainEvent for HatchSealed {
+    const EVENT_TYPE: &'static str = "hatch_sealed";
+    const SCHEMA_VERSION: u32 = 1;
+    const REQUIRED_EPOCH: u32 = 2;
+}
+
+event_set! {
+    /// What happened to a hatch.
+    pub enum HatchEvent {
+        /// Sealed.
+        Sealed(HatchSealed),
+    }
+}
+
+event_holder!(
+    /// An aggregate supporting epoch 1 whose event needs epoch 2.
+    Hatch = "hatch",
+    HatchEvent
 );
 
 event_set! {
@@ -1043,6 +1189,9 @@ registry!(DoorsAndMoody: Door, MoodyDoor);
 registry!(DoorsAndTaciturn: Door, TaciturnDoor);
 registry!(DoorsAndWordy: Door, WordyDoor);
 registry!(DoorsAndGarbled: Door, GarbledDoor);
+registry!(DoorsAndUnlisted: Door, UnlistedDoor);
+registry!(DoorsAndBoastful: Door, BoastfulDoor);
+registry!(DoorsAndMangled: Door, MangledDoor);
 registry!(DoorsAndDrifting: Door, DriftingDoor);
 registry!(DoorsAndVeiled: Door, VeiledDoor);
 registry!(DoorsAndMuted: Door, MutedDoor);
@@ -1052,6 +1201,7 @@ registry!(Gates: Gate);
 registry!(Misrouted: MisroutedDoor);
 registry!(Malformeds: Malformed);
 registry!(Latches: Latch);
+registry!(Hatches: Hatch);
 registry!(Twins: Twin);
 registry!(SignalPosts: SignalPost);
 registry!(Shapelesses: ShapelessDoor);

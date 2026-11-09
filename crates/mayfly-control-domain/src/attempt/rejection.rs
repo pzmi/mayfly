@@ -1,11 +1,16 @@
 //! Why the attempt refused a command.
 
+use serde::{Deserialize, Serialize};
+
 use crate::aggregate::Rejection;
 
 /// A refusal of the `Attempt` aggregate: a rejection, never an event (`doc/domain-model.md`
 /// §6.0). Each code is returned by a refused determinism case and pinned in
-/// `tests/fixtures/decisions/attempt.txt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `tests/fixtures/decisions/attempt.txt`. Its serde form is its code (`"stale_run"`), which
+/// a refusal receipt stores (pinned by `mayfly-control`'s
+/// `should_encode_attempt_refusals_as_their_codes_when_recorded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AttemptRejection {
     /// The stream has no `AttemptStarted`.
     NotStarted,

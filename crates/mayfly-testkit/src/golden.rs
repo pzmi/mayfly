@@ -11,7 +11,9 @@
 //!   encoding its upcaster must produce.
 //!
 //! Each sample must decode, re-encode (current) or upcast (legacy) exactly, and fold through
-//! `evolve` from `initial()` without a panic. Together, the samples of a kind must show every
+//! `evolve` from `initial()` without a panic, and need no higher epoch than its aggregate's
+//! `SUPPORTED_EPOCH` (`doc/event-store.md` §6.2: a build never writes what it could not decide
+//! afterwards; [`GoldenFailure::EpochAboveSupported`]). Together, the samples of a kind must show every
 //! field and enum variant of the payload's traced shape
 //! ([`mayfly_control_domain::shape`]): an optional field or a variant no sample shows could be
 //! renamed without breaking a frozen fixture, so it fails as [`GoldenFailure::Uncovered`]. A
@@ -132,6 +134,20 @@ pub enum GoldenFailure {
         /// The panic message.
         message: String,
     },
+    /// A sample's event needs a higher epoch (`DomainEvent::REQUIRED_EPOCH`) than its
+    /// aggregate's `SUPPORTED_EPOCH`: the build would refuse to write it (ES-I12).
+    EpochAboveSupported {
+        /// The aggregate.
+        aggregate: &'static str,
+        /// The kind.
+        kind: EventKind,
+        /// The sample.
+        path: PathBuf,
+        /// The epoch the event needs.
+        required: u32,
+        /// The aggregate's supported epoch.
+        supported: u32,
+    },
     /// Fields or variants of the kind's shape that no sample shows.
     Uncovered {
         /// The kind.
@@ -227,6 +243,18 @@ impl fmt::Display for GoldenFailure {
             } => write!(
                 f,
                 "{aggregate}: evolve(initial, {kind}) panicked on {}: {message}",
+                path.display()
+            ),
+            Self::EpochAboveSupported {
+                aggregate,
+                kind,
+                path,
+                required,
+                supported,
+            } => write!(
+                f,
+                "{aggregate}: {kind} ({}) needs epoch {required}, above the supported {supported}; \
+                 raise SUPPORTED_EPOCH in a prepare release first",
                 path.display()
             ),
             Self::Uncovered { kind, missing } => write!(
@@ -663,6 +691,15 @@ impl Run<'_> {
             self.samples += 1;
             samples.extend(serde_json::from_str::<Value>(&text).ok());
             self.check_evolve::<A>(kind, path, &event);
+            if event.required_epoch() > A::SUPPORTED_EPOCH {
+                self.failures.push(GoldenFailure::EpochAboveSupported {
+                    aggregate: A::NAME,
+                    kind,
+                    path: path.clone(),
+                    required: event.required_epoch(),
+                    supported: A::SUPPORTED_EPOCH,
+                });
+            }
             match role {
                 Role::Current => self.compare(kind, path, &text, &event),
                 Role::Legacy(target) => {

@@ -130,10 +130,10 @@ its event. Pinned by JC-07, JC-08, JC-16, JC-31; model `ES_I4_globalEventIdentit
 **ES-I5 Command identity**. A repeated `command_id` with the same
 intent digest is answered from its receipt with no new write, even after its streams moved; under
 a different digest it is refused `CommandIdReused`, revealing nothing else; at most one outcome
-commits per command id. A refusal writes a **refusal receipt bound to the stream and revision it
-was decided at** (E3, ADR 0034): a repeat while that stream is still at that revision is answered
-with the recorded refusal; once the stream moved, the repeat is decided afresh, never replayed, and
-its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
+commits per command id. A refusal writes a **refusal receipt bound to every stream the decision
+read, at the revision it read it** (E3, ADR 0034; ADR 0041): a repeat while all of them are still
+there is answered with the recorded refusal; once any moved, the repeat is decided afresh, never
+replayed, and its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
 Pinned by JC-12..JC-14, JC-28, JC-29, JC-29b; model
 `ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`); SW6, SW8;
 `ForgetfulReceiptsJournal`, `IntentBlindReceipts`, `BlindReceiptUpsertJournal`.
@@ -286,8 +286,9 @@ pub struct UnitOfWork {
   (§6.4).
 - A unit with no events is legal only to record an inbox entry (a message that required nothing)
   or a receipt: a zero-event acceptance, or a refusal receipt (E3; it then carries no append and
-  exactly one read, the refused stream at the revision decided at, so a moved stream refuses the
-  receipt: `Malformed(RefusalNotBound)` otherwise); it writes no head. An append with no event is
+  at least one read: the refused stream and every other stream the decision read, each at the
+  revision read, so a moved stream refuses the receipt; `Malformed(RefusalNotBound)` otherwise;
+  ADR 0041); it writes no head. An append with no event is
   `Malformed` (a guard is a read).
 - The receipt's recorded outcome is the `Appended` value: per stream the first and last revision
   and the event ids.

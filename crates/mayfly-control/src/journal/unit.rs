@@ -187,7 +187,7 @@ impl UnitOfWork {
         if holds_nul {
             return Err(MalformedUnit::NulInPayload);
         }
-        if rejection.is_some() && (!self.appends.is_empty() || self.reads.len() != 1) {
+        if rejection.is_some() && (!self.appends.is_empty() || self.reads.is_empty()) {
             return Err(MalformedUnit::RefusalNotBound);
         }
         let mut rows = BTreeSet::new();
@@ -247,7 +247,7 @@ pub enum MalformedUnit {
     InvalidEventType,
     /// A payload, row or refusal holds a NUL, which PostgreSQL refuses (JC-19).
     NulInPayload,
-    /// A refusal receipt with appends, or without exactly one read to bind it to (E3).
+    /// A refusal receipt with appends, or with no read to bind it to (E3, ADR 0041).
     RefusalNotBound,
     /// It writes a projection row twice.
     DuplicateProjectionRow,
@@ -267,7 +267,7 @@ impl fmt::Display for MalformedUnit {
             Self::RevisionOutOfRange => "an expected revision is above the storable maximum",
             Self::InvalidEventType => "an event type is not a snake_case name",
             Self::NulInPayload => "a payload of the unit of work holds a NUL",
-            Self::RefusalNotBound => "a refusal receipt is not bound to exactly one read",
+            Self::RefusalNotBound => "a refusal receipt has appends or no read to bind it to",
             Self::DuplicateProjectionRow => "the unit of work writes a projection row twice",
             Self::ProjectionOutsideUnit => "a projection row belongs to a stream not appended",
             Self::InvalidProjectionKey => "a projection key is empty, long or not printable",
@@ -360,15 +360,22 @@ mod tests {
     #[test]
     fn should_accept_unit_when_it_only_records_a_bound_refusal_receipt() {
         // given
-        let unit = unit()
+        let one = unit()
             .with_read(stream("a-1"), ExpectedRevision::NoStream)
+            .with_receipt(receipt(refused()));
+        let several = unit()
+            .with_read(stream("a-1"), ExpectedRevision::NoStream)
+            .with_read(
+                stream("p-1"),
+                ExpectedRevision::Exactly(StreamRevision::new(3)),
+            )
             .with_receipt(receipt(refused()));
 
         // when
-        let shape = unit.check_shape();
+        let shapes = [one.check_shape(), several.check_shape()];
 
         // then
-        assert_eq!(shape, Ok(()));
+        assert_eq!(shapes, [Ok(()), Ok(())]);
     }
 
     #[test]
@@ -499,13 +506,12 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_unit_when_a_refusal_receipt_is_not_bound_to_one_read() {
+    fn should_refuse_unit_when_a_refusal_receipt_has_no_read_or_an_append() {
         // given
         let units = [
             unit().with_receipt(receipt(refused())),
             appending(vec![event(1)]).with_receipt(receipt(refused())),
-            unit()
-                .with_read(stream("a-1"), ExpectedRevision::NoStream)
+            appending(vec![event(1)])
                 .with_read(stream("a-2"), ExpectedRevision::NoStream)
                 .with_receipt(receipt(refused())),
         ];

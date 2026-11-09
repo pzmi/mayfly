@@ -7,6 +7,8 @@
 //!   refusals included, over accepted and refused cases, and its outcomes and refusal codes
 //!   match its decisions golden (ver §3.1).
 //! - [`journal`]: `MemoryJournal`, the in-memory `Journal` (ver §7.1).
+//! - [`clock`]: `FakeClock`, `SeededRng` and `RecordingNotifier`, fakes for `AggregateStore`'s
+//!   ports (ver §3.2, §3.3).
 //! - [`contracts`]: the port contract suites, starting with the journal's (ver §5).
 //! - [`block_on`](block_on()): drives an async port from a synchronous test.
 //!
@@ -20,6 +22,7 @@
 //! accept.
 
 mod block_on;
+pub mod clock;
 pub mod contracts;
 pub mod determinism;
 pub mod golden;

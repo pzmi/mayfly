@@ -414,6 +414,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-store-sql` | a string literal or `.sql` file under `mayfly-adapter-sqlite/src/` using a form only SQLite has (`INSERT OR …`, `REPLACE INTO`, `AUTOINCREMENT`, `rowid`, `_rowid_`, `oid`, a `json…()` function, `->`/`->>`; `WITHOUT ROWID` allowed): the PostgreSQL adapter would have to fake it (`doc/event-store.md` §4.3 rule 4) | ES-02 |
 | `ARCH-nightly-features` | `#![feature(..)]` (also through `cfg_attr` or inside a macro's tokens) or a macro 2.0 item (`macro name`, `pub macro name`), in any crate: the pinned stable toolchain (ADR 0006) builds them only under `RUSTC_BOOTSTRAP`, which §3.6 refuses | ARCH-03 |
 | `ARCH-exhaustive-transition` | in a `[purity] pure` crate's production code, a catch-all arm (`_`, a bare binding, or `..` among a tuple's elements, also behind a guard or in an or-pattern) of a `match` inside a transition function: `decide`, `evolve`, `step` or a `decide_`/`evolve_`/`step_` helper; wildcards inside a variant's payload are allowed, macros are not read (`event_set!` uses if-chains) | KER-04 |
+| `ARCH-single-append` | in a control-plane or both-planes crate (production and test code), a call of `Journal::append` (a method call `.append(x)` with one by-value, non-literal argument, also inside a macro's tokens, or the path `Journal::append`) outside `save` and `settle` of `AggregateStore` in `mayfly-control`, an `impl Journal` block, the testkit contract suite with its own tests, or a journal adapter's own test code (ADR 0041) | ES-03 |
 | `ARCH-macro-export` | a `#[macro_export]` in a production crate without an `[[exceptions.lints]]` row (`lint = "macro_export"`) citing an ADR: an exported macro's body is checked under its own crate's rules but expands in another (composition's spawn in the CLI); `event_set!` is approved by ADR 0018 | ARCH-02 |
 
 Catalog completeness is part of every run, not a rule id: each rule names at least one
@@ -423,9 +424,9 @@ Rules planned by later tasks, which bind by review until then:
 
 | Rule | What will fail | Task |
 |:--|:--|:--|
-| `ARCH-journal-sql` | SQL naming a store table of `doc/event-store.md` §4.1 (`stream_head`, `journal_event`, `journal_identity`, `event_kind_manifest`, `command_receipt`, `inbox`, …) outside an adapter's store and migration modules; any `UPDATE`/`DELETE` of `journal_event` or `journal_identity` (there is no outbox table, ADR 0034) | ES-03 (ES-02 delivers the SQLite triggers that refuse such statements, JC-27) |
-| `ARCH-migration-frozen` | a released migration whose content hash differs from `migrations.lock` | ES-03 (its card; ES-02 pins schema version 1 by a frozen fixture) |
-| `ARCH-single-append` | a call of `Journal::append` or `Journal::commit` anywhere but `AggregateStore::save`, the `Journal` impls and the testkit contract suite | ES-03 |
+| `ARCH-journal-sql` | SQL naming a store table of `doc/event-store.md` §4.1 (`stream_head`, `journal_event`, `journal_identity`, `event_kind_manifest`, `command_receipt`, `inbox`, …) outside an adapter's store and migration modules; any `UPDATE`/`DELETE` of `journal_event` or `journal_identity` (there is no outbox table, ADR 0034) | ES-03R (ES-02 delivers the SQLite triggers that refuse such statements, JC-27) |
+| `ARCH-migration-frozen` | a released migration whose content hash differs from `migrations.lock` | ES-03R (ES-02 pins schema version 1 by a frozen fixture) |
+| `ARCH-no-global-order` | adapter SQL ordering by `rowid`, a time column or a revision across streams; a store-port method returning events of several streams (`doc/event-store.md` §4.3 rule 1) | ES-03R |
 | `ARCH-log-event-name` | a `tracing` event whose message is not a literal `snake_case` name | RT-04 |
 
 ### 3.4 Fixtures

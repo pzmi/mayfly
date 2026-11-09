@@ -11,11 +11,12 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use mayfly_control::journal::{
-    AppendError, Appended, CommandReceipt, Decision, EventLocation, ExpectedRevision, InboxKey,
-    Journal, Payload, ProjectionName, ProjectionWrite, ReceiptOutcome, RecordedEvent, StorageError,
-    StoredKind, StreamHead, StreamId, StreamRevision, UnitOfWork,
+    AggregateName, AppendError, Appended, CommandReceipt, Decision, EventLocation,
+    ExpectedRevision, InboxKey, Journal, MalformedUnit, NewEvent, Payload, ProjectionName,
+    ProjectionWrite, ReceiptOutcome, RecordedEvent, StorageError, StoredKind, StreamHead, StreamId,
+    StreamRevision, SupportedEpochs, UnitOfWork,
 };
-use mayfly_domain::{CommandId, EventId};
+use mayfly_domain::{CommandId, EventId, Millis};
 use mayfly_testkit::block_on;
 use mayfly_testkit::contracts::journal::{
     InjectedFault, JournalCase, JournalFactory, check_journal_contract, run_journal_contract,
@@ -55,6 +56,10 @@ enum Fault {
     /// replaces its command's receipt without comparing it with the one it judged, so two
     /// re-decisions of a command with a stale refusal receipt both commit (JC-29b).
     BlindReceiptUpsert,
+    /// `OneReadRefusalJournal`: binds a refusal receipt to the lowest of the streams the
+    /// decision read and forgets the others, so a refusal decided over two streams is replayed
+    /// after the other one moved (ADR 0041).
+    OneReadRefusal,
 }
 
 /// Pending once, waking itself: where a broken journal lets another future run.
@@ -256,6 +261,18 @@ impl BrokenJournal {
                 }
                 other => other,
             },
+            Fault::OneReadRefusal => {
+                let mut unit = unit;
+                let refusal = unit
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|r| matches!(r.decision, Decision::Refused { .. }));
+                if refusal {
+                    unit.reads.sort_by(|a, b| a.stream.cmp(&b.stream));
+                    unit.reads.truncate(1);
+                }
+                self.inner.append(unit).await
+            }
             Fault::TornUnit => {
                 if unit.appends.len() < 2 {
                     return self.inner.append(unit).await;
@@ -319,7 +336,8 @@ impl BrokenJournal {
                     return Err(refusal);
                 }
                 YieldOnce(false).await;
-                let bound = unit.reads.first().cloned();
+                let mut bound = unit.reads.clone();
+                bound.sort_by(|a, b| a.stream.cmp(&b.stream));
                 let mut bare = unit;
                 bare.receipt = None;
                 let appended = if bare.appends.is_empty() && bare.inbox.is_none() {
@@ -327,8 +345,8 @@ impl BrokenJournal {
                 } else {
                     self.inner.append(bare).await?
                 };
-                let outcome = match (receipt.decision, bound) {
-                    (Decision::Refused { rejection }, Some(bound)) => {
+                let outcome = match receipt.decision {
+                    Decision::Refused { rejection } if !bound.is_empty() => {
                         ReceiptOutcome::Refused { bound, rejection }
                     }
                     _ => ReceiptOutcome::Accepted(appended.clone()),
@@ -665,6 +683,64 @@ fn should_fail_unit_visible_at_once_when_journal_shows_a_unit_in_parts() {
             JournalCase::CrashAtomicity,
             JournalCase::UnitVisibleAtOnce
         ]
+    );
+}
+
+#[test]
+fn should_fail_refusal_receipts_when_journal_binds_a_refusal_to_one_read() {
+    // given
+    let fault = Fault::OneReadRefusal;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(failed, [JournalCase::RefusalReceipts]);
+}
+
+#[test]
+fn should_report_refusal_before_injected_fault_when_memory_judges_a_unit() {
+    // given
+    let journal = MemoryJournal::new();
+    let s1 = StreamId::new("attempt-1").unwrap_or_else(|e| panic!("{e}"));
+    let attempt = AggregateName::new("attempt").unwrap_or_else(|e| panic!("{e}"));
+    let unit = |id: u128| {
+        UnitOfWork::new(
+            Millis::new(1),
+            SupportedEpochs::new().with(attempt.clone(), 1),
+        )
+        .with_append(
+            s1.clone(),
+            attempt.clone(),
+            ExpectedRevision::NoStream,
+            vec![NewEvent {
+                event_id: EventId::from_u128(id),
+                kind: StoredKind {
+                    event_type: "contract_fact".to_owned(),
+                    schema_version: 1,
+                },
+                required_epoch: 1,
+                payload: Payload::new("{}"),
+            }],
+        )
+    };
+    let mut malformed = unit(1);
+    malformed.appends[0].events.clear();
+
+    // when
+    let armed = journal.inject(InjectedFault::Busy);
+    let refused = block_on(journal.append(malformed));
+    let next = block_on(journal.append(unit(1)));
+
+    // then
+    assert!(armed);
+    assert_eq!(
+        refused,
+        Err(AppendError::Malformed(MalformedUnit::EmptyAppend))
+    );
+    assert!(
+        next.is_ok(),
+        "the fault was consumed by the refused unit: {next:?}"
     );
 }
 

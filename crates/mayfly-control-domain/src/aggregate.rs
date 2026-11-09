@@ -3,12 +3,21 @@
 
 use std::fmt::Debug;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::command::Command;
 use crate::event::EventSet;
 
 /// Why `decide` refused a command. Each aggregate has its own refusal type; `code` is the
 /// stable `snake_case` name a command receipt and the operator see.
-pub trait Rejection: Clone + Debug + PartialEq {
+///
+/// A refusal is recorded in a refusal receipt (ADR 0034, E3) as its serde form and answers a
+/// repeat at the same revisions from there, so it serialises and deserialises; it carries codes
+/// and ids only, never free text (ES-I13). The control plane's `AggregateStore` pins the round
+/// trip for every refused determinism case of the registry (`mayfly-control`'s
+/// `should_round_trip_every_refusal_when_registry_cases_are_encoded`).
+pub trait Rejection: Clone + Debug + PartialEq + Serialize + DeserializeOwned {
     /// Every code [`Rejection::code`] can return. The determinism harness refuses a case whose
     /// refusal code is not listed and a listed code that no refused case returns, and pins the
     /// codes and outcomes in the aggregate's decisions golden, so a renamed code shows in review
@@ -22,6 +31,25 @@ pub trait Rejection: Clone + Debug + PartialEq {
     fn code(&self) -> &'static str;
 }
 
+/// An aggregate's command body: what a command asks, with its stable type name and the
+/// canonical form its intent digest is computed from (`doc/event-store.md` §3.7 step 4).
+///
+/// `command_type` names the body's variant as a `snake_case` name recorded in the command
+/// receipt; `TYPES` lists every name it can return. The determinism harness refuses a case whose
+/// type is not listed, a listed type no case decides and a malformed list
+/// (`mayfly_testkit::determinism`, pinned by its `should_fail_when_command_type_is_not_declared`,
+/// `should_fail_when_a_declared_command_type_has_no_case` and
+/// `should_fail_when_command_types_are_malformed`). The serde form is the canonical intent
+/// encoding: `AggregateStore` hashes it, so a body type that does not serialise cannot be
+/// stored at all.
+pub trait CommandBody: Clone + Debug + Serialize {
+    /// Every name [`CommandBody::command_type`] can return.
+    const TYPES: &'static [&'static str];
+
+    /// The body's type, a fixed `snake_case` name, never formatted from data.
+    fn command_type(&self) -> &'static str;
+}
+
 /// One event-sourced aggregate: a pure decision function over a state folded from its events.
 ///
 /// Implementations read no clock, mint no id, draw no randomness and log nothing: time and
@@ -30,10 +58,17 @@ pub trait Rejection: Clone + Debug + PartialEq {
 pub trait Aggregate {
     /// The stream prefix (`attempt`, `host`, …): streams are named `<NAME>-<id>` (plan §5.1).
     const NAME: &'static str;
+    /// The highest stream epoch this build decides for the aggregate (`doc/event-store.md`
+    /// §6.2, ES-I12): the journal refuses an append to a stream holding an event that needs
+    /// more, and a batch whose events need more. Raised by a **prepare** release that reads a
+    /// new event or field before an **activate** release writes it (§6.1). The golden harness
+    /// fails a sample that needs more than this (`mayfly_testkit::golden`, pinned by its
+    /// `should_fail_when_a_sample_needs_more_than_the_aggregate_supports`).
+    const SUPPORTED_EPOCH: u32 = 1;
     /// The folded state.
     type State: Clone + Debug + PartialEq;
     /// The aggregate's command bodies.
-    type Body: Clone + Debug;
+    type Body: CommandBody;
     /// The aggregate's events, declared with [`crate::event_set!`].
     type Event: EventSet;
     /// The aggregate's refusals.

@@ -343,7 +343,9 @@ pub struct EventLocation {
 
 /// The canonical digest of a command's body (`doc/event-store.md` §3.1): what tells a repeat of
 /// a command id from a reuse of it with another intent (ES-I5). Computed by `AggregateStore`
-/// (ES-03); the journal only compares it.
+/// (`mayfly_control::store::intent_digest`) over the aggregate, the command type, the target
+/// stream and the canonical body, so two commands that differ in any of them differ here; the
+/// journal only compares digests, never the stored `command_type` beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IntentDigest([u8; 32]);
 
@@ -443,8 +445,10 @@ impl SupportedEpochs {
 pub enum Decision {
     /// `decide` accepted it: the unit's appends (possibly none) are its events.
     Accepted,
-    /// `decide` refused it. The unit carries no append and exactly one read, the stream and
-    /// revision it was decided at, which the refusal receipt is bound to (E3, ADR 0034).
+    /// `decide` refused it. The unit carries no append and at least one read: every stream
+    /// the decision read, at the revision it read it (the refused stream itself, and any other
+    /// a decision read, `doc/event-store.md` §3.2), which the refusal receipt is bound to
+    /// (E3, ADR 0034, amended by ADR 0041).
     Refused {
         /// The encoded refusal (codes and ids, never free text): what a repeat at the same
         /// revision is answered with.
@@ -470,11 +474,18 @@ pub struct NewReceipt {
 pub enum ReceiptOutcome {
     /// Accepted, with what its unit appended; answers every repeat for ever.
     Accepted(crate::journal::Appended),
-    /// Refused while `bound` held; answers a repeat only while the stream is still there. Once
-    /// it moved, the command is decided afresh and its outcome replaces this receipt (E3).
+    /// Refused while `bound` held; answers a repeat only while **every** bound stream is still
+    /// where the decision read it. Once any of them moved, the command is decided afresh and its
+    /// outcome replaces this receipt (E3; ADR 0041: a decision may read several streams, and a
+    /// refusal replayed after one of them moved would be stale).
+    ///
+    /// Pinned by: `crates/mayfly-testkit/src/contracts/journal.rs::refusal_over_two_reads` (JC-28),
+    /// which `OneReadRefusalJournal` fails
+    /// (`crates/mayfly-testkit/tests/journal_contract.rs::should_fail_refusal_receipts_when_journal_binds_a_refusal_to_one_read`).
     Refused {
-        /// The stream and revision the refusal was decided at.
-        bound: ReadCondition,
+        /// The streams and revisions the refusal was decided at, one per stream, in `StreamId`
+        /// order whatever order the unit named them in.
+        bound: Vec<ReadCondition>,
         /// The encoded refusal.
         rejection: Payload,
     },

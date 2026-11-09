@@ -204,6 +204,9 @@ rules! {
     StoreSql => "ARCH-store-sql", "ES-02",
         "A string literal or .sql file under mayfly-adapter-sqlite's src/ uses a form only SQLite has: INSERT OR ..., REPLACE INTO, AUTOINCREMENT, rowid, _rowid_, oid, a json...() function or the -> and ->> operators (WITHOUT ROWID is allowed): the PostgreSQL adapter would have to fake it (doc/event-store.md section 4.3).",
         ["store-sql-insert-or-ignore"];
+    SingleAppend => "ARCH-single-append", "ES-03",
+        "A control-plane or both-planes crate calls Journal::append (`.append(x)` with a by-value, non-literal argument, also in macro tokens, or the path Journal::append) outside AggregateStore's save and settle in mayfly-control, an impl Journal block, the testkit contract suite or an adapter's own test code.",
+        ["second-append-caller"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

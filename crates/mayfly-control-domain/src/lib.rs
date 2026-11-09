@@ -19,8 +19,8 @@ mod registry;
 pub mod shape;
 
 pub use aggregate::{
-    Aggregate, AggregateRegistry, AggregateVisitor, DeterminismCase, DeterminismCases, Expect,
-    Rejection, replay,
+    Aggregate, AggregateRegistry, AggregateVisitor, CommandBody, DeterminismCase, DeterminismCases,
+    Expect, Rejection, replay,
 };
 pub use command::{Actor, Command};
 pub use event::{DecodeError, DomainEvent, EventKind, EventSet};

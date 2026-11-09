@@ -29,6 +29,7 @@
 mod collect;
 mod flow;
 mod paths;
+mod rules_append;
 mod rules_clippy;
 mod rules_cqrs;
 mod rules_events;
@@ -447,6 +448,7 @@ pub fn check(
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(rules_transition::check(facts, policy));
         out.extend(rules_store::check(root, facts));
+        out.extend(rules_append::check(facts, policy));
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));

@@ -10,10 +10,10 @@ use mayfly_testkit::determinism::{
 use tempfile::TempDir;
 
 use crate::support::{
-    DOOR_DECISIONS, Doors, DoorsAndConfused, DoorsAndDrifting, DoorsAndEcho, DoorsAndFlaky,
-    DoorsAndForgetful, DoorsAndGarbled, DoorsAndGrudging, DoorsAndMoody, DoorsAndMuted,
-    DoorsAndOptimist, DoorsAndSilent, DoorsAndTaciturn, DoorsAndTally, DoorsAndVeiled,
-    DoorsAndWordy, DoorsTwice, NoAggregates,
+    DOOR_DECISIONS, Doors, DoorsAndBoastful, DoorsAndConfused, DoorsAndDrifting, DoorsAndEcho,
+    DoorsAndFlaky, DoorsAndForgetful, DoorsAndGarbled, DoorsAndGrudging, DoorsAndMangled,
+    DoorsAndMoody, DoorsAndMuted, DoorsAndOptimist, DoorsAndSilent, DoorsAndTaciturn,
+    DoorsAndTally, DoorsAndUnlisted, DoorsAndVeiled, DoorsAndWordy, DoorsTwice, NoAggregates,
 };
 
 /// A decisions directory holding `files` (name, content).
@@ -338,6 +338,80 @@ fn should_fail_when_refusal_codes_are_malformed_or_repeated() {
 }
 
 #[test]
+fn should_fail_when_command_type_is_not_declared() {
+    // given
+    let root = decisions();
+    // when
+    let failures = verify::<DoorsAndUnlisted>(root.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![
+            DeterminismFailure::UndeclaredCommandType {
+                aggregate: "unlisted_door",
+                case: "close_open_door",
+                command_type: "close"
+            },
+            DeterminismFailure::UndeclaredCommandType {
+                aggregate: "unlisted_door",
+                case: "close_closed_door",
+                command_type: "close"
+            },
+        ]
+    );
+}
+
+#[test]
+fn should_fail_when_a_declared_command_type_has_no_case() {
+    // given
+    let root = decisions_with(&[
+        ("door.txt", DOOR_DECISIONS),
+        (
+            "boastful_door.txt",
+            &DOOR_DECISIONS.replacen("# door:", "# boastful_door:", 1),
+        ),
+    ]);
+    // when
+    let failures = verify::<DoorsAndBoastful>(root.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![DeterminismFailure::UncoveredCommandType {
+            aggregate: "boastful_door",
+            command_type: "slam"
+        }]
+    );
+}
+
+#[test]
+fn should_fail_when_command_types_are_malformed() {
+    // given
+    let root = decisions_with(&[
+        ("door.txt", DOOR_DECISIONS),
+        (
+            "mangled_door.txt",
+            &DOOR_DECISIONS.replacen("# door:", "# mangled_door:", 1),
+        ),
+    ]);
+    // when
+    let failures = verify::<DoorsAndMangled>(root.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![
+            DeterminismFailure::InvalidCommandTypes {
+                aggregate: "mangled_door",
+                detail: "has \"Open\", which is not [a-z][a-z0-9_]*".to_owned()
+            },
+            DeterminismFailure::InvalidCommandTypes {
+                aggregate: "mangled_door",
+                detail: "lists close twice".to_owned()
+            },
+        ]
+    );
+}
+
+#[test]
 fn should_fail_when_aggregate_is_registered_twice() {
     // given
     let root = decisions();
@@ -520,12 +594,28 @@ fn should_name_what_to_fix_when_each_failure_is_displayed() {
             error: "denied".to_owned(),
         },
         DeterminismFailure::UnregisteredDecisions { path },
+        DeterminismFailure::InvalidCommandTypes {
+            aggregate: "door",
+            detail: "lists open twice".to_owned(),
+        },
+        DeterminismFailure::UndeclaredCommandType {
+            aggregate: "door",
+            case: "slam_door",
+            command_type: "slam",
+        },
+        DeterminismFailure::UncoveredCommandType {
+            aggregate: "door",
+            command_type: "lock",
+        },
     ]);
     // when
     let report = failures.to_string();
     // then
     for expected in [
-        "9 determinism failure(s)",
+        "12 determinism failure(s)",
+        "door: CommandBody::TYPES lists open twice",
+        "door/slam_door: command type slam is not in CommandBody::TYPES",
+        "door: no case decides command type lock",
         "door: no refused case returns code jammed",
         "door: no determinism case has a history",
         "door: Rejection::CODES lists x twice",

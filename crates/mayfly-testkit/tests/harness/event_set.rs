@@ -124,7 +124,7 @@ fn should_expose_stable_codes_when_rejections_are_named() {
 #[test]
 fn should_decide_from_command_alone_when_aggregate_has_no_state() {
     // given
-    let command = crate::support::command(());
+    let command = crate::support::command(crate::support::Nothing);
     // when
     let events = Gate::decide(&Gate::initial(), command);
     // then

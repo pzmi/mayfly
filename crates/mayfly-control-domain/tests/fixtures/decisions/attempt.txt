@@ -93,3 +93,5 @@ case unknown_left_by_inventory accepted
 case verification_prepares accepted
   guest_verified/v1 {"nonce_ref":"0000000000000000000000000000d003","facts":{"os":"macos","uptime":30000}}
   attempt_prepared/v1 {}
+case withdraw_retirement_when_github_says_busy accepted
+  retirement_withdrawn/v1 {}

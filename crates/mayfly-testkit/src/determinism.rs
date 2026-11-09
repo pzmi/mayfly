@@ -9,7 +9,10 @@
 //! results, each event's encoded bytes ([`crate::golden::encode`]) and the refusal's
 //! `Rejection::code()`. The result must match the declared outcome, a refusal's code must be in
 //! `Rejection::CODES`, and every code listed there must be returned by some refused case, so
-//! each one is pinned in the decisions golden below.
+//! each one is pinned in the decisions golden below. Likewise each case's command type must be
+//! in `CommandBody::TYPES`, every type listed there must be decided by some case, and the list
+//! must hold unique `snake_case` names: the type is what a command receipt records and the
+//! intent digest covers (`doc/event-store.md` §3.7), so every one is exercised.
 //!
 //! Each aggregate's codes and case outcomes are also pinned in a decisions golden,
 //! `<root>/<aggregate>.txt` (for the control plane, `crates/mayfly-control-domain/tests/
@@ -29,8 +32,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mayfly_control_domain::{
-    Aggregate, AggregateRegistry, AggregateVisitor, DeterminismCase, DeterminismCases, EventKind,
-    EventSet, Expect, Rejection, replay,
+    Aggregate, AggregateRegistry, AggregateVisitor, CommandBody, DeterminismCase, DeterminismCases,
+    EventKind, EventSet, Expect, Rejection, replay,
 };
 
 use crate::golden;
@@ -64,6 +67,29 @@ pub enum DeterminismFailure {
         aggregate: &'static str,
         /// What is wrong.
         detail: String,
+    },
+    /// `CommandBody::TYPES` has a type that is not `[a-z][a-z0-9_]*`, or one twice.
+    InvalidCommandTypes {
+        /// The aggregate.
+        aggregate: &'static str,
+        /// What is wrong.
+        detail: String,
+    },
+    /// A case's command type is not in `CommandBody::TYPES`.
+    UndeclaredCommandType {
+        /// The aggregate.
+        aggregate: &'static str,
+        /// The case.
+        case: &'static str,
+        /// The type.
+        command_type: &'static str,
+    },
+    /// A type in `CommandBody::TYPES` that no case decides.
+    UncoveredCommandType {
+        /// The aggregate.
+        aggregate: &'static str,
+        /// The type.
+        command_type: &'static str,
     },
     /// Two cases of one aggregate share a name.
     DuplicateCase {
@@ -183,6 +209,25 @@ impl fmt::Display for DeterminismFailure {
             Self::InvalidCodes { aggregate, detail } => {
                 write!(f, "{aggregate}: Rejection::CODES {detail}")
             }
+            Self::InvalidCommandTypes { aggregate, detail } => {
+                write!(f, "{aggregate}: CommandBody::TYPES {detail}")
+            }
+            Self::UndeclaredCommandType {
+                aggregate,
+                case,
+                command_type,
+            } => write!(
+                f,
+                "{aggregate}/{case}: command type {command_type} is not in CommandBody::TYPES"
+            ),
+            Self::UncoveredCommandType {
+                aggregate,
+                command_type,
+            } => write!(
+                f,
+                "{aggregate}: no case decides command type {command_type}; add a determinism \
+                 case that does"
+            ),
             Self::DuplicateCase { aggregate, case } => {
                 write!(f, "{aggregate}: case {case} is declared twice")
             }
@@ -424,8 +469,11 @@ impl AggregateVisitor for Run<'_> {
         }
         let codes = <A::Rejection as Rejection>::CODES;
         self.check_codes(aggregate, codes);
+        let types = <A::Body as CommandBody>::TYPES;
+        self.check_types(aggregate, types);
         let mut outcomes = BTreeMap::new();
         let mut refused = BTreeSet::new();
+        let mut decided = BTreeSet::new();
         for case in cases {
             self.cases += 1;
             let name = case.name;
@@ -436,6 +484,17 @@ impl AggregateVisitor for Run<'_> {
                 });
                 continue;
             }
+            let command_type = case.command.body.command_type();
+            if !types.contains(&command_type) {
+                self.failures
+                    .push(DeterminismFailure::UndeclaredCommandType {
+                        aggregate,
+                        case: name,
+                        command_type,
+                    });
+                continue;
+            }
+            decided.insert(command_type);
             match check_case::<A>(case) {
                 Ok(outcome) => {
                     refused.extend(outcome.code);
@@ -450,6 +509,13 @@ impl AggregateVisitor for Run<'_> {
             for code in codes.iter().filter(|code| !refused.contains(*code)) {
                 self.failures
                     .push(DeterminismFailure::UncoveredCode { aggregate, code });
+            }
+            for command_type in types.iter().filter(|t| !decided.contains(*t)) {
+                self.failures
+                    .push(DeterminismFailure::UncoveredCommandType {
+                        aggregate,
+                        command_type,
+                    });
             }
         }
         if self.failures.len() == before {
@@ -471,6 +537,21 @@ impl Run<'_> {
             };
             self.failures
                 .push(DeterminismFailure::InvalidCodes { aggregate, detail });
+        }
+    }
+
+    fn check_types(&mut self, aggregate: &'static str, types: &[&'static str]) {
+        let mut seen = BTreeSet::new();
+        for command_type in types {
+            let detail = if !valid_code(command_type) {
+                format!("has {command_type:?}, which is not [a-z][a-z0-9_]*")
+            } else if !seen.insert(*command_type) {
+                format!("lists {command_type} twice")
+            } else {
+                continue;
+            };
+            self.failures
+                .push(DeterminismFailure::InvalidCommandTypes { aggregate, detail });
         }
     }
 

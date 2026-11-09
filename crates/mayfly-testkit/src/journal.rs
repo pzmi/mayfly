@@ -55,9 +55,9 @@ impl State {
             }
             let answers = match &stored.outcome {
                 ReceiptOutcome::Accepted(_) => true,
-                ReceiptOutcome::Refused { bound, .. } => {
-                    bound.expected.matches(self.revision(&bound.stream))
-                }
+                ReceiptOutcome::Refused { bound, .. } => bound
+                    .iter()
+                    .all(|read| read.expected.matches(self.revision(&read.stream))),
             };
             if answers {
                 return Some(AppendError::CommandReplayed(Box::new(stored.clone())));
@@ -179,14 +179,11 @@ impl State {
         if let Some(receipt) = unit.receipt {
             let outcome = match receipt.decision {
                 Decision::Accepted => ReceiptOutcome::Accepted(appended.clone()),
-                Decision::Refused { rejection } => ReceiptOutcome::Refused {
-                    bound: unit
-                        .reads
-                        .into_iter()
-                        .next()
-                        .ok_or(AppendError::Storage(StorageError::new("refusal_unbound")))?,
-                    rejection,
-                },
+                Decision::Refused { rejection } => {
+                    let mut bound = unit.reads;
+                    bound.sort_by(|a, b| a.stream.cmp(&b.stream));
+                    ReceiptOutcome::Refused { bound, rejection }
+                }
             };
             next.receipts.insert(
                 receipt.command_id,
@@ -266,9 +263,13 @@ impl MemoryJournal {
         f(&self.lock().state)
     }
 
+    /// Judges `unit` first and only then lets an armed fault strike, so a refusal is reported
+    /// ahead of the store's own `Busy` and `Storage`, as the reporting order says (JC-09); the
+    /// fault is consumed either way.
     fn commit(&self, unit: UnitOfWork) -> Result<Appended, AppendError> {
         let mut shared = self.lock();
         let fault = shared.fault.take();
+        let (next, appended) = shared.state.after(unit)?;
         match fault {
             Some(InjectedFault::StorageBeforeCommit | InjectedFault::CrashAfterStatement(0)) => {
                 return Err(AppendError::Storage(StorageError::new("injected_failure")));
@@ -276,7 +277,6 @@ impl MemoryJournal {
             Some(InjectedFault::Busy) => return Err(AppendError::Busy),
             _ => {}
         }
-        let (next, appended) = shared.state.after(unit)?;
         let lost = AppendError::OutcomeUnknown(StorageError::new("injected_lost_reply"));
         match fault {
             Some(InjectedFault::ReplyLostBeforeCommit) => Err(lost),

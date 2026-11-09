@@ -288,16 +288,18 @@ impl<H: StoreHooks> Tx<'_, H> {
             ReceiptOutcome::Accepted(_) => return Err(answers(stored.receipt)),
             ReceiptOutcome::Refused { bound, .. } => bound.clone(),
         };
-        let at = match heads.get(&bound.stream) {
-            Some(head) => head.as_ref().map(|h| h.revision),
-            None => self
-                .read(|c| rows::head(c, &bound.stream))?
-                .map(|h| h.revision),
-        };
-        if bound.expected.matches(at) {
-            return Err(answers(stored.receipt));
+        for read in &bound {
+            let at = match heads.get(&read.stream) {
+                Some(head) => head.as_ref().map(|h| h.revision),
+                None => self
+                    .read(|c| rows::head(c, &read.stream))?
+                    .map(|h| h.revision),
+            };
+            if !read.expected.matches(at) {
+                return Ok(stored.outcome_text);
+            }
         }
-        Ok(stored.outcome_text)
+        Err(answers(stored.receipt))
     }
 
     /// The writes, in lock order.
@@ -355,12 +357,19 @@ impl<H: StoreHooks> Tx<'_, H> {
         if let Some(new) = &unit.receipt {
             let outcome = match &new.decision {
                 Decision::Accepted => ReceiptOutcome::Accepted(appended.clone()),
-                Decision::Refused { rejection } => ReceiptOutcome::Refused {
-                    bound: unit.reads.first().cloned().ok_or(Stop::Refused(
-                        AppendError::Storage(StorageError::new("refusal_unbound")),
-                    ))?,
-                    rejection: rejection.clone(),
-                },
+                Decision::Refused { rejection } => {
+                    let mut bound = unit.reads.clone();
+                    bound.sort_by(|a, b| a.stream.cmp(&b.stream));
+                    if bound.is_empty() {
+                        return Err(Stop::Refused(AppendError::Storage(StorageError::new(
+                            "refusal_unbound",
+                        ))));
+                    }
+                    ReceiptOutcome::Refused {
+                        bound,
+                        rejection: rejection.clone(),
+                    }
+                }
             };
             let text = rows::encode_outcome(&outcome);
             let id = new.command_id.to_string();

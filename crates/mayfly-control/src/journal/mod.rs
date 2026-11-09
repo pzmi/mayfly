@@ -101,6 +101,21 @@ pub const MAX_PAGE: u32 = 1_000;
 ///
 /// **Time.** The journal reads no clock: `recorded_at` comes in the unit (ADR 0020) and
 /// nothing orders or decides by it.
+///
+/// Pinned by: `crates/mayfly-testkit/src/contracts/journal.rs`, one function per case, run on
+/// memory by `crates/mayfly-testkit/tests/journal_contract.rs::should_pass_journal_contract_when_journal_is_in_memory`
+/// and on SQLite by `crates/mayfly-adapter-sqlite/tests/journal_contract.rs`: JC-01
+/// `absent_stream`, JC-02 `consecutive_revisions`, JC-03 `continues_from_head`, JC-04
+/// `stale_expected_revision`, JC-05 `ahead_expected_revision`, JC-06 `no_stream_mismatch`, JC-07
+/// `duplicate_event_id`, JC-08 `malformed_unit`, JC-09 `refusal_order`, JC-10
+/// `multi_stream_all_or_nothing`, JC-11 `read_conditions`, JC-12 `receipt_replay`, JC-13
+/// `command_id_reused`, JC-14 `store_refusal_leaves_no_receipt`, JC-15 `inbox_dedupe`, JC-16
+/// `lookup_event`, JC-17 `kind_manifest`, JC-18 `epochs_case`, JC-19 `payload_round_trip`, JC-20
+/// `streams_enumeration`, JC-21 `racing_handles`, JC-22 `independent_streams`, JC-23
+/// `crash_atomicity`, JC-24 `survives_reopen`, JC-25 `outcome_unknown`, JC-28
+/// `refusal_receipts` (with `refusal_over_two_reads`, ADR 0041), JC-29 `racing_command_ids`,
+/// JC-29b `racing_stale_refusal`, JC-30 `racing_inbox_keys`, JC-31 `racing_event_ids`, JC-32
+/// `unit_visible_at_once`.
 pub trait Journal: Send + Sync {
     /// Commits `unit` atomically and returns what it appended.
     ///

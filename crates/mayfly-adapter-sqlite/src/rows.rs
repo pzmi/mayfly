@@ -5,7 +5,8 @@
 //! rule 6), payloads `TEXT` returned byte for byte. A receipt's outcome is a small JSON document
 //! this module alone writes and reads (§4.1 `command_receipt.outcome`):
 //! `{"accepted":[{"stream":…,"first":…,"last":…,"events":[…]}]}` or
-//! `{"refused":{"stream":…,"expected":null|n,"rejection":…}}`. The engine never parses it: no
+//! `{"refused":{"bound":[{"stream":…,"expected":null|n},…],"rejection":…}}` (the bound reads
+//! in `StreamId` order, ADR 0041). The engine never parses it: no
 //! JSON function of either engine is on a correctness path (§4.3 rule 4).
 
 use mayfly_control::journal::{
@@ -325,11 +326,13 @@ pub(crate) fn encode_outcome(outcome: &ReceiptOutcome) -> String {
         }),
         ReceiptOutcome::Refused { bound, rejection } => json!({
             "refused": {
-                "stream": bound.stream.as_str(),
-                "expected": match bound.expected {
-                    ExpectedRevision::NoStream => Value::Null,
-                    ExpectedRevision::Exactly(r) => json!(r.get()),
-                },
+                "bound": bound.iter().map(|read| json!({
+                    "stream": read.stream.as_str(),
+                    "expected": match read.expected {
+                        ExpectedRevision::NoStream => Value::Null,
+                        ExpectedRevision::Exactly(r) => json!(r.get()),
+                    },
+                })).collect::<Vec<_>>(),
                 "rejection": rejection.as_str(),
             }
         }),
@@ -361,15 +364,26 @@ pub(crate) fn decode_outcome(text: &str) -> Option<ReceiptOutcome> {
         return Some(ReceiptOutcome::Accepted(Appended { streams }));
     }
     let refused = value.get("refused")?;
-    let expected = match refused.get("expected")? {
-        Value::Null => ExpectedRevision::NoStream,
-        n => ExpectedRevision::Exactly(StreamRevision::new(n.as_u64()?)),
-    };
+    let bound = refused
+        .get("bound")?
+        .as_array()?
+        .iter()
+        .map(|read| {
+            let expected = match read.get("expected")? {
+                Value::Null => ExpectedRevision::NoStream,
+                n => ExpectedRevision::Exactly(StreamRevision::new(n.as_u64()?)),
+            };
+            Some(ReadCondition {
+                stream: StreamId::new(read.get("stream")?.as_str()?).ok()?,
+                expected,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if bound.is_empty() {
+        return None;
+    }
     Some(ReceiptOutcome::Refused {
-        bound: ReadCondition {
-            stream: StreamId::new(refused.get("stream")?.as_str()?).ok()?,
-            expected,
-        },
+        bound,
         rejection: Payload::new(refused.get("rejection")?.as_str()?),
     })
 }
@@ -396,17 +410,23 @@ mod tests {
                 }],
             }),
             ReceiptOutcome::Refused {
-                bound: ReadCondition {
+                bound: vec![ReadCondition {
                     stream: stream("pool-1"),
                     expected: ExpectedRevision::NoStream,
-                },
+                }],
                 rejection: Payload::new("{\"code\":\"zażółć\\\"\"}"),
             },
             ReceiptOutcome::Refused {
-                bound: ReadCondition {
-                    stream: stream("pool-1"),
-                    expected: ExpectedRevision::Exactly(StreamRevision::MAX),
-                },
+                bound: vec![
+                    ReadCondition {
+                        stream: stream("attempt-1"),
+                        expected: ExpectedRevision::Exactly(StreamRevision::new(2)),
+                    },
+                    ReadCondition {
+                        stream: stream("pool-1"),
+                        expected: ExpectedRevision::Exactly(StreamRevision::MAX),
+                    },
+                ],
                 rejection: Payload::new(""),
             },
         ];
@@ -432,8 +452,10 @@ mod tests {
             "{\"accepted\":{}}",
             "{\"accepted\":[{\"stream\":\"Bad\",\"first\":0,\"last\":0,\"events\":[]}]}",
             "{\"accepted\":[{\"stream\":\"a-1\",\"first\":0,\"last\":0,\"events\":[\"x\"]}]}",
-            "{\"refused\":{\"stream\":\"a-1\",\"expected\":-1,\"rejection\":\"\"}}",
-            "{\"refused\":{\"stream\":\"a-1\",\"expected\":null}}",
+            "{\"refused\":{\"bound\":[{\"stream\":\"a-1\",\"expected\":-1}],\"rejection\":\"\"}}",
+            "{\"refused\":{\"bound\":[{\"stream\":\"a-1\",\"expected\":null}]}}",
+            "{\"refused\":{\"bound\":[],\"rejection\":\"\"}}",
+            "{\"refused\":{\"stream\":\"a-1\",\"expected\":null,\"rejection\":\"\"}}",
         ];
 
         // when
