@@ -164,5 +164,7 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
 ## Public repository
 
 Never commit secrets, tokens, JIT configs, private keys, credentials, internal hostnames,
-private-repo content or personal paths. Fixtures (GitHub recordings, Tart JSON, configs) are
+private-repo content or personal paths. **Never name a private project** of the owner's anywhere
+(code, docs, ADRs, fixtures, commit messages): no name, no path, and no hint that a design came
+from elsewhere; every design is described as mayfly's own, on its own merits. Fixtures (GitHub recordings, Tart JSON, configs) are
 redacted or synthetic.
