@@ -326,6 +326,11 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-control-domain"
 version = "0.1.0"
+dependencies = [
+ "mayfly-domain",
+ "mayfly-testkit",
+ "serde",
+]
 
 [[package]]
 name = "mayfly-data"
@@ -362,6 +367,13 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-testkit"
 version = "0.1.0"
+dependencies = [
+ "mayfly-control-domain",
+ "mayfly-domain",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "memchr"

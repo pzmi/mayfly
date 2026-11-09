@@ -5,3 +5,4 @@ This directory holds the decisions behind mayfly, one file per decision, in Mich
 | ADR | Title | Status |
 |---|---|---|
 | [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Proposed |
+| [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Proposed |

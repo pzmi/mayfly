@@ -10,3 +10,10 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+mayfly-testkit = { path = "../mayfly-testkit" }
