@@ -103,7 +103,13 @@ for station in process.sequence_after(plan):
 ## Dispatch
 
 Inline: intake, plan, qa, ship, babysit. Subagent (fresh context, one station, structured
-output): implement, test, polish, review. Each subagent's prompt tells it to read `CLAUDE.md`
+output): implement, test, polish, review.
+
+**When the Agent tool is not available** (a task agent started by `/orchestrate` usually cannot
+spawn subagents): run implement, test and polish inline; for review, do a separate, deliberate
+pass that re-reads the diff against `.claude/skills/review/SKILL.md` as if it were someone
+else's, and write `review.json` with `"mode": "inline-no-agent"`. Say so in the report: the
+orchestrator then runs an independent `/review` over the commit before or right after landing. Each subagent's prompt tells it to read `CLAUDE.md`
 and its station file and to follow the station's Prompt section. A subagent crash counts as a
 failed sensor. Subagents work in the same directory (the worktree, if one was given) with the
 same `CARGO_TARGET_DIR`.
