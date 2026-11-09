@@ -73,6 +73,16 @@ pub const BOUNDED: &[Bound] = &[
         step: "activationStep",
         steps: 8,
     },
+    Bound {
+        file: "link.qnt",
+        step: "step",
+        steps: 10,
+    },
+    Bound {
+        file: "link.qnt",
+        step: "implStep",
+        steps: 8,
+    },
 ];
 
 /// Seeds of the multi-seed simulation, derived from one printed base seed.

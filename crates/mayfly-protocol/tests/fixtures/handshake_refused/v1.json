@@ -1,0 +1,20 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "handshake_refused": {
+      "reason": {
+        "unsupported_version": {
+          "supported": [
+            {
+              "major": 1,
+              "minor": 0
+            }
+          ]
+        }
+      }
+    }
+  }
+}

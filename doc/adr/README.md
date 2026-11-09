@@ -91,3 +91,4 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0039](0039-clones-only-from-local-service-owned-image-bases.md) | Clones only from local service-owned image bases | Accepted |
 | [0040](0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool at organisation scope | Accepted |
 | [0041](0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | AggregateStore: one write path, intent digests and refusals bound to every read | Proposed |
+| [0042](0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered Unknown, never refused | Proposed |

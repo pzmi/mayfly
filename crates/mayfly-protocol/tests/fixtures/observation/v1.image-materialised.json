@@ -1,0 +1,26 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": {
+        "directive_id": "000000000000000000000000000000d1",
+        "attempt": {
+          "attempt_id": "0000000000000000000000000a11ce01",
+          "generation": 1
+        }
+      },
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "image_materialised": {
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "base_name": "mfb-0123abcd-2-330-0"
+        }
+      }
+    }
+  }
+}

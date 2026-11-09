@@ -1,0 +1,23 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "hello": {
+      "host_id": "host0",
+      "boot_id": "6f1c2a9e-boot",
+      "dp_version": "0.1.0",
+      "supported": [
+        {
+          "major": 1,
+          "minor": 0
+        }
+      ],
+      "capabilities": [
+        "shim"
+      ],
+      "epoch_floor": 6
+    }
+  }
+}

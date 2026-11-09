@@ -1,0 +1,29 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": {
+        "directive_id": "000000000000000000000000000000d1",
+        "attempt": {
+          "attempt_id": "0000000000000000000000000a11ce01",
+          "generation": 1
+        }
+      },
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "host_facts": {
+          "disk_free_bytes": 343597383680,
+          "disk_low_water": false,
+          "woke": true,
+          "tart_version": "2.30.0",
+          "external_guests": 1
+        }
+      }
+    }
+  }
+}

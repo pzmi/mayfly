@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-testkit-shared"
-description = "Test-only: plane-neutral test support (the bounded poll helper) both planes' kits and tests may use."
+description = "Test-only: plane-neutral test support (the bounded poll helper, the fixture tree reader) both planes' kits and tests may use."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

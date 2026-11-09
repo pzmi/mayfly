@@ -135,6 +135,8 @@ xtask = []
 # dependency is added with `cargo add` and listed here in the same commit.
 [external.normal]
 mayfly-domain = { serde = ["default", "derive"] }
+# Protocol messages are serde data (ADR 0010, ADR 0017); the encoding stays in the transports.
+mayfly-protocol = { serde = ["default", "derive"] }
 mayfly-control-domain = { serde = ["default", "derive"] }
 mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["default"] }
 # AggregateStore encodes events and refusals and hashes intent digests (ADR 0041).
@@ -145,6 +147,8 @@ xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro
 
 [external.dev]
 mayfly-domain = { proptest = ["std"] }
+# The protocol golden fixtures are JSON (ver section 4).
+mayfly-protocol = { serde_json = ["default"] }
 mayfly-adapter-sqlite = { tempfile = ["default"] }
 mayfly-control = { serde = ["default", "derive"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }

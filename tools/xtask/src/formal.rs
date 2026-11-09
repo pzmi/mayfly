@@ -53,6 +53,10 @@ pub const MODELS: &[Model] = &[
         file: "lifecycle.qnt",
         steps: &["step", "serveStep", "activationStep"],
     },
+    Model {
+        file: "link.qnt",
+        steps: &["step", "implStep"],
+    },
 ];
 
 /// The backend flags of every `quint run` and `quint test`: the TypeScript evaluator in

@@ -1,0 +1,28 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": {
+        "directive_id": "000000000000000000000000000000d1",
+        "attempt": {
+          "attempt_id": "0000000000000000000000000a11ce01",
+          "generation": 1
+        }
+      },
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "guest_verified": {
+          "facts": {
+            "os": "macos",
+            "uptime": 42000
+          }
+        }
+      }
+    }
+  }
+}

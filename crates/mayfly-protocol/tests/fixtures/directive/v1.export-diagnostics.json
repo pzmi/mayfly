@@ -1,0 +1,22 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "directive": {
+      "directive_id": "000000000000000000000000000000d1",
+      "epoch": 7,
+      "attempt": {
+        "attempt_id": "0000000000000000000000000a11ce01",
+        "generation": 1
+      },
+      "deadline": 1700000060000,
+      "kind": {
+        "export_diagnostics": {
+          "vm_name": "mf-pool0-host0-s1-g1-0a11ce01"
+        }
+      }
+    }
+  }
+}

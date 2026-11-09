@@ -87,8 +87,9 @@ then, a model's task records the one it tried.
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
 | lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F) | KER-04, KER-04F |
+| link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
 
-The planned models are listed in verification §6.1: `scheduling` (KER-05), `scaleset` (KER-06), `recovery` (KER-07), `link` (KER-02) and `registration` (KER-09).
+The planned models are listed in verification §6.1: `scheduling` (KER-05), `scaleset` (KER-06), `recovery` (KER-07) and `registration` (KER-09).
 
 ### Simulation budget
 
@@ -176,6 +177,45 @@ guard of `recordJitHandle` makes simulation of `serveStep` report `[violation]` 
 `i22JitMintedOnceAfterGrantAndVerification`; letting `requestRetirement` run while a directive
 is pending (mutant 27) makes simulation of `step` report `[violation]` of
 `i10UnknownLeavesOnlyOnObservation`.
+
+### link
+
+One control plane (`cp`), one data plane (`dp`), a network (`net`: two sets of frames, so no
+order) and history for the invariants (`g`, read by no guard). Two directives stand for the
+kinds: id 1 is a `CloneVm` (held in safe mode), id 2 a `ReportInventory` (never held). Each
+action is one stimulus of the protocol: `dpHello` (start or reconnect, offering major 1 or 2),
+`dpRestart` (memory lost, floor kept), `dpWelcome` (enter a session strictly above the floor),
+`dpDeliver` (fence, repeat, hold or execute one frame, possibly leaving a duplicate behind;
+an execution ends applied, refused for resources, or Unknown with the effect applied or not),
+`cpWelcome` (mint `max(minted, floor) + 1`, or refuse an unsupported major), `cpIssue`
+(`DirectiveIssued`), `relaySend` (re-send under the current session until the answer is
+definite), `cpReceive` (the inbox, fenced by epoch), `loseToDp`, `loseToCp` and
+`foreignMajor` (a frame of another major). `step` is every behaviour plan §3.2 allows;
+`implStep` is what the composition can do (its control plane never writes another major). The
+Rust published language is `mayfly_protocol`; its pure rules `negotiate`, `admit_frame`,
+`mint_epoch`, `enters_session`, `check_epoch` and `DirectiveTag::held_in_safe_mode` are this
+model's guards. Safety only: liveness (a session eventually opens) is not claimed.
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `i09NoStaleEpochExecutes` | I09: no frame of an epoch older than the floor executes | `formal-verify`; `crates/mayfly-protocol/src/handshake.rs::should_fence_frames_by_the_session_epoch_when_a_directive_arrives`; later the fencing matrix (KER-08) and the link contract (DP-02) |
+| `executesAtMostOncePerEpoch` | each directive id executes at most once per epoch, under re-sends and duplicates | `formal-verify`; later KER-08 and the link contract |
+| `refusedMeansNothingHappened` | a definite refusal names an (epoch, directive) that never executes; an applied answer one that did (ADR 0042) | `formal-verify`; `staleFrameIsNeverRefusedTest`; the golden `observation/v1.unknown-stale-epoch.json` |
+| `i17EpochsIncrease` | sessions are entered at strictly increasing epochs, the floor equals the open session's epoch and never exceeds what was minted | `formal-verify`; `handshake.rs::should_mint_above_the_journal_and_the_floor_when_a_session_opens`, `should_enter_only_above_the_floor_when_a_welcome_arrives` |
+| `i18InboxFence` | the inbox applies no answer older than the newest it applied | `formal-verify`; `olderAnswerIgnoredTest`; the `Attempt` epoch fence (KER-04) |
+| `i29SafeModeHoldsKinds` | in a safe session no held kind executes | `formal-verify`; `directive.rs::should_hold_exactly_the_effect_kinds_when_in_safe_mode` |
+| `versionNegotiated` | a session exists only in a major both peers speak; no frame of another major executes | `formal-verify`; `version.rs` tests; `tests/golden.rs::should_refuse_every_fixture_when_its_major_is_unknown` |
+
+Tests (`quint test`, stage `formal-test`, all deterministic): `handshakeAndExecuteTest`,
+`unsupportedMajorRefusedTest`, `duplicateExecutesOnceTest`, `staleFrameIsNeverRefusedTest`,
+`oldWelcomeAfterRestartIgnoredTest`, `epochMintedAboveFloorTest`, `safeModeHoldsCreateTest`,
+`foreignMajorDiscardedTest`, `frameBeforeWelcomeDiscardedTest`, `olderAnswerIgnoredTest`.
+Negative controls tried: answering a stale frame `refused` (the rule of plan §3.2 before
+ADR 0042) violates `refusedMeansNothingHappened` on the reconnect path of
+`staleFrameIsNeverRefusedTest` (a directed run; uniform simulation of 20 000 traces does not
+reach the 12-step path); entering a welcome at the floor (`>=` for `>`) makes Apalache report
+`[violation]` of `i17EpochsIncrease` at 5 steps; dropping the safe-mode hold makes simulation
+and Apalache report `[violation]` of `i29SafeModeHoldsKinds`.
 
 ## Promoting a counterexample
 

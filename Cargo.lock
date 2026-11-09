@@ -470,6 +470,12 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-protocol"
 version = "0.1.0"
+dependencies = [
+ "mayfly-domain",
+ "mayfly-testkit-shared",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mayfly-testkit"

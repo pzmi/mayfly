@@ -1,0 +1,19 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "directive": {
+      "directive_id": "000000000000000000000000000000d1",
+      "epoch": 7,
+      "attempt": null,
+      "deadline": 1700000060000,
+      "kind": {
+        "pull_image": {
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      }
+    }
+  }
+}

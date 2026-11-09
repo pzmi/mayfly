@@ -1,0 +1,16 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "message": {
+    "welcome": {
+      "epoch": 7,
+      "mode": "safe",
+      "accepted_version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  }
+}

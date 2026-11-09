@@ -126,10 +126,22 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   `RunnerLaunched`, `RunnerLaunchUnknown`, `RunnerExited{code}`, `VmStopped`, `VmDeleted`,
   `Inventory{vms}` | `InventoryIncomplete{reason}`, `CapacityReported{report_id, totals, used,
   free, foreign}`, `HostFacts{disk, wake, tart_version}`, `HypervisorLimitHit`, `ImagePulled`,
-  `ImageMaterialised`, `DirectiveRefused{reason}` (definite, nothing happened; reasons include
-  `insufficient_resources`, `proof_mismatch`, `stale_epoch`, `safe_mode`),
-  `DirectiveOutcomeUnknown{reason}` (ambiguous: timeout, lost process). Observations are facts,
-  deduplicated by `observation_id` in the control plane's inbox.
+  `ImageMaterialised`, `DirectiveRefused{reason}` (definite, nothing happened in that epoch;
+  reasons include `insufficient_resources`, `proof_mismatch`, `safe_mode`),
+  `DirectiveOutcomeUnknown{reason}` (ambiguous: timeout, lost process, and `stale_epoch`: a frame
+  of an older session is never executed and answered Unknown, never refused, ADR 0042).
+  Observations are facts, deduplicated by `observation_id` in the control plane's inbox. The
+  code's names (`mayfly-protocol`) are those of the `Attempt` aggregate where they differ:
+  `VmBooted` for `VmStarted`, `OutcomeUnknown` for `DirectiveOutcomeUnknown`.
+- **Shapes as built (KER-02).** A directive's `attempt_id` and `generation` are one optional
+  `attempt` (image and host directives serve no attempt); `StopVm{grace, proof}` and
+  `DeleteVm{proof}` name the VM inside the proof, whose run epoch is the directive's own; an
+  observation's `directive_id?` is `answers: {directive_id, attempt?}`, echoed from the
+  directive; `RunnerExited` and `VmObservedStopped` name their VM; `ImageEvicted` answers
+  `EvictImage`; `Hello` lists every version the data plane speaks (`supported`) beside its build
+  `dp_version`; handshake frames are written in the oldest major the writer speaks, so the peer
+  can always read and refuse them; a capacity report is ordered by `(epoch, report_id)`. The
+  golden fixtures of `crates/mayfly-protocol/tests/fixtures/` show every kind and reason.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly

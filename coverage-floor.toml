@@ -19,9 +19,10 @@ changed_line = 90
 # verification.md section 10 starts the pure crates at 95. Measured when FND-05 landed:
 # mayfly-domain 79.15% (224 of 283 lines) and mayfly-control-domain 94.66% (71 of 75), both below
 # it, so each floor starts at the measured value rounded down and ratchets up toward 95 as tests
-# are added; it is never lowered. mayfly-protocol and mayfly-data-domain have no instrumented
-# line yet: their 95 floors join the file with their first code. mayfly-control-domain rose to 96
-# when KER-03G measured 96.16% (977 of 1016); mayfly-domain rose to 84 when ARCH-04 measured
-# 84.43% (255 of 302).
+# are added; it is never lowered. mayfly-data-domain has no instrumented line yet: its 95 floor
+# joins the file with its first code; mayfly-protocol joined at 95 with its first code (KER-02).
+# mayfly-control-domain rose to 96 when KER-03G measured 96.16% (977 of 1016); mayfly-domain rose
+# to 84 when ARCH-04 measured 84.43% (255 of 302).
 mayfly-domain = 84
+mayfly-protocol = 95
 mayfly-control-domain = 96
