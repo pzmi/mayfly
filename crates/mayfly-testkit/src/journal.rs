@@ -249,6 +249,15 @@ impl MemoryJournal {
         self.read(|s| s.refusal(unit))
     }
 
+    /// Stores `receipt` over whatever receipt its command has, judging nothing: for broken
+    /// journals built over this one (the blind receipt upsert JC-29b must catch).
+    pub fn overwrite_receipt(&self, receipt: CommandReceipt) {
+        self.lock()
+            .state
+            .receipts
+            .insert(receipt.command_id, receipt);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }

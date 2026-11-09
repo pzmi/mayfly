@@ -6,10 +6,12 @@
 //! registry, command receipts with intent digests and refusal receipts bound to a revision,
 //! an inbox, stream epochs, and no global order to read (no method returns events of more
 //! than one stream; the suite reads the journal by enumerating streams). JC-26 (durability
-//! settings at open) and JC-27 (raw `UPDATE`/`DELETE` refused) need an engine and join with
-//! the adapters (ES-02, ES-09).
+//! settings at open) and JC-27 (raw `UPDATE`/`DELETE` refused) need an engine: they are the
+//! [`EngineCase`]s, run by [`check_engine_contract`] over an [`EngineJournalFactory`] (the
+//! SQLite adapter's `tests/journal_contract.rs`; the PostgreSQL adapter, ES-09).
 //!
 //! **What the concurrency cases prove, and what they do not.** JC-21, JC-22, JC-29..JC-32
+//! (JC-29b included)
 //! drive several appends (and a reader) at once on one task ([`join_all`], [`join2`]), through
 //! two handles where the factory gives a second one. An adapter whose append really waits (a
 //! writer thread, a database) interleaves them at its await points, so the cases check the
@@ -157,6 +159,10 @@ pub enum JournalCase {
     RefusalReceipts,
     /// JC-29: two units with one command id on different streams: exactly one commits.
     RacingCommandIds,
+    /// JC-29b: two units re-deciding one command whose refusal receipt went stale (its stream
+    /// moved), on different streams: exactly one commits and replaces the receipt, the other
+    /// is answered by the winner's receipt.
+    RacingStaleRefusal,
     /// JC-30: two units with one inbox key on different streams: exactly one commits.
     RacingInboxKeys,
     /// JC-31: two units with one event id on different streams: exactly one commits.
@@ -167,7 +173,7 @@ pub enum JournalCase {
 
 impl JournalCase {
     /// Every case, in the order the suite runs them.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::AbsentStream,
         Self::ConsecutiveRevisions,
         Self::ContinuesFromHead,
@@ -195,6 +201,7 @@ impl JournalCase {
         Self::OutcomeUnknown,
         Self::RefusalReceipts,
         Self::RacingCommandIds,
+        Self::RacingStaleRefusal,
         Self::RacingInboxKeys,
         Self::RacingEventIds,
         Self::UnitVisibleAtOnce,
@@ -231,6 +238,7 @@ impl JournalCase {
             Self::OutcomeUnknown => "JC-25",
             Self::RefusalReceipts => "JC-28",
             Self::RacingCommandIds => "JC-29",
+            Self::RacingStaleRefusal => "JC-29b",
             Self::RacingInboxKeys => "JC-30",
             Self::RacingEventIds => "JC-31",
             Self::UnitVisibleAtOnce => "JC-32",
@@ -268,6 +276,7 @@ impl JournalCase {
             Self::OutcomeUnknown => "outcome_unknown",
             Self::RefusalReceipts => "refusal_receipts",
             Self::RacingCommandIds => "racing_command_ids",
+            Self::RacingStaleRefusal => "racing_stale_refusal",
             Self::RacingInboxKeys => "racing_inbox_keys",
             Self::RacingEventIds => "racing_event_ids",
             Self::UnitVisibleAtOnce => "unit_visible_at_once",
@@ -382,6 +391,7 @@ pub async fn check_case<F: JournalFactory>(factory: &F, case: JournalCase) -> Re
         JournalCase::OutcomeUnknown => outcome_unknown(factory).await,
         JournalCase::RefusalReceipts => refusal_receipts(factory).await,
         JournalCase::RacingCommandIds => racing_command_ids(factory).await,
+        JournalCase::RacingStaleRefusal => racing_stale_refusal(factory).await,
         JournalCase::RacingInboxKeys => racing_inbox_keys(factory).await,
         JournalCase::RacingEventIds => racing_event_ids(factory).await,
         JournalCase::UnitVisibleAtOnce => unit_visible_at_once(factory).await,
@@ -2840,9 +2850,83 @@ async fn outcome_unknown<F: JournalFactory>(factory: &F) -> Check {
             journal.lookup_event(EventId::from_u128(30)).await,
         )?,
         &Some(EventLocation {
-            stream: s1,
+            stream: s1.clone(),
             revision: rev(4),
         }),
+    )?;
+    lost_replies_without_events(factory, &journal, &s1).await
+}
+
+/// JC-25 for the units that append nothing: a refusal receipt and an inbox-only unit. A
+/// re-append after a reply lost before the commit commits now; after one lost after the commit
+/// it is answered by what the first commit stored (the refusal receipt, the inbox entry).
+async fn lost_replies_without_events<F: JournalFactory>(
+    factory: &F,
+    journal: &F::Journal,
+    s1: &StreamId,
+) -> Check {
+    let refusal_unit = || {
+        unit(5_000)
+            .with_read(s1.clone(), at(4))
+            .with_receipt(refusal(3, 1, "pool_draining"))
+    };
+    must_inject(factory, journal, InjectedFault::ReplyLostBeforeCommit).await?;
+    let error = refused(journal.append(refusal_unit()).await)?;
+    ensure(
+        &format!("a refusal receipt's reply lost before the commit, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the refusal receipt after a reply lost before the commit",
+        &io("receipt", journal.receipt(CommandId::from_u128(3)).await)?,
+        &None,
+    )?;
+    must_inject(factory, journal, InjectedFault::ReplyLostAfterCommit).await?;
+    let error = refused(journal.append(refusal_unit()).await)?;
+    ensure(
+        &format!("a refusal receipt's reply lost after the commit, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the identical refusal re-appended: the stored refusal answers",
+        &journal.append(refusal_unit()).await.map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(CommandReceipt {
+            command_id: CommandId::from_u128(3),
+            command_type: command_type(),
+            intent: intent(1),
+            outcome: ReceiptOutcome::Refused {
+                bound: ReadCondition {
+                    stream: s1.clone(),
+                    expected: at(4),
+                },
+                rejection: rejection("pool_draining"),
+            },
+        }))),
+    )?;
+
+    let message = key("scaleset-1", "lost");
+    let inbox_only = || unit(6_000).with_inbox(message.clone());
+    must_inject(factory, journal, InjectedFault::ReplyLostBeforeCommit).await?;
+    let error = refused(journal.append(inbox_only()).await)?;
+    ensure(
+        &format!("an inbox-only unit's reply lost before the commit, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the message after a reply lost before the commit",
+        &io("inbox_contains", journal.inbox_contains(&message).await)?,
+        &false,
+    )?;
+    must_inject(factory, journal, InjectedFault::ReplyLostAfterCommit).await?;
+    let error = refused(journal.append(inbox_only()).await)?;
+    ensure(
+        &format!("an inbox-only unit's reply lost after the commit, got {error:?}"),
+        matches!(error, AppendError::OutcomeUnknown(_)),
+    )?;
+    eq(
+        "the identical inbox-only unit re-appended: the stored entry answers",
+        &journal.append(inbox_only()).await.map(|_| ()),
+        &Err(AppendError::DuplicateMessage(message)),
     )
 }
 
@@ -2903,6 +2987,76 @@ async fn racing_command_ids<F: JournalFactory>(factory: &F) -> Check {
     .await
 }
 
+/// JC-29b. Two writers each re-decide command 7, whose refusal receipt is stale (its stream
+/// moved after the refusal), and append on their own new stream. Each read the stale refusal,
+/// so a journal that replaces the receipt without comparing it with the one it judged (a blind
+/// upsert) commits both. Exactly one may commit; the other is answered by the winner's
+/// receipt. The memory journal passes by judging one unit at a time; an engine passes because
+/// it replaces the refusal only where the stored row is still the stale one.
+async fn racing_stale_refusal<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2, s3) = (
+        stream("attempt-1"),
+        stream("attempt-2"),
+        stream("attempt-3"),
+    );
+    io(
+        "a refusal of command 7 bound to a new stream",
+        journal
+            .append(unit(1_000).with_read(s1.clone(), NEW).with_receipt(refusal(
+                7,
+                1,
+                "pool_draining",
+            )))
+            .await,
+    )?;
+    io(
+        "the bound stream moves",
+        journal.append(appending(unit(1_500), &s1, NEW, &[1])).await,
+    )?;
+    let other = factory.second_handle(&journal).await;
+    let redecided =
+        |s: &StreamId, id: u128| appending(unit(2_000), s, NEW, &[id]).with_receipt(accepted(7, 1));
+    let outcomes = join_all(vec![
+        journal.append(redecided(&s2, 2)),
+        other.append(redecided(&s3, 3)),
+    ])
+    .await;
+    let won = |winner: usize| Appended {
+        streams: vec![if winner == 0 {
+            appended(&s2, 0, &[2])
+        } else {
+            appended(&s3, 0, &[3])
+        }],
+    };
+    let receipt_of = |winner: usize| CommandReceipt {
+        command_id: CommandId::from_u128(7),
+        command_type: command_type(),
+        intent: intent(1),
+        outcome: ReceiptOutcome::Accepted(won(winner)),
+    };
+    let (winner, loser) = one_winner(
+        "two re-decisions of one command with a stale refusal receipt",
+        &outcomes,
+        |loser| AppendError::CommandReplayed(Box::new(receipt_of(1 - loser))),
+    )?;
+    let journal = factory.reopen(journal).await;
+    let streams = [&s2, &s3];
+    eq(
+        "the winner's and the loser's streams",
+        &[
+            head_revision(&journal, streams[winner]).await?,
+            head_revision(&journal, streams[loser]).await?,
+        ],
+        &[Some(rev(0)), None],
+    )?;
+    eq(
+        "the receipt that replaced the refusal",
+        &io("receipt", journal.receipt(CommandId::from_u128(7)).await)?,
+        &Some(receipt_of(winner)),
+    )
+}
+
 async fn racing_inbox_keys<F: JournalFactory>(factory: &F) -> Check {
     let (s1, s2) = (stream("scaleset-1"), stream("scaleset-2"));
     let message = key("scaleset-1", "9");
@@ -2931,33 +3085,58 @@ async fn racing_event_ids<F: JournalFactory>(factory: &F) -> Check {
     .await
 }
 
-/// One reader pass over the parts of [`whole_unit`], in a fixed order; each part present or
-/// not.
-async fn read_parts<J: Journal>(
+/// One part of [`whole_unit`], present or not: `0` the first stream's head, `1` its events,
+/// `2` the second stream's event identity, `3` the second stream's head, `4` the receipt, `5`
+/// the inbox entry, `6` the second stream's row.
+async fn read_part<J: Journal>(
     journal: &J,
     s1: &StreamId,
     s2: &StreamId,
-) -> Result<Vec<bool>, String> {
-    Ok(vec![
-        head_revision(journal, s1).await?.is_some(),
-        !io("read_stream", journal.read_stream(s1, None, None).await)?.is_empty(),
-        io(
+    part: usize,
+) -> Result<bool, String> {
+    Ok(match part {
+        0 => head_revision(journal, s1).await?.is_some(),
+        1 => !io("read_stream", journal.read_stream(s1, None, None).await)?.is_empty(),
+        2 => io(
             "lookup_event",
             journal.lookup_event(EventId::from_u128(11)).await,
         )?
         .is_some(),
-        head_revision(journal, s2).await? == Some(rev(1)),
-        io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.is_some(),
-        io(
+        3 => head_revision(journal, s2).await? == Some(rev(1)),
+        4 => io("receipt", journal.receipt(CommandId::from_u128(1)).await)?.is_some(),
+        5 => io(
             "inbox_contains",
             journal.inbox_contains(&key("scaleset-1", "1")).await,
         )?,
-        io(
+        _ => io(
             "projection",
             journal.projection(&projection_name(), "r2").await,
         )?
         .is_some(),
-    ])
+    })
+}
+
+/// The number of parts [`read_part`] reads.
+const PARTS: usize = 7;
+
+/// One reader pass over the parts of [`whole_unit`], each present or not, in the order read:
+/// first stream first, or (`reverse`) last stream first, so a journal that exposes either end
+/// of a unit before the other is caught by one of the two orders.
+async fn read_parts<J: Journal>(
+    journal: &J,
+    s1: &StreamId,
+    s2: &StreamId,
+    reverse: bool,
+) -> Result<Vec<bool>, String> {
+    let mut order: Vec<usize> = (0..PARTS).collect();
+    if reverse {
+        order.reverse();
+    }
+    let mut parts = Vec::new();
+    for part in order {
+        parts.push(read_part(journal, s1, s2, part).await?);
+    }
+    Ok(parts)
 }
 
 async fn unit_visible_at_once<F: JournalFactory>(factory: &F) -> Check {
@@ -2970,8 +3149,8 @@ async fn unit_visible_at_once<F: JournalFactory>(factory: &F) -> Check {
     )?;
     let observer = async {
         let mut passes = Vec::new();
-        for _ in 0..16 {
-            passes.push(read_parts(&reader, &s1, &s2).await);
+        for n in 0..16 {
+            passes.push(read_parts(&reader, &s1, &s2, n % 2 == 0).await);
             YieldNow(false).await;
         }
         passes
@@ -2991,7 +3170,184 @@ async fn unit_visible_at_once<F: JournalFactory>(factory: &F) -> Check {
     }
     eq(
         "every part after the commit",
-        &read_parts(&reader, &s1, &s2).await?,
-        &vec![true; 7],
+        &read_parts(&reader, &s1, &s2, false).await?,
+        &vec![true; PARTS],
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-26, JC-27: the cases only a storage engine has (adapters only, `doc/event-store.md` §7.1)
+
+/// A raw statement that would rewrite history, run on the store beside the adapter (as an
+/// operator's SQL shell or a buggy migration would), never through the port (JC-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Tamper {
+    /// Change a stored event's payload.
+    UpdateEvent,
+    /// Delete a stored event.
+    DeleteEvent,
+    /// Move a stored event identity to another revision.
+    UpdateIdentity,
+    /// Delete a stored event identity.
+    DeleteIdentity,
+    /// Lower a stream head's revision.
+    LowerHeadRevision,
+    /// Lower a stream head's epoch.
+    LowerHeadEpoch,
+    /// Delete a stream head.
+    DeleteHead,
+}
+
+impl Tamper {
+    /// Every tampering JC-27 tries.
+    pub const ALL: [Self; 7] = [
+        Self::UpdateEvent,
+        Self::DeleteEvent,
+        Self::UpdateIdentity,
+        Self::DeleteIdentity,
+        Self::LowerHeadRevision,
+        Self::LowerHeadEpoch,
+        Self::DeleteHead,
+    ];
+}
+
+/// The hooks of a factory whose journal stores into an engine (SQLite, PostgreSQL): what the
+/// engine-only cases need beside [`JournalFactory`]. The memory journal has no engine and no
+/// such factory.
+pub trait EngineJournalFactory: JournalFactory {
+    /// Opens a new store whose engine lacks the durability settings the adapter requires
+    /// (journal mode, synchronous commit), under the production profile (`allow_relaxed` false)
+    /// or the test profile that tolerates it (`allow_relaxed` true). `None`: the adapter refused
+    /// to open it (JC-26).
+    fn open_without_durability(
+        &self,
+        allow_relaxed: bool,
+    ) -> impl Future<Output = Option<Self::Journal>>;
+
+    /// Runs `tamper` on `stream`'s first event (and its head) through a raw engine connection
+    /// beside `journal`; `true` when the engine accepted the statement (JC-27).
+    fn tamper(
+        &self,
+        journal: &Self::Journal,
+        stream: &StreamId,
+        tamper: Tamper,
+    ) -> impl Future<Output = bool>;
+}
+
+/// One case only an engine has, named after its id in `doc/event-store.md` §7.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EngineCase {
+    /// JC-26: a store without its durability settings is refused at open unless the test
+    /// profile allows it.
+    DurabilityAtOpen,
+    /// JC-27: raw `UPDATE`/`DELETE` of journal rows, and any lowering of a head, is refused by
+    /// the store itself, and the journal reads the same afterwards.
+    HistoryRefusesRewrite,
+}
+
+impl EngineCase {
+    /// Every engine case, in run order.
+    pub const ALL: [Self; 2] = [Self::DurabilityAtOpen, Self::HistoryRefusesRewrite];
+
+    /// The case's id in `doc/event-store.md` §7.1.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::DurabilityAtOpen => "JC-26",
+            Self::HistoryRefusesRewrite => "JC-27",
+        }
+    }
+
+    /// The case's `snake_case` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::DurabilityAtOpen => "durability_at_open",
+            Self::HistoryRefusesRewrite => "history_refuses_rewrite",
+        }
+    }
+}
+
+impl Display for EngineCase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.id(), self.name())
+    }
+}
+
+/// Runs the engine cases against `factory`; returns each failed case with why.
+pub async fn check_engine_contract<F: EngineJournalFactory>(
+    factory: &F,
+) -> Vec<(EngineCase, String)> {
+    let mut failures = Vec::new();
+    for case in EngineCase::ALL {
+        let outcome = match case {
+            EngineCase::DurabilityAtOpen => durability_at_open(factory).await,
+            EngineCase::HistoryRefusesRewrite => history_refuses_rewrite(factory).await,
+        };
+        if let Err(detail) = outcome {
+            failures.push((case, detail));
+        }
+    }
+    failures
+}
+
+async fn durability_at_open<F: EngineJournalFactory>(factory: &F) -> Check {
+    ensure(
+        "a store without its durability settings opened under the production profile",
+        factory.open_without_durability(false).await.is_none(),
+    )?;
+    ensure(
+        "a store without its durability settings refused under the test profile",
+        factory.open_without_durability(true).await.is_some(),
+    )
+}
+
+async fn history_refuses_rewrite<F: EngineJournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    io(
+        "an event at epoch 2",
+        journal
+            .append(UnitOfWork::new(Millis::new(1_000), build(2)).with_append(
+                s1.clone(),
+                aggregate("attempt"),
+                NEW,
+                vec![at_epoch(1, 2)],
+            ))
+            .await,
+    )?;
+    io(
+        "a second event",
+        journal
+            .append(UnitOfWork::new(Millis::new(2_000), build(2)).with_append(
+                s1.clone(),
+                aggregate("attempt"),
+                at(0),
+                vec![at_epoch(2, 2)],
+            ))
+            .await,
+    )?;
+    let probe = Probe {
+        streams: vec![s1.clone()],
+        events: vec![1, 2],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    for tamper in Tamper::ALL {
+        ensure(
+            &format!("the store accepted {tamper:?}"),
+            !factory.tamper(&journal, &s1, tamper).await,
+        )?;
+        eq(
+            &format!("the journal after a refused {tamper:?}"),
+            &observe(&journal, &probe).await?,
+            &before,
+        )?;
+    }
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the journal after the refusals and a reopen",
+        &observe(&journal, &probe).await?,
+        &before,
     )
 }

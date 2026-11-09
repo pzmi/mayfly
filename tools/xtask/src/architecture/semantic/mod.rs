@@ -21,8 +21,9 @@
 //! The collector records facts (resolved path references, `unsafe` sites, lint, `ignore` and
 //! `macro_export` attributes, include-family macros, item declarations, test functions) with
 //! their file, line and context (production or test code); `rules_purity`, `rules_include`,
-//! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs` and
-//! `rules_seams` turn facts into diagnostics, and `rules_clippy` checks the pure crates' Clippy configuration, the
+//! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs`,
+//! `rules_transition`, `rules_seams` and `rules_store` turn facts into diagnostics, and
+//! `rules_clippy` checks the pure crates' Clippy configuration, the
 //! semantic layer behind these syntactic rules.
 
 mod collect;
@@ -36,6 +37,7 @@ mod rules_include;
 mod rules_purity;
 mod rules_runtime;
 mod rules_seams;
+mod rules_store;
 mod rules_transition;
 mod rules_types;
 
@@ -444,6 +446,7 @@ pub fn check(
         out.extend(rules_runtime::check(facts, policy));
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(rules_transition::check(facts, policy));
+        out.extend(rules_store::check(root, facts));
         out.extend(hygiene.check(facts));
     }
     out.extend(rules_types::check(&every));
@@ -465,6 +468,7 @@ fn selector_crates() -> BTreeSet<String> {
             &rules_hygiene::POLL_HELPER.0,
             &rules_cqrs::APPLICATION,
             &rules_seams::DEFINER,
+            &rules_store::ADAPTER,
             &rules_types::AGGREGATES.0,
             &rules_events::EVENTS_CRATE,
             &rules_events::VALUES_CRATE,

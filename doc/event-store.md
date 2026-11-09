@@ -134,9 +134,9 @@ commits per command id. A refusal writes a **refusal receipt bound to the stream
 was decided at** (E3, ADR 0034): a repeat while that stream is still at that revision is answered
 with the recorded refusal; once the stream moved, the repeat is decided afresh, never replayed, and
 its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
-Pinned by JC-12..JC-14, JC-28, JC-29; model
+Pinned by JC-12..JC-14, JC-28, JC-29, JC-29b; model
 `ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`); SW6, SW8;
-`ForgetfulReceiptsJournal`, `IntentBlindReceipts`.
+`ForgetfulReceiptsJournal`, `IntentBlindReceipts`, `BlindReceiptUpsertJournal`.
 
 **ES-I6 Message identity**. An inbox key is consumed by at most one committed unit; a
 redelivered message is answered `DuplicateMessage` with no write; a unit that only records the
@@ -199,7 +199,8 @@ consumer until the consumer is fixed. Pinned by DC-08, DC-18; model `ES_I15_noSk
 `SkippingLedger`, `HeadTrustingWorker`.
 
 **ES-I16 Lock order**. Every store transaction takes its locks in the one order
-of §4.2, so no reachable state has a wait-for cycle; every lock wait is bounded and ends in a
+of §4.2, so no reachable state has a wait-for cycle (the receipt row is in it, second after the
+heads, including the row a stale refusal receipt is replaced through by compare-and-set, E3); every lock wait is bounded and ends in a
 definite `Busy` refusal. Pinned on PostgreSQL by the model's split-transaction scenarios replayed
 with the driver checking each waiter's blockers (§7.3), and by JC-22's two-unit deadlock case
 (units naming the same two streams in opposite order both finish); trivially true on SQLite, where
@@ -768,16 +769,24 @@ against the same revision; exactly one append commits. JC-22 units on disjoint s
 two streams in opposite orders both finish without deadlock. JC-23 crash after each statement:
 nothing partial is visible after reopen. JC-24 everything (heads, receipts, inbox, manifest,
 epochs) survives reopen. JC-25 a fault at `COMMIT` is `OutcomeUnknown` and every other error is
-definite (fault-injecting adapter hooks, §7.5). JC-26 a store without its durability settings is
+definite (fault-injecting adapter hooks, §7.5); re-appending the identical unit resolves it, for
+a unit with events, a refusal receipt (answered by the stored refusal) and an inbox-only unit
+(answered `DuplicateMessage`). JC-26 a store without its durability settings is
 refused at open unless the test profile allows it. JC-27 raw `UPDATE`/`DELETE` of journal rows is
 refused by the store (adapter modes only). JC-28 a refusal receipt answers a repeat at the same
 revision with the recorded refusal; after the stream moved, the repeat is decided afresh and its
 acceptance replaces the refusal receipt; a refusal receipt whose stream moved before commit is
 refused (E3). JC-29 two units with one command id on different streams, at once: exactly one
-commits, the other is answered by its receipt. JC-30 the same for one inbox key
+commits, the other is answered by its receipt. JC-29b two units re-deciding one command whose
+refusal receipt went stale, on different streams, at once: exactly one commits and replaces the
+receipt (a compare-and-set on the stored refusal, never a blind upsert), the other is answered by
+the winner's receipt; memory passes by judging one unit at a time, an engine through the
+compare-and-set. JC-30 the same for one inbox key
 (`DuplicateMessage`). JC-31 the same for one event id (`DuplicateEventId`). JC-32 a reader running
-beside an append never sees part of the unit (ES-I1). JC-26 and JC-27 need an engine and arrive
-with the adapters (ES-02, ES-09); the rest run on memory from ES-01F.
+beside an append never sees part of the unit (ES-I1), reading its parts first stream first and, on
+alternate passes, last stream first. JC-26 and JC-27 need an engine: they are the engine cases
+(`EngineJournalFactory`, `check_engine_contract`), run by the adapters (ES-02, ES-09); the rest
+run on memory from ES-01F.
 
 The concurrency cases (JC-21, JC-22, JC-29..JC-32) drive units at once on one task through two
 handles, so they check the *outcomes* of the interleavings an adapter's await points allow; they
@@ -963,6 +972,10 @@ then a fix.
 | `GlobalLockJournal` (refuses a unit while another stream's is open) | contract | JC-22, JC-29..JC-31 |
 | `LateIdCheckJournal` (id check after revision check) | contract | JC-09, JC-25 |
 | `TornUnitJournal` (a unit's last stream visible after the rest) | contract | JC-32 |
+| `TornUnitLastFirst` (a unit's last stream, receipt and inbox entry visible before the rest) | contract | JC-32 (its last-stream-first passes) |
+| `BlindReceiptUpsertJournal` (replaces a stale refusal receipt without comparing it) | contract | JC-29b |
+| SQLite without its journal triggers | contract | JC-27 |
+| SQLite opening a store without durability under the production profile | contract | JC-26 |
 | `AckBeforeCommitJournal` (reports success before `COMMIT` returns) | lab | SW6 `ack-before-commit` |
 | `UnfencedLedger` (advance ignores the token) | contract | DC-11; model trace `staleWorkerFenced`; SW9 |
 | `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08 |

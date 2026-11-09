@@ -528,6 +528,10 @@ classification by extended code and constraint name, `StoreHooks` with `NoHooks`
 storage (E3). Contract in modes fresh, reopened, two-connection, two-handle, crash-injected; JC-23,
 JC-25..JC-28. Migration test from empty and from the previous schema fixture.
 Accept: all JC cases green in five modes; `ARCH-store-sql` refuses an `INSERT OR IGNORE` fixture.
+Folded in from the ES-01F review: JC-29b (racing re-decisions of a command whose refusal receipt
+went stale; the receipt is replaced by compare-and-set) with a blind-upsert negative control,
+JC-32 read in both stream orders, JC-25 lost replies of a refusal receipt and of an inbox-only
+unit, and the receipt row named in ES-I16's lock order.
 
 #### ES-03 `AggregateStore`
 Cites: event-store §3.7, §6.2–§6.3; ADR 0034. The single write path with the step order of §3.7

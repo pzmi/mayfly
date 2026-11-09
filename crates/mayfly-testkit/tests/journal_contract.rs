@@ -11,9 +11,9 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use mayfly_control::journal::{
-    AppendError, Appended, CommandReceipt, EventLocation, ExpectedRevision, InboxKey, Journal,
-    Payload, ProjectionName, RecordedEvent, StorageError, StoredKind, StreamHead, StreamId,
-    StreamRevision, UnitOfWork,
+    AppendError, Appended, CommandReceipt, Decision, EventLocation, ExpectedRevision, InboxKey,
+    Journal, Payload, ProjectionName, ProjectionWrite, ReceiptOutcome, RecordedEvent, StorageError,
+    StoredKind, StreamHead, StreamId, StreamRevision, UnitOfWork,
 };
 use mayfly_domain::{CommandId, EventId};
 use mayfly_testkit::block_on;
@@ -47,6 +47,14 @@ enum Fault {
     LateIdCheck,
     /// `TornUnitJournal`: makes a unit's last stream visible after the rest of it.
     TornUnit,
+    /// A torn unit the other way round: its last stream, with the receipt, the inbox entry
+    /// and that stream's rows, visible before the rest. Only a reader that reads the last
+    /// stream first sees the tear (JC-32's reverse passes).
+    TornUnitLastFirst,
+    /// `BlindReceiptUpsertJournal`: judges a unit, lets another writer run, then writes it and
+    /// replaces its command's receipt without comparing it with the one it judged, so two
+    /// re-decisions of a command with a stale refusal receipt both commit (JC-29b).
+    BlindReceiptUpsert,
 }
 
 /// Pending once, waking itself: where a broken journal lets another future run.
@@ -273,6 +281,66 @@ impl BrokenJournal {
                 all.streams.extend(second.streams);
                 Ok(all)
             }
+            Fault::TornUnitLastFirst => {
+                if unit.appends.len() < 2 {
+                    return self.inner.append(unit).await;
+                }
+                if let Some(refusal) = self.inner.judge(&unit) {
+                    return Err(refusal);
+                }
+                let mut rest = unit.clone();
+                let last = rest.appends.pop();
+                let on_last =
+                    |p: &ProjectionWrite| last.as_ref().is_some_and(|l| l.stream == p.stream);
+                rest.projections.retain(|p| !on_last(p));
+                rest.receipt = None;
+                rest.inbox = None;
+                let mut tail = UnitOfWork::new(unit.recorded_at, unit.supported_epochs.clone());
+                tail.appends.extend(last.clone());
+                tail.receipt = unit.receipt.clone();
+                tail.inbox = unit.inbox.clone();
+                tail.projections = unit
+                    .projections
+                    .iter()
+                    .filter(|p| on_last(p))
+                    .cloned()
+                    .collect();
+                let second = self.inner.append(tail).await?;
+                YieldOnce(false).await;
+                let mut all = self.inner.append(rest).await?;
+                all.streams.extend(second.streams);
+                Ok(all)
+            }
+            Fault::BlindReceiptUpsert => {
+                let Some(receipt) = unit.receipt.clone() else {
+                    return self.inner.append(unit).await;
+                };
+                if let Some(refusal) = self.inner.judge(&unit) {
+                    return Err(refusal);
+                }
+                YieldOnce(false).await;
+                let bound = unit.reads.first().cloned();
+                let mut bare = unit;
+                bare.receipt = None;
+                let appended = if bare.appends.is_empty() && bare.inbox.is_none() {
+                    Appended::default()
+                } else {
+                    self.inner.append(bare).await?
+                };
+                let outcome = match (receipt.decision, bound) {
+                    (Decision::Refused { rejection }, Some(bound)) => {
+                        ReceiptOutcome::Refused { bound, rejection }
+                    }
+                    _ => ReceiptOutcome::Accepted(appended.clone()),
+                };
+                self.inner.overwrite_receipt(CommandReceipt {
+                    command_id: receipt.command_id,
+                    command_type: receipt.command_type,
+                    intent: receipt.intent,
+                    outcome,
+                });
+                Ok(appended)
+            }
         }
     }
 }
@@ -484,7 +552,8 @@ fn should_fail_survives_reopen_when_journal_loses_receipts_on_reopen() {
             JournalCase::CommandIdReused,
             JournalCase::StoreRefusalLeavesNoReceipt,
             JournalCase::SurvivesReopen,
-            JournalCase::RefusalReceipts
+            JournalCase::RefusalReceipts,
+            JournalCase::RacingStaleRefusal
         ]
     );
 }
@@ -522,6 +591,7 @@ fn should_fail_inbox_dedupe_when_journal_consumes_a_redelivery() {
             JournalCase::InboxDedupe,
             JournalCase::PayloadRoundTrip,
             JournalCase::SurvivesReopen,
+            JournalCase::OutcomeUnknown,
             JournalCase::RacingInboxKeys
         ]
     );
@@ -555,6 +625,7 @@ fn should_fail_independent_streams_when_journal_holds_one_global_lock() {
         [
             JournalCase::IndependentStreams,
             JournalCase::RacingCommandIds,
+            JournalCase::RacingStaleRefusal,
             JournalCase::RacingInboxKeys,
             JournalCase::RacingEventIds
         ]
@@ -669,7 +740,10 @@ fn should_name_every_case_by_its_event_store_id_when_listed() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted, ids, "case ids are unique and listed in order");
-    assert!(ids.iter().all(|id| id.starts_with("JC-") && id.len() == 5));
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("JC-") && (id.len() == 5 || id == &"JC-29b"))
+    );
     assert!(!ids.contains(&"JC-26") && !ids.contains(&"JC-27"));
 }
 
@@ -718,4 +792,46 @@ fn should_complete_future_when_it_is_woken_from_another_thread() {
     // then
     assert_eq!(outcome, "opened");
     handle.join().unwrap();
+}
+
+#[test]
+fn should_fail_unit_visible_at_once_when_journal_shows_the_last_stream_first() {
+    // given
+    let fault = Fault::TornUnitLastFirst;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_fails_named(&failed, &[JournalCase::UnitVisibleAtOnce]);
+    assert_eq!(
+        failed,
+        [
+            JournalCase::MultiStreamAllOrNothing,
+            JournalCase::IndependentStreams,
+            JournalCase::CrashAtomicity,
+            JournalCase::UnitVisibleAtOnce
+        ]
+    );
+}
+
+#[test]
+fn should_fail_racing_stale_refusal_when_journal_upserts_receipts_blindly() {
+    // given
+    let fault = Fault::BlindReceiptUpsert;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_fails_named(&failed, &[JournalCase::RacingStaleRefusal]);
+    assert_eq!(
+        failed,
+        [
+            JournalCase::CrashAtomicity,
+            JournalCase::OutcomeUnknown,
+            JournalCase::RacingCommandIds,
+            JournalCase::RacingStaleRefusal
+        ]
+    );
 }

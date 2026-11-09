@@ -1,0 +1,4 @@
+rule: ARCH-store-sql
+at: crates/mayfly-adapter-sqlite/src/lib.rs:5
+contains: mayfly-adapter-sqlite SQL uses `INSERT OR`
+only: true

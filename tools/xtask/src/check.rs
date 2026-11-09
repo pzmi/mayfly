@@ -36,6 +36,15 @@ const CROSS_CHECK_ARGS: &[&str] = &[
     "warnings",
 ];
 
+/// The environment the `cross-check` stage gives cargo. `rusqlite`'s `bundled` feature compiles
+/// SQLite's C source for the target, which for `aarch64-apple-darwin` needs the macOS SDK that a
+/// Linux host does not have; a lint links nothing, so `libsqlite3-sys` is told to take its
+/// "system library" path instead, which compiles no C and uses the same pre-generated bindings
+/// of the bundled version. Every Rust line is still linted for the target. The bundled build
+/// itself is compiled and tested natively by the `macos` CI job (ES-02, ADR 0008). Pinned by
+/// `should_skip_only_the_c_build_of_sqlite_when_cross_check_runs`.
+const CROSS_CHECK_ENV: &[(&str, &str)] = &[("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")];
+
 /// The `cross-check` stage body: `cargo` with [`CROSS_CHECK_ARGS`]. A missing rustup target
 /// fails with the command that installs it, never a skip (D15); this is a preflight rather
 /// than cargo's own "can't find crate for `core`" so the fix is obvious. Pinned by
@@ -61,6 +70,7 @@ fn run_cross_check() -> i32 {
     }
     let status = Command::new("cargo")
         .args(CROSS_CHECK_ARGS)
+        .envs(CROSS_CHECK_ENV.iter().copied())
         .current_dir(&root)
         .status();
     match status {
@@ -86,7 +96,7 @@ pub fn stages() -> Vec<Stage> {
         .collect();
     stages.push(Stage::in_process(
         "cross-check",
-        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight)",
+        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; bundled SQLite's C source not compiled)",
         run_cross_check,
     ));
     stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
@@ -733,6 +743,22 @@ jobs:
             block.push(line);
         }
         block.join("\n")
+    }
+
+    #[test]
+    fn should_skip_only_the_c_build_of_sqlite_when_cross_check_runs() {
+        // given
+        let env = CROSS_CHECK_ENV;
+
+        // when
+        let listed = catalog::find("cross-check").map(|c| c.command);
+
+        // then
+        assert_eq!(env, [("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")]);
+        assert!(
+            listed.is_some_and(|l| l.contains("bundled SQLite's C source not compiled")),
+            "{listed:?}"
+        );
     }
 
     #[test]

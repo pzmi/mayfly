@@ -201,6 +201,9 @@ rules! {
     EventSetMacro => "ARCH-event-set-macro", "ARCH-04",
         "Production code implements EventSet anywhere but the body of macro_rules! event_set in mayfly-control-domain/src/event.rs, so a set would lack the generated shape() and codec.",
         ["event-set-by-hand"];
+    StoreSql => "ARCH-store-sql", "ES-02",
+        "A string literal or .sql file under mayfly-adapter-sqlite's src/ uses a form only SQLite has: INSERT OR ..., REPLACE INTO, AUTOINCREMENT, rowid, _rowid_, oid, a json...() function or the -> and ->> operators (WITHOUT ROWID is allowed): the PostgreSQL adapter would have to fake it (doc/event-store.md section 4.3).",
+        ["store-sql-insert-or-ignore"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

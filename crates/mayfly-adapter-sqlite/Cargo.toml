@@ -10,3 +10,13 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+mayfly-testkit = { version = "0.1.0", path = "../mayfly-testkit" }
+tempfile = "3.27.0"
