@@ -322,6 +322,9 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-control"
 version = "0.1.0"
+dependencies = [
+ "mayfly-domain",
+]
 
 [[package]]
 name = "mayfly-control-domain"
@@ -368,6 +371,7 @@ version = "0.1.0"
 name = "mayfly-testkit"
 version = "0.1.0"
 dependencies = [
+ "mayfly-control",
  "mayfly-control-domain",
  "mayfly-domain",
  "serde",

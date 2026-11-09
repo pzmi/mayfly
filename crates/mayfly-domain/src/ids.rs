@@ -149,6 +149,12 @@ hex_id!(
     /// A command, the key of its receipt (idempotency).
     CommandId
 );
+hex_id!(
+    /// One recorded event, unique across the whole journal through its event-id registry
+    /// (plan §5.2, ADR 0021): the caller's id port mints it before the append, so a retried
+    /// append cannot record the same fact twice (the journal contract's `duplicate_event_id`).
+    EventId
+);
 
 impl AttemptId {
     /// The eight lowercase hex digits that end an [`crate::OwnedVmName`]: the id's LOW 32 bits.

@@ -16,7 +16,7 @@ mod vm_name;
 pub use digest::ImageDigest;
 pub use error::{DigestError, IdError, VmNameError};
 pub use fence::{Epoch, Fence, FenceError, Generation};
-pub use ids::{AttemptId, CommandId, DirectiveId, HostId, ObservationId, PoolName};
+pub use ids::{AttemptId, CommandId, DirectiveId, EventId, HostId, ObservationId, PoolName};
 pub use resources::Resources;
 pub use time::{Deadline, Millis};
 pub use vm_name::{OwnedVmName, Slot, VmNameClass, classify_vm_name};

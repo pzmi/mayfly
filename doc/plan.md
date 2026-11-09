@@ -214,9 +214,13 @@ in the command. `decide` is deterministic, refusals included (DETERMINISM cases,
 
 ### 5.2 Journal (SQLite)
 
-Tables: `event_stream(stream_id, revision)`, `event_journal(sequence, event_id UNIQUE, stream_id,
-stream_revision, type, schema_version, payload_json, recorded_at, UNIQUE(stream_id,
-stream_revision))`, `command_receipt(command_id, status, result_json)`, `outbox(directive_id,
+**Stream-scoped, with no global order (ADR 0021):** a stream head per stream holds its revision,
+compared and advanced by each append; event ids are unique through a registry; readers enumerate
+streams and read each after a revision; no correctness rests on a single writer, so the port is
+storage-neutral (SQLite first, PostgreSQL possible). `recorded_at` is the writer's control-plane
+`Clock` reading (ADR 0020). Tables: `event_stream(stream_id, revision)`,
+`event_journal(stream_id, stream_revision, event_id UNIQUE, type, schema_version, payload_json,
+recorded_at, PRIMARY KEY(stream_id, stream_revision))`, `command_receipt(command_id, status, result_json)`, `outbox(directive_id,
 attempt_id, generation, kind, request_json, status, attempts, next_attempt_at)`,
 `inbox(source, message_id, processed_at)` (GitHub messages and DP observations), projection tables
 with `projection_meta(name, spec_version, watermark)`, `schema_meta`.
@@ -254,7 +258,8 @@ upcasters for old versions; an unknown event type in the journal puts the daemon
 ### 5.5 Projections
 
 Each projection is a versioned spec (`name`, `spec_version`, `tables`, `apply(event)`), rebuildable
-from sequence 0; on start the watermark is checked and the tail applied. A change of meaning is a
+stream by stream; it keeps a per-stream applied revision, and on start each stream's tail after it
+is applied (no global watermark, ADR 0021). A change of meaning is a
 new spec version, rebuilt alongside. `mayfly recover --rebuild-projections` exists and is tested.
 Projection rebuild equals live projection (contract test).
 

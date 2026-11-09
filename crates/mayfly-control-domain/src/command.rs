@@ -3,7 +3,8 @@
 use mayfly_domain::{CommandId, Millis};
 
 /// A command addressed to one aggregate: its idempotency key, the instant the caller issued it
-/// (from its `Clock` port), and the aggregate-specific body.
+/// (a reading of the control plane's `Clock` port: Unix-epoch wall-clock milliseconds, ADR
+/// 0020), and the aggregate-specific body.
 ///
 /// `decide` reads time only from `issued_at`, which is what keeps it deterministic (checked
 /// for every registered aggregate by the control domain's
@@ -12,7 +13,9 @@ use mayfly_domain::{CommandId, Millis};
 pub struct Command<B> {
     /// The key of the command's receipt (fnd §6.4): a repeat returns the recorded result.
     pub command_id: CommandId,
-    /// When the caller issued the command, read from its clock before calling `decide`.
+    /// When the caller issued the command, read from the control plane's `Clock` before calling
+    /// `decide`: wall-clock milliseconds since the Unix epoch, so an instant an event derives
+    /// from it still means the same after a restart (ADR 0020).
     pub issued_at: Millis,
     /// What the command asks of the aggregate.
     pub body: B,

@@ -12,10 +12,11 @@ publish = false
 workspace = true
 
 [dependencies]
+mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
 mayfly-control-domain = { version = "0.1.0", path = "../mayfly-control-domain" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
-mayfly-domain = { path = "../mayfly-domain" }
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"

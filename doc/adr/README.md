@@ -6,3 +6,5 @@ This directory holds the decisions behind mayfly, one file per decision, in Mich
 |---|---|---|
 | [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Proposed |
 | [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Proposed |
+| [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Proposed |
+| [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Proposed |

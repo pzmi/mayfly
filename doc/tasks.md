@@ -287,12 +287,13 @@ Accept: exhaustive matrices; stale epoch refused; delete without matching proof 
 ### Phase 2 — journal (control plane)
 
 #### ES-01 Journal port, in-memory journal, contract suite
-Cites: plan §5.2, ver §5. `Journal` port in `mayfly-control` (append with expected revisions,
-read stream, read all from sequence, receipts, outbox, inbox — one atomic `commit(UnitOfWork)`).
-`MemoryJournal` in testkit. The **journal contract suite** in testkit as functions taking a
-factory: expected-revision conflict without mutation, duplicate event id rule, all-or-nothing unit
-of work, receipt replay returns the original result, inbox dedupe, outbox status transitions,
-read-all ordering.
+Cites: plan §5.2, ver §5, ADR 0020, ADR 0021. `Journal` port in `mayfly-control` (append with
+expected revisions on stream heads, read stream, enumerate streams, event-id lookup, receipts,
+outbox, inbox — one atomic `append(UnitOfWork)`; no global order). `MemoryJournal` in testkit. The
+**journal contract suite** in testkit as functions taking a factory: expected-revision conflict
+without mutation, duplicate event id rule, all-or-nothing unit of work, receipt replay returns the
+original result, inbox dedupe, outbox status transitions, racing writers on one stream,
+independent streams, per-stream reads.
 Accept: suite green on `MemoryJournal`; a deliberately broken journal in the suite's own tests fails it.
 
 #### ES-02 SQLite journal

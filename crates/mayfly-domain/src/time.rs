@@ -1,8 +1,16 @@
 //! Time as values. The domain reads no clock: callers pass `now`.
+//!
+//! Which clock a reading comes from is the reader's port's business (ADR 0020): the control
+//! plane's `Clock` port reads wall-clock time as milliseconds since the Unix epoch, because its
+//! readings are persisted (command `issued_at`, event instants, the journal's `recorded_at`,
+//! outbox `next_attempt_at`) and must keep their meaning across a restart; the data plane's
+//! `ProcessClock` reads a monotonic clock for deadlines that never leave the process.
 
 use serde::{Deserialize, Serialize};
 
-/// Milliseconds, as a duration or as a reading of the caller's monotonic clock.
+/// Milliseconds, as a duration or as a reading of the caller's clock: Unix-epoch wall time for
+/// the control plane's `Clock`, a monotonic reading for the data plane's `ProcessClock`
+/// (ADR 0020). Two readings compare meaningfully only when they come from the same clock.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
