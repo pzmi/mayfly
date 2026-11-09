@@ -52,27 +52,27 @@ when it lands renumbers its record and every citation of it in the same commit.
 |---|---|---|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted. Amended 2026-11-09 |
 | [0002](0002-control-plane-and-data-plane-in-a-multi-crate-workspace.md) | Control plane and data plane in a multi-crate workspace | Accepted |
-| [0003](0003-platforms-macos-arm64-product-linux-buildable.md) | Platforms: macOS arm64 product, Linux-buildable | Proposed |
-| [0004](0004-port-xtask-from-site-preview.md) | Port xtask from site-preview | Proposed |
+| [0003](0003-platforms-macos-arm64-product-linux-buildable.md) | Platforms: macOS arm64 product, Linux-buildable | Accepted |
+| [0004](0004-port-xtask-from-site-preview.md) | Port xtask from site-preview | Accepted |
 | [0005](0005-integrate-on-main-one-signed-commit-per-task.md) | Integrate on main, one signed commit per task | Accepted |
-| [0006](0006-pinned-stable-toolchain-edition-2024-dual-licence.md) | Pinned stable toolchain, edition 2024, dual licence | Proposed |
-| [0007](0007-event-sourcing-and-cqrs-in-the-control-plane-only.md) | Event sourcing and CQRS in the control plane only | Proposed. Amended by 0024, 0026, 0037 |
-| [0008](0008-sqlite-through-rusqlite-as-the-first-journal-adapter.md) | SQLite through rusqlite as the first journal adapter | Proposed. Amended by 0021 |
-| [0009](0009-native-async-ports-used-through-generics.md) | Native async ports used through generics | Proposed |
-| [0010](0010-serde-json-link-protocol-with-an-explicit-version.md) | Serde JSON link protocol with an explicit version | Proposed |
-| [0011](0011-model-first-with-quint-conformance.md) | Model first with Quint conformance | Proposed |
-| [0012](0012-independent-fault-lab-and-fakes.md) | Independent fault lab and fakes | Proposed |
-| [0013](0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart through its CLI by argv; guests by tart exec or ssh | Proposed |
-| [0014](0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly | Proposed. Amended by 0033, 0034 |
-| [0015](0015-owner-gated-real-world-lanes.md) | Owner-gated real-world lanes | Proposed |
-| [0016](0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox and fail-closed tools | Proposed. Amended by 0035 |
-| [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Proposed |
-| [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Proposed. Amended 2026-11-09 |
-| [0019](0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane separation over dev closures and policy-driven planes | Proposed |
-| [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Proposed |
+| [0006](0006-pinned-stable-toolchain-edition-2024-dual-licence.md) | Pinned stable toolchain, edition 2024, dual licence | Accepted |
+| [0007](0007-event-sourcing-and-cqrs-in-the-control-plane-only.md) | Event sourcing and CQRS in the control plane only | Accepted. Amended by 0024, 0026, 0037 |
+| [0008](0008-sqlite-through-rusqlite-as-the-first-journal-adapter.md) | SQLite through rusqlite as the first journal adapter | Accepted. Amended by 0021 |
+| [0009](0009-native-async-ports-used-through-generics.md) | Native async ports used through generics | Accepted |
+| [0010](0010-serde-json-link-protocol-with-an-explicit-version.md) | Serde JSON link protocol with an explicit version | Accepted |
+| [0011](0011-model-first-with-quint-conformance.md) | Model first with Quint conformance | Accepted |
+| [0012](0012-independent-fault-lab-and-fakes.md) | Independent fault lab and fakes | Accepted |
+| [0013](0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart through its CLI by argv; guests by tart exec or ssh | Accepted |
+| [0014](0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly | Accepted. Amended by 0033, 0034 |
+| [0015](0015-owner-gated-real-world-lanes.md) | Owner-gated real-world lanes | Accepted |
+| [0016](0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox and fail-closed tools | Accepted. Amended by 0035 |
+| [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Accepted |
+| [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Accepted. Amended 2026-11-09 |
+| [0019](0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane separation over dev closures and policy-driven planes | Accepted |
+| [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Accepted |
 | [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Accepted. Amended by 0034 |
 | [0022](0022-strategic-ddd-with-a-data-oriented-implementation.md) | Strategic DDD with a data-oriented implementation | Accepted |
-| [0023](0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time | Proposed |
+| [0023](0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time | Accepted |
 | [0024](0024-the-data-plane-owns-host-resource-accounting.md) | The data plane owns host resource accounting | Accepted |
 | [0025](0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine keeps evidence and Unknown resolves only by observation | Accepted |
 | [0026](0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Provider instance identity in the ownership proof and an external epoch floor | Accepted |
@@ -90,5 +90,8 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0038](0038-jit-delivery-through-tart-exec-with-a-checked-guest-identity.md) | JIT delivery through tart exec with a checked guest identity | Accepted |
 | [0039](0039-clones-only-from-local-service-owned-image-bases.md) | Clones only from local service-owned image bases | Accepted |
 | [0040](0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool at organisation scope | Accepted |
-| [0041](0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | AggregateStore: one write path, intent digests and refusals bound to every read | Proposed |
-| [0042](0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered Unknown, never refused | Proposed |
+| [0041](0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | AggregateStore: one write path, intent digests and refusals bound to every read | Accepted |
+| [0042](0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered Unknown, never refused | Accepted |
+| [0043](0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Upgrades jump forward any distance; rollback is one release, deeper rollback restores a backup | Accepted |
+| [0044](0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates mayfly; `mayfly uninstall --purge` removes what it created | Accepted |
+| [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted |

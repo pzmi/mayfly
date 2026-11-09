@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed; amended 2026-11-09.
+Accepted (owner, 2026-11-09); amended 2026-11-09.
 
 ## Context
 
@@ -151,7 +151,7 @@ with the tracer in the test kit; it keeps the pure crate smaller but adds a seco
 point every event set must carry and splits the shape rules from the codec they describe. It
 remains open if the pure crate's tracer grows.
 
-## Amended 2026-11-09 (planner): the static rules behind the tracer (ARCH-04)
+## Amended 2026-11-09 (planner): the static rules behind the tracer (ARCH-04) (accepted by the owner 2026-11-09)
 
 Review of the tracer amendment (KER-03G) left three things to the architecture checker and one
 to a test; ARCH-04 lands them.
@@ -190,7 +190,7 @@ to a test; ARCH-04 lands them.
   hand-written visitor choosing its field list by depth) is another type, and without the names
   the tracer would report the inner one as a differing recursive copy instead of tracing it.
 
-## Amended 2026-11-09 (ES-03, proposed): command bodies, refusals and epochs
+## Amended 2026-11-09 (ES-03; accepted by the owner 2026-11-09): command bodies, refusals and epochs
 
 ADR 0041 adds to the aggregate contract: `Aggregate::Body` implements `CommandBody` (a
 `snake_case` `command_type`, its `TYPES` and `Serialize`, the canonical form of the intent

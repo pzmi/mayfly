@@ -46,9 +46,9 @@ event, not an outbox row). ES-01F realigns the landed ES-01; ES-02 to ES-12 impl
 - E3: no refusal receipts (receipts of accepted commands only), or unbound ones that replay a stale refusal.
 - E9: rebuild only at start-up under the owner lease.
 
-## Amended 2026-11-09 (ES-03, proposed)
+## Amended 2026-11-09 (ES-03; accepted by the owner 2026-11-09)
 
-ADR 0041 (proposed) refines decision 2: a refusal receipt is bound to **every** stream the
+ADR 0041 refines decision 2: a refusal receipt is bound to **every** stream the
 decision read, each at the revision read, not to one; it answers while all are unchanged and is
 decided afresh once any moved. A refusal bound to one stream would be replayed after another
 input of the decision moved.

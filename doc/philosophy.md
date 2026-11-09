@@ -1,7 +1,8 @@
 # mayfly: philosophy
 
-**Status:** owner-reviewed in part, 2026-11-09: §5.1 (no telemetry, ADR 0036) and §7.2 (name
-alternatives) are confirmed; items still marked [OWNER] are open (P1, P3, P4). **Scope:** product behaviour, operator interface,
+**Status:** Accepted (owner, 2026-11-09): §5.1 (no telemetry, ADR 0036), §7.2 (name
+alternatives) and the former open items P1, P3 (ADR 0044) and P4 (ADR 0045) are decided; no
+open owner item remains. **Scope:** product behaviour, operator interface,
 security, observability, dependencies and the way mayfly is built.
 
 **How to use this document.** It says *why* mayfly is built the way it is and which lines it
@@ -76,16 +77,17 @@ reviews and applies (`recover --dry-run`, `--apply <plan>`). Drain, pause and re
 operator's levers and always work.
 
 4.2 **No surprises.** No self-update, no background download the operator did not configure, no
-default that widens access. The runner inside images never self-updates (ADR 0030) [OWNER P1:
-confirm that mayfly itself is updated only through the package manager (Homebrew), never by
-itself]. Configuration is one file,
+default that widens access. The runner inside images never self-updates (ADR 0030) (mayfly
+itself is updated only through the package manager, Homebrew, never by itself: owner, 2026-11-09,
+ADR 0044). Configuration is one file,
 validated on load; a change is logged once at INFO.
 
 4.3 **Reversible.** Releases roll back safely (adjacent releases are compatible both ways; an
 older build that meets something it cannot understand enters safe mode rather than guessing).
-Uninstall removes what mayfly created and nothing else [OWNER P3: confirm as a commitment for
-OPS-01, as `mayfly uninstall --purge` for VMs, bases and state beside the package manager's
-uninstall].
+Uninstall removes what mayfly created and nothing else (a commitment, owner, 2026-11-09, ADR 0044:
+`brew uninstall` removes the program; `mayfly uninstall --purge` removes the state, the VMs and
+image bases it can prove it created, and its runner registrations). A rollback beyond one release
+restores a backup and quarantines what it cannot prove (ADR 0043).
 
 ## 5. Privacy and least privilege
 
@@ -102,7 +104,7 @@ handed over once, and is gone (D13).
 
 5.3 **Least privilege.** The daemon runs as a non-root user; its state is `0700`/`0600`; the
 GitHub App asks for the narrowest permissions that work, and the documentation lists them and
-why [OWNER P4: confirm the exact permission list is a documented commitment]. Secrets come from
+why (the exact list is a documented commitment, widened only by an ADR first, and `mayfly doctor` warns when the App holds more: owner, 2026-11-09, ADR 0045). Secrets come from
 the operator's chosen provider by reference (Keychain, file, environment, command) and are
 never persisted by mayfly (ADR 0033).
 

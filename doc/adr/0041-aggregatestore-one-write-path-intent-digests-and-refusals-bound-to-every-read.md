@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed. Amends ADR 0034 (E3) and ADR 0021.
+Accepted (owner, 2026-11-09). Amends ADR 0034 (E3) and ADR 0021.
 
 ## Context
 

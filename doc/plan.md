@@ -287,8 +287,13 @@ older build must not ignore ships in two releases: **prepare** (N+1 reads it and
 aggregate's supported epoch) then **activate** (N+2 writes it); a stream whose epoch exceeds a
 build's support refuses that build's writes and is still read (event-store §6). An unknown event
 type in the journal puts the daemon in **safe mode** (it cannot prove it understands ownership).
-Upgrade and rollback beyond one release are an open owner decision (dm OD2); the working
-assumption is in event-store §6 and dm §10.1.
+**Upgrades and rollback (owner, 2026-11-09, ADR 0043):** any forward jump of any number of
+versions is supported (every event readable for ever, every upcaster and migration kept; a CI
+upgrade matrix upgrades the journal of every released version straight to the current build);
+rollback one version is supported; deeper rollback restores the automatic pre-migration backup
+(`mayfly restore <backup>`); an older build meeting newer data refuses to write the affected
+streams and says why; a deep-rollback recovery quarantines the VMs it cannot prove and never
+asserts ownership (ADR 0025). Detail: event-store §6.1a.
 
 ### 5.4 Commands, queries, reactors
 
@@ -369,7 +374,9 @@ token, Actions-service token, message-queue token; all in memory only, refreshed
 never logged (`Secret<T>` with redacting `Debug`/`Display`, a test proves it). The App key comes
 from a `SecretProvider` reference (`keychain:`, `file:`, `env:`, `exec:`; ADR 0033). Permissions
 are verified against a disposable installation (GH-00, owner), never guessed; the documented
-permission list is an open owner item (philosophy §5.3).
+permission list, with the reason for each permission, is a published commitment (ADR 0045; the
+list itself is to be verified by GH-00 and HW-02), and `mayfly doctor` warns when the App holds
+more.
 
 ### 7.2 Scale Set session
 
@@ -557,6 +564,7 @@ mayfly events --follow [--since]  mayfly doctor [--json]          mayfly config 
 mayfly recover --dry-run | --apply <plan-id>                      mayfly safe-mode enter
 mayfly image verify <manifest>    mayfly image refresh <pool>     mayfly image withdraw <digest>
 mayfly service install|uninstall  mayfly diagnostics bundle [--out <path>]   mayfly metrics
+mayfly restore <backup>           mayfly uninstall --purge [--dry-run | --apply <plan-id>]
 ```
 
 Config (TOML, `schema_version = 1`): `state_dir`, `[github]` (organisation, App client id,
@@ -565,8 +573,12 @@ memory and disk), `[[pools]]` (name, `tier = "trusted"`, image manifest, guest O
 `min_prepared`, `max_prepared_age`, `max_running`, breaker N and W, optional daily runner refresh),
 `[provider]` (`tart` + `tart_home`). Validated on load; refused keys (`allow_untrusted_prs`, a
 classic `mode`) are refused with a message, never ignored. Secrets only by reference (ADR 0033).
-Uninstall and the packaging channel (Homebrew, `mayfly uninstall --purge`) are an open owner
-decision (philosophy §4.3).
+Packaging and removal (owner, 2026-11-09, ADR 0044): mayfly is distributed and updated through
+Homebrew and never updates itself; `brew uninstall` removes the program; `mayfly uninstall
+--purge` removes exactly what mayfly created (journal and state, its VMs and image bases with the
+ownership proof of §8.4, its runner registrations) and Homebrew's caveat points to it. `mayfly
+restore <backup>` restores the automatic pre-migration backup (ADR 0043). Both are destructive
+operations run only by the owner or on the owner's explicit request, never by an agent.
 
 ---
 

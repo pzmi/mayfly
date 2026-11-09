@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed; partly superseded by 0038 (guests: no SSH)
+Accepted (owner, 2026-11-09); partly superseded by 0038 (guests: no SSH)
 
 ## Context
 

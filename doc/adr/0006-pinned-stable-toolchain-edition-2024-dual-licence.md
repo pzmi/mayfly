@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09)
 
 ## Context
 
@@ -24,4 +24,4 @@ Crates are not published to crates.io.
 Compiler upgrades are deliberate commits (foundation section 8, item 5: a version bump is its
 own commit with the gate green), so new lints never break the gate unannounced. `cargo-deny`
 checks dependency licences against a permissive allowlist (FND-04). Not publishing removes the
-semver obligations of a library. Proposed: the owner may pick a different licence or toolchain.
+semver obligations of a library. Accepted by the owner 2026-11-09; the owner may still pick a different licence or toolchain.

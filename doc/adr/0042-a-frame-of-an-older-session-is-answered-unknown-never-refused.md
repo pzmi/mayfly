@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed. Amends plan §3.2 (the `stale_epoch` refusal reason).
+Accepted (owner, 2026-11-09). Amends plan §3.2 (the `stale_epoch` refusal reason).
 
 ## Context
 

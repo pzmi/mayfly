@@ -15,34 +15,35 @@ then `cargo xtask check` (and `cargo xtask quick` while iterating).
 D1–D15 were the plan's first decisions; D*n* is ADR *n*+1 and stays a valid alias. From ADR 0017
 on, the ADR number is the decision id and no new D-id is minted (ADR 0001, amended 2026-11-09);
 rows below list every ADR that binds tasks. **Proposed** decisions are planner defaults the owner
-may override; until then tasks follow them as written. Only the owner flips a decision to
+may override; until then tasks follow them as written (none is Proposed today: the owner accepted
+ADRs 0003, 0004, 0006-0020, 0023, 0041 and 0042 on 2026-11-09). Only the owner flips a decision to
 Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `doc/event-store.md`
-§8.3 (E1–E9) are ADRs 0021 and 0024–0040.
+§8.3 (E1–E9) are ADRs 0021 and 0024–0040; the answers on upgrades, distribution and the App's permissions are ADRs 0043–0045.
 
 | D | Decision | Status |
 |---|---|---|
 | [D1](adr/0002-control-plane-and-data-plane-in-a-multi-crate-workspace.md) | The multi-crate workspace of plan §4, with the control plane / data plane split of plan §3, is the code structure. The split is enforced by `architecture.toml` edges, not by convention. | Accepted |
-| [D2](adr/0003-platforms-macos-arm64-product-linux-buildable.md) | Platforms: the product targets `aarch64-apple-darwin`; every crate also builds and tests on Linux x86_64/arm64 (CI and agent sandbox). Platform code uses `#[cfg]` items, never `cfg!` branches. Windows is out of scope. | Proposed |
-| [D3](adr/0004-port-xtask-from-site-preview.md) | `tools/xtask` is ported from `pzmi/site-preview` (same owner, MIT OR Apache-2.0) and adapted, not rewritten: architecture checker with negative fixtures, check catalog, `doctor` with `tools/versions.toml`, `adr`, `land`, action-pin check. Site-preview-specific stages (bench, docs, release specifics) are dropped until needed. | Proposed |
+| [D2](adr/0003-platforms-macos-arm64-product-linux-buildable.md) | Platforms: the product targets `aarch64-apple-darwin`; every crate also builds and tests on Linux x86_64/arm64 (CI and agent sandbox). Platform code uses `#[cfg]` items, never `cfg!` branches. Windows is out of scope. | Accepted (owner, 2026-11-09) |
+| [D3](adr/0004-port-xtask-from-site-preview.md) | `tools/xtask` is ported from `pzmi/site-preview` (same owner, MIT OR Apache-2.0) and adapted, not rewritten: architecture checker with negative fixtures, check catalog, `doctor` with `tools/versions.toml`, `adr`, `land`, action-pin check. Site-preview-specific stages (bench, docs, release specifics) are dropped until needed. | Accepted (owner, 2026-11-09) |
 | [D4](adr/0005-integrate-on-main-one-signed-commit-per-task.md) | The whole plan is integrated directly on `main`: one DCO-signed commit per task, subject `<ID>: <summary>`, landed by the orchestrator with `cargo xtask land` after a green gate on the merged tree; implementing agents never push. ⛳ checkpoints and CI on `main` are the quality net. | Accepted |
-| [D5](adr/0006-pinned-stable-toolchain-edition-2024-dual-licence.md) | Toolchain pinned to stable 1.97.0, edition 2024, resolver 3; `Cargo.lock` committed; CI uses `--locked`. License `MIT OR Apache-2.0`; no crates.io publishing. | Proposed |
-| [D6](adr/0007-event-sourcing-and-cqrs-in-the-control-plane-only.md) | Event sourcing and CQRS live in the **control plane only** (plan §5). The data plane keeps no durable state and re-observes the provider on start (plan §3.1). | Proposed |
-| [D7](adr/0008-sqlite-through-rusqlite-as-the-first-journal-adapter.md) | Persistence is behind the storage-neutral `Journal` port (ADR 0021: the stream-scoped event store design, no global order). SQLite through `rusqlite` (bundled) is the first adapter, with WAL, `synchronous=FULL` and forward-only raw-SQL migrations; a PostgreSQL adapter follows. A single writer thread is an implementation detail of the SQLite adapter, never a premise of the port; `sqlx` is rejected (compile-time DB, two SQLite stacks). | Proposed (amended by 0021) |
-| [D8](adr/0009-native-async-ports-used-through-generics.md) | Ports are native `async fn`/RPITIT traits used through generics; `async_trait` and `dyn` ports only where object safety is proven necessary (with a note in the ADR). | Proposed |
-| [D9](adr/0010-serde-json-link-protocol-with-an-explicit-version.md) | The CP↔DP protocol is serde JSON with an explicit `protocol_version`; the in-process transport still encodes and decodes every message. Secrets cross only as `SecretHandle` (plan §3.2). `serde` derive in `mayfly-domain` is ADR 0017. | Proposed |
-| [D10](adr/0011-model-first-with-quint-conformance.md) | **Model first from day one** (unlike site-preview's retrofit): the lifecycle, scheduling, recovery, scaleset and link Quint models precede the Rust code they govern; conformance replays ITF traces against production code (ver §6). | Proposed |
-| [D11](adr/0012-independent-fault-lab-and-fakes.md) | The fault lab (`tools/faultlab`) imports **no** production crate: it drives the binaries, reads SQLite with its own SQL and fake-tart/fake-github state with its own parsers, and has its own checker (ver §8). `mayfly-fake-tart` and `mayfly-fake-github` likewise implement their wire behaviour independently. | Proposed |
-| [D12](adr/0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart is driven only through its CLI by argv. Guests are reached by `tart exec` where the image supports it, else the system `ssh` binary with a pinned per-image host key; no Rust SSH library in v0.x. | Proposed |
-| [D13](adr/0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly: `Secret<T>` with redacting `Debug`/`Display`, no `Serialize`; JIT configs live in memory and go to the guest launcher over stdin. A redaction test and the secret scan guard it. | Proposed |
-| [D14](adr/0015-owner-gated-real-world-lanes.md) | Real-world lanes (real Tart on macOS, live GitHub scale set) are owner-gated: a manual `hardware.yml` workflow on the owner's self-hosted Mac and a disposable GitHub repository/App. Agents deliver everything up to them. | Proposed |
-| [D15](adr/0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox: Linux, no Docker, no macOS, no Tart. Quint (Node) and Apalache (JVM) are dev-only tools pinned in `tools/versions.toml`; a missing tool fails closed (never a skipped-but-green check). Actions are pinned by commit SHA. | Proposed |
-| [ADR 0017](adr/0017-serde-derive-in-the-shared-kernel.md) | `mayfly-domain` depends on `serde` with `derive` and on no format crate; encoding stays in `mayfly-protocol`, the journal adapter and the golden-fixture harness. | Proposed |
-| [ADR 0018](adr/0018-event-codec-and-aggregate-registry.md) | Events implement `DomainEvent`; an aggregate's events form one `event_set!` enum with a codec and a registry, so every kind has its schema version and golden fixture. | Proposed |
-| [ADR 0019](adr/0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane membership and the purity and independence roles are data in `architecture.toml` (`[planes]`, `[purity]`), pinned by a repository test, instead of dev-dependency closures. | Proposed |
-| [ADR 0020](adr/0020-control-plane-time-and-the-journal-s-recorded-at.md) | The control plane's `Clock` port reads wall-clock milliseconds since the Unix epoch; every persisted instant is such a reading, and the journal records `recorded_at`. | Proposed |
+| [D5](adr/0006-pinned-stable-toolchain-edition-2024-dual-licence.md) | Toolchain pinned to stable 1.97.0, edition 2024, resolver 3; `Cargo.lock` committed; CI uses `--locked`. License `MIT OR Apache-2.0`; no crates.io publishing. | Accepted (owner, 2026-11-09) |
+| [D6](adr/0007-event-sourcing-and-cqrs-in-the-control-plane-only.md) | Event sourcing and CQRS live in the **control plane only** (plan §5). The data plane keeps no durable state and re-observes the provider on start (plan §3.1). | Accepted (owner, 2026-11-09) |
+| [D7](adr/0008-sqlite-through-rusqlite-as-the-first-journal-adapter.md) | Persistence is behind the storage-neutral `Journal` port (ADR 0021: the stream-scoped event store design, no global order). SQLite through `rusqlite` (bundled) is the first adapter, with WAL, `synchronous=FULL` and forward-only raw-SQL migrations; a PostgreSQL adapter follows. A single writer thread is an implementation detail of the SQLite adapter, never a premise of the port; `sqlx` is rejected (compile-time DB, two SQLite stacks). | Accepted (owner, 2026-11-09); amended by 0021 |
+| [D8](adr/0009-native-async-ports-used-through-generics.md) | Ports are native `async fn`/RPITIT traits used through generics; `async_trait` and `dyn` ports only where object safety is proven necessary (with a note in the ADR). | Accepted (owner, 2026-11-09) |
+| [D9](adr/0010-serde-json-link-protocol-with-an-explicit-version.md) | The CP↔DP protocol is serde JSON with an explicit `protocol_version`; the in-process transport still encodes and decodes every message. Secrets cross only as `SecretHandle` (plan §3.2). `serde` derive in `mayfly-domain` is ADR 0017. | Accepted (owner, 2026-11-09) |
+| [D10](adr/0011-model-first-with-quint-conformance.md) | **Model first from day one** (unlike site-preview's retrofit): the lifecycle, scheduling, recovery, scaleset and link Quint models precede the Rust code they govern; conformance replays ITF traces against production code (ver §6). | Accepted (owner, 2026-11-09) |
+| [D11](adr/0012-independent-fault-lab-and-fakes.md) | The fault lab (`tools/faultlab`) imports **no** production crate: it drives the binaries, reads SQLite with its own SQL and fake-tart/fake-github state with its own parsers, and has its own checker (ver §8). `mayfly-fake-tart` and `mayfly-fake-github` likewise implement their wire behaviour independently. | Accepted (owner, 2026-11-09) |
+| [D12](adr/0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart is driven only through its CLI by argv. Guests are reached by `tart exec` where the image supports it, else the system `ssh` binary with a pinned per-image host key; no Rust SSH library in v0.x. | Accepted (owner, 2026-11-09) |
+| [D13](adr/0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly: `Secret<T>` with redacting `Debug`/`Display`, no `Serialize`; JIT configs live in memory and go to the guest launcher over stdin. A redaction test and the secret scan guard it. | Accepted (owner, 2026-11-09) |
+| [D14](adr/0015-owner-gated-real-world-lanes.md) | Real-world lanes (real Tart on macOS, live GitHub scale set) are owner-gated: a manual `hardware.yml` workflow on the owner's self-hosted Mac and a disposable GitHub repository/App. Agents deliver everything up to them. | Accepted (owner, 2026-11-09) |
+| [D15](adr/0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox: Linux, no Docker, no macOS, no Tart. Quint (Node) and Apalache (JVM) are dev-only tools pinned in `tools/versions.toml`; a missing tool fails closed (never a skipped-but-green check). Actions are pinned by commit SHA. | Accepted (owner, 2026-11-09) |
+| [ADR 0017](adr/0017-serde-derive-in-the-shared-kernel.md) | `mayfly-domain` depends on `serde` with `derive` and on no format crate; encoding stays in `mayfly-protocol`, the journal adapter and the golden-fixture harness. | Accepted (owner, 2026-11-09) |
+| [ADR 0018](adr/0018-event-codec-and-aggregate-registry.md) | Events implement `DomainEvent`; an aggregate's events form one `event_set!` enum with a codec and a registry, so every kind has its schema version and golden fixture. | Accepted (owner, 2026-11-09) |
+| [ADR 0019](adr/0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane membership and the purity and independence roles are data in `architecture.toml` (`[planes]`, `[purity]`), pinned by a repository test, instead of dev-dependency closures. | Accepted (owner, 2026-11-09) |
+| [ADR 0020](adr/0020-control-plane-time-and-the-journal-s-recorded-at.md) | The control plane's `Clock` port reads wall-clock milliseconds since the Unix epoch; every persisted instant is such a reading, and the journal records `recorded_at`. | Accepted (owner, 2026-11-09) |
 | [ADR 0021](adr/0021-a-storage-neutral-stream-scoped-event-store.md) | The `Journal` port follows the stream-scoped event store design (`doc/event-store.md`): no global order, readers enumerate streams and read each after a revision. Amends ADR 0008; amended by 0034. | Accepted |
 | [ADR 0022](adr/0022-strategic-ddd-with-a-data-oriented-implementation.md) | DDD is strategic (contexts, language, consistency boundaries in `doc/domain-model.md`); code is data-oriented: plain data, free pure functions and tables. | Accepted |
-| [ADR 0023](adr/0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time (DP-03). | Proposed |
+| [ADR 0023](adr/0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time (DP-03). | Accepted (owner, 2026-11-09) |
 | [ADR 0024](adr/0024-the-data-plane-owns-host-resource-accounting.md) | The data plane accounts for and enforces host resources (memory, disk, macOS-guest slots incl. foreign VMs), refuses directives that do not fit and reports capacity; the control plane allocates only within reported capacity (OD4). | Accepted |
 | [ADR 0025](adr/0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine whenever ownership or an outcome cannot be proven; never auto-delete a quarantined VM; capacity loss accepted; `Unknown` resolves only by re-observation, no operator assertion (OD9, OD10). | Accepted |
 | [ADR 0026](adr/0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Ownership proof includes the provider instance id (random MAC per clone, re-observed before delete); external epoch floor in `TART_HOME` (OD6, OD7). | Accepted |
@@ -60,14 +61,17 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0038](adr/0038-jit-delivery-through-tart-exec-with-a-checked-guest-identity.md) | JIT over `tart exec -i` stdin to the exact VM after the lock-PID and instance-id checks; GitHub confirms the runner online; no SSH (OD5). | Accepted |
 | [ADR 0039](adr/0039-clones-only-from-local-service-owned-image-bases.md) | Never pull at job time; clones only from local service-owned bases; `mayfly image refresh <pool>` (OD13). | Accepted |
 | [ADR 0040](adr/0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool, organisation scope, never deleted automatically (OD14). | Accepted |
-| [ADR 0041](adr/0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | `AggregateStore`'s write path; refusal receipts bound to every stream the decision read; `CommandBody` with a canonical intent digest; derived event ids; `ARCH-single-append`. Amends 0034 (E3). | Proposed |
+| [ADR 0041](adr/0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | `AggregateStore`'s write path; refusal receipts bound to every stream the decision read; `CommandBody` with a canonical intent digest; derived event ids; `ARCH-single-append`. Amends 0034 (E3). | Accepted (owner, 2026-11-09) |
+| [ADR 0042](adr/0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered `Unknown`, never refused (amends plan §3.2's `stale_epoch`). | Accepted (owner, 2026-11-09) |
+| [ADR 0043](adr/0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Forward upgrades of any distance (upgrade matrix from every release); rollback one release; deeper rollback restores the pre-migration backup (`mayfly restore`); older build refuses writes on newer streams; deep-rollback recovery quarantines what it cannot prove (OD2). | Accepted (owner, 2026-11-09) |
+| [ADR 0044](adr/0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates; no self-update; `brew uninstall` removes the program; `mayfly uninstall --purge` removes what mayfly created, with ownership proof (P1, P3). | Accepted (owner, 2026-11-09) |
+| [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). | Accepted (owner, 2026-11-09) |
 
-Open owner decisions (working assumptions, no ADR yet): **OD2** upgrade and rollback (any forward
-jump supported through an upgrade-matrix test from every released version; one-step rollback;
-deeper rollback restores the automatic pre-upgrade backup; an older build refuses writes on
-streams of a newer epoch; dm §10.1); **P1/P3** packaging and uninstall (Homebrew, `mayfly
-uninstall --purge`); **P4** the documented GitHub App permission list (philosophy §5.3); the
-remaining sub-items of **OD20** (socket authorisation, audit).
+Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
+**P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
+list (ADR 0045). Still planner defaults: the remaining sub-items of **OD20** (socket
+authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
+GitHub capture (GH-00).
 
 ## Rules for every task
 
@@ -131,6 +135,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences, ownership proof | FND-02 | sonnet | |
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | DEC-01 | Record the owner's decisions as ADRs and apply them to the documents | DDD-01 | opus | |
+| DEC-02 | Record the owner's upgrade, distribution and ADR decisions (ADRs 0043-0045, batch acceptance) | DEC-01 | opus | |
 | KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06, DEC-01 | opus | |
 | KER-03 | Event-sourcing kernel: aggregate, event registry, goldens, determinism | KER-01 | opus | |
 | KER-04 | Lifecycle model and `Attempt` aggregate | KER-03, FND-06, DEC-01 | opus | |
@@ -198,6 +203,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | OPS-05 | Watchdog, heartbeat metric, distinct exit codes | RT-02, RT-04 | sonnet | |
 | OPS-06 | `mayfly image refresh <pool>` and runner-age warnings | CP-07, DP-05, OPS-02 | sonnet | |
 | OPS-07 | `mayfly diagnostics bundle` | RT-03, RT-04 | sonnet | |
+| OPS-08 | `mayfly restore <backup>` and `mayfly uninstall --purge` | RT-03, OPS-01, CP-07 | opus | |
 | HW-01 | (owner) Real Tart lane on the owner's Mac | DP-05, OPS-01 | sonnet | |
 | HW-02 | (owner) Live GitHub scale set on a disposable organisation | GH-04, HW-01, GH-00 | sonnet | |
 | HW-03 | (owner) Canary next to Tartelet, then cutover | E2E-02, HW-02, OPS-03 | sonnet | |
@@ -247,7 +253,7 @@ aarch64-apple-darwin` from Linux. `security.yml` (gitleaks, cargo-deny advisorie
 `codeql.yml`, `scorecard.yml`, `.github/dependabot.yml` (cargo, actions, npm in `formal/`).
 `doc/required-checks.md`. Every action pinned by SHA (the pin check enforces it).
 Accept: all workflows green on `main`; actionlint clean; (owner) branch ruleset requiring the
-listed checks, if the owner wants one.
+listed checks, if the owner wants one (pending: the owner will add it later).
 
 #### FND-05 nextest profiles, testkit poll helper, coverage stage
 Cites: ver §2, §10, ADR 0019. `.config/nextest.toml` (default, ci, serial profiles), the `poll`
@@ -354,14 +360,21 @@ their invariants (mapped to I01–I16), commands, policies (→ process managers
 (→ projections), external systems, and hot spots. Proposes the changes to plan.md and to KER-02..08
 it implies; the orchestrator applies them after the ⛳ owner review.
 Accept: every KER-04..08 aggregate and every policy traces to the model; (owner) hot spots decided.
-(Landed: `doc/domain-model.md`; the owner reviewed it on 2026-11-09, applied by DEC-01.)
+(Landed: `doc/domain-model.md`; the owner reviewed it on 2026-11-09, applied by DEC-01. The ⛳ checkpoint is satisfied by the owner's decisions: every hot spot is decided and recorded as ADRs 0024-0045 by DEC-01 and DEC-02.)
 
 #### DEC-01 Record the owner's decisions as ADRs and apply them
 Cites: dm §10–§11, event-store §8, philosophy, ADR 0001. ADRs 0024–0040 for OD1, OD3–OD20, E2–E9,
 P2; ADR 0021 Accepted; ADR 0001 amended (record-not-rule, dated amendments, `Rejected`, ADR number
 as id); plan, domain model, event store, verification, philosophy, foundation, CLAUDE.md and this
-file follow; GH-05 removed. Open: OD2, P1/P3, P4.
+file follow; GH-05 removed. Open then: OD2, P1/P3, P4 (decided by DEC-02).
 Accept: `cargo xtask check --only docs` green; every decided OD/E names its ADR.
+
+#### DEC-02 Record the owner's upgrade, distribution and ADR decisions
+Cites: ADR 0001, dm §10.1 OD2, philosophy P1/P3/P4. New ADRs 0043 (upgrades and rollback), 0044
+(Homebrew and `uninstall --purge`), 0045 (the App permission list); ADRs 0041 and 0042 and the
+batch 0003, 0004, 0006-0020, 0023 Accepted (owner, 2026-11-09), with the amendments marked
+proposed inside them; dm OD2, event-store §6, plan, philosophy and this file follow. Docs only.
+Accept: `cargo xtask check --only docs` green; no open owner item left in philosophy.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
@@ -634,12 +647,13 @@ Accept: fixtures give their verdicts; core store workloads PASS; each mutant FAI
 whose fault never hits is `INCONCLUSIVE`; a missing Knossos fails closed.
 
 #### ES-11 Compatibility harness and upgrade matrix
-Cites: event-store §6.5; dm OD2 (working assumption). `cargo xtask compat` with a scenario corpus,
+Cites: event-store §6.1a, §6.5; ADR 0043. `cargo xtask compat` with a scenario corpus,
 run as N → N+1 → N on SQLite locally and on both engines in CI, plus an **upgrade matrix** from
 every released version to the current build (forward jumps of any size), from the first tagged
-release on. Revisit when the owner decides OD2.
+release on: CI opens the journal of **every released version** and upgrades it straight to the
+current build, never only the previous one (ADR 0043).
 Accept: a deliberately incompatible event change (a rename) fails it; a skipped-version upgrade in
-the matrix passes.
+the matrix passes; the matrix has one row per released version.
 
 #### ES-12 Online projection rebuild
 Cites: event-store §3.6, ES-I11, §6.4; ADR 0034 (E9). Shadow generations built stream by stream in
@@ -829,7 +843,8 @@ session open, poll, acquire, JIT generation, job start and completion, cancel, 4
 offer fields usable for trust classification, how long an unclaimed JIT registration lingers, and
 whether `maxCapacity` is read as a total. Agents prepare the capture tool and redaction; (owner)
 runs it.
-Accept: the traces and answers committed (redacted); GH-01 cites them.
+Accept: the traces and answers committed (redacted); GH-01 cites them; the minimal GitHub App
+permission list, verified, is committed for ADR 0045. Pending owner item (the owner will address it later).
 
 ### Phase 4 — GitHub
 
@@ -847,6 +862,8 @@ fault knobs add 409 and 422.
 Cites: plan §7.1, D13. RS256 JWT, installation token cache with refresh-before-expiry, reqwest +
 rustls, retry policy honouring Retry-After, request metrics.
 Accept: tests against fake-github; token never in Debug output.
+ADR 0045: the client reads the installation's granted permissions so `mayfly doctor` can warn when
+they exceed the published minimal list (the list is filled in by GH-00/HW-02, to be verified).
 
 #### GH-03 Scale Set client
 Cites: plan §7.2, §7.4. `ScaleSetApi` port implementation; recorded redacted fixtures as the
@@ -944,8 +961,10 @@ Cites: plan §11, §13; ADR 0031. Foreground `mayflyd` documented for local use;
 (auto-login session, `KeepAlive` with exit-code handling so a lock refusal is not restarted
 forever, `ThrottleInterval`, `ExitTimeOut`), `mayfly service install|uninstall`, `doctor` checks
 (provider version, `TART_HOME` `0700` and its deployment marker, disk, memory, socket permissions,
-secret references resolvable, sleep settings FAIL, clock). Uninstall removes what mayfly created
-and nothing else (philosophy §4.3; the packaging channel and `--purge` are OWNER P1/P3, pending).
+secret references resolvable, sleep settings FAIL, clock). `service uninstall` removes what the service
+install created and nothing else (philosophy §4.3); the purge of state, VMs and bases is OPS-08
+(ADR 0044). `doctor` also warns when the GitHub App holds more permissions than ADR 0045's list
+needs (once GH-02 exposes them).
 Accept: plist golden; doctor JSON golden on Linux with fakes; (owner) install on the Mac.
 
 #### OPS-02 Image manifest
@@ -959,6 +978,8 @@ without it refused, ADR 0038); `image withdraw` with CP-07.
 Cites: fnd §7. Tag-triggered release: macOS arm64 (and Linux) archives, `SHA256SUMS`, build
 provenance attestation, CycloneDX SBOM; signing/notarisation documented as (owner) follow-up.
 Accept: dry-run on a branch produces artefacts; (owner) first tag.
+ADR 0044: Homebrew is the distribution and update channel (a formula or tap, with a caveat that
+points to `mayfly uninstall --purge`); no self-update or update check exists anywhere.
 
 #### OPS-04 Runbooks
 Cites: plan §10. `doc/runbook.md`: stale runner, disk full, GitHub outage, lost guest, orphan
@@ -986,6 +1007,21 @@ Cites: ADR 0036, philosophy §5.1. A local, redacted archive (version, config wi
 provider and OS versions) and its listing; nothing sent anywhere.
 Accept: a canary-secret test over every bundle file; golden listing.
 
+#### OPS-08 `mayfly restore` and `mayfly uninstall --purge`
+Cites: ADR 0043, ADR 0044, plan §8.4, §10, §11. `mayfly restore <backup>` restores the automatic
+pre-migration backup (taken before every migration; ES-09's restore path), refuses a backup of a
+newer schema than the binary, and leaves the daemon in the recovery path of plan §10 so that VMs
+created after the backup are quarantined (`ownership_doubt`), never deleted or asserted.
+`mayfly uninstall --purge [--dry-run | --apply <plan-id>]` plans first, then removes exactly what
+mayfly created: journal and state, its VMs and image bases (each only with the ownership proof:
+journal record, exact `OwnedVmName` and generation; foreign or unprovable VMs and bases are
+reported and left) and its runner registrations; Homebrew's caveat points to it. Both are
+destructive operations on a real host: run only by the owner or on the owner's explicit request,
+never by an agent (CLAUDE.md); agents test them on the fakes.
+Accept: on the fake provider and fake-github, a purge removes only owned VMs, bases and
+registrations and leaves a foreign VM and a base it did not create; `--dry-run` changes nothing;
+a restore of an older backup quarantines later VMs and deletes none; (owner) on the real Mac.
+
 #### HW-01 (owner) Real Tart lane
 `hardware.yml` (manual dispatch, self-hosted label on the owner's Mac): VmProvider contract on real
 Tart in a dedicated `TART_HOME`, one-job run with a tiny Linux image. Agents write the workflow and
@@ -994,7 +1030,7 @@ DEC-01: also verifies `tart set --random-mac` and MAC read-back, `tart exec -i`,
 its PID, shim survival across a daemon kill and `tart stop` semantics.
 
 #### HW-02 (owner) Live GitHub scale set
-Disposable repository and GitHub App with documented permissions; gated live test of GH-03/GH-04;
+Disposable repository and GitHub App with the permissions of ADR 0045's list (verified here, with the reason for each); gated live test of GH-03/GH-04;
 (owner) creates the App and secrets.
 
 #### HW-03 (owner) Canary and cutover

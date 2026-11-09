@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed (amended by 0033, 0034)
+Accepted (owner, 2026-11-09); amended by 0033, 0034
 
 ## Context
 

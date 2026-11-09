@@ -685,6 +685,18 @@ ordered for display by `recorded_at` and labelled as such. No decision reads it.
   ignores keys it does not know.
 - **Consumers:** registered as rows, marked by every build.
 
+### 6.1a Upgrade and rollback distances (owner, 2026-11-09, ADR 0043)
+
+- **Forward, any distance:** a jump over any number of releases is supported; every event stays
+  readable and every upcaster and migration is kept. ES-11's upgrade matrix opens the journal of
+  every released version and upgrades it straight to the current build.
+- **Back one release:** supported, by prepare then activate (above).
+- **Back further:** restore the automatic pre-migration backup (`mayfly restore <backup>`); the
+  restored store is detected by the external epoch floor (I17).
+- **Older build, newer data:** refuses to write the affected streams and says why (§6.3); a
+  recovery after a deep rollback quarantines the VMs it cannot prove, never asserts ownership
+  (ADR 0025) and never deletes on a doubt.
+
 ### 6.2 Kernel additions (ES-03)
 
 `Aggregate::SUPPORTED_EPOCH: u32` (default 1) and `EventSet::required_epoch(&self) -> u32` (default
@@ -724,7 +736,7 @@ deliveries). Snapshots under unknown keys are ignored.
 ### 6.5 The compatibility harness (ES-11, after the first release)
 
 `cargo xtask compat` runs a scenario corpus as N → N+1 → N over one store file (and, in CI, one
-PostgreSQL database) with the previous release's binary, and fails on a refused start, a
+PostgreSQL database) with the previous release's binary, plus the **upgrade matrix** of §6.1a (every released version's journal opened and upgraded straight to the current build), and fails on a refused start, a
 safe-mode entry not declared by the scenario, or a projection that differs from a rebuild.
 
 ---

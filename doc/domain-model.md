@@ -1,14 +1,14 @@
 # mayfly: domain model
 
 **Status:** owner-reviewed, 2026-11-09 (task DDD-01; decisions applied by DEC-01). Owner: Patryk
-Żmigrodzki. Every OWNER hot spot except OD2 is decided and recorded as an ADR (§10.1 names it).
+Żmigrodzki. Every OWNER hot spot is decided and recorded as an ADR (§10.1 names it); the remaining sub-items of OD20 stay planner defaults.
 **What:** the bounded contexts, ubiquitous language, aggregates, policies and read models of
 mayfly, converged from an event-storming session. It sits *upstream* of [`plan.md`](plan.md),
 the Quint models in `formal/` and the code: plan.md says what the product does and how it is
 structured; this document says what the words mean and where each rule is protected. A citation
 "dm §6.4" points here. Hot spots marked **OWNER** (§10) are open until the owner decides; until
 then the recommended option is the working assumption of every later section; today that holds
-only for OD2 (and the remaining sub-items of OD20).
+only for the remaining sub-items of OD20.
 
 ---
 
@@ -946,7 +946,7 @@ epoch floor detects (I17) → safe mode → **salvage plan**: trust the verified
 created after it as *managed-looking with evidence*, and let the operator assert ownership per VM
 in the plan (journaled `OutcomeAsserted`, never automatic). *Alternatives:* drain-before-upgrade
 mandatory and no rollback; or inventory+GitHub-only rebuild (nothing deletable: hosts fill up).
-**OWNER DECISION PENDING.** Working assumption (the owner's question was that users may skip versions): any forward jump is supported (every upcaster and migration kept for ever; an upgrade-matrix test from every released version); rollback is supported one release back; deeper rollback means restoring the automatic pre-upgrade backup, which the epoch floor detects (I17); an older build refuses writes on streams whose epoch is newer than it supports. The salvage plan may no longer assert ownership (OD10 forbids assertions): VMs created after the verified prefix are classified managed-looking and quarantined (`ownership_doubt`), never deleted. Alternatives as above.
+**Decided (owner, 2026-11-09), ADR 0043 (the recommendation, with the owner's question that users may skip versions answered):** any forward jump of any number of versions is supported (every event readable for ever, every upcaster and migration kept; a CI upgrade matrix opens the journal of every released version and upgrades it straight to the current build); rollback one version is supported (prepare/activate, event-store §6); deeper rollback restores the automatic pre-migration backup (`mayfly restore <backup>`), which the epoch floor detects (I17); an older build meeting newer data refuses to write the affected streams and says why; a deep-rollback recovery quarantines the VMs it cannot prove (`ownership_doubt`), never asserted (OD10, ADR 0025), never deleted. The salvage plan therefore no longer asserts ownership.
 
 **OD3 (B) Trust tiers for v0.x.** [SC HS-2, Q10; GD H5] Scale-set runners are interchangeable, so
 trust can only be enforced per scale set, and offer data may not carry a fork flag [VERIFY].

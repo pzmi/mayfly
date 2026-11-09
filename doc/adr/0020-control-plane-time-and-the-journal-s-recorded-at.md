@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09)
 
 ## Context
 
@@ -42,7 +42,7 @@ caller); letting the journal read a clock itself (breaks "the journal reads no c
 - `FakeClock` (testkit) starts at a given Unix-epoch instant.
 - KER-01's `Millis` and KER-03's `Command` docs now say this; ES-03 introduces the `Clock` port.
 
-## Amended 2026-11-09 (planner): no outbox, no inbox instant
+## Amended 2026-11-09 (planner): no outbox, no inbox instant (accepted by the owner 2026-11-09)
 
 ADR 0034 replaced the outbox table with `DirectiveIssued` events delivered by a durable consumer,
 so there is no persisted `next_attempt_at`: a directive's deadline is an instant in its event,

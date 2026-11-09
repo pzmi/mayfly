@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed (amended by 0021)
+Accepted (owner, 2026-11-09); amended by 0021
 
 ## Context
 
@@ -34,7 +34,7 @@ streams to prove it.
 
 ## Consequences
 
-Status is `Proposed (amended by 0021)`: the owner has not accepted either text, and a reader
+Status is `Accepted (owner, 2026-11-09); amended by 0021`: a reader
 follows ADR 0021 where the two differ. Plan section 5.2's description of one writer connection,
 its global `sequence` and foundation section 4.4's channel to a writer thread should be read as the
 SQLite adapter's internals. Implemented by ES-01 (port, memory journal, contract suite) and ES-02

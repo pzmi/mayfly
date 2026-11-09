@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09)
 
 ## Context
 
@@ -25,5 +25,5 @@ sandbox run. Platform-specific code uses `#[cfg(...)]` items or blocks, never a 
 Everything but real Tart and live GitHub is testable on Linux against fakes (ADR 0012, ADR 0015
 for what is not). CI adds a macOS arm64 build and test job and a `cargo check --target
 aarch64-apple-darwin` from Linux (FND-04), so a platform item that does not compile on one side
-fails in CI. Windows contributors are unsupported. Proposed: the owner may widen or narrow the
+fails in CI. Windows contributors are unsupported. Accepted by the owner 2026-11-09; the owner may still widen or narrow the
 list.

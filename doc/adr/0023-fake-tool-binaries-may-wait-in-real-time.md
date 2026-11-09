@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09)
 
 ## Context
 
@@ -37,4 +37,4 @@ new fake binary that needs time adds one exception entry, visible in review. Enf
 `xtask` (`rules_hygiene`, fixture `test-sleep-exception-in-test-file`, unit tests
 `should_report_sleep_when_exception_is_missing_or_not_for_that_file` and
 `should_report_unused_exception_when_the_excepted_file_does_not_sleep`). Implemented first by
-`mayfly-fake-tart`. Proposed: the owner accepts or amends it.
+`mayfly-fake-tart`. Accepted by the owner 2026-11-09.

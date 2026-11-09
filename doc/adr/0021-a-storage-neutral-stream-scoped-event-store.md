@@ -60,7 +60,7 @@ Amended by ADR 0034 (2026-11-09, owner): directives become `DirectiveIssued` eve
 durable consumer (no outbox table); refusal receipts are bound to the stream revision they were
 decided at; stream epochs and snapshots are built now; the projection rebuild is online.
 
-## Amended 2026-11-09 (planner): reporting order, names and receipts after ES-01F (amendment proposed)
+## Amended 2026-11-09 (planner): reporting order, names and receipts after ES-01F (accepted by the owner 2026-11-09)
 
 ES-01F realigned the landed port with ADR 0034 and the ES-01 review; three passages above are
 refined, not reversed:
