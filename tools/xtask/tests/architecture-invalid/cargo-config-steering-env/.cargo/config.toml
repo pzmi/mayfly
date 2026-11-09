@@ -1,0 +1,5 @@
+# Fixture: `[env]` hands Clippy its arguments and unlocks nightly features in rustc
+# (third checkpoint review M1).
+[env]
+CLIPPY_ARGS = "-Aclippy::disallowed_methods"
+RUSTC_BOOTSTRAP = "1"

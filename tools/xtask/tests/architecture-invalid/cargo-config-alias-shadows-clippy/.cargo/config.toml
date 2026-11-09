@@ -1,0 +1,4 @@
+# Fixture: an alias shadows the subcommand the gate runs, so `cargo clippy` only type-checks
+# (third checkpoint review M1).
+[alias]
+clippy = "check"

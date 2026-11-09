@@ -2,8 +2,9 @@
 //! section 2.3). The syntactic rules read paths as written, so `type T = SystemTime;
 //! T::now()` through an associated type, `Self::now()` in `impl Now for SystemTime`, or
 //! `path.exists()` on a value escape them. Clippy resolves every call and type after macro
-//! expansion, so each `[purity] pure` crate carries a `clippy.toml` whose `disallowed-methods`
-//! and `disallowed-types` hold at least [`REQUIRED_METHODS`] and [`REQUIRED_TYPES`]; the
+//! expansion, so each `[purity] pure` crate carries a `clippy.toml` whose `disallowed-methods`,
+//! `disallowed-types` and `disallowed-macros` hold at least [`REQUIRED_METHODS`],
+//! [`REQUIRED_TYPES`] and [`REQUIRED_MACROS`]; the
 //! workspace's `clippy::all = "deny"` makes every hit an error in the `clippy` and
 //! `cross-check` stages. This rule keeps the layer from being switched off silently:
 //!
@@ -101,6 +102,18 @@ pub const REQUIRED_METHODS: &[&str] = &[
     "std::io::stderr",
     "std::backtrace::Backtrace::capture",
     "std::backtrace::Backtrace::force_capture",
+    "std::thread::panicking",
+    "std::os::unix::net::UnixStream::connect",
+    "std::os::unix::net::UnixStream::pair",
+    "std::os::unix::net::UnixListener::bind",
+    "std::os::unix::net::UnixDatagram::bind",
+    "std::os::unix::net::UnixDatagram::unbound",
+    "std::os::unix::net::UnixDatagram::pair",
+    "std::os::unix::fs::symlink",
+    "std::os::unix::fs::chown",
+    "std::os::unix::fs::lchown",
+    "std::os::unix::fs::fchown",
+    "std::net::ToSocketAddrs::to_socket_addrs",
 ];
 /// The `disallowed-types` every pure crate's `clippy.toml` holds.
 pub const REQUIRED_TYPES: &[&str] = &[
@@ -111,9 +124,13 @@ pub const REQUIRED_TYPES: &[&str] = &[
     "std::fs::OpenOptions",
     "std::fs::DirEntry",
     "std::fs::ReadDir",
+    "std::fs::DirBuilder",
     "std::net::TcpStream",
     "std::net::TcpListener",
     "std::net::UdpSocket",
+    "std::os::unix::net::UnixStream",
+    "std::os::unix::net::UnixListener",
+    "std::os::unix::net::UnixDatagram",
     "std::process::Command",
     "std::process::Child",
     "std::thread::Builder",
@@ -139,6 +156,16 @@ pub const REQUIRED_TYPES: &[&str] = &[
     "std::sync::atomic::AtomicU64",
     "std::sync::atomic::AtomicUsize",
     "std::sync::atomic::AtomicPtr",
+];
+/// The `disallowed-macros` every pure crate's `clippy.toml` holds: console output, in
+/// production and tests. `env!` and `option_env!` stay with the syntactic rule, which lets a
+/// test read `CARGO_MANIFEST_DIR` and `CARGO_PKG_*`.
+pub const REQUIRED_MACROS: &[&str] = &[
+    "std::print",
+    "std::println",
+    "std::eprint",
+    "std::eprintln",
+    "std::dbg",
 ];
 
 /// The diagnostics for the workspace at `root`: every pure member's `clippy.toml`, and the
@@ -168,31 +195,22 @@ pub fn check(
     out
 }
 
-/// A `.cargo/config.toml` (or `.cargo/config`) of the workspace root or of a member
-/// (`manifests`, relative to `root`) whose `[env]` sets `CLIPPY_CONF_DIR`.
+/// A Cargo configuration in the repository ([`super::rules_hygiene::cargo_configs`]) whose
+/// `[env]` sets `CLIPPY_CONF_DIR`.
 fn conf_dir_overrides(root: &Path, manifests: &[String]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let mut dirs: Vec<String> = vec![String::new()];
-    dirs.extend(
-        manifests
-            .iter()
-            .filter_map(|m| m.rsplit_once('/').map(|(dir, _)| format!("{dir}/"))),
-    );
-    for dir in &dirs {
-        for name in [".cargo/config.toml", ".cargo/config"] {
-            let rel = format!("{dir}{name}");
-            let sets = fs::read_to_string(root.join(&rel))
-                .ok()
-                .and_then(|text| text.parse::<toml::Table>().ok())
-                .and_then(|config| config.get("env").cloned())
-                .and_then(|env| env.as_table().map(|t| t.contains_key("CLIPPY_CONF_DIR")));
-            if sets == Some(true) {
-                out.push(Diagnostic::new(
-                    Rule::PureClippyConfig,
-                    "`[env] CLIPPY_CONF_DIR` points Clippy past the pure crates' clippy.toml",
-                    rel,
-                ));
-            }
+    for rel in super::rules_hygiene::cargo_configs(root, manifests) {
+        let sets = fs::read_to_string(root.join(&rel))
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .and_then(|config| config.get("env").cloned())
+            .and_then(|env| env.as_table().map(|t| t.contains_key("CLIPPY_CONF_DIR")));
+        if sets == Some(true) {
+            out.push(Diagnostic::new(
+                Rule::PureClippyConfig,
+                "`[env] CLIPPY_CONF_DIR` points Clippy past the pure crates' clippy.toml",
+                rel,
+            ));
         }
     }
     out
@@ -237,6 +255,7 @@ fn crate_config(root: &Path, dir: &Path, name: &str) -> Vec<Diagnostic> {
     for (key, required) in [
         ("disallowed-methods", REQUIRED_METHODS),
         ("disallowed-types", REQUIRED_TYPES),
+        ("disallowed-macros", REQUIRED_MACROS),
     ] {
         let (listed, invalid) = entries(table.get(key));
         let missing: Vec<&str> = required
@@ -314,9 +333,10 @@ mod tests {
                 .join(", ")
         };
         format!(
-            "disallowed-methods = [{}]\ndisallowed-types = [{}]\n",
+            "disallowed-methods = [{}]\ndisallowed-types = [{}]\ndisallowed-macros = [{}]\n",
             quoted(REQUIRED_METHODS),
-            quoted(REQUIRED_TYPES)
+            quoted(REQUIRED_TYPES),
+            quoted(REQUIRED_MACROS)
         )
     }
 
@@ -418,6 +438,25 @@ pub fn hooks() -> std::io::Error {
 }
 /// A hash map through an alias.
 pub type Map = std::collections::HashMap<u8, u8>; // bypass
+/// Unix sockets, links, ownership, name resolution, a directory builder and thread state.
+pub fn unix(path: &std::path::Path) {
+    use std::net::ToSocketAddrs;
+    use std::os::unix::net as un;
+    let _ = un::UnixStream::connect(path); // bypass
+    let _ = un::UnixListener::bind(path); // bypass
+    let _ = un::UnixDatagram::unbound(); // bypass
+    let _ = std::os::unix::fs::symlink(path, path); // bypass
+    let _ = std::os::unix::fs::chown(path, None, None); // bypass
+    let _ = ("localhost", 80).to_socket_addrs(); // bypass
+    let _ = std::fs::DirBuilder::new(); // bypass
+    let _ = std::thread::panicking(); // bypass
+}
+/// Console output, which needs no path at all.
+pub fn console() {
+    println!("x"); // bypass
+    eprint!("x"); // bypass
+    let _ = dbg!(1); // bypass
+}
 "#;
 
     /// Runs `program args` in `dir` with `target` as its target directory and none of the
@@ -524,7 +563,7 @@ pub type Map = std::collections::HashMap<u8, u8>; // bypass
         let control = run_in(&unchecked, &parent.path().join("target"), &program, &args);
 
         // then
-        assert_eq!(lines.len(), 7);
+        assert_eq!(lines.len(), 18);
         for (name, output) in &linted {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!output.status.success(), "{name}: {stderr}");

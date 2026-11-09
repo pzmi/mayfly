@@ -1,0 +1,4 @@
+rule: ARCH-nightly-features
+at: crates/mayfly-domain/src/lib.rs:4
+contains: #![feature(register_tool)]
+only: true

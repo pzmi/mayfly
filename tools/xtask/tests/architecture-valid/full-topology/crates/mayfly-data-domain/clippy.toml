@@ -81,6 +81,19 @@ disallowed-methods = [
   { path = "std::io::stderr", reason = "pure crate: no console" },
   { path = "std::backtrace::Backtrace::capture", reason = "pure crate: reads RUST_BACKTRACE" },
   { path = "std::backtrace::Backtrace::force_capture", reason = "pure crate: walks the stack" },
+  { path = "std::thread::panicking", reason = "pure crate: reads thread state" },
+  # Unix sockets, file ownership and links, and name resolution.
+  { path = "std::os::unix::net::UnixStream::connect", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixStream::pair", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixListener::bind", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixDatagram::bind", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixDatagram::unbound", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixDatagram::pair", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::fs::symlink", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::fs::chown", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::fs::lchown", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::fs::fchown", reason = "pure crate: no I/O" },
+  { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "pure crate: resolves names over the network" },
 ]
 disallowed-types = [
   # Randomness: std hash containers iterate in a per-process random order.
@@ -92,9 +105,13 @@ disallowed-types = [
   { path = "std::fs::OpenOptions", reason = "pure crate: no I/O" },
   { path = "std::fs::DirEntry", reason = "pure crate: no I/O" },
   { path = "std::fs::ReadDir", reason = "pure crate: no I/O" },
+  { path = "std::fs::DirBuilder", reason = "pure crate: no I/O" },
   { path = "std::net::TcpStream", reason = "pure crate: no I/O" },
   { path = "std::net::TcpListener", reason = "pure crate: no I/O" },
   { path = "std::net::UdpSocket", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixStream", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixListener", reason = "pure crate: no I/O" },
+  { path = "std::os::unix::net::UnixDatagram", reason = "pure crate: no I/O" },
   { path = "std::process::Command", reason = "pure crate: no process" },
   { path = "std::process::Child", reason = "pure crate: no process" },
   { path = "std::thread::Builder", reason = "pure crate: no threads" },
@@ -121,4 +138,13 @@ disallowed-types = [
   { path = "std::sync::atomic::AtomicU64", reason = "pure crate: no shared mutable state" },
   { path = "std::sync::atomic::AtomicUsize", reason = "pure crate: no shared mutable state" },
   { path = "std::sync::atomic::AtomicPtr", reason = "pure crate: no shared mutable state" },
+]
+# Console output, also in tests: a pure crate returns values. `env!`/`option_env!` are the
+# syntactic layer's (`ARCH-domain-purity`), because a test may read `CARGO_MANIFEST_DIR`.
+disallowed-macros = [
+  { path = "std::print", reason = "pure crate: no console" },
+  { path = "std::println", reason = "pure crate: no console" },
+  { path = "std::eprint", reason = "pure crate: no console" },
+  { path = "std::eprintln", reason = "pure crate: no console" },
+  { path = "std::dbg", reason = "pure crate: no console" },
 ]

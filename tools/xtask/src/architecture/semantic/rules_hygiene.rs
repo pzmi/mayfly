@@ -1,5 +1,6 @@
 //! Hygiene and test quality (foundation.md sections 3.3 and 5.2; doc/tasks.md rules 4 and
-//! 5): no unfinished code in production, no ignored tests, no unapproved lint suppression,
+//! 5): no unfinished code in production, no ignored tests, no unapproved lint suppression
+//! (nor one named by a macro metavariable), no nightly features or macro 2.0 items,
 //! no sleeps in tests outside the bounded poll helper, named, structured tests, and no
 //! `cfg!` platform branches in `crates/*/src`.
 
@@ -10,7 +11,7 @@ use std::path::Path;
 use super::super::POLICY_FILE;
 use super::super::policy::{LintException, Policy};
 use super::super::report::{Diagnostic, Rule};
-use super::{Context, Facts, RefKind, Site, first_hit};
+use super::{Context, Facts, METAVARIABLE_ATTRIBUTE, RefKind, Site, first_hit};
 
 /// The `lint` an `[[exceptions.lints]]` entry names to approve a `#[macro_export]`.
 pub const MACRO_EXPORT: &str = "macro_export";
@@ -83,6 +84,7 @@ impl<'a> Hygiene<'a> {
         self.sleeps(facts, &mut out);
         tests(facts, &mut out);
         platform_branches(facts, &mut out);
+        nightly(facts, &mut out);
         out
     }
 
@@ -109,6 +111,18 @@ impl<'a> Hygiene<'a> {
                 out.push(Diagnostic::new(Rule::LintConfig, problem, manifest.clone()));
             }
         }
+        for rel in cargo_configs(root, manifests) {
+            let dir = rel
+                .strip_suffix(".cargo/config.toml")
+                .or_else(|| rel.strip_suffix(".cargo/config"))
+                .unwrap_or_default()
+                .to_owned();
+            if let Some(config) = read_toml(root, &rel, &mut out) {
+                rustflags(&config, &rel, &mut out);
+                build_steering(&config, &rel, &mut out);
+                self.sources(&config, &dir, &rel, &mut out);
+            }
+        }
         let mut dirs: Vec<String> = vec![String::new()];
         dirs.extend(
             manifests
@@ -116,15 +130,6 @@ impl<'a> Hygiene<'a> {
                 .filter_map(|m| m.rsplit_once('/').map(|(dir, _)| format!("{dir}/"))),
         );
         for dir in &dirs {
-            for name in [".cargo/config.toml", ".cargo/config"] {
-                let rel = format!("{dir}{name}");
-                if root.join(&rel).is_file()
-                    && let Some(config) = read_toml(root, &rel, &mut out)
-                {
-                    rustflags(&config, &rel, &mut out);
-                    self.sources(&config, dir, &rel, &mut out);
-                }
-            }
             for name in ["clippy.toml", ".clippy.toml"] {
                 let rel = format!("{dir}{name}");
                 if root.join(&rel).is_file()
@@ -369,6 +374,22 @@ impl<'a> Hygiene<'a> {
                 ));
                 continue;
             }
+            if attribute.name == METAVARIABLE_ATTRIBUTE
+                || attribute.lints.iter().any(|l| l.contains('$'))
+            {
+                // No exception approves it: the lint and its level are whatever a caller
+                // passes, so no row can say which suppression it approves.
+                out.push(Diagnostic::new(
+                    Rule::LintSuppression,
+                    format!(
+                        "{} writes `#[{}]` in a macro: an attribute named by a metavariable sets a lint level the checker cannot read (a caller could pass `allow`); write the attribute out, or forward a whole `#[$m:meta]` the caller writes",
+                        facts.package,
+                        attribute.lints.join(", ")
+                    ),
+                    attribute.site.at(),
+                ));
+                continue;
+            }
             for lint in &attribute.lints {
                 if let Err(reason) = self.excepted(&attribute.site, lint) {
                     let shown = if attribute.name == "coverage" {
@@ -408,10 +429,154 @@ fn read_toml(root: &Path, rel: &str, out: &mut Vec<Diagnostic>) -> Option<toml::
     }
 }
 
-/// Reports rustflags in a Cargo config that allow or cap lints.
+/// Every Cargo configuration file in the repository, relative to `root`: the root's, each
+/// member's (`manifests`), and any other `.cargo/config.toml` or `.cargo/config` below the
+/// root, because Cargo reads the one of every directory from where it runs up to the root.
+/// The walk skips `target`, `.git`, `node_modules` and nested workspaces (a directory whose
+/// `Cargo.toml` has a `[workspace]` table: the fuzz crate and the checker's fixtures), whose
+/// configuration their own run checks.
+pub fn cargo_configs(root: &Path, manifests: &[String]) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_dir() || path.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".cargo" {
+                for file in ["config.toml", "config"] {
+                    if path.join(file).is_file() {
+                        out.insert(super::relative(root, &path.join(file)));
+                    }
+                }
+                continue;
+            }
+            let nested = fs::read_to_string(path.join("Cargo.toml"))
+                .ok()
+                .and_then(|t| t.parse::<toml::Table>().ok())
+                .is_some_and(|t| t.contains_key("workspace"));
+            if matches!(name.as_str(), "target" | ".git" | "node_modules") || nested {
+                continue;
+            }
+            walk(root, &path, out);
+        }
+    }
+    let mut out = BTreeSet::new();
+    let mut dirs: Vec<String> = vec![String::new()];
+    dirs.extend(
+        manifests
+            .iter()
+            .filter_map(|m| m.rsplit_once('/').map(|(dir, _)| format!("{dir}/"))),
+    );
+    for dir in &dirs {
+        for name in [".cargo/config.toml", ".cargo/config"] {
+            let rel = format!("{dir}{name}");
+            if root.join(&rel).is_file() {
+                out.insert(rel);
+            }
+        }
+    }
+    walk(root, root, &mut out);
+    out.into_iter().collect()
+}
+
+/// Whether a Cargo configuration's `[env]` must not set `name`: every variable the xtask
+/// preflight refuses ([`crate::repo::steering`]; `RUSTFLAGS` with any value here), except
+/// `CLIPPY_CONF_DIR`, which `ARCH-pure-clippy-config` reports.
+fn steering_env(name: &str) -> bool {
+    name != "CLIPPY_CONF_DIR" && crate::repo::steering(name, std::ffi::OsStr::new(""))
+}
+
+/// The one `[alias]` the repository keeps: `cargo xtask`, exactly as `.cargo/config.toml`
+/// defines it. Any other alias could shadow a subcommand the gate runs (`clippy = "check"`).
+const XTASK_ALIAS: (&str, &str) = ("xtask", "run --locked --package xtask --");
+
+/// `ARCH-lint-config`: a Cargo configuration that swaps or wraps the compiler (`[build] rustc`,
+/// `rustc-wrapper`, `rustc-workspace-wrapper`, `rustdoc`), sets a build-steering `[env]`
+/// variable ([`steering_env`]), unlocks nightly options (`[unstable]`), runs tests through a
+/// `[target.*] runner`, overrides dependencies (`paths`), or aliases anything but
+/// [`XTASK_ALIAS`]: each would let Clippy or the tests report green over code they never
+/// checked or ran. Pinned by `should_report_lint_config_when_cargo_config_steers_the_build`.
+fn build_steering(config: &toml::Table, rel: &str, out: &mut Vec<Diagnostic>) {
+    let mut refuse = |what: String| {
+        out.push(Diagnostic::new(
+            Rule::LintConfig,
+            format!(
+                "{what} in a Cargo configuration steers the compiler or the tests past the gate"
+            ),
+            rel,
+        ));
+    };
+    for key in [
+        "rustc",
+        "rustc-wrapper",
+        "rustc-workspace-wrapper",
+        "rustdoc",
+    ] {
+        if config.get("build").and_then(|b| b.get(key)).is_some() {
+            refuse(format!("`[build] {key}`"));
+        }
+    }
+    for name in config
+        .get("env")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|t| t.keys())
+    {
+        if steering_env(name) {
+            refuse(format!("`[env] {name}`"));
+        }
+    }
+    if config.contains_key("unstable") {
+        refuse("`[unstable]`".to_owned());
+    }
+    if config.contains_key("paths") {
+        refuse("`paths`".to_owned());
+    }
+    for (triple, target) in config
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        if target.get("runner").is_some() {
+            refuse(format!("`[target.{triple}] runner`"));
+        }
+    }
+    for (name, value) in config
+        .get("alias")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        let text = match value {
+            toml::Value::String(s) => s.split_whitespace().collect::<Vec<_>>().join(" "),
+            toml::Value::Array(a) => a
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        };
+        if (name.as_str(), text.as_str()) != XTASK_ALIAS {
+            refuse(format!(
+                "`[alias] {name}` (only `{} = \"{}\"` is kept)",
+                XTASK_ALIAS.0, XTASK_ALIAS.1
+            ));
+        }
+    }
+}
+
+/// Reports rustflags in a Cargo config that allow or cap lints, or pass `-Z` options
+/// (`-Zcrate-attr=allow(..)` injects a crate attribute no source shows).
 fn rustflags(config: &toml::Table, rel: &str, out: &mut Vec<Diagnostic>) {
     let mut lists: Vec<&toml::Value> = Vec::new();
-    lists.extend(config.get("build").and_then(|b| b.get("rustflags")));
+    for key in ["rustflags", "rustdocflags"] {
+        lists.extend(config.get("build").and_then(|b| b.get(key)));
+    }
     for target in config
         .get("target")
         .and_then(toml::Value::as_table)
@@ -420,7 +585,6 @@ fn rustflags(config: &toml::Table, rel: &str, out: &mut Vec<Diagnostic>) {
     {
         lists.extend(target.get("rustflags"));
     }
-    lists.extend(config.get("env").and_then(|e| e.get("RUSTFLAGS")));
     for value in lists {
         let flags: Vec<String> = match value {
             toml::Value::String(s) => s.split_whitespace().map(str::to_owned).collect(),
@@ -444,6 +608,14 @@ fn rustflags(config: &toml::Table, rel: &str, out: &mut Vec<Diagnostic>) {
                 out.push(Diagnostic::new(
                     Rule::LintConfig,
                     format!("rustflags `{flag}` allow or cap lints outside the source"),
+                    rel,
+                ));
+            } else if flag.starts_with("-Z") {
+                out.push(Diagnostic::new(
+                    Rule::LintConfig,
+                    format!(
+                        "rustflags `{flag}` pass a nightly `-Z` option (`-Zcrate-attr` injects attributes no source shows)"
+                    ),
                     rel,
                 ));
             }
@@ -545,7 +717,25 @@ fn tests(facts: &Facts, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Whether `name` matches `^should_[a-z0-9_]+_when_[a-z0-9_]+$`.
+/// `ARCH-nightly-features`: a `#![feature(..)]` (also through `cfg_attr` or in a macro's
+/// tokens) or a macro 2.0 item, in any crate. The toolchain is a pinned stable (ADR 0006), so
+/// such code compiles only with `RUSTC_BOOTSTRAP`, which `ARCH-lint-config` and the xtask
+/// preflight refuse; the feature it unlocks (`register_tool`, `custom_inner_attributes`,
+/// `rustc_attrs`) could change what the lints see. Pinned by
+/// `should_report_nightly_when_feature_or_macro_two_point_zero_is_written`.
+fn nightly(facts: &Facts, out: &mut Vec<Diagnostic>) {
+    for (site, what) in &facts.nightly {
+        out.push(Diagnostic::new(
+            Rule::NightlyFeatures,
+            format!(
+                "{} writes {what}: a nightly-only construct on a stable toolchain (ADR 0006); remove it",
+                facts.package
+            ),
+            site.at(),
+        ));
+    }
+}
+
 /// `ARCH-platform-branch`: a `cfg!` that names a platform, in `crates/*/src`. Such a
 /// branch compiles every platform's arm everywhere, so on Linux the macOS arm is instrumented
 /// but never run, and the changed-lines gate counts it uncovered; `#[cfg]` items or blocks
@@ -569,6 +759,7 @@ fn platform_branches(facts: &Facts, out: &mut Vec<Diagnostic>) {
     }
 }
 
+/// Whether `name` matches `^should_[a-z0-9_]+_when_[a-z0-9_]+$`.
 fn well_named(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("should_") else {
         return false;
@@ -643,6 +834,125 @@ mod tests {
         assert!(got[1].contains("inherits none"), "{got:?}");
         assert!(got[2].contains("`--cap-lints=warn`"), "{got:?}");
         assert!(hygiene.finish().is_empty());
+    }
+
+    #[test]
+    fn should_report_lint_config_when_cargo_config_steers_the_build() {
+        // given: one configuration per way to steer the build, one in a directory that is
+        // neither the root nor a member, one in a nested workspace (skipped: its own run checks
+        // it), and the repository's own `xtask` alias, which passes
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\"]\n[workspace.lints.clippy]\nall = \"deny\"\n",
+        );
+        write(
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\n[lints]\nworkspace = true\n",
+        );
+        write(
+            ".cargo/config.toml",
+            "paths = [\"../p\"]\n[alias]\nxtask = \"run --locked --package xtask --\"\n[build]\nrustc = \"r\"\nrustflags = [\"-Z\", \"crate-attr=allow(unused)\"]\n[unstable]\nbuild-std = [\"std\"]\n",
+        );
+        write(
+            "crates/.cargo/config",
+            "[target.x86_64-unknown-linux-gnu]\nrunner = \"true\"\n[env]\nRUSTFLAGS = \"-D warnings\"\nCARGO_BUILD_RUSTC_WRAPPER = \"w\"\nCLIPPY_CONF_DIR = \"c\"\nOTHER = \"1\"\n",
+        );
+        write("fuzz/Cargo.toml", "[workspace]\n");
+        write(
+            "fuzz/.cargo/config.toml",
+            "[build]\nrustc-wrapper = \"w\"\n",
+        );
+        let policy = super::super::testing::policy();
+        let adr_exists = |_: &str| true;
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let got = super::super::testing::rendered(
+            &hygiene.config(root, &["crates/a/Cargo.toml".to_owned()]),
+        );
+
+        // then
+        let expected = [
+            ("`-Z` option", ".cargo/config.toml"),
+            ("`[build] rustc`", ".cargo/config.toml"),
+            ("`[unstable]`", ".cargo/config.toml"),
+            ("`paths`", ".cargo/config.toml"),
+            ("`[env] CARGO_BUILD_RUSTC_WRAPPER`", "crates/.cargo/config"),
+            ("`[env] RUSTFLAGS`", "crates/.cargo/config"),
+            (
+                "`[target.x86_64-unknown-linux-gnu] runner`",
+                "crates/.cargo/config",
+            ),
+        ];
+        assert_eq!(got.len(), expected.len(), "{got:?}");
+        for (line, (what, at)) in got.iter().zip(expected) {
+            assert!(
+                line.contains(what) && line.ends_with(&format!("(at {at})")),
+                "{got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_report_nightly_when_feature_or_macro_two_point_zero_is_written() {
+        // given
+        let source = "#![feature(register_tool)]\n#![cfg_attr(all(), feature(rustc_attrs))]\npub macro m() {}\nmacro_rules! n { () => { #![feature(x)] pub(crate) macro inner() {} }; }\nfn r#macro() {}\n";
+        let facts = super::super::testing::facts_for("mayfly-domain", &[("src/lib.rs", source)]);
+        let policy = super::super::testing::policy();
+        let adr_exists = |_: &str| true;
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let got: Vec<String> = super::super::testing::rendered(&hygiene.check(&facts))
+            .into_iter()
+            .filter(|d| d.starts_with("ARCH-nightly-features"))
+            .collect();
+
+        // then
+        let lines: Vec<&str> = got
+            .iter()
+            .map(|d| d.rsplit("lib.rs:").next().unwrap_or_default())
+            .collect();
+        assert_eq!(lines, ["1)", "2)", "3)", "4)", "4)"], "{got:?}");
+    }
+
+    #[test]
+    fn should_report_metavariable_attribute_when_an_exception_row_tries_to_approve_it() {
+        // given: a level named by a metavariable, directly and in `cfg_attr`, an exception row
+        // that tries to approve it, and the forwarding of a whole `meta`, which passes
+        let source = "macro_rules! a { ($l:ident) => { #[$l(clippy::all)] fn f() {} }; }\nmacro_rules! b { ($l:ident) => { #[cfg_attr(all(), $l(unused))] fn g() {} }; }\nmacro_rules! c { ($(#[$m:meta])*) => { $(#[$m])* fn h() {} }; }\nmacro_rules! d { ($c:meta) => { #[cfg_attr($c, allow(dead_code))] fn i() {} }; }\n";
+        let facts = super::super::testing::facts_for("mayfly-domain", &[("src/lib.rs", source)]);
+        let mut policy = super::super::testing::policy();
+        policy.exceptions.lints.push(LintException {
+            path: "crates/mayfly-domain/src/lib.rs".to_owned(),
+            lint: "$ l (clippy :: all)".to_owned(),
+            adr: "0001".to_owned(),
+        });
+        let adr_exists = |_: &str| true;
+        let mut hygiene = Hygiene::new(&policy, &adr_exists);
+
+        // when
+        let got: Vec<String> = super::super::testing::rendered(&hygiene.check(&facts))
+            .into_iter()
+            .filter(|d| d.starts_with("ARCH-lint-suppression"))
+            .collect();
+
+        // then
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got[0].ends_with("lib.rs:1)"), "{got:?}");
+        assert!(got[1].ends_with("lib.rs:2)"), "{got:?}");
+        assert!(
+            got[2].ends_with("lib.rs:4)") && got[2].contains("allow(dead_code)"),
+            "{got:?}"
+        );
+        assert_eq!(hygiene.finish().len(), 1, "the row approves nothing");
     }
 
     #[test]

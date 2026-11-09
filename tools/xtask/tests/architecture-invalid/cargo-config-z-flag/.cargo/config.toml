@@ -1,0 +1,5 @@
+# Fixture: a `-Z` flag injects a crate attribute no source file shows (third checkpoint
+# review M1); in `rustflags` it would need `RUSTC_BOOTSTRAP`, refused on its own, so the
+# fixture puts it where Cargo passes it on without probing the compiler.
+[build]
+rustdocflags = ["-Zcrate-attr=allow(clippy::disallowed_methods)"]

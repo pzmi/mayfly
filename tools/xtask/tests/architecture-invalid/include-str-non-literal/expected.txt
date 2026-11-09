@@ -1,0 +1,4 @@
+rule: ARCH-foreign-source
+at: crates/mayfly-domain/src/lib.rs:5
+contains: not one string literal
+only: true

@@ -34,10 +34,11 @@ use cli::{AdrAction, Cli, Command};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_default();
+    let vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
     if let Err(err) = repo::preflight(
         &repo::root(),
         &cwd,
-        std::env::var_os("CLIPPY_CONF_DIR").as_deref(),
+        vars.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str())),
     ) {
         eprintln!("xtask: {err}");
         return ExitCode::from(2);

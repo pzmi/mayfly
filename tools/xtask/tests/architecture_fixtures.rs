@@ -23,11 +23,30 @@ fn fixtures_dir() -> PathBuf {
     repository_root().join("tools/xtask/tests/architecture-invalid")
 }
 
+/// The build-steering variables `cargo llvm-cov` puts in a test's environment (it wraps rustc):
+/// the xtask binary refuses to start with them (foundation.md section 3.6), so a test that runs
+/// it removes them, as a developer's shell would not have them.
+const STEERING: &[&str] = &[
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+    "CLIPPY_CONF_DIR",
+];
+
+/// The xtask binary with [`STEERING`] removed from its environment.
+fn xtask_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    for name in STEERING {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .args(args)
-        .output()
-        .expect("xtask runs")
+    xtask_command().args(args).output().expect("xtask runs")
 }
 
 fn cases() -> Vec<String> {

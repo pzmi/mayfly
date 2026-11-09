@@ -1,0 +1,4 @@
+rule: ARCH-lint-config
+at: crates/.cargo/config.toml
+contains: `[build] rustc-workspace-wrapper`
+only: true

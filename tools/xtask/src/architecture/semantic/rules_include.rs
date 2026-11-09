@@ -13,7 +13,8 @@
 //!
 //! The data includes compile nothing, so they stay legal in token streams; in a production
 //! crate a literal path that resolves outside the package is `ARCH-foreign-source`, like an
-//! `include!` (a crate's source and fixtures stay in its own directory). Tools may read
+//! `include!` (a crate's source and fixtures stay in its own directory), and so is a path that
+//! is not one string literal (`concat!(env!(..), ..)`, a metavariable). Tools may read
 //! repository files (`xtask` embeds `tools/versions.toml`).
 //!
 //! Pinned by `should_report_include_macro_when_it_is_renamed_or_imported`,
@@ -63,6 +64,16 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
                 format!(
                     "{} writes `include!` inside a macro's tokens: the file it compiles depends on where the macro expands and is never analysed; write `include!` as an item or expression, or a `mod`",
                     facts.package
+                ),
+                include.site.at(),
+            ));
+        }
+        if production && include.name != "include" && !include.literal {
+            out.push(Diagnostic::new(
+                Rule::ForeignSource,
+                format!(
+                    "{} reads `{}!` from a path that is not one string literal (`concat!`, `env!` or a metavariable): the file it embeds cannot be shown to lie inside the package",
+                    facts.package, include.written
                 ),
                 include.site.at(),
             ));

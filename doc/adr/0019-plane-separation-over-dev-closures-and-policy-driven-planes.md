@@ -95,3 +95,25 @@ crates.
 Enforced by `ARCH-plane-separation` over the resolved graph (fixture
 `shared-dev-depends-on-testkit`); fnd §2.2 rules 2 and 3 say so. The positive fixture's kernel
 now dev-depends on the shared kit; the repository had no such edge.
+
+## Amendment (2026-11-09): what the checker defends against
+
+The third adversarial review of the FND-04 checkpoint bypassed the checker without touching a
+rule: a lint level passed to a macro as a metavariable (`#[$l(clippy::disallowed_methods)]`
+expanded to an `allow` nobody wrote), Cargo configuration and environment that switch Clippy off
+(`rustc-workspace-wrapper`, `[env] CLIPPY_ARGS`, `-Zcrate-attr`, an alias `clippy = "check"`),
+nightly features, gaps in the pure crates' `clippy.toml`, and CI steps whose failure a `|| true`
+or `set +e` would swallow. Each pass so far has found new ways around name-based rules, so the
+decision is to state what the checker is for rather than imply it is complete.
+
+Decided: **the checker defends against honest mistakes, agent shortcuts and accidental drift,
+and closes every bypass an adversarial review finds with a fixture or test that reproduces it
+and fails for a named rule. It is not a sandbox against a determined insider; human and agent
+review remain the backstop**, and a finding there becomes a fixture. What steers the build from
+outside the source is refused, fail closed: Cargo configuration anywhere in the repository
+(`ARCH-lint-config`) and the environment of `cargo xtask` (its preflight; only
+`RUSTFLAGS=-D warnings`, which CI's native macOS job sets, is accepted). Nightly constructs are
+refused outright (`ARCH-nightly-features`), as the toolchain is a pinned stable (ADR 0006).
+Process authority over values (a returned `Command`) stays out of scope for the name-based
+rules. The model, the refused variables and the list of what each of the three passes closed
+are in fnd §3.6.

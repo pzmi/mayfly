@@ -103,16 +103,16 @@ rules! {
         "A reachable source file cannot be analysed: it does not parse, a module file is missing, or an include!/#[path] is not a literal.",
         ["include-non-literal", "unparseable-source"];
     ForeignSource => "ARCH-foreign-source", "ARCH-01",
-        "A target root, #[path] module or include! resolves outside the owning package's directory, so one crate would compile another's source under its own policy.",
-        ["control-path-into-data-domain", "faultlab-includes-adapter-source", "include-str-outside-package"];
+        "A target root, #[path] module or include! resolves outside the owning package's directory, so one crate would compile another's source under its own policy; a production crate's include_str!/include_bytes! reads a file outside it or through a path that is not one string literal.",
+        ["control-path-into-data-domain", "faultlab-includes-adapter-source", "include-str-non-literal", "include-str-outside-package"];
     IncludeMacro => "ARCH-include-macro", "ARCH-02",
         "An include-family macro (include!, include_str!, include_bytes!) is reached under another name (a use of std/core::include*, an alias), or an include! is written inside a macro token stream, so the file it compiles is never analysed.",
         ["include-in-macro-body", "include-through-alias"];
     DomainPurity => "ARCH-domain-purity", "FND-02",
-        "A [purity] pure crate names I/O (also std::path's file-system functions), a process, env, a thread, the clock (also through <T>::now, a type alias, Self, UNIX_EPOCH or elapsed), randomness (also a std HashMap/HashSet), a backtrace, a process-global hook or OS error, global mutable state (atomics, locks, lazy statics, thread_local!, static mut), a runtime or executor, HTTP, SQL, the console or an outer layer in production code.",
-        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-backtrace", "domain-clock-through-type-alias", "domain-fs-via-macro-head", "domain-hashmap-iteration", "domain-path-fs", "domain-qself-clock", "domain-static-counter", "domain-std-fs", "domain-std-net", "domain-thread-local", "domain-tokio-via-macro-path", "domain-unix-epoch-elapsed"];
+        "A [purity] pure crate names I/O (also std::path's file-system functions), a process, env, a thread, the clock (also through <T>::now, a type alias, Self, UNIX_EPOCH or elapsed), randomness (also a std HashMap/HashSet), a backtrace, a process-global hook or OS error, global mutable state (atomics, locks, lazy statics, thread_local!, static mut), a runtime or executor, HTTP, SQL, the console or an outer layer in production code; or its test code calls env!/option_env! for anything but CARGO_MANIFEST_DIR and CARGO_PKG_*.",
+        ["cfg-attr-path-default", "control-domain-std-fs", "domain-aliased-fs", "domain-backtrace", "domain-clock-through-type-alias", "domain-fs-via-macro-head", "domain-hashmap-iteration", "domain-path-fs", "domain-qself-clock", "domain-static-counter", "domain-std-fs", "domain-std-net", "domain-test-reads-env", "domain-thread-local", "domain-tokio-via-macro-path", "domain-unix-epoch-elapsed"];
     PureClippyConfig => "ARCH-pure-clippy-config", "ARCH-02",
-        "A [purity] pure crate has no clippy.toml, has one shadowed by a .clippy.toml, lacks a required disallowed-methods or disallowed-types entry or sets allow-invalid on one, or a .cargo/config.toml [env] sets CLIPPY_CONF_DIR: the semantic layer of the purity rules would be off.",
+        "A [purity] pure crate has no clippy.toml, has one shadowed by a .clippy.toml, lacks a required disallowed-methods, disallowed-types or disallowed-macros entry or sets allow-invalid on one, or a .cargo/config.toml [env] sets CLIPPY_CONF_DIR: the semantic layer of the purity rules would be off.",
         ["pure-clippy-config-missing-entry", "pure-crate-without-clippy-config"];
     ProcessAuthority => "ARCH-process-authority", "FND-02",
         "Production code of a production crate outside [purity] process_authority names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export or type alias.",
@@ -127,8 +127,8 @@ rules! {
         "A crate the semantic rules name is missing and not listed in [semantic] absent, or absent lists a member or a crate no rule names, or the shared test kit lacks the poll helper file the test-sleep exemption names.",
         ["missing-selector", "poll-helper-missing"];
     LintConfig => "ARCH-lint-config", "FND-02",
-        "A lint or source policy is relaxed outside source: a member's [lints] is not workspace = true, a workspace lint is allowed, rustflags allow or cap lints, clippy.toml allows, or a .cargo/config.toml replaces a package source.",
-        ["cargo-source-replacement", "clippy-toml-allow", "member-lints-override", "rustflags-allow"];
+        "A lint or source policy is relaxed outside source: a member's [lints] is not workspace = true, a workspace lint is allowed, rustflags allow or cap lints or pass -Z, clippy.toml allows, or any .cargo/config.toml in the repository replaces a package source, swaps or wraps rustc, sets a build-steering [env] variable (CLIPPY_*, RUSTC_*, RUSTFLAGS, CARGO_BUILD_*, ..), has [unstable], paths or a target runner, or an alias other than the pinned xtask one.",
+        ["cargo-config-alias-shadows-clippy", "cargo-config-rustc-wrapper", "cargo-config-steering-env", "cargo-config-z-flag", "cargo-source-replacement", "clippy-toml-allow", "member-lints-override", "rustflags-allow"];
     UnfinishedCode => "ARCH-unfinished-code", "FND-02",
         "Production code calls todo!, unimplemented! or dbg! without an [exceptions.lints] entry.",
         ["todo-in-production"];
@@ -136,8 +136,8 @@ rules! {
         "Code carries an #[ignore] attribute.",
         ["ignored-test"];
     LintSuppression => "ARCH-lint-suppression", "FND-02",
-        "An allow, expect or coverage(off) attribute lacks an [exceptions.lints] entry citing an existing ADR, or an entry matches nothing.",
-        ["allow-with-missing-adr", "stale-lint-exception", "unjustified-allow"];
+        "An allow, expect or coverage(off) attribute lacks an [exceptions.lints] entry citing an existing ADR, an entry matches nothing, or an attribute in a macro is named by a metavariable (#[$level(lint)]), which no entry can approve.",
+        ["allow-with-missing-adr", "lint-level-through-metavariable", "stale-lint-exception", "unjustified-allow"];
     TestSleep => "ARCH-test-sleep", "FND-02",
         "Test code sleeps outside the bounded poll helper mayfly-testkit-shared/src/poll.rs, or a test-only crate waits in real time in a file no [[exceptions.lints]] entry (lint = \"test_sleep\") approves.",
         ["sleep-in-test", "test-sleep-exception-in-test-file"];
@@ -186,6 +186,9 @@ rules! {
     MacroExport => "ARCH-macro-export", "ARCH-02",
         "A production crate declares a #[macro_export] macro without an [[exceptions.lints]] entry (lint = \"macro_export\") citing an ADR: its body would expand in other crates, outside the rules that hold where it is written.",
         ["composition-exports-process-macro"];
+    NightlyFeatures => "ARCH-nightly-features", "ARCH-03",
+        "Code writes #![feature(..)] (also through cfg_attr or inside a macro's tokens) or a macro 2.0 item (`macro name`): nightly-only constructs the pinned stable toolchain builds only under RUSTC_BOOTSTRAP.",
+        ["feature-attribute", "macro-two-point-zero"];
 }
 
 /// Compares the catalog with the negative fixtures in `dir`: every rule has fixtures, each

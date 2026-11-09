@@ -1,0 +1,4 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-domain/src/lib.rs:16
+contains: `option_env!("HOME")`
+only: true

@@ -424,14 +424,129 @@ pub struct TokenScan {
     pub attributes: Vec<(syn::Meta, usize)>,
     /// Functions after a test attribute.
     pub test_fns: Vec<TokenTest>,
+    /// Attributes whose name, or the name of a `cfg_attr` branch, is a macro metavariable
+    /// (`#[$level(clippy::x)]`), with the line of their `#` and their text: the attribute
+    /// the expansion writes cannot be read from the macro (`ARCH-lint-suppression`).
+    pub open_attributes: Vec<(usize, String)>,
+    /// Macro 2.0 items (`macro name(..) {..}`), by line (`ARCH-nightly-features`).
+    pub macro_items: Vec<usize>,
+    /// Metavariables bound only as a whole attribute (`#[$meta:meta]`): the caller writes
+    /// the `#[..]`, where the scan of its arguments reads it, so `#[$meta]` forwards it.
+    forwarded: BTreeSet<String>,
 }
 
 /// Scans `tokens` (a macro body or invocation) for paths, `use` and `extern crate` items and
 /// `unsafe`, at every group depth.
 pub fn scan_tokens(tokens: &TokenStream) -> TokenScan {
-    let mut scan = TokenScan::default();
+    let mut scan = TokenScan {
+        forwarded: forwarded_metas(tokens),
+        ..TokenScan::default()
+    };
     scan_into(tokens, &mut scan);
     scan
+}
+
+/// The metavariables of `tokens` whose every binding (`$name:fragment`) is a whole attribute
+/// of fragment `meta` (`#[$name:meta]`).
+fn forwarded_metas(tokens: &TokenStream) -> BTreeSet<String> {
+    fn walk(tokens: &TokenStream, all: &mut BTreeMap<String, (usize, usize)>) {
+        let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
+        for (i, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Group(group) => {
+                    let whole = group.delimiter() == Delimiter::Bracket
+                        && i > 0
+                        && is_punct(trees.get(i - 1), '#')
+                        && binding(&group.stream().into_iter().collect::<Vec<_>>(), 0)
+                            .is_some_and(|(_, fragment, end)| fragment == "meta" && end == 4);
+                    if whole {
+                        let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                        if let Some((name, _, _)) = binding(&inner, 0) {
+                            let entry = all.entry(name).or_default();
+                            entry.0 += 1;
+                            entry.1 += 1;
+                        }
+                    } else {
+                        walk(&group.stream(), all);
+                    }
+                }
+                TokenTree::Punct(p) if p.as_char() == '$' => {
+                    if let Some((name, _, _)) = binding(&trees, i) {
+                        all.entry(name).or_default().0 += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut all = BTreeMap::new();
+    walk(tokens, &mut all);
+    all.into_iter()
+        .filter(|(_, (bound, whole))| bound == whole)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The binding `$name:fragment` at `trees[i]`: its name, fragment and the index after it.
+fn binding(trees: &[TokenTree], i: usize) -> Option<(String, String, usize)> {
+    match (
+        trees.get(i),
+        trees.get(i + 1),
+        trees.get(i + 2),
+        trees.get(i + 3),
+    ) {
+        (
+            Some(TokenTree::Punct(dollar)),
+            Some(TokenTree::Ident(var)),
+            Some(TokenTree::Punct(colon)),
+            Some(TokenTree::Ident(fragment)),
+        ) if dollar.as_char() == '$' && colon.as_char() == ':' && !is_path_sep(trees, i + 2) => {
+            Some((name(var), name(fragment), i + 4))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the attribute `trees` (the inside of `#[..]`) has a metavariable for its name or
+/// for the name of a `cfg_attr` branch, other than `$crate` and a whole forwarded `meta`.
+fn metavariable_named(trees: &[TokenTree], forwarded: &BTreeSet<String>) -> bool {
+    if binding(trees, 0).is_some_and(|(_, _, end)| end == trees.len()) {
+        // `#[$name:meta]`: a matcher, not an attribute the expansion writes.
+        return false;
+    }
+    if let [TokenTree::Punct(p), TokenTree::Ident(var)] = trees
+        && p.as_char() == '$'
+        && forwarded.contains(&name(var))
+    {
+        return false;
+    }
+    let head = trees
+        .iter()
+        .position(|t| {
+            matches!(t, TokenTree::Group(_))
+                || matches!(t, TokenTree::Punct(p) if matches!(p.as_char(), '=' | ','))
+        })
+        .unwrap_or(trees.len());
+    let open = trees[..head].iter().enumerate().any(|(k, t)| {
+        matches!(t, TokenTree::Punct(p) if p.as_char() == '$')
+            && !matches!(trees.get(k + 1), Some(TokenTree::Ident(i)) if i == "crate")
+    });
+    if open {
+        return true;
+    }
+    let cfg_attr = matches!(&trees[..head], [TokenTree::Ident(i)] if i == "cfg_attr");
+    match trees.get(head) {
+        Some(TokenTree::Group(group))
+            if cfg_attr && group.delimiter() == Delimiter::Parenthesis =>
+        {
+            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+            inner
+                .split(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ','))
+                .skip(1)
+                .any(|branch| !branch.is_empty() && metavariable_named(branch, forwarded))
+        }
+        _ => false,
+    }
 }
 
 fn scan_into(tokens: &TokenStream, scan: &mut TokenScan) {
@@ -449,6 +564,13 @@ fn scan_into(tokens: &TokenStream, scan: &mut TokenScan) {
             }
             TokenTree::Ident(ident) if ident == "use" || ident == "extern" => {
                 parse_item_at(&trees, i, scan);
+                i += 1;
+            }
+            // `macro` is reserved: as a bare identifier it starts a macro 2.0 item.
+            TokenTree::Ident(ident)
+                if ident == "macro" && matches!(trees.get(i + 1), Some(TokenTree::Ident(_))) =>
+            {
+                scan.macro_items.push(ident.span().start().line);
                 i += 1;
             }
             TokenTree::Punct(p) if p.as_char() == '#' => {
@@ -474,6 +596,12 @@ fn attribute_at(trees: &[TokenTree], start: usize, scan: &mut TokenScan) {
         return;
     };
     if group.delimiter() != Delimiter::Bracket {
+        return;
+    }
+    let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+    if metavariable_named(&inner, &scan.forwarded) {
+        scan.open_attributes
+            .push((line, group.stream().to_string()));
         return;
     }
     let Ok(meta) = syn::parse2::<syn::Meta>(group.stream()) else {
@@ -832,6 +960,54 @@ mod tests {
         // then
         assert!(!cycle.is_empty());
         assert_eq!(joined(own), ["tokio::spawn"]);
+    }
+
+    #[test]
+    fn should_record_attributes_named_by_a_metavariable_when_tokens_are_scanned() {
+        // given: lint levels named by metavariables, directly and through `cfg_attr`, next
+        // to the forms that stay readable (a forwarded whole `meta`, `$crate`, a matcher)
+        let tokens: TokenStream = "\
+($l:ident, $(#[$m:meta])*) => {\n\
+#[$l(clippy::disallowed_methods)] fn a() {}\n\
+#[cfg_attr(all(), $l(unused))] fn b() {}\n\
+#![$l(clippy::all)]\n\
+$(#[$m])* fn c() {}\n\
+#[$crate::marker] fn d() {}\n\
+#[doc = $l] fn e() {}\n\
+}"
+        .parse()
+        .unwrap();
+        let rebound: TokenStream = "(#[$m:meta]) => {}; ($m:ident) => { #[$m] fn f() {} }"
+            .parse()
+            .unwrap();
+
+        // when
+        let scan = scan_tokens(&tokens);
+        let other = scan_tokens(&rebound);
+
+        // then
+        let lines: Vec<usize> = scan.open_attributes.iter().map(|(l, _)| *l).collect();
+        assert_eq!(lines, [2, 3, 4], "{:?}", scan.open_attributes);
+        assert_eq!(
+            other.open_attributes.len(),
+            1,
+            "{:?}",
+            other.open_attributes
+        );
+    }
+
+    #[test]
+    fn should_record_macro_items_when_tokens_hold_macros_two_point_zero() {
+        // given
+        let tokens: TokenStream = "() => { pub macro m($x:expr) { $x } fn r#macro() {} }"
+            .parse()
+            .unwrap();
+
+        // when
+        let scan = scan_tokens(&tokens);
+
+        // then
+        assert_eq!(scan.macro_items, [1]);
     }
 
     #[test]

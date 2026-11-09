@@ -1,0 +1,4 @@
+# Fixture: a configuration in a directory Cargo reads when run below it wraps rustc, so
+# `cargo clippy` there runs whatever the wrapper does (third checkpoint review M1).
+[build]
+rustc-workspace-wrapper = "/bin/true"

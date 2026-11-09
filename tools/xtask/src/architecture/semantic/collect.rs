@@ -14,9 +14,9 @@ use super::flow;
 use super::paths::{self, Scopes, TokenScan, Written, scan_tokens, use_leaves};
 use super::{
     AttributeUse, Context, Declaration, Facts, HiddenItem, INCLUDE_FAMILY, ImplDecl, IncludeKind,
-    IncludeUse, MethodCall, MutParam, RefKind, Reference, Site, TestFn, TypeDecl, Unit,
-    effective_metas, foreign_message, include_path, is_doc_hidden, is_include, is_test_attribute,
-    is_test_only, non_literal, outside_package, relative,
+    IncludeUse, METAVARIABLE_ATTRIBUTE, MethodCall, MutParam, RefKind, Reference, Site, TestFn,
+    TypeDecl, Unit, effective_metas, foreign_message, include_path, is_doc_hidden, is_include,
+    is_test_attribute, is_test_only, non_literal, outside_package, relative,
 };
 
 /// Where a target is: the workspace root, its package's directory, and whether it is the
@@ -453,8 +453,26 @@ impl Collector<'_> {
         for (meta, line) in &scan.attributes {
             self.attribute(meta, *line);
         }
+        for (line, text) in &scan.open_attributes {
+            let site = self.site(*line);
+            self.facts.attributes.push(AttributeUse {
+                site,
+                name: METAVARIABLE_ATTRIBUTE.to_owned(),
+                lints: vec![text.clone()],
+            });
+        }
+        for line in &scan.macro_items {
+            let site = self.site(*line);
+            self.facts
+                .nightly
+                .push((site, "a macro 2.0 item (`macro name`)".to_owned()));
+        }
         for (name, line) in flow::token_method_calls(tokens) {
             self.method_call(name, line);
+        }
+        for (name, line, variable) in token_macros(tokens, ENV_MACROS, first_literal) {
+            let site = self.site(line);
+            self.facts.env_macros.push((site, name, variable));
         }
         for (name, line, literal) in token_includes(tokens) {
             self.include_use(
@@ -482,6 +500,15 @@ impl Collector<'_> {
             let Some(name) = meta.path().get_ident().map(paths::name) else {
                 continue;
             };
+            if name == "feature" {
+                let site = self.site(line);
+                let shown = match &meta {
+                    Meta::List(list) => format!("#![feature({})]", list.tokens),
+                    _ => "#![feature]".to_owned(),
+                };
+                self.facts.nightly.push((site, format!("`{shown}`")));
+                continue;
+            }
             let lints = match (name.as_str(), &meta) {
                 ("allow" | "expect", Meta::List(list)) => list
                     .parse_args_with(
@@ -637,6 +664,7 @@ impl Collector<'_> {
             written: written.to_owned(),
             kind,
             outside,
+            literal: literal.is_some(),
         });
     }
 
@@ -719,28 +747,73 @@ fn first_line(path: &syn::Path) -> usize {
 /// The include-family macros that read a file as data rather than compile it.
 const DATA_INCLUDES: &[&str] = &["include_str", "include_bytes"];
 
+/// The macros that read the build environment.
+const ENV_MACROS: &[&str] = &["env", "option_env"];
+
 /// Every include-family invocation (`include!`, `include_str!`, `include_bytes!`, under any
 /// path) in a token stream, at any depth: its name, line and literal path, if it has one.
 fn token_includes(tokens: &proc_macro2::TokenStream) -> Vec<(String, usize, Option<String>)> {
+    token_macros(tokens, INCLUDE_FAMILY, include_path)
+}
+
+/// The first argument of a macro when it is a string literal (`env!("X", "message")`).
+fn first_literal(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let first: proc_macro2::TokenStream = tokens
+        .clone()
+        .into_iter()
+        .take_while(|t| !matches!(t, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
+        .collect();
+    include_path(&first)
+}
+
+/// Every invocation of a macro named in `names` (under any path) in a token stream, at any
+/// depth: its name, line and what `argument` reads from its arguments.
+fn token_macros(
+    tokens: &proc_macro2::TokenStream,
+    names: &[&str],
+    argument: fn(&proc_macro2::TokenStream) -> Option<String>,
+) -> Vec<(String, usize, Option<String>)> {
     let mut out = Vec::new();
     let trees: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
     for (i, tree) in trees.iter().enumerate() {
         match tree {
-            proc_macro2::TokenTree::Group(group) => out.extend(token_includes(&group.stream())),
+            proc_macro2::TokenTree::Group(group) => {
+                out.extend(token_macros(&group.stream(), names, argument));
+            }
             proc_macro2::TokenTree::Ident(ident)
-                if INCLUDE_FAMILY.contains(&paths::name(ident).as_str())
+                if names.contains(&paths::name(ident).as_str())
                     && matches!(trees.get(i + 1), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '!') =>
             {
-                let literal = match trees.get(i + 2) {
-                    Some(proc_macro2::TokenTree::Group(group)) => include_path(&group.stream()),
+                let value = match trees.get(i + 2) {
+                    Some(proc_macro2::TokenTree::Group(group)) => argument(&group.stream()),
                     _ => None,
                 };
-                out.push((paths::name(ident), ident.span().start().line, literal));
+                out.push((paths::name(ident), ident.span().start().line, value));
             }
             _ => {}
         }
     }
     out
+}
+
+/// The line of `macro` when `tokens` (an item `syn` could not parse) is a macro 2.0 item,
+/// with or without a visibility: `macro m(..) {..}`, `pub(crate) macro m {..}`.
+fn macro_item_line(tokens: &proc_macro2::TokenStream) -> Option<usize> {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
+    let mut i = 0;
+    if matches!(trees.first(), Some(proc_macro2::TokenTree::Ident(i)) if i == "pub") {
+        i = 1;
+        if matches!(trees.get(1), Some(proc_macro2::TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Parenthesis)
+        {
+            i = 2;
+        }
+    }
+    match trees.get(i) {
+        Some(proc_macro2::TokenTree::Ident(ident)) if ident == "macro" => {
+            Some(ident.span().start().line)
+        }
+        _ => None,
+    }
 }
 
 /// The kind and name of an item that declares one.
@@ -794,6 +867,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.scoped(attrs, |this| {
             if let Some((kind, ident)) = declared(item) {
                 this.declaration(kind, ident);
+            }
+            if let Item::Verbatim(tokens) = item
+                && let Some(line) = macro_item_line(tokens)
+            {
+                let site = this.site(line);
+                this.facts
+                    .nightly
+                    .push((site, "a macro 2.0 item (`macro name`)".to_owned()));
             }
             if let Item::Macro(mac) = item
                 && mac.ident.is_some()
@@ -875,6 +956,16 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.reference(&Written::from_syn(&mac.path), line, RefKind::Macro, false);
         for segment in &mac.path.segments {
             visit::visit_path_arguments(self, &segment.arguments);
+        }
+        if let Some(last) = mac.path.segments.last()
+            && ENV_MACROS.contains(&paths::name(&last.ident).as_str())
+        {
+            let site = self.site(line);
+            self.facts.env_macros.push((
+                site,
+                paths::name(&last.ident),
+                first_literal(&mac.tokens),
+            ));
         }
         if is_include(&mac.path) {
             self.include(mac, line);

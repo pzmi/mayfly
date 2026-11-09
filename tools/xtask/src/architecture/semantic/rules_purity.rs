@@ -441,6 +441,23 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
         }
     }
     if pure {
+        for (site, name, variable) in &facts.env_macros {
+            let build_path = name == "env"
+                && variable
+                    .as_deref()
+                    .is_some_and(|v| v == "CARGO_MANIFEST_DIR" || v.starts_with("CARGO_PKG_"));
+            if site.context == Context::Test && !build_path {
+                out.push(Diagnostic::new(
+                    Rule::DomainPurity,
+                    format!(
+                        "{} test code calls `{name}!({})`: a pure crate's tests read the environment only as `env!(\"CARGO_MANIFEST_DIR\")` or `env!(\"CARGO_PKG_*\")`",
+                        facts.package,
+                        variable.as_deref().map_or("<not a literal>".to_owned(), |v| format!("\"{v}\""))
+                    ),
+                    site.at(),
+                ));
+            }
+        }
         for call in &facts.method_calls {
             if call.site.context == Context::Production
                 && PURE_FORBIDDEN_METHODS.contains(&call.name.as_str())
@@ -723,6 +740,28 @@ mod tests {
             .map(|d| d.rsplit(':').next().unwrap_or(""))
             .collect();
         assert_eq!(lines, ["1)", "3)", "4)"], "{got:?}");
+    }
+
+    #[test]
+    fn should_report_domain_when_a_pure_test_reads_the_environment_beyond_the_manifest() {
+        // given
+        let source = "#[cfg(test)]\nmod tests {\n    fn f() {\n        let _ = env!(\"CARGO_MANIFEST_DIR\");\n        let _ = env!(\"CARGO_PKG_NAME\", \"set by cargo\");\n        let _ = env!(\"HOME\");\n        let _ = option_env!(\"CARGO_PKG_NAME\");\n        let _ = include_str!(concat!(env!(\"OUT_DIR\"), \"/x\"));\n    }\n}\n";
+
+        // when
+        let pure = diagnostics("mayfly-domain", &[("src/lib.rs", source)]);
+        let other = diagnostics("mayfly-control", &[("src/lib.rs", source)]);
+
+        // then
+        let lines: Vec<&str> = pure
+            .iter()
+            .filter(|d| d.starts_with("ARCH-domain-purity"))
+            .map(|d| d.rsplit("lib.rs:").next().unwrap_or_default())
+            .collect();
+        assert_eq!(lines, ["6)", "7)", "8)"], "{pure:?}");
+        assert!(
+            !other.iter().any(|d| d.starts_with("ARCH-domain-purity")),
+            "{other:?}"
+        );
     }
 
     #[test]

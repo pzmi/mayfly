@@ -1,0 +1,4 @@
+rule: ARCH-lint-suppression
+at: crates/mayfly-domain/src/lib.rs:7
+contains: an attribute named by a metavariable
+only: true

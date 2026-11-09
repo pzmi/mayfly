@@ -290,7 +290,12 @@ mod tests {
     /// but the `required` aggregate is a gate job, and every step in it is a gate step (the
     /// macOS build, `doctor`, a tool install, not only `cargo xtask check --only`): a step with
     /// `continue-on-error` or its own `if`, or a job with either key, is listed in `softened`,
-    /// because the gate could then pass without that step having run or passed. A workflow that
+    /// because the gate could then pass without that step having run or passed. So is a gate
+    /// step that sets `shell` (or a `defaults.run.shell` above it), whose `run` text swallows
+    /// a failure ([`swallowed`]), or that runs under an `env` (workflow, job or step) steering
+    /// the build ([`crate::repo::steering`]: RUSTFLAGS other than `-D warnings`, `CLIPPY_*`,
+    /// `RUSTC_*`, ..), and a workflow with a `<<` merge key or more than one YAML document
+    /// ([`structure`]), which this parser and GitHub could read differently. A workflow that
     /// does not parse panics: these are tests.
     fn parse_ci(text: &str) -> ParsedCi {
         use yaml_rust2::{Yaml, YamlLoader};
@@ -322,7 +327,22 @@ mod tests {
             }
         };
         let docs = YamlLoader::load_from_str(text).expect("workflow parses as YAML");
-        let Some(jobs) = docs.first().and_then(|d| d["jobs"].as_hash()) else {
+        for note in structure(&docs) {
+            soften(&mut out, note);
+        }
+        let Some(workflow) = docs.first() else {
+            return out;
+        };
+        for note in steering_env(&workflow["env"]) {
+            soften(&mut out, format!("the workflow's env sets {note}"));
+        }
+        if !workflow["defaults"]["run"]["shell"].is_badvalue() {
+            soften(
+                &mut out,
+                "the workflow sets `defaults.run.shell`".to_owned(),
+            );
+        }
+        let Some(jobs) = workflow["jobs"].as_hash() else {
             return out;
         };
         for (id, body) in jobs {
@@ -344,14 +364,41 @@ mod tests {
                 for key in soft_keys(body) {
                     soften(&mut out, format!("{job}: a gate job has `{key}`"));
                 }
+                for note in steering_env(&body["env"]) {
+                    soften(&mut out, format!("{job}: a gate job's env sets {note}"));
+                }
+                if !body["defaults"]["run"]["shell"].is_badvalue() {
+                    soften(
+                        &mut out,
+                        format!("{job}: a gate job sets `defaults.run.shell`"),
+                    );
+                }
             }
             for step in body["steps"].as_vec().into_iter().flatten() {
+                let run = step["run"].as_str().unwrap_or_default();
                 if gate_job {
                     for key in soft_keys(step) {
                         soften(&mut out, format!("{job}: a gate step has `{key}`"));
                     }
+                    if !step["shell"].is_badvalue() {
+                        soften(
+                            &mut out,
+                            format!(
+                                "{job}: a gate step sets `shell: {}`",
+                                render(&step["shell"])
+                            ),
+                        );
+                    }
+                    for note in steering_env(&step["env"]) {
+                        soften(&mut out, format!("{job}: a gate step's env sets {note}"));
+                    }
+                    for line in swallowed(run) {
+                        soften(
+                            &mut out,
+                            format!("{job}: a gate step's run swallows a failure: `{line}`"),
+                        );
+                    }
                 }
-                let run = step["run"].as_str().unwrap_or_default();
                 for line in run.lines() {
                     if let Some(args) = line.split("cargo xtask check --only ").nth(1) {
                         // `--only a,b` and `--only a --only b` both name stages
@@ -367,6 +414,151 @@ mod tests {
             out.stages.insert(job, stages);
         }
         out
+    }
+
+    /// Lines of a `run` script that let a failing command pass: `set +e`, `|| true`, `|| :`,
+    /// `exit 0`, or a trailing `true`/`:` command. Comment lines are skipped.
+    fn swallowed(run: &str) -> Vec<String> {
+        run.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| {
+                let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+                let or_ok = compact.split("||").skip(1).any(|alternative| {
+                    matches!(
+                        alternative.trim().trim_end_matches(';').trim(),
+                        "true" | ":"
+                    )
+                });
+                compact.contains("set +e")
+                    || compact.contains("set +o errexit")
+                    || compact.contains("exit 0")
+                    || or_ok
+                    || matches!(compact.as_str(), "true" | ":")
+                    || compact.ends_with("; true")
+                    || compact.ends_with(";true")
+                    || compact.ends_with("; :")
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The `env` entries in `map` that steer the build ([`crate::repo::steering`]).
+    fn steering_env(map: &yaml_rust2::Yaml) -> Vec<String> {
+        map.as_hash()
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                let key = key.as_str()?;
+                let value = match value {
+                    yaml_rust2::Yaml::String(s) | yaml_rust2::Yaml::Real(s) => s.clone(),
+                    yaml_rust2::Yaml::Integer(i) => i.to_string(),
+                    yaml_rust2::Yaml::Boolean(b) => b.to_string(),
+                    _ => String::new(),
+                };
+                crate::repo::steering(key, std::ffi::OsStr::new(&value))
+                    .then(|| format!("`{key}: {value}`"))
+            })
+            .collect()
+    }
+
+    /// What makes a workflow's YAML mean one thing here and another to GitHub: more than one
+    /// document, or a `<<` merge key anywhere.
+    fn structure(docs: &[yaml_rust2::Yaml]) -> Vec<String> {
+        fn merges(value: &yaml_rust2::Yaml) -> bool {
+            match value {
+                yaml_rust2::Yaml::Hash(map) => map
+                    .iter()
+                    .any(|(k, v)| k.as_str() == Some("<<") || merges(v)),
+                yaml_rust2::Yaml::Array(items) => items.iter().any(merges),
+                _ => false,
+            }
+        }
+        let mut out = Vec::new();
+        if docs.len() != 1 {
+            out.push(format!(
+                "the workflow holds {} YAML documents, not one",
+                docs.len()
+            ));
+        }
+        if docs.iter().any(merges) {
+            out.push("the workflow uses a `<<` merge key".to_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn should_flag_a_gate_step_when_its_shell_run_or_env_can_swallow_a_failure() {
+        // given: each line a separate way for a gate step to be red and count as green
+        let text = "\
+env:
+  CLIPPY_ARGS: -Aclippy::all
+jobs:
+  a:
+    env:
+      RUSTFLAGS: -Awarnings
+    steps:
+      - shell: bash {0}
+        run: cargo xtask check --only clippy
+      - run: |
+          set +e
+          cargo xtask check --only fmt-check
+      - run: cargo xtask check --only docs || true
+      - run: cargo xtask doctor; exit 0
+      - run: |
+          cargo xtask check --only architecture
+          true
+      - env:
+          RUSTC_WRAPPER: /bin/true
+        run: cargo xtask check --only deny
+  macos:
+    env:
+      RUSTFLAGS: \"-D warnings\"
+    steps:
+      - run: cargo build --workspace --locked && echo done
+      # set +e, in a comment only
+  required:
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - run: echo ok || true
+";
+
+        // when
+        let parsed = parse_ci(text);
+
+        // then
+        assert_eq!(
+            parsed.softened,
+            [
+                "the workflow's env sets `CLIPPY_ARGS: -Aclippy::all`",
+                "a: a gate job's env sets `RUSTFLAGS: -Awarnings`",
+                "a: a gate step sets `shell: bash {0}`",
+                "a: a gate step's run swallows a failure: `set +e`",
+                "a: a gate step's run swallows a failure: `cargo xtask check --only docs || true`",
+                "a: a gate step's run swallows a failure: `cargo xtask doctor; exit 0`",
+                "a: a gate step's run swallows a failure: `true`",
+                "a: a gate step's env sets `RUSTC_WRAPPER: /bin/true`",
+            ]
+        );
+    }
+
+    #[test]
+    fn should_flag_a_workflow_when_it_merges_keys_or_holds_two_documents() {
+        // given
+        let merged = "jobs:\n  a:\n    <<: { continue-on-error: false }\n    steps:\n      - run: cargo xtask check --only clippy\n";
+        let two = "jobs:\n  a:\n    steps:\n      - run: cargo xtask check --only clippy\n---\njobs: {}\n";
+
+        // when
+        let (merged, two) = (parse_ci(merged), parse_ci(two));
+
+        // then
+        assert_eq!(merged.softened, ["the workflow uses a `<<` merge key"]);
+        assert_eq!(
+            two.softened,
+            ["the workflow holds 2 YAML documents, not one"]
+        );
     }
 
     #[test]
@@ -764,6 +956,8 @@ mod tests {
             if text.contains("pull_request_target") {
                 problems.push(format!("{name}: pull_request_target"));
             }
+            let docs = yaml_rust2::YamlLoader::load_from_str(&text).expect("workflow parses");
+            problems.extend(structure(&docs).into_iter().map(|p| format!("{name}: {p}")));
             for (i, line) in lines.iter().enumerate() {
                 if line.contains("uses: actions/checkout@") {
                     let step_end = lines[i + 1..]

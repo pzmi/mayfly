@@ -167,18 +167,31 @@ The pure crates also name no instrumentation crate (`tracing`, `log`, `metrics`;
 call through an associated type (`<Z as K>::C::now()`) or a method on a value
 (`path.exists()`, `UNIX_EPOCH.elapsed()`) is not resolved by them. Each pure crate therefore
 carries a `clippy.toml` whose `disallowed-methods` and `disallowed-types` list the clock, file
-system (`std::fs` and the `std::path` functions above), environment, process, thread, channel,
-hook, OS-error, backtrace, std hash containers, locks, once-cells and atomics; Clippy resolves
-them after macro expansion, through aliases, `Self` and associated types, and the workspace's
-`clippy::all = "deny"` makes each hit an error in the `clippy` and `cross-check` stages
-(pinned by
+system (`std::fs`, `std::fs::DirBuilder` and the `std::path` functions above), Unix sockets,
+links and ownership (`std::os::unix::net::{UnixStream, UnixListener, UnixDatagram}`,
+`std::os::unix::fs::{symlink, chown, lchown, fchown}`), name resolution
+(`ToSocketAddrs::to_socket_addrs`), environment, process, thread (`std::thread::panicking`
+included), channel, hook, OS-error, backtrace, std hash containers, locks, once-cells and
+atomics, and whose `disallowed-macros` list `print!`, `println!`, `eprint!`, `eprintln!` and
+`dbg!`; Clippy resolves them after macro expansion, through aliases, `Self` and associated
+types, and the workspace's `clippy::all = "deny"` makes each hit an error in the `clippy` and
+`cross-check` stages (pinned by
 `should_fail_clippy_stage_when_a_pure_crate_reaches_the_clock_through_names_the_checker_cannot_resolve`).
 Clippy reads the nearest `clippy.toml` at or above a crate's manifest, so the file applies to
 that crate alone. The checker fails when a pure crate lacks the file, has a `.clippy.toml`
 that shadows it, misses an entry of its required list or sets `allow-invalid` on one, or when a
-`.cargo/config.toml` `[env]` sets `CLIPPY_CONF_DIR`; `cargo xtask` refuses to run with
-`CLIPPY_CONF_DIR` in its environment. The file covers test code too, so a pure crate's tests
-reach files and time through the test kits, not `std` directly.
+Cargo configuration in the repository sets `CLIPPY_CONF_DIR` in `[env]`; `cargo xtask` refuses
+to run with it, or any other variable that steers the build, in its environment (§3.6).
+
+**Test code of a pure crate** (its `#[cfg(test)]` modules and its `tests/`) is held to exactly
+this: the `clippy.toml` entries above, which Clippy applies to every target of the crate
+(`--all-targets`); `ARCH-domain-purity` for `env!` and `option_env!`, where a test may read only
+`env!("CARGO_MANIFEST_DIR")` and `env!("CARGO_PKG_*")` (pinned by
+`should_report_domain_when_a_pure_test_reads_the_environment_beyond_the_manifest`); and the
+external allowlist (§2.4), which gives a pure crate's tests no runtime, HTTP or SQL crate to
+name. The rest of the list above binds production code only: a test may name `std::os` items
+the file does not list, declare a `static mut` or `thread_local!`, or name `std::env` as a path
+without calling one of the listed functions. Those reach the review, not the gate.
 
 Time, ids and randomness arrive as values on commands and directives (plan §5.1). The pure
 crates may hold `async` trait *declarations* (link ports in `mayfly-protocol`) but never an
@@ -342,8 +355,13 @@ through that crate's library `use` items and `pub type` aliases (chained across 
 macro token streams conservatively; and reads every `cfg` branch. A target root, `#[path]` or
 `include!` that resolves outside the package directory is refused and not loaded
 (`ARCH-foreign-source`), as is a production crate's `include_str!`/`include_bytes!` of a file
-outside it. An include-family macro reached under another name, or an `include!` inside a
-macro's tokens, is refused (`ARCH-include-macro`): the file it compiles could not be analysed. Diagnostics are
+outside it or through a path that is not one string literal (`concat!(env!(..), ..)`, a
+metavariable). An include-family macro reached under another name, or an `include!` inside a
+macro's tokens, is refused (`ARCH-include-macro`): the file it compiles could not be analysed.
+An attribute in a macro's tokens whose name is a metavariable (`#[$level(clippy::x)]`, also as
+a `cfg_attr` branch) is refused (`ARCH-lint-suppression`), because the lint level it sets cannot
+be read; forwarding a whole `#[$m:meta]` that the caller writes stays legal, as the scan of the
+caller's arguments reads it. Diagnostics are
 `ARCH-<id>: message (at path[:line])`. Rules are declared in one `rules!` table (id, owning
 task, description, fixtures) that also feeds `list-checks`; the run then checks every negative
 fixture, every positive fixture and the catalog's completeness (§3.4).
@@ -365,20 +383,20 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-independent-oracle` | an `[purity] independent` crate with any edge to a workspace crate | FND-02 |
 | `ARCH-unlisted-external`, `ARCH-external-feature`, `ARCH-external-source` | §2.4 | FND-02 |
 | `ARCH-source-parse` | a reachable file that does not parse, a missing module file, a non-literal `include!`/`#[path]` | FND-02 |
-| `ARCH-foreign-source` | a target root, `#[path]` module or `include!` resolving outside the package directory; a production crate's `include_str!`/`include_bytes!` of a file outside it | ARCH-01 (data includes from ARCH-02) |
+| `ARCH-foreign-source` | a target root, `#[path]` module or `include!` resolving outside the package directory; a production crate's `include_str!`/`include_bytes!` of a file outside it, or through a path that is not one string literal | ARCH-01 (data includes from ARCH-02, non-literal paths from ARCH-03) |
 | `ARCH-include-macro` | `include!`, `include_str!` or `include_bytes!` reached under another name (a `use` of `std`/`core::include*`, with or without `as`), or `include!` inside a macro's tokens (a `macro_rules!` body, another macro's arguments), in any crate | ARCH-02 |
 | `ARCH-plane-separation` | §2.2 rule 2 (a shared crate's dev edges included) and the `[planes]` completeness of §3.1 | ARCH-01 (shared dev edges from ARCH-02) |
 | `ARCH-plane-vocabulary` | a crate naming or declaring (struct, enum, union, trait, type, fn, mod, const, static, macro, associated item) a word another plane owns (`[planes.vocabulary]`): a CP word in a data or shared crate, a DP word in a control or shared crate; production and test code, through any crate | ARCH-01 (declarations from ARCH-02) |
-| `ARCH-domain-purity` | §2.3 in a `[purity] pure` crate | FND-02 (widened by ARCH-01, ARCH-02) |
-| `ARCH-pure-clippy-config` | a pure crate without its `clippy.toml`, with a `.clippy.toml` shadowing it, missing a required `disallowed-methods`/`disallowed-types` entry or setting `allow-invalid`; a `.cargo/config.toml` `[env]` setting `CLIPPY_CONF_DIR` (§2.3, the semantic layer) | ARCH-02 |
+| `ARCH-domain-purity` | §2.3 in a `[purity] pure` crate; in its test code, an `env!`/`option_env!` other than `env!("CARGO_MANIFEST_DIR")`/`env!("CARGO_PKG_*")` | FND-02 (widened by ARCH-01, ARCH-02, ARCH-03) |
+| `ARCH-pure-clippy-config` | a pure crate without its `clippy.toml`, with a `.clippy.toml` shadowing it, missing a required `disallowed-methods`/`disallowed-types`/`disallowed-macros` entry or setting `allow-invalid`; a Cargo configuration's `[env]` setting `CLIPPY_CONF_DIR` (§2.3, the semantic layer) | ARCH-02 (macros from ARCH-03) |
 | `ARCH-process-authority` | §2.3 process authority outside `[purity] process_authority`, also through another crate's `pub type` alias | FND-02 (aliases from ARCH-02) |
 | `ARCH-layer-isolation` | a crate naming a crate it must not reach (the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI), also through another crate's re-export or `pub type` alias; production **and** test code, test code may name test-only crates | FND-02 (test code from ARCH-01, aliases from ARCH-02) |
 | `ARCH-unsafe-code` | `unsafe` blocks, fns, impls, traits, extern blocks or `#[unsafe(..)]`, anywhere | FND-02 |
 | `ARCH-missing-selector` | a crate named by a code selector that is not a member and not in `[semantic] absent`, or a stale `absent` entry | FND-02 |
-| `ARCH-lint-config` | a member without `[lints] workspace = true`, a workspace lint set to allow, lint caps in rustflags, `clippy.toml` allows, a `[source]` replacement in a `.cargo/config.toml` other than an `[exceptions.vendor]`-approved vendored directory | FND-02 (sources from ARCH-01) |
+| `ARCH-lint-config` | a member without `[lints] workspace = true`, a workspace lint set to allow, lint caps or `-Z` options in rustflags or rustdocflags, `clippy.toml` allows; in **any** `.cargo/config.toml` or `.cargo/config` of the repository (nested workspaces excepted, their own run checks them): a `[source]` replacement other than an `[exceptions.vendor]`-approved vendored directory, `[build] rustc`/`rustc-wrapper`/`rustc-workspace-wrapper`/`rustdoc`, an `[env]` variable the xtask preflight refuses (§3.6), `[unstable]`, `paths`, a `[target.*] runner`, or an `[alias]` other than `xtask = "run --locked --package xtask --"` | FND-02 (sources from ARCH-01, build steering from ARCH-03) |
 | `ARCH-unfinished-code` | `todo!`/`unimplemented!`/`dbg!` without an exception | FND-02 |
 | `ARCH-ignored-test` | `#[ignore]` | FND-02 |
-| `ARCH-lint-suppression` | `#[allow]`, `#[expect]` or `coverage(off)` without a matching `[[exceptions.lints]]` row citing an ADR; a stale row | FND-02 |
+| `ARCH-lint-suppression` | `#[allow]`, `#[expect]` or `coverage(off)` without a matching `[[exceptions.lints]]` row citing an ADR; a stale row; an attribute in a macro's tokens named by a metavariable (`#[$level(..)]`, also in `cfg_attr`), which no row can approve | FND-02 (metavariables from ARCH-03) |
 | `ARCH-test-sleep` | a sleep in test code outside `mayfly-testkit-shared/src/poll.rs` | FND-02 |
 | `ARCH-test-name`, `ARCH-test-structure` | a test not named `should_<outcome>_when_<condition>`; missing `// given`, `// when`, `// then` in order | FND-02 |
 | `ARCH-platform-branch` | `cfg!(target_os…)` runtime branches under `crates/*/src` | FND-02 |
@@ -390,6 +408,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-detached-spawn` | `tokio::spawn`, `tokio::task::{spawn, spawn_blocking, spawn_local, block_in_place}`, `std::thread::{spawn, Builder}` in a production crate outside `mayfly-composition::supervision`, `mayfly-adapter-sqlite::writer`, `mayfly-adapter-link::transport`, `mayfly-adapter-{tart,guest}::process` (tasks are spawned on a tracker handed down) | ARCH-01 |
 | `ARCH-secret-serialize` | a type that is or transitively holds `Secret` deriving or implementing `Serialize`; `Secret` deriving `Debug`/`Display`; `Debug`/`Display` for `Secret` implemented outside the file that defines it | ARCH-01 (exercised from KER-02, RT-01) |
 | `ARCH-aggregate-registered` | an `impl Aggregate for X` in `mayfly-control-domain` production code without `visitor.visit::<X>()` in `ControlAggregates::accept` (the harnesses would skip it) | ARCH-01 |
+| `ARCH-nightly-features` | `#![feature(..)]` (also through `cfg_attr` or inside a macro's tokens) or a macro 2.0 item (`macro name`, `pub macro name`), in any crate: the pinned stable toolchain (ADR 0006) builds them only under `RUSTC_BOOTSTRAP`, which §3.6 refuses | ARCH-03 |
 | `ARCH-macro-export` | a `#[macro_export]` in a production crate without an `[[exceptions.lints]]` row (`lint = "macro_export"`) citing an ADR: an exported macro's body is checked under its own crate's rules but expands in another (composition's spawn in the CLI); `event_set!` is approved by ADR 0018 | ARCH-02 |
 
 Catalog completeness is part of every run, not a rule id: each rule names at least one
@@ -430,6 +449,66 @@ Rules planned by later tasks, which bind by review until then:
 - No mocking frameworks; real objects over testkit fakes; tempdirs and port 0.
 - A rule is never loosened to get green. A change to `architecture.toml` that widens an edge,
   allowlist, plane list, role list or exception needs the task to say so and an ADR.
+
+### 3.6 Threat model of the checker
+
+The checker defends against **honest mistakes, agent shortcuts and accidental drift**: a
+forgotten edge, a convenient `use std::fs`, a lint silenced to get green, a configuration that
+quietly widens what passes. Every bypass an adversarial review finds is closed with a negative
+fixture or test that reproduces it and now fails for a named rule, so the same shortcut cannot
+come back unnoticed. It is **not a sandbox against a determined insider**: name-based rules
+over unexpanded source, a lint layer over one toolchain and policy files in the same
+repository can be defeated by someone set on it (a proc-macro dependency through the allowlist,
+a returned `Command` value handed to a crate without process authority, a build script's
+effects). Human and agent review remain the backstop for those, and a finding there becomes a
+fixture here.
+
+Two things outside the source steer what the gate sees, so both are refused, fail closed:
+
+- **Cargo configuration** (`ARCH-lint-config`, §3.3): any `.cargo/config.toml` in the repository
+  that swaps or wraps rustc, passes `-Z` flags, sets a steering `[env]` variable, enables
+  `[unstable]`, overrides `paths`, runs tests through a `runner` or aliases a subcommand.
+- **The environment of `cargo xtask`** (`repo::preflight`, pinned by
+  `should_refuse_when_the_environment_steers_the_build` and the binary's
+  `should_refuse_to_run_when_a_rustc_wrapper_is_set`): it exits 2 when `RUSTFLAGS` is set to
+  anything but `-D warnings` (CI's native macOS job sets exactly that), or when `RUSTC`,
+  `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTC_BOOTSTRAP`, `RUSTDOC`, `RUSTDOCFLAGS`,
+  `CARGO_ENCODED_RUSTFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`, `CARGO_BUILD_RUSTC`,
+  `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTDOC`,
+  `CARGO_BUILD_RUSTFLAGS`, `CARGO_BUILD_RUSTDOCFLAGS`, any `CLIPPY_*` (`CLIPPY_ARGS`,
+  `CLIPPY_CONF_DIR`), `CARGO_ALIAS_*`, `CARGO_UNSTABLE_*` or a `CARGO_TARGET_*_RUNNER` /
+  `CARGO_TARGET_*_RUSTFLAGS` is set. It refuses rather than clears, so the person or job that
+  set one sees why. `CARGO_BUILD_JOBS`, `CARGO_TARGET_DIR` and the like change no verdict and
+  pass. The xtask tests that run the binary under `cargo llvm-cov` (which wraps rustc) remove
+  its variables first.
+
+Out of scope for the name-based checker, by decision: **process authority over values**. A
+crate outside `[purity] process_authority` that receives a `std::process::Command` (a return
+value, an associated type) and calls `.spawn()` on it names no process path; the rule reads
+names, not types. A returned `Command` is an API smell the review catches; the pure crates are
+covered anyway by their `clippy.toml` (`std::process::Command` is a disallowed type).
+
+Three adversarial passes over the FND-04 checkpoint ran on 2026-11-09:
+
+1. **ARCH-01** aligned the checker with this document and closed the first pass: the plane and
+   purity tables as policy data, `ARCH-anyhow-in-library`, `ARCH-unbounded-channel`,
+   `ARCH-detached-spawn`, `ARCH-secret-serialize`, test code under layer isolation, `#[path]`
+   and `include!` outside the package (`ARCH-foreign-source`).
+2. **ARCH-02** closed the second: a renamed `include!` and one inside macros
+   (`ARCH-include-macro`), clock and file system through aliases, `Self` and associated types
+   (the `clippy.toml` semantic layer, `ARCH-pure-clippy-config`), cross-crate `pub type`
+   aliases, exported macros (`ARCH-macro-export`), declarations of the other plane's
+   vocabulary, YAML-parsed CI lockstep, the checkout preflight, shared crates' dev edges.
+3. **ARCH-03** closed the third: a lint level passed to a macro as a metavariable
+   (`lint-level-through-metavariable`); Cargo configuration and environment that switch Clippy
+   off (`cargo-config-rustc-wrapper`, `cargo-config-steering-env`, `cargo-config-z-flag`,
+   `cargo-config-alias-shadows-clippy`, the preflight tests); nightly features and macro 2.0
+   (`ARCH-nightly-features`: `feature-attribute`, `macro-two-point-zero`); gaps in the semantic
+   layer (Unix sockets, links, ownership, name resolution, `DirBuilder`, `thread::panicking`,
+   console macros, `env!` in tests: the clippy-stage test, `domain-test-reads-env`); CI steps
+   that swallow failures through `shell`, `set +e`, `|| true`, `exit 0`, a trailing `true` or a
+   steering `env`, and workflows with merge keys or several documents (the `check.rs` lockstep
+   tests); non-literal data includes (`include-str-non-literal`).
 
 ---
 
@@ -627,10 +706,14 @@ boundaries), not as an object model.
    `e2e` and `conformance` with their stages.
 2. **One aggregate job, `required`**, runs `if: always()`, needs every other job of `ci.yml`, and
    fails unless every result is `success` (skipped and cancelled fail).
-3. **Self-tests** in xtask parse `ci.yml` and fail when an `in_check` stage is in zero jobs or
-   in two, when `required` does not need every job, or when any step of a job other than
-   `required` (a build, `doctor`, a tool install, not only `check --only`) or such a job itself
-   has `continue-on-error` or an `if:`. `doc/required-checks.md` lists the jobs; a test keeps it
+3. **Self-tests** in xtask parse `ci.yml` with a YAML parser and fail when an `in_check` stage
+   is in zero jobs or in two, when `required` does not need every job, or when any step of a job
+   other than `required` (a build, `doctor`, a tool install, not only `check --only`) or such a
+   job itself has `continue-on-error` or an `if:`; when such a step sets `shell:` (or a
+   `defaults.run.shell` applies), its `run:` holds `set +e`, `|| true`, `|| :`, `exit 0` or a
+   trailing `true`/`:`, or a workflow, job or step `env:` sets a variable the xtask preflight
+   refuses (§3.6; `RUSTFLAGS: -D warnings` passes); and when any workflow uses a `<<` merge key
+   or holds more than one YAML document, which this parser and GitHub could read differently. `doc/required-checks.md` lists the jobs; a test keeps it
    in step.
 4. Scheduled and owner-gated workflows are outside `required`; their failures open an issue and
    are fixed, not muted.
@@ -695,8 +778,9 @@ landed does not exist yet: clap rejects it as an unrecognised subcommand and exi
 `check --only` stage that does not exist yet is likewise an unknown name (exit 2, listing the
 valid ones), never a skipped stage. The repository root is compiled into the xtask binary, so
 every command first refuses (exit 2) to run from outside that checkout, which a target
-directory shared between worktrees would otherwise allow, and refuses a `CLIPPY_CONF_DIR` in
-its environment (§2.3).
+directory shared between worktrees would otherwise allow, and refuses an environment that
+steers the build (`CLIPPY_CONF_DIR`, `RUSTC_WRAPPER`, `RUSTFLAGS` other than `-D warnings`, ..;
+§3.6).
 
 | Command | What it does | Task |
 |:--|:--|:--|

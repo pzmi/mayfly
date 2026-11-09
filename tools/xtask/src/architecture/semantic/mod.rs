@@ -205,7 +205,18 @@ pub struct Facts {
     pub declarations: Vec<Declaration>,
     /// `#[macro_export]` attributes, where they are (`ARCH-macro-export`).
     pub macro_exports: Vec<Site>,
+    /// Nightly-only constructs: `#![feature(..)]` (also through `cfg_attr` and in macro
+    /// tokens) and macro 2.0 items, with what was found (`ARCH-nightly-features`).
+    pub nightly: Vec<(Site, String)>,
+    /// `env!` and `option_env!` invocations (also in macro tokens): where, which, and the
+    /// variable when the first argument is a string literal (`ARCH-domain-purity` in tests).
+    pub env_macros: Vec<(Site, String, Option<String>)>,
 }
+
+/// The `name` of an [`AttributeUse`] whose own name, or a `cfg_attr` branch's, is a macro
+/// metavariable (`#[$level(clippy::x)]`): the level the expansion sets cannot be read, so it
+/// is refused whatever `[[exceptions.lints]]` holds.
+pub const METAVARIABLE_ATTRIBUTE: &str = "$metavariable";
 
 /// The include family: `include!` compiles a file, the other two embed one as data.
 pub const INCLUDE_FAMILY: &[&str] = &["include", "include_str", "include_bytes"];
@@ -233,6 +244,8 @@ pub struct IncludeUse {
     pub kind: IncludeKind,
     /// The `ARCH-foreign-source` message when its literal path lies outside the package.
     pub outside: Option<String>,
+    /// Whether its argument is one string literal (not `concat!`, `env!` or a metavariable).
+    pub literal: bool,
 }
 
 /// A named item: a struct, enum, union, trait, type, fn, mod, const, static or macro, also an
@@ -287,7 +300,7 @@ pub struct HiddenItem {
 pub struct AttributeUse {
     /// Where its `#` is.
     pub site: Site,
-    /// `allow`, `expect`, `coverage` or `ignore`.
+    /// `allow`, `expect`, `coverage`, `ignore` or [`METAVARIABLE_ATTRIBUTE`].
     pub name: String,
     /// The lints it names (`coverage` for `coverage(off)`; empty for `ignore`).
     pub lints: Vec<String>,
@@ -950,12 +963,22 @@ fn path_attributes(attrs: &[Attribute]) -> Vec<PathAttr> {
 /// The attribute itself, plus every attribute a `cfg_attr` may expand to (any branch).
 pub fn effective_metas(meta: &Meta) -> Vec<Meta> {
     let mut out = vec![meta.clone()];
-    if let Meta::List(list) = meta
-        && list.path.is_ident("cfg_attr")
-        && let Ok(args) = list
-            .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+    let Meta::List(list) = meta else {
+        return out;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return out;
+    }
+    // Each branch on its own: a condition that does not parse as a meta (a macro's
+    // `$cond`) must not hide the attributes after it.
+    let trees: Vec<proc_macro2::TokenTree> = list.tokens.clone().into_iter().collect();
+    for branch in trees
+        .split(|t| matches!(t, proc_macro2::TokenTree::Punct(p) if p.as_char() == ','))
+        .skip(1)
+        .filter(|b| !b.is_empty())
     {
-        for inner in args.into_iter().skip(1) {
+        let stream: proc_macro2::TokenStream = branch.iter().cloned().collect();
+        if let Ok(inner) = syn::parse2::<Meta>(stream) {
             out.extend(effective_metas(&inner));
         }
     }

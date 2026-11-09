@@ -1,0 +1,4 @@
+rule: ARCH-nightly-features
+at: crates/mayfly-domain/src/lib.rs:5
+contains: a macro 2.0 item
+only: true
