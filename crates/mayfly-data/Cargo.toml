@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-data"
+description = "Data-plane application: executor, inventory observer and resource monitor, with the ports VmProvider, GuestTransport, HostProbe and ProcessClock."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

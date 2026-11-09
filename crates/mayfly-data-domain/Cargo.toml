@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-data-domain"
+description = "Pure data-plane domain: the directive executor state machine, fencing and the VM supervisor state machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

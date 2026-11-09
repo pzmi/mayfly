@@ -1,0 +1,16 @@
+[package]
+name = "mayfly-fake-tart"
+description = "Test-only: a `tart`-compatible CLI over a state directory, with fault knobs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "tart"
+path = "src/bin/tart.rs"
+
+[lints]
+workspace = true

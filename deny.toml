@@ -1,0 +1,43 @@
+# cargo-deny policy (foundation.md section 8). Run through `cargo xtask security`.
+# Loosening anything here needs a reviewed reason in a comment, and an ADR when it is a
+# policy change.
+
+[graph]
+all-features = true
+
+[advisories]
+# A vulnerability or a yanked crate fails the stage at any depth. `unmaintained` is a scope
+# (cargo-deny 0.18 and later): "workspace" fails on an unmaintained crate that a workspace
+# member depends on directly, and does not report one reached only transitively.
+# Each ignore needs the advisory id, the reason and an ADR.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# This repository's own `MIT OR Apache-2.0` must be accepted. Add a licence only with a
+# comment saying which dependency needs it. The BSD, ISC, Zlib and Unicode entries are the
+# permissive licences foundation.md pre-approves.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+# A path dependency must carry a version so a wildcard requirement
+# is a real finding; allow-wildcard-paths only covers unpublished path crates.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,20 @@
+[package]
+name = "mayfly-cli"
+description = "Binaries `mayflyd` (the daemon) and `mayfly` (the operator CLI)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "mayflyd"
+path = "src/bin/mayflyd.rs"
+
+[[bin]]
+name = "mayfly"
+path = "src/bin/mayfly.rs"
+
+[lints]
+workspace = true

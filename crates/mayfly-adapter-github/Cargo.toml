@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-adapter-github"
+description = "Control-plane adapter: GitHub App JWT and installation tokens, Scale Set client, JIT runner configs and classic runner registration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

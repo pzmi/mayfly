@@ -1,0 +1,16 @@
+[package]
+name = "mayfly-faultlab"
+description = "Jepsen-style fault harness: controller, history, nemesis and checker; imports no production crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "faultlab"
+path = "src/main.rs"
+
+[lints]
+workspace = true

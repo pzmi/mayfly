@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-adapter-sqlite"
+description = "Control-plane adapter: SQLite journal, receipts, outbox, inbox, projections and migrations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

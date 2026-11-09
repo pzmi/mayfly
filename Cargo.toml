@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mayfly-domain",
+    "crates/mayfly-protocol",
+    "crates/mayfly-control-domain",
+    "crates/mayfly-control",
+    "crates/mayfly-data-domain",
+    "crates/mayfly-data",
+    "crates/mayfly-adapter-sqlite",
+    "crates/mayfly-adapter-github",
+    "crates/mayfly-adapter-secrets",
+    "crates/mayfly-adapter-tart",
+    "crates/mayfly-adapter-guest",
+    "crates/mayfly-adapter-host",
+    "crates/mayfly-adapter-link",
+    "crates/mayfly-composition",
+    "crates/mayfly-cli",
+    "crates/mayfly-testkit",
+    "crates/mayfly-conformance",
+    "crates/mayfly-fake-tart",
+    "crates/mayfly-fake-github",
+    "tools/faultlab",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pzmi/mayfly"
+readme = "README.md"
+keywords = ["ci", "github-actions", "runners", "virtual-machines", "tart"]
+categories = ["development-tools", "command-line-utilities"]
+
+[workspace.dependencies]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

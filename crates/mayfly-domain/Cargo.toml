@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-domain"
+description = "Shared kernel, pure: ids, VM name ownership, Generation, Epoch, Fence, ImageDigest, Resources, Deadline (no clock), errors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

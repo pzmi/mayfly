@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-control"
+description = "Control-plane application: command bus, AggregateStore, projections, queries, reactors, reconciler, listener and outbox relay, with the ports Journal, Clock, Ids, ScaleSetApi, RunnerRegistry and SecretStore."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

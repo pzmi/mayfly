@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-adapter-secrets"
+description = "Control-plane adapter: file (mode 0600) and macOS Keychain secret stores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
