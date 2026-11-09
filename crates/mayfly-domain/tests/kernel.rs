@@ -21,7 +21,7 @@ proptest! {
         pool in name_strategy(),
         host in name_strategy(),
         slot in any::<u32>(),
-        generation in any::<u32>(),
+        generation in 1..=u32::MAX,
         attempt in any::<u128>(),
     ) {
         // given
@@ -29,7 +29,7 @@ proptest! {
             PoolName::new(&pool).unwrap(),
             HostId::new(&host).unwrap(),
             Slot::new(slot),
-            Generation::new(generation),
+            Generation::new(generation).unwrap(),
             AttemptId::from_u128(attempt),
         );
         // when
@@ -38,18 +38,88 @@ proptest! {
         // then
         prop_assert_eq!(&parsed, &name);
         prop_assert_eq!(parsed.to_string(), text);
-        prop_assert_eq!(parsed.generation(), Generation::new(generation));
+        prop_assert_eq!(parsed.generation(), Generation::new(generation).unwrap());
         prop_assert_eq!(parsed.slot(), Slot::new(slot));
     }
 
     #[test]
-    fn should_not_parse_foreign_names_as_owned_when_they_are_arbitrary_text(text in ".{0,60}") {
-        // given a string that does not start with the managed prefix
+    fn should_not_parse_foreign_names_as_owned_when_they_are_arbitrary_or_near_miss_text(
+        prefix in prop_oneof![
+            Just(String::new()),
+            Just("mf".to_owned()),
+            Just("mf_".to_owned()),
+            Just("mf.".to_owned()),
+            Just("MF-".to_owned()),
+            Just("Mf-".to_owned()),
+            Just("m".to_owned()),
+            Just(" mf-".to_owned()),
+            Just("xmf-".to_owned()),
+            Just("\u{ff4d}f-".to_owned()),
+        ],
+        rest in ".{0,60}",
+    ) {
+        // given a string that does not start with the managed prefix, often only just
+        let text = format!("{prefix}{rest}");
         prop_assume!(!text.starts_with("mf-"));
         // when
         // then
         prop_assert_eq!(OwnedVmName::parse(&text), Err(VmNameError::NotManaged));
         prop_assert_eq!(classify_vm_name(&text), VmNameClass::Foreign);
+    }
+
+    #[test]
+    fn should_only_accept_the_canonical_spelling_when_a_canonical_name_is_mutated(
+        pool in name_strategy(),
+        host in name_strategy(),
+        slot in any::<u32>(),
+        generation in 1..=u32::MAX,
+        attempt in any::<u128>(),
+        mutation in 0..14_usize,
+        at in any::<usize>(),
+    ) {
+        // given a canonical name built from components
+        let canonical = OwnedVmName::new(
+            PoolName::new(&pool).unwrap(),
+            HostId::new(&host).unwrap(),
+            Slot::new(slot),
+            Generation::new(generation).unwrap(),
+            AttemptId::from_u128(attempt),
+        )
+        .to_string();
+        let slot_part = format!("-s{slot}-");
+        let generation_part = format!("-g{generation}-");
+        let short = AttemptId::from_u128(attempt).short();
+        // when one spelling rule is broken
+        let mutant = match mutation {
+            0 => canonical.replace(&slot_part, &format!("-s0{slot}-")),
+            1 => canonical.replace(&generation_part, &format!("-g0{generation}-")),
+            2 => canonical.to_uppercase(),
+            3 => canonical.replace(&short, &short.to_uppercase()),
+            4 => format!(" {canonical}"),
+            5 => format!("{canonical} "),
+            6 => format!("{canonical}-"),
+            7 => {
+                let mut chars: Vec<char> = canonical.chars().collect();
+                chars.insert(3 + at % (chars.len() - 3), '-');
+                chars.into_iter().collect()
+            }
+            8 => {
+                let dashes: Vec<usize> = canonical.match_indices('-').map(|(i, _)| i).collect();
+                let mut text = canonical.clone();
+                text.remove(dashes[at % dashes.len()]);
+                text
+            }
+            9 => format!("{canonical}0"),
+            10 => canonical[..canonical.len() - 1].to_owned(),
+            11 => canonical.replace(&slot_part, "-s4294967296-"),
+            12 => canonical.replace(&generation_part, "-g99999999999-"),
+            _ => canonical.replace(&slot_part, "-s\u{663}-"),
+        };
+        // then it never parses to a name that prints differently: it fails, or reprints exactly
+        match OwnedVmName::parse(&mutant) {
+            Err(_) => {}
+            Ok(name) => prop_assert_eq!(name.to_string(), mutant),
+        }
     }
 
     #[test]
@@ -82,7 +152,7 @@ proptest! {
         // when
         let deadline = Deadline::after(Millis::new(now), Millis::new(timeout));
         // then
-        prop_assert!(deadline.instant().get() >= now);
+        prop_assert_eq!(deadline.instant().get(), now.saturating_add(timeout));
     }
 }
 
@@ -115,6 +185,17 @@ fn should_refuse_vm_name_when_it_is_malformed() {
         ("mf-pool-host-s0-1-0123abcd", VmNameError::Generation),
         ("mf-pool-host-s0-g-0123abcd", VmNameError::Generation),
         ("mf-pool-host-s0-g01-0123abcd", VmNameError::Generation),
+        ("mf-pool-host-S0-g1-0123abcd", VmNameError::Slot),
+        ("mf-pool-host-s0-G1-0123abcd", VmNameError::Generation),
+        ("mf-pool-host-g1-s0-0123abcd", VmNameError::Slot),
+        ("mf-pool-host-s\u{663}-g1-0123abcd", VmNameError::Slot),
+        ("mf-pool-host-s0-g\u{663}-0123abcd", VmNameError::Generation),
+        (
+            "mf-pool-host-s0-g4294967296-0123abcd",
+            VmNameError::Generation,
+        ),
+        ("mf-pool-host-s0-g0-0123abcd", VmNameError::Generation),
+        ("mf-pool-host-s0-g1-", VmNameError::AttemptShort),
         ("mf-pool-host-s0-g1-0123ABCD", VmNameError::AttemptShort),
         ("mf-pool-host-s0-g1-0123abc", VmNameError::AttemptShort),
         ("mf-pool-host-s0-g1-0123abcde", VmNameError::AttemptShort),
@@ -150,34 +231,75 @@ fn should_not_parse_foreign_names_as_owned_when_a_provider_reports_them() {
 }
 
 #[test]
-fn should_classify_names_when_inventory_lists_them() {
+fn should_classify_shape_when_inventory_lists_names() {
     // given
     // when
     // then
-    assert!(matches!(classify_vm_name(GOOD), VmNameClass::Owned(_)));
+    assert!(matches!(classify_vm_name(GOOD), VmNameClass::WellFormed(_)));
     assert_eq!(
         classify_vm_name("mf-legacy-vm"),
-        VmNameClass::UnknownManaged
+        VmNameClass::MalformedManaged
     );
-    assert_eq!(classify_vm_name("mf-"), VmNameClass::UnknownManaged);
+    assert_eq!(classify_vm_name("mf-"), VmNameClass::MalformedManaged);
     assert_eq!(classify_vm_name("base-image"), VmNameClass::Foreign);
 }
 
 #[test]
 fn should_take_the_short_part_from_the_attempt_id_when_a_name_is_built() {
     // given
-    let attempt = AttemptId::from_u128(0x0123_abcd_u128 << 96 | 0xffff);
+    let attempt = AttemptId::from_u128(0xffff_u128 << 96 | 0x0123_abcd);
     // when
     let name = OwnedVmName::new(
         PoolName::new("p").unwrap(),
         HostId::new("h").unwrap(),
         Slot::new(2),
-        Generation::new(7),
+        Generation::new(7).unwrap(),
         attempt,
     );
     // then
     assert_eq!(name.to_string(), "mf-p-h-s2-g7-0123abcd");
     assert_eq!(name.attempt_short(), attempt.short());
+}
+
+#[test]
+fn should_differ_in_short_when_v7_shaped_ids_are_a_minute_apart() {
+    // given UUIDv7-shaped ids: a 48-bit millisecond timestamp on top, random bits below
+    let v7 = |millis: u128, random: u128| (millis << 80) | (0x7_u128 << 76) | random;
+    let first = AttemptId::from_u128(v7(
+        1_800_000_000_000,
+        0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128 & ((1 << 76) - 1),
+    ));
+    let later = AttemptId::from_u128(v7(
+        1_800_000_060_000,
+        0x0fed_cba9_8765_4321_0fed_cba9_8765_4321_u128 & ((1 << 76) - 1),
+    ));
+    // when
+    let (a, b) = (first.short(), later.short());
+    // then the short follows the random low bits, not the timestamp
+    assert_ne!(a, b);
+    assert_eq!(a, "89abcdef");
+    assert_eq!(b, "87654321");
+}
+
+#[test]
+fn should_check_consistency_when_name_is_compared_with_an_attempt() {
+    // given
+    let attempt = AttemptId::from_u128(0xdead_beef);
+    let name = OwnedVmName::new(
+        PoolName::new("p").unwrap(),
+        HostId::new("h").unwrap(),
+        Slot::new(0),
+        Generation::new(3).unwrap(),
+        attempt,
+    );
+    // when
+    // then
+    assert!(name.is_for(&attempt, Generation::new(3).unwrap()));
+    assert!(!name.is_for(&attempt, Generation::new(4).unwrap()));
+    assert!(!name.is_for(
+        &AttemptId::from_u128(0xdead_bef0),
+        Generation::new(3).unwrap()
+    ));
 }
 
 #[test]
@@ -251,6 +373,13 @@ fn should_admit_the_fence_only_when_host_and_epoch_match() {
         current.admit(&Fence::new(HostId::new("mac2").unwrap(), Epoch::new(5))),
         Err(FenceError::WrongHost)
     );
+    // the host is checked first: host and epoch both different is WrongHost, not Stale or Ahead
+    for epoch in [4, 6] {
+        assert_eq!(
+            current.admit(&Fence::new(HostId::new("mac2").unwrap(), Epoch::new(epoch))),
+            Err(FenceError::WrongHost)
+        );
+    }
 }
 
 #[test]
@@ -258,8 +387,10 @@ fn should_not_wrap_when_generation_or_epoch_reaches_its_limit() {
     // given
     // when
     // then
-    assert_eq!(Generation::FIRST.next(), Some(Generation::new(2)));
-    assert_eq!(Generation::new(u32::MAX).next(), None);
+    assert_eq!(Generation::FIRST.next(), Generation::new(2));
+    assert_eq!(Generation::new(u32::MAX).unwrap().next(), None);
+    assert_eq!(Generation::new(0), None);
+    assert_eq!(Generation::FIRST.get(), 1);
     assert_eq!(Epoch::FIRST.next(), Some(Epoch::new(2)));
     assert_eq!(Epoch::new(u64::MAX).next(), None);
 }
@@ -334,5 +465,10 @@ fn should_validate_when_a_value_is_deserialized() {
     assert!(decode::<AttemptId>("xyz").is_err());
     assert!(decode::<ImageDigest>("latest").is_err());
     let de: U32Deserializer<DeError> = 9_u32.into_deserializer();
-    assert_eq!(Generation::deserialize(de).unwrap(), Generation::new(9));
+    assert_eq!(
+        Generation::deserialize(de).unwrap(),
+        Generation::new(9).unwrap()
+    );
+    let zero: U32Deserializer<DeError> = 0_u32.into_deserializer();
+    assert!(Generation::deserialize(zero).is_err());
 }

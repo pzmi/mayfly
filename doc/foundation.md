@@ -117,7 +117,7 @@ of the following, in any `cfg` branch, through any alias or re-export:
 Time, ids and randomness arrive as values on commands and directives (plan §5.1). The pure
 crates may hold `async` trait *declarations* (link ports in `mayfly-protocol`) but never an
 executor. `serde` derive is permitted in `mayfly-protocol` and `mayfly-control-domain` (wire and
-journal shapes); whether `mayfly-domain` may derive it is decided by the D9 ADR in KER-01.
+journal shapes); `mayfly-domain` may derive it too, validating types only through their parsers (ADR 0017).
 
 **Application crates** (`mayfly-control`, `mayfly-data`) may use `tokio` with the `sync`
 feature, `tokio-util` (cancellation, task tracking), `tracing` and `thiserror`. They reach time
@@ -135,7 +135,7 @@ it, added with `cargo add` and named with its reason in the commit message.
 
 | Crate | Ceiling (normal) |
 |:--|:--|
-| `mayfly-domain` | `thiserror`; `serde` (derive) only if the D9 ADR allows |
+| `mayfly-domain` | `thiserror`; `serde` (derive, ADR 0017) |
 | `mayfly-protocol` | `serde` (derive), `thiserror` |
 | `mayfly-control-domain` | `serde` (derive), `thiserror` |
 | `mayfly-data-domain` | `thiserror` |

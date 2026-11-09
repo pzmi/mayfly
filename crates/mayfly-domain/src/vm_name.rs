@@ -1,7 +1,8 @@
 //! The managed VM name `mf-<pool>-<host>-s<slot>-g<gen>-<short>` and its strict parser (plan §8.4).
 //!
 //! Ownership of a VM needs the journal record, this exact name and its generation; a name that
-//! does not parse is never owned, so a delete path built on [`OwnedVmName`] cannot reach it.
+//! does not parse is never owned. Parsing proves shape only: a well-formed name is a
+//! precondition of ownership, not evidence of it.
 
 use std::fmt;
 use std::str::FromStr;
@@ -33,7 +34,7 @@ impl Slot {
     }
 }
 
-/// A VM name that is exactly one mayfly produced. Round trip pinned by
+/// A VM name with exactly the shape mayfly produces. Round trip pinned by
 /// `should_round_trip_when_any_owned_name_is_formatted_and_parsed`; refusals by
 /// `should_refuse_vm_name_when_it_is_malformed` and `should_not_parse_foreign_names_as_owned`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -82,7 +83,7 @@ impl OwnedVmName {
             .map(Slot)
             .ok_or(VmNameError::Slot)?;
         let generation = canonical_u32(generation, 'g')
-            .map(Generation::new)
+            .and_then(Generation::new)
             .ok_or(VmNameError::Generation)?;
         if short.len() != 8
             || !short
@@ -129,6 +130,17 @@ impl OwnedVmName {
     pub fn attempt_short(&self) -> &str {
         &self.short
     }
+
+    /// Whether this name carries `attempt`'s short and `generation`.
+    ///
+    /// A consistency check only, never an ownership proof: the short is 32 bits of the id, so
+    /// distinct attempts can collide. Ownership needs the journal record plus the exact full
+    /// name plus the generation (plan §8.4); nothing may delete a VM on this alone. Pinned by
+    /// `should_check_consistency_when_name_is_compared_with_an_attempt`.
+    #[must_use]
+    pub fn is_for(&self, attempt: &AttemptId, generation: Generation) -> bool {
+        self.short == attempt.short() && self.generation == generation
+    }
 }
 
 fn canonical_u32(part: &str, tag: char) -> Option<u32> {
@@ -173,24 +185,27 @@ impl From<OwnedVmName> for String {
     }
 }
 
-/// How an inventory entry's name relates to us, so an unknown `mf-*` VM is reported and never
-/// deleted (plan §8.4). Pinned by `should_classify_names_when_inventory_lists_them`.
+/// What the SHAPE of an inventory entry's name says, nothing more.
+///
+/// Whether a VM is ours depends on the journal (a record, this exact name, its generation:
+/// plan §8.4), never on the name alone. No variant authorises deletion; an unrecognised
+/// `mf-*` name is reported and left alone. Pinned by `should_classify_shape_when_inventory_lists_names`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmNameClass {
-    /// A well-formed owned name (ownership still needs the journal record).
-    Owned(OwnedVmName),
-    /// Has the `mf-` prefix but is not a well-formed owned name: report, never delete.
-    UnknownManaged,
-    /// Not ours at all.
+    /// Has exactly the shape of a name mayfly produces. Not proof of ownership.
+    WellFormed(OwnedVmName),
+    /// Has the `mf-` prefix but not the shape of a name mayfly produces.
+    MalformedManaged,
+    /// Does not start with `mf-`.
     Foreign,
 }
 
-/// Classifies a provider-reported VM name.
+/// Classifies a provider-reported VM name by its shape only.
 #[must_use]
 pub fn classify_vm_name(name: &str) -> VmNameClass {
     match OwnedVmName::parse(name) {
-        Ok(owned) => VmNameClass::Owned(owned),
+        Ok(owned) => VmNameClass::WellFormed(owned),
         Err(VmNameError::NotManaged) => VmNameClass::Foreign,
-        Err(_) => VmNameClass::UnknownManaged,
+        Err(_) => VmNameClass::MalformedManaged,
     }
 }

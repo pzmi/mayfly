@@ -28,8 +28,8 @@ journal adapter and the golden-fixture harness.
 A type whose invariant a malformed value would break (`PoolName`, `HostId`, the 128-bit ids,
 `OwnedVmName`, `ImageDigest`) serialises as its canonical string and deserialises only through
 its validating parser (`#[serde(try_from = "String")]`), so a decoded value is as valid as a
-constructed one. Plain value types (`Generation`, `Epoch`, `Millis`, `Resources`) use the
-derive's natural form. `proptest` is a dev-dependency only.
+constructed one. `Generation` (1 or more) deserialises through its validating constructor from a bare number.
+Plain value types (`Epoch`, `Millis`, `Resources`) use the derive's natural form. `proptest` is a dev-dependency only.
 
 ## Consequences
 

@@ -133,7 +133,7 @@ macro_rules! hex_id {
 }
 
 hex_id!(
-    /// One attempt to run one job on one VM. Its first eight hex digits are the VM name's
+    /// One attempt to run one job on one VM. Its last eight hex digits are the VM name's
     /// short part ([`AttemptId::short`]).
     AttemptId
 );
@@ -151,9 +151,14 @@ hex_id!(
 );
 
 impl AttemptId {
-    /// The eight lowercase hex digits that end an [`crate::OwnedVmName`]: the id's top 32 bits.
+    /// The eight lowercase hex digits that end an [`crate::OwnedVmName`]: the id's LOW 32 bits.
+    ///
+    /// The low bits, not the top: the id port may mint time-ordered ids (`UUIDv7`), whose top
+    /// 48 bits are a millisecond timestamp, so the top 32 bits would be equal for every attempt
+    /// minted within about 65 seconds. The low bits are random in both `UUIDv7` and `UUIDv4`.
+    /// Pinned by `should_differ_in_short_when_v7_shaped_ids_are_a_minute_apart`.
     #[must_use]
     pub fn short(self) -> String {
-        format!("{:08x}", self.0 >> 96)
+        format!("{:08x}", self.0 & 0xffff_ffff)
     }
 }

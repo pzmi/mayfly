@@ -9,6 +9,8 @@ pub enum IdError {
     InvalidName,
     /// A 128-bit id that is not exactly 32 lowercase hexadecimal digits.
     InvalidHexId,
+    /// A generation of 0; generations start at 1.
+    ZeroGeneration,
 }
 
 impl fmt::Display for IdError {
@@ -16,6 +18,7 @@ impl fmt::Display for IdError {
         match self {
             Self::InvalidName => f.write_str("a name must match [a-z0-9]{1,16}"),
             Self::InvalidHexId => f.write_str("an id must be 32 lowercase hexadecimal digits"),
+            Self::ZeroGeneration => f.write_str("a generation starts at 1"),
         }
     }
 }
@@ -35,7 +38,7 @@ pub enum VmNameError {
     Host,
     /// The slot part is not `s` and a canonical decimal number.
     Slot,
-    /// The generation part is not `g` and a canonical decimal number.
+    /// The generation part is not `g` and a canonical decimal number of at least 1.
     Generation,
     /// The attempt part is not eight lowercase hexadecimal digits.
     AttemptShort,

@@ -4,24 +4,29 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::IdError;
 use crate::ids::HostId;
 
-/// The retry counter of one slot's VM name; a retry reuses it, a new VM takes the next.
+/// The generation of one slot's VM name, from [`Generation::FIRST`] (1; zero does not exist).
+///
+/// Not a retry counter: a retry of an attempt reuses its generation (plan §6 rule 3), and only
+/// a new attempt for the slot takes the next one. Deserialises through [`Generation::new`], so
+/// a decoded zero is refused like a constructed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "u32", into = "u32")]
 pub struct Generation(u32);
 
 impl Generation {
     /// The first generation of a slot.
     pub const FIRST: Self = Self(1);
 
-    /// Wraps a raw value.
+    /// Wraps a raw value; `None` for 0, since generations start at [`Generation::FIRST`].
     #[must_use]
-    pub const fn new(value: u32) -> Self {
-        Self(value)
+    pub const fn new(value: u32) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
     }
 
-    /// The raw value.
+    /// The raw value, never 0.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
@@ -37,7 +42,21 @@ impl Generation {
     }
 }
 
-/// A host epoch, bumped on every control-plane start; stale ones are refused (plan §3.4).
+impl TryFrom<u32> for Generation {
+    type Error = IdError;
+    fn try_from(value: u32) -> Result<Self, IdError> {
+        Self::new(value).ok_or(IdError::ZeroGeneration)
+    }
+}
+
+impl From<Generation> for u32 {
+    fn from(value: Generation) -> Self {
+        value.0
+    }
+}
+
+/// A host epoch, minted per data-plane session, reconnects included, so a superseded control
+/// plane or session is refused (plan §3.2, §3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Epoch(u64);
