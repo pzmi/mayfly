@@ -83,6 +83,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | FND-04 | CI, security and supply-chain workflows | FND-02 | sonnet | ⛳ |
 | FND-05 | nextest profiles, testkit poll helper, coverage stage | FND-04 | sonnet | |
 | FND-06 | Formal toolchain: Quint and Apalache pins, `formal` stages | FND-04 | sonnet | |
+| ARCH-01 | Align the architecture policy with fnd §2–§3 | FND-04 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences | FND-02 | sonnet | |
 | KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06 | opus | |
 | KER-03 | Event-sourcing kernel: aggregate, event registry, goldens, determinism | KER-01 | opus | |
@@ -191,6 +192,19 @@ Cites: ver §6, D10, D15. `formal/package.json` + lockfile pinning Quint; Apalac
 SHA-256 in `tools/versions.toml`; xtask stages `formal-typecheck` (all `.qnt`), `formal-test`
 (Quint tests), the `MODELS` registry (empty), `formal.yml` workflow. A trivial `formal/smoke.qnt`.
 Accept: stages fail closed when Quint is missing; CI runs them.
+
+#### ARCH-01 Align the architecture policy with fnd §2–§3
+Cites: fnd §2.2, §3.1, §3.3. FND-02 ported site-preview's checker with the edges of the FND-02 card;
+foundation.md, written in parallel, is stricter. Bring code and document into one agreement:
+(1) edges per fnd §2.2 (`mayfly-data-domain` → `mayfly-protocol`; CP adapters reach only
+`mayfly-domain`, `mayfly-control-domain` where needed and `mayfly-control`; DP adapters likewise on
+the data side; conformance may drive the Tart adapter); (2) either data-driven `[planes]` and
+`[purity]` tables in `architecture.toml` as fnd §3.1 describes, or amend fnd §3.1 to the
+code-named design, whichever keeps the checker simpler (say which, and why, in the commit);
+(3) the rules fnd §3.3 assigns to FND-02 that are missing: `ARCH-anyhow-in-library`,
+`ARCH-unbounded-channel`, `ARCH-detached-spawn`, `ARCH-secret-serialize`, each with a negative
+fixture; (4) the fault lab's package name (`mayfly-faultlab`) in fnd.
+Accept: `cargo xtask check` green; each new rule fails its fixture; fnd §2–§3 describe the code exactly.
 
 ### Phase 1 — kernel (pure crates, models first)
 
