@@ -4,11 +4,13 @@
 
 mayfly is a headless Rust service running **single-use GitHub Actions runners in disposable
 VMs** (one job per VM, cloned from a pinned image, destroyed after). Demand comes from GitHub
-Runner Scale Sets; VMs come from a `VmProvider` port whose first adapter drives Tart by argv.
+Runner Scale Sets only (no classic `--ephemeral` mode, ADR 0028); VMs come from a `VmProvider`
+port whose first adapter drives Tart by argv, each VM under a per-VM shim (ADR 0037).
 Binaries: `mayflyd` (daemon) and `mayfly` (operator CLI over a `0600` Unix socket). The
-**control plane** (event-sourced SQLite journal, CQRS, outbox/inbox, reconciler, scale-set
-listener) decides; the **data plane** (directive executor, observers) acts and stores nothing
-durable; `architecture.toml` enforces the split. Public, open source (`MIT OR Apache-2.0`).
+**control plane** (stream-scoped event store on SQLite, CQRS, inbox, durable delivery,
+reconciler, scale-set listener) decides and allocates; the **data plane** (directive executor,
+observers, resource ledger) acts, enforces host resources (ADR 0024) and stores nothing durable
+but its epoch-floor marker; `architecture.toml` enforces the split. Public, open source (`MIT OR Apache-2.0`).
 
 ## Docs
 
@@ -17,8 +19,11 @@ durable; `architecture.toml` enforces the split. Public, open source (`MIT OR Ap
 | `doc/plan.md` | Product and architecture: goals and guardrails (§1), CP/DP split and protocol (§3), crates (§4), event sourcing and CQRS (§5), attempt lifecycle (§6), GitHub (§7), data plane and ownership (§8), capacity (§9), recovery (§10), operator interface (§11), observability (§12), security (§13) |
 | `doc/foundation.md` | Engineering rules: dependency law (§2), enforcement (§3), logging (§5), event-sourcing rules (§6), CI (§7), commands (§9), commits (§10), agent contract (§11) |
 | `doc/verification.md` | Test levels (§2), contract suites (§5), formal models and conformance (§6), fault lab (§8), curated mutants (§9) |
-| `doc/philosophy.md` | Why mayfly is built this way and the lines it does not cross; the decision test (§8). A draft awaiting the owner |
-| `doc/tasks.md` | Decisions D1–D15, rules for every task, task order and dependencies, model per task, ⛳ checkpoints, the live gate |
+| `doc/philosophy.md` | Why mayfly is built this way and the lines it does not cross; the decision test (§8). Owner-reviewed in part (open items marked) |
+| `doc/domain-model.md` | Bounded contexts, ubiquitous language, aggregates, invariants I01–I33, policies P1–P25, owner decisions OD1–OD20 (§10) |
+| `doc/event-store.md` | The stream-scoped, storage-neutral event store: invariants ES-I*, ports, adapters, delivery, compatibility, verification, owner decisions E1–E9 |
+| `doc/formal-models.md` | Quint models, their depths and timings |
+| `doc/tasks.md` | Decisions (ADR numbers; D1–D15 as aliases), rules for every task, task order and dependencies, model per task, ⛳ checkpoints, the live gate |
 | `doc/adr/` | Decisions, Nygard style (`NNNN-kebab-title.md`: Status, Context, Decision, Consequences); index in `doc/adr/README.md` |
 
 Citations read "plan §5.2", "fnd §3", "ver §6"; read the sections a task cites, not whole
@@ -50,14 +55,17 @@ cargo xtask check          # the full blocking gate (fnd §9): before every comm
 cargo xtask check --only <stages>   # named stages through the same code (what each CI job runs)
 cargo xtask architecture   # crate/plane policy and its negative fixtures
 cargo xtask list-checks    # every check, machine-readable
-cargo xtask doctor         # every pinned tool: run it first when local and CI disagree
+cargo xtask doctor [--all]  # pinned tools `check` needs (--all: every pinned tool): run it first when local and CI disagree
+cargo xtask check --only formal-typecheck,formal-test   # Quint typecheck and scenario tests (in `check`)
+cargo xtask formal-verify  # Apalache bounded verification + long simulation (needs Java: weekly/on formal/ changes)
 cargo xtask adr new "<title>" [--number N]   # and `cargo xtask adr index --fix`
 cargo xtask land <sha> --push origin main    # orchestrator only (D4)
 ```
 
 Coverage is live: `cargo xtask coverage [--changed-since REV]`, stages `coverage` and
-`changed-lines`; the floors in `coverage-floor.toml` only ratchet up. Later tasks add stages
-(formal FND-06, mutants VER-05). `quick` is not `check`;
+`changed-lines`; the floors in `coverage-floor.toml` only ratchet up. The formal stages
+`formal-typecheck` and `formal-test` are live (FND-06). Later tasks add stages (conformance
+VER-01, mutants VER-05, `contract-postgres` ES-09). `quick` is not `check`;
 never report one as the other. A repeatable job becomes an `xtask` subcommand. A missing tool
 fails, never a skipped-but-green check. Run the gate in the foreground; commit only on green.
 **Never prefix a command with inline `MAYFLY_*`, `QUINT_SEED` or `PROPTEST_*` variables**; a
@@ -126,8 +134,9 @@ reviewable.
   tables; no getters/setters or privacy ceremony beyond validated boundary value types. Follow the
   ADRs: a task cites the ADRs it implements, and a deviation needs a new or superseding ADR.
 - **Event sourcing** (plan §5, fnd §6): `AggregateStore::save` is the only caller of
-  `Journal::append`; one transaction holds the events, synchronous projections, outbox rows,
-  command receipt and the inbox entry that caused it; reactors run after commit and are never
+  `Journal::append`; one store transaction holds the events (a directive is a `DirectiveIssued`
+  event, no outbox table: ADR 0034), inline projections, dispatch marks, the command receipt
+  (refusals bound to the revision they were decided at) and the inbox entry that caused it; reactors run after commit and are never
   replayed. `decide`/`evolve` are pure and deterministic, refusals included (`DETERMINISM_CASES`
   with accepted and refused cases for every aggregate). Events are immutable, past tense,
   `EVENT_TYPE` + `SCHEMA_VERSION`, one golden JSON fixture per type and version; evolve by
@@ -139,25 +148,43 @@ reviewable.
   (`doc/event-store.md` §6). Never rename an event, field, config key, CLI flag, metric or socket
   API field.
 - **Effects** (plan §6, §3.2): state reflects an observed fact, never an attempted command.
-  `Unknown` leaves only on an observation; a timeout never becomes success or `Deleted`. A retry
+  `Unknown` leaves only on an observation; a timeout never becomes success or `Deleted`, and
+  **no one asserts an outcome**, the operator included: a provider that cannot answer leaves it
+  `Unknown`, reported as a provider limitation (ADR 0025). A retry
   reuses the same VM name and generation. Directives carry the host epoch; a stale one is refused.
   The scale-set listener acks a message only after its inbox record commits.
 - **Ownership** (plan §8.4, G4): a VM is deleted only with positive proof: journal record **and**
-  exact `OwnedVmName` **and** generation, matched against the fence. Never a base image, never a
-  foreign VM, never by name prefix; an unknown `mf-*` VM is reported, never deleted.
+  exact `OwnedVmName` **and** generation **and** provider instance id (random MAC per clone),
+  matched against the fence and re-observed by the data plane right before the delete (ADR 0026).
+  Never a base image, never a foreign VM, never by name prefix; an unknown `mf-*` VM is reported,
+  never deleted. **A quarantined VM is never deleted automatically** (no timer, no cap): its
+  capacity loss is accepted until an operator resolves the case (ADR 0025).
+- **Capacity** (ADR 0024): the data plane accounts for and enforces host resources and refuses a
+  directive that does not fit (I33); the control plane allocates only within reported capacity.
 - **Tart and processes** (plan §8.2, D12): argv only, never `sh -c`; every call has a deadline,
-  its own process group, bounded captured output and redaction.
+  its own process group, bounded captured output and redaction. `tart run` lives under its per-VM
+  shim and is stopped only by `tart stop`, never a signal (ADR 0037); clones come only from local
+  service-owned bases, never an OCI reference (ADR 0039); guests only through `tart exec`, no SSH
+  (ADR 0038).
 - **Secrets** (plan §13, D13): `Secret<T>` with redacting `Debug`/`Display` and no `Serialize`;
-  never in the journal, outbox (a `SecretHandle` only), logs, metrics, argv or a child's env; a
-  JIT config reaches the guest launcher over stdin only.
+  never in the journal (a `SecretHandle` id only), logs, metrics, argv, a child's env or a
+  diagnostics bundle; a JIT config reaches the guest launcher over `tart exec -i` stdin only.
+  Secrets come from a `SecretProvider` selected per secret by a reference URI (`keychain:`,
+  `file:` 0600, `env:`, `exec:`; ADR 0033); config holds references, never values.
+- **No telemetry** (ADR 0036): nothing is sent anywhere the operator did not configure, not even
+  opt-in; bug evidence is a local, redacted `mayfly diagnostics bundle` sent by hand.
 - **Logging** (fnd §5): `tracing`, fixed `snake_case` event names, data in fields; (almost)
   nothing at INFO on the healthy path; metric labels bounded, never ids.
 - **Dependencies**: `cargo add`, reason in the commit message; `Cargo.lock` committed, builds
   `--locked`; licences per `deny.toml`; GitHub Actions pinned by commit SHA.
-- **Decisions**: a change that adds or reverses an architectural decision adds an ADR
-  (`cargo xtask adr new "<title>"`, with `--number N` when the orchestrator reserved one) or
-  supersedes one, in the same commit. Only the owner flips Proposed to Accepted.
-- **Philosophy** (`doc/philosophy.md`, a draft awaiting the owner): every new feature, directive,
+- **Decisions** (`doc/adr/README.md`): a change that adds or reverses an architectural decision
+  adds an ADR (`cargo xtask adr new "<title>"`, `--number N` when reserved) or amends or
+  supersedes one, in the same commit, with the rules, fixtures and tests that pin it. ADRs are
+  decision records, not rules: never cite one as a reason not to do the better thing, never drift
+  from one silently; propose the change on the record (a dated amendment or a superseding ADR)
+  and put it to the owner when it is theirs. Only the owner flips Proposed to Accepted or accepts
+  an amendment of an Accepted record. The ADR number is the decision id; no new D-ids.
+- **Philosophy** (`doc/philosophy.md`): every new feature, directive,
   command, default, metric, log field or dependency passes its decision test (§8). A conflict
   goes to the owner, not into the code.
 
@@ -183,11 +210,14 @@ reviewable.
 - Linux, 4 CPUs and 15 GB RAM: **at most two concurrent lanes**, each with
   `CARGO_BUILD_JOBS=2` and its own `CARGO_TARGET_DIR` under the session scratchpad, deleted when
   the lane is done. `/dev/shm` is RAM: use it only when free memory clearly allows.
-- No Docker, no macOS, no Tart. Provider tests use the in-memory fake and `mayfly-fake-tart`;
+- No macOS, no Tart. Docker only for the PostgreSQL contract stage and the store lab (images
+  from `mirror.gcr.io`, pinned by digest; ADR 0035): start `dockerd` first, and a missing daemon
+  fails the stage closed. Provider tests use the in-memory fake and `mayfly-fake-tart`;
   GitHub tests use `mayfly-fake-github`. Never run a real `tart` command. Real-Tart and live
   GitHub lanes (HW-01..03, `hardware.yml`, `MAYFLY_REAL_TART_HOME`) are owner-gated (D14): deliver
   everything up to them and report them as pending.
-- Node (Quint) and the JVM (Apalache) are dev-time only, for `formal/`; binaries never need them.
+- Node (Quint) and the JVM (Apalache, Knossos for the store lab) are dev-time only; binaries
+  never need them.
 - `gh` may be unavailable: use the GitHub MCP tools (`actions_list`, `actions_get`, `get_job_logs`).
 - Hooks (each a no-op until its prerequisite exists): SessionStart installs the pinned toolchain
   and fetches crates (remote sessions); every edited `*.rs` is rustfmt'ed; Stop runs the fast gate

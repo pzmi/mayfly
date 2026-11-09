@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Proposed; partly superseded by 0038 (guests: no SSH)
 
 ## Context
 
@@ -27,3 +27,6 @@ Process authority is confined to the Tart and guest adapters, composition and te
 assert. The system `ssh` binary must exist on the host and its behaviour is outside our control.
 An image that supports neither path cannot be used. Implemented by DP-04 and the guest adapter
 task; the guest launcher and JIT delivery are ADR 0014.
+
+Partly superseded by ADR 0038 (2026-11-09, owner): guests are reached only by `tart exec`; the
+SSH path and the pinned per-image host key are gone. Tart by argv stands.

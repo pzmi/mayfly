@@ -1,6 +1,7 @@
 # mayfly: philosophy
 
-**Status:** draft for the owner, 2026-11-09. **Scope:** product behaviour, operator interface,
+**Status:** owner-reviewed in part, 2026-11-09: §5.1 (no telemetry, ADR 0036) and §7.2 (name
+alternatives) are confirmed; items still marked [OWNER] are open (P1, P3, P4). **Scope:** product behaviour, operator interface,
 security, observability, dependencies and the way mayfly is built.
 
 **How to use this document.** It says *why* mayfly is built the way it is and which lines it
@@ -45,15 +46,18 @@ There is no "reuse when it looks clean" (G1).
 2.4 **Bounded by construction.** Slots, guest-OS licence limits, memory headroom and disk reserve
 are admission rules, not hopes (G3). Recovery never starts unbounded replacements (G2).
 
-2.5 **Untrusted code is untrusted.** Workflow code is hostile by default. Fork pull requests are
-off unless the operator turns them on for a pool. No host directory, socket, key or credential is
+2.5 **Untrusted code is untrusted.** Workflow code is hostile by default. v0.x serves trusted
+code only: untrusted offers are declined before they are acquired, and there is no switch that
+turns them on for a pool (ADR 0027). No host directory, socket, key or credential is
 shared with a guest (plan §1.3, §13).
 
 ## 3. Honest state
 
 3.1 **No fictional success.** State records what was observed, never what was attempted. An
 effect whose outcome is unknown is `Unknown` until something outside mayfly confirms it; a
-timeout is never success (G5).
+timeout is never success, and nobody, not even the operator, can declare an outcome mayfly did
+not observe. A provider that cannot answer is reported as such; what cannot be proven is kept
+and quarantined, never deleted to make room (G5, ADR 0025).
 
 3.2 **Status says what is known and how old it is.** `mayfly status` distinguishes observed,
 unknown, stale and refused, and says why. Safe mode is announced, with its reason, not hidden.
@@ -72,20 +76,25 @@ reviews and applies (`recover --dry-run`, `--apply <plan>`). Drain, pause and re
 operator's levers and always work.
 
 4.2 **No surprises.** No self-update, no background download the operator did not configure, no
-default that widens access [OWNER: confirm "no self-update, ever"]. Configuration is one file,
+default that widens access. The runner inside images never self-updates (ADR 0030) [OWNER P1:
+confirm that mayfly itself is updated only through the package manager (Homebrew), never by
+itself]. Configuration is one file,
 validated on load; a change is logged once at INFO.
 
 4.3 **Reversible.** Releases roll back safely (adjacent releases are compatible both ways; an
 older build that meets something it cannot understand enters safe mode rather than guessing).
-Uninstall removes what mayfly created and nothing else [OWNER: confirm as a commitment for
-OPS-01].
+Uninstall removes what mayfly created and nothing else [OWNER P3: confirm as a commitment for
+OPS-01, as `mayfly uninstall --purge` for VMs, bases and state beside the package manager's
+uninstall].
 
 ## 5. Privacy and least privilege
 
 5.1 **No phoning home.** mayfly talks to the GitHub endpoints the operator configured and to the
 local VM provider, and to nothing else. No telemetry, no usage statistics, no crash upload, no
-update check [OWNER: confirm; this also rules out an opt-in telemetry later]. Metrics are
-exposed locally and pulled by the operator's own tools.
+update check, ever, not even opt-in (owner, 2026-11-09, ADR 0036). Metrics are exposed locally
+and pulled by the operator's own tools. To report a bug, the operator runs `mayfly diagnostics
+bundle`, reviews the redacted local archive it writes, and sends it by hand; nothing is sent in
+the background.
 
 5.2 **Secrets are transient.** A secret is never written by mayfly: not to the journal, the
 outbox, logs, metrics, argv, a child's environment or diagnostics. It lives in memory, is
@@ -93,7 +102,9 @@ handed over once, and is gone (D13).
 
 5.3 **Least privilege.** The daemon runs as a non-root user; its state is `0700`/`0600`; the
 GitHub App asks for the narrowest permissions that work, and the documentation lists them and
-why [OWNER: confirm the exact permission list is a documented commitment].
+why [OWNER P4: confirm the exact permission list is a documented commitment]. Secrets come from
+the operator's chosen provider by reference (Keychain, file, environment, command) and are
+never persisted by mayfly (ADR 0033).
 
 5.4 **Telemetry about the system, never about people or code.** Logs and metrics describe the
 daemon's health with bounded labels; they never carry repository content, job logs, user
@@ -124,8 +135,8 @@ public under `MIT OR Apache-2.0`.
 
 7.2 **No lock-in beyond ports.** Tart and GitHub are adapters behind ports; the domain knows
 neither (G8). The config and image-manifest formats are documented and versioned. If another
-tool fits someone better, the documentation says so [OWNER: confirm we name alternatives, for
-example for Linux-only fleets on Kubernetes].
+tool fits someone better, the documentation says so and names it, for example for Linux-only
+fleets on Kubernetes (owner, 2026-11-09).
 
 7.3 **Simple over clever.** Plain data, pure functions, tables and enums (ADR 0022). Correctness
 beats cleverness; a shortcut that makes today's task faster and tomorrow's proof harder is
@@ -154,12 +165,12 @@ Before designing a feature, directive, command, default, metric, log field or de
 | Principle | Held by |
 |---|---|
 | §2.1–2.4 safety, ownership, single use, bounds | plan §1.1 G1–G4; invariants I01–I05, I17, I29; fault lab F01–F31; `OwnedVmName` |
-| §2.5 untrusted code | plan §1.3 trust tier; SEC-01 tests |
-| §3.1 no fictional success | G5; I10; lifecycle model; CP-02 lost-reply tests |
+| §2.5 untrusted code | plan §1.3 trust tier (ADR 0027, I32); SEC-01 tests |
+| §3.1 no fictional success | G5; I10 (strict), I28; ADR 0025; lifecycle model; CP-02 lost-reply tests; F46, F47 |
 | §3.3 evidence | verification §1, §11; the four verdicts; `quick` is not `check` |
 | §4.1 operator approves recovery | plan §10, §11 (`recover --dry-run/--apply`); I11 |
 | §4.3 reversible releases | event-store.md §6; ES-11 compat harness |
-| §5.1 no phoning home | [OWNER] a test or architecture rule that only the GitHub and provider adapters open network or process handles (fnd §3 spawn/IO rules) |
+| §5.1 no phoning home | ADR 0036; planned: an architecture rule that only the GitHub adapter opens outbound connections and only the provider and guest adapters spawn processes (with SEC-01); the diagnostics bundle's canary test (OPS-07) |
 | §5.2 secrets | D13 (ADR 0014); I15; RT-04 redaction tests; secret scan |
 | §5.4 bounded telemetry | fnd §5.4; RT-04 metric goldens |
 | §6.2 quiet when healthy | fnd §5.2 |

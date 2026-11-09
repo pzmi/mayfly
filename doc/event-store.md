@@ -2,7 +2,8 @@
 
 The design of mayfly's event store: a storage-neutral, stream-scoped journal with command
 receipts, an inbox, durable at-least-once delivery, inline projections and snapshots, whose first
-adapter is SQLite and whose second is PostgreSQL. This document owns *what*; [`tasks.md`](tasks.md) owns *order*. It amends plan §5 and
+adapter is SQLite and whose second is PostgreSQL. The owner's decisions E1–E9 of 2026-11-09 are applied (§8.3; ADRs 0021, 0034,
+0035). This document owns *what*; [`tasks.md`](tasks.md) owns *order*. It amends plan §5 and
 foundation §6 where they assumed SQLite (§1.4 lists each amendment). ADR 0021 records the decision.
 
 A bare § is a section of this document; "plan", "fnd" and "ver" are `plan.md`, `foundation.md`
@@ -50,12 +51,12 @@ and `verification.md`.
 | Event-kind manifest | yes | the start-up unknown-kind check reads it instead of scanning the journal |
 | Inline projections in the append transaction, stream-local | yes | read models never lag the journal for the fields the control loop uses |
 | Projection specs with versions; change of meaning is a new spec | yes | |
-| Durable delivery: dispatch marks, per-consumer per-stream checkpoints, leases with fencing tokens, no skip | yes | becomes mayfly's outbox (§5) |
+| Durable delivery: dispatch marks, per-consumer per-stream checkpoints, leases with fencing tokens, no skip | yes | replaces the outbox: directives are `DirectiveIssued` events (§5, E2) |
 | Versioned snapshots (format, reducer version, checksum, folded kinds), asynchronous | yes, later (ES-08) | `host-*`, `pool-*` and `scaleset-*` streams grow for the daemon's lifetime |
-| Online shadow-generation rebuild with dual writes and a cutover fence | **no** | one control-plane process per journal (§4.5); rebuild runs at start-up before any writer. Revisit with the multi-host edition |
+| Online shadow-generation rebuild with dual writes and a cutover fence | **yes** (E9, ES-12) | a projection version change never blocks admission; the store stays correct when a second writer appears (multi-host edition) |
 | Erasure of personal data | **no** | mayfly stores no personal data or free text (fnd §6.1); secrets never reach the store (D13). Should that change, a new ADR adds a side store, never a journal rewrite |
 | Advisory locks on the write path, table partitioning, lock tuning for a high write rate | **no** | the control plane writes a few events per second (§1.3); mayfly's PostgreSQL adapter uses row locks only (§4.2) |
-| Jepsen-style harness with an independent controller and four fail-closed verdicts | yes, as a store workload of the fault lab (§7.5) | |
+| Jepsen-style harness with an independent controller and four fail-closed verdicts | yes, as a store workload of the fault lab (§7.5), checked by Knossos (E5) | |
 
 ### 1.3 Non-goals
 
@@ -66,8 +67,8 @@ claim about throughput: the control plane writes a few events per second.
 ### 1.4 Amendments to existing documents (land with ES-01..ES-03)
 
 - plan §5.2: the table list becomes §4.1's schema; "one SQLite transaction" becomes "one store
-  transaction"; `sequence`, `read all` and the projection `watermark` go; the outbox becomes a
-  delivery consumer (§5, owner decision O2).
+  transaction"; `sequence`, `read all` and the projection `watermark` go; the outbox becomes
+  `DirectiveIssued` events and a delivery consumer (§5, E2).
 - plan §5.5 and fnd §6.7: "rebuild from sequence 0" becomes "rebuild by enumerating stream heads".
 - fnd §6.3: "one SQLite transaction" becomes "one store transaction".
 - D7: "Persistence is SQLite" becomes "the first persistence adapter is SQLite; the store is
@@ -90,7 +91,7 @@ claim about throughput: the control plane writes a few events per second.
   one.
 - **Receipt**: the recorded outcome of an accepted command, keyed by `command_id`.
 - **Inbox entry**: `(source, message_id)` of an external message a unit consumed.
-- **Consumer**: a durable, at-least-once reader of every stream (the outbox relay, the saga,
+- **Consumer**: a durable, at-least-once reader of every stream (the directive relay, the saga,
   asynchronous projections). It has a **mark** (dirty row), a **checkpoint** and a **lease**
   per stream.
 - **Store clock**: the clock that judges lease expiry. The database's own clock on PostgreSQL;
@@ -129,9 +130,12 @@ its event. Pinned by JC-07, JC-08, JC-16; model `ES_I4_globalEventIdentity`
 **ES-I5 Command identity**. A repeated `command_id` with the same
 intent digest is answered from its receipt with no new write, even after its streams moved; under
 a different digest it is refused `CommandIdReused`, revealing nothing else; at most one outcome
-commits per command id. Refusals and zero-event decisions write no receipt: a refusal describes a
-state, and a retry is decided afresh (owner decision O3). Pinned by JC-12..JC-14; model
-`ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`); SW6, SW8;
+commits per command id. A refusal writes a **refusal receipt bound to the stream and revision it
+was decided at** (E3, ADR 0034): a repeat while that stream is still at that revision is answered
+with the recorded refusal; once the stream moved, the repeat is decided afresh, never replayed, and
+its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
+Pinned by JC-12..JC-14, JC-28; model
+`ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`); SW6, SW8;
 `ForgetfulReceiptsJournal`, `IntentBlindReceipts`.
 
 **ES-I6 Message identity**. An inbox key is consumed by at most one committed unit; a
@@ -160,9 +164,12 @@ inputs are guarded by the stream's expected revision), per-stream rebuild sound,
 projection row a cross-stream contention point. Pinned by PC-05 (the store refuses a write keyed
 by another stream: `Malformed`) and `ARCH-projection-locality`.
 
-**ES-I11 Rebuild equivalence**. A rebuilt projection equals the
-live one; a rebuild enumerates stream heads, folds each stream from revision 0, and records the
-revision it last *applied*, never one read from a head. Pinned by PC-01, PC-02, PC-06; property
+**ES-I11 Rebuild equivalence** (online since E9; mayfly I16). A rebuilt projection
+equals the live one; a rebuild enumerates stream heads, folds each stream from revision 0 into a
+shadow generation while live units dual-write it, and records the revision it last *applied*, never
+one read from a head; the cutover fence makes the switch atomic and refuses a unit computed for
+the old generation set. Pinned by PC-01, PC-02, PC-06, PC-07..PC-09; model scenarios
+`shadowRebuildDualWrite`, `cutoverFence`; property
 "rebuild equals live" over random histories; F21; ver §9 mutant 18.
 
 **ES-I12 Epoch safety**. A stream's `required_epoch` never decreases; a build never
@@ -274,8 +281,9 @@ pub struct UnitOfWork {
 - Dispatch marks are **not** in the unit: the store writes one per *registered* consumer (a table,
   not this build's code) for every appended stream, so a build marks consumers it does not run
   (§6.4).
-- A unit with no events is legal only to record an inbox entry (a message that required nothing);
-  it writes no receipt and no head.
+- A unit with no events is legal only to record an inbox entry (a message that required nothing)
+  or a refusal receipt (E3; it then carries the refused stream in `reads` at the revision decided
+  at, so a moved stream refuses the receipt); it writes no head.
 - The receipt's recorded outcome is the `Appended` value: per stream the first and last revision
   and the event ids.
 
@@ -398,8 +406,12 @@ Projection rows are documents `(spec, generation, stream, key) → payload`: the
 them without projection-specific SQL, so no projection can depend on an engine's dialect.
 Cross-stream views (`pool_status` counting attempts) are computed at query time over stream-local
 rows or maintained by a durable consumer (§5); they are never an inline write (ES-I10). A rebuild
-writes a new generation stream by stream (`RebuildHandle::apply_stream(stream, rows, applied)`)
-and flips the active generation in one transaction when every enumerated stream is done.
+writes a new (shadow) generation stream by stream (`RebuildHandle::apply_stream(stream, rows,
+applied)`) **online** (E9): while it runs, every unit computes its inline rows for the active and
+the shadow generation and writes both (dual writes); when every enumerated stream is done, a
+cutover fence flips the active generation in one transaction, and a unit that computed rows for the
+previous generation set is refused (`ProjectionGenerationMoved`, retried like
+`WrongExpectedRevision`). Readers see the active generation only.
 
 ### 3.7 What `AggregateStore::save` does, and transaction scopes
 
@@ -534,8 +546,8 @@ these through a port or rely on them for an invariant the other engine must also
 A journal has one control-plane owner at a time (plan §10's state-dir lock). On SQLite it is the
 state-dir lock; on PostgreSQL a session-level advisory lock on a fixed key, taken at open and held
 for the process's life, plus an `owner_epoch` row incremented at each takeover. Append correctness
-never depends on it (two concurrent writers still satisfy §2); only start-up work that §1.2 keeps
-offline (projection rebuild, safe-mode classification) relies on it, and says so.
+never depends on it (two concurrent writers still satisfy §2); only the start-up safe-mode
+classification relies on it, and says so. Projection rebuild is online (E9) and does not.
 
 ---
 
@@ -571,14 +583,14 @@ streams it wrote; a kick lost with its process loses nothing, the mark is durabl
 | Consumer | Reacts to | Effect | Idempotency / fence |
 |:--|:--|:--|:--|
 | `attempt_saga` | lifecycle events of `attempt-*` | issues the next command (plan §5.4) | derived `command_id` = f(consumer, event_id): a redelivery is a receipt replay |
-| `outbox_relay` | `DirectiveIssued` events (§5.3) | sends the directive over the link | `directive_id` (derived from the event id); the data plane dedupes by it and fences by host epoch (I09) |
+| `directive_relay` | `DirectiveIssued` events (§5.3) | sends the directive over the link | `directive_id` (derived from the event id); the data plane dedupes by it and fences by host epoch (I09) |
 | `github_effects` | events needing a GitHub call (delete runner by recorded id, release a job) | REST/scale-set call | the API's own idempotency (runner id, request id), recorded outcome via inbox |
 | async projections (if any) | their subscribed kinds | rows in a consumer-owned generation | fenced by `Delivery.fence` stored per stream |
 
 The reconciler is not a consumer: it reads projections and observations and issues commands
 (plan §5.4).
 
-### 5.3 The outbox as delivery (owner decision O2, recommended)
+### 5.3 The outbox as delivery (decided, E2, ADR 0034)
 
 plan §5.2 and the in-flight ES-01 draft keep a mutable `outbox` table (`status`, `attempts`,
 `next_attempt_at`) scanned by status and time. The port replaces it:
@@ -586,7 +598,7 @@ plan §5.2 and the in-flight ES-01 draft keep a mutable `outbox` table (`status`
 - A directive is a fact: the `Attempt` aggregate's decision emits `DirectiveIssued { directive_id,
   attempt_id, generation, kind, deadline, secret: Option<SecretHandle> }` in the unit that decided
   it. The `SecretHandle` is a reference; the secret itself stays in memory (D13, ES-I13).
-- The `outbox_relay` consumer delivers it at least once; the host epoch is stamped by the link
+- The `directive_relay` consumer delivers it at least once; the host epoch is stamped by the link
   adapter at send time, not stored.
 - Its *status* is not a row: `Sent` is the relay's checkpoint, and `Done`/`Refused`/`Unknown` are
   the `Attempt`'s state, recorded by observation commands through the inbox (I10 stays an
@@ -597,8 +609,8 @@ plan §5.2 and the in-flight ES-01 draft keep a mutable `outbox` table (`status`
 
 This removes the only time-ordered scan in the store, gives the outbox the same contract, model
 and fault workload as every other consumer, and keeps one at-least-once mechanism instead of two.
-If the owner keeps the table instead, it stays outside the journal tables, is scanned by key with
-`next_attempt_at` as a filter only, and gets its own contract cases mirroring DC-01..DC-25.
+The owner chose this (E2); there is no `outbox` table, and ES-01F removes it from the landed
+port.
 
 ### 5.4 The inbox
 
@@ -645,7 +657,8 @@ ordered for display by `recorded_at` and labelled as such. No decision reads it.
 - **Projections:** a compatible change bumps `VERSION`; a change of meaning is a new spec beside
   the old one (both maintained for a release, then the old one dropped by a later migration). A
   start whose spec version differs from `projection_meta.version` **in either direction**, or whose
-  `written_by` names another build, rebuilds before admission (§6.4).
+  `written_by` names another build, starts an online rebuild (E9, §3.6); admission is not held
+  for it, and reads use the old generation until the cutover (§6.4).
 - **Snapshots:** keyed by format and reducer version, so two builds keep their own; a build
   ignores keys it does not know.
 - **Consumers:** registered as rows, marked by every build.
@@ -680,7 +693,7 @@ At start-up, after migrations and before any writer, composition compares `store
 
 ### 6.4 Rollback and the derived stores
 
-Projections rebuild on any version mismatch, so N never reads rows N+1 wrote with a meaning N does
+Projections rebuild (online, into a shadow generation) on any version mismatch, so N never reads rows N+1 wrote with a meaning N does
 not know, and N+1 rebuilds again on its return. Dispatch marks are written for every registered
 consumer, so N marks N+1's consumers and N+1 finds no gap on its return (a
 release that appended without marking a consumer a newer release registered would have lost
@@ -705,7 +718,9 @@ show the broken implementations of §7.6 failing named cases (ver §5).
 **Modes.** Memory; SQLite fresh file; the same file reopened between steps; SQLite two-connection;
 SQLite two-handle; SQLite crash-injected (the connection dropped after each statement of a unit,
 then the file reopened); PostgreSQL fresh database; PostgreSQL two-pool; PostgreSQL
-crash-injected (the backend terminated after each statement). Every case runs in every mode
+crash-injected (the backend terminated after each statement). PostgreSQL runs in a throwaway
+Docker container from a digest-pinned `mirror.gcr.io/library/postgres` image, locally and in CI;
+without a running Docker daemon the stage fails closed (E4, ADR 0035). Every case runs in every mode
 unless marked otherwise. Lease expiry is driven by the store clock: memory and SQLite advance a
 `FakeClock`; PostgreSQL cases use TTL 0 for "already expired" and a long TTL for "live", so no
 test sleeps.
@@ -719,8 +734,9 @@ repeated within a unit is `Malformed`. JC-09 the refusal order of §3.3 for a un
 several rules. JC-10 a multi-stream unit whose second stream conflicts writes nothing on the first.
 JC-11 a moved read condition refuses the unit; a `NoStream` read is invalidated by a create.
 JC-12 a replayed command returns its first `Appended` after its streams moved, writing nothing.
-JC-13 a reused command id with another intent is `CommandIdReused`. JC-14 a refused unit leaves no
-receipt and the same command may later be accepted. JC-15 a redelivered inbox key is
+JC-13 a reused command id with another intent is `CommandIdReused`. JC-14 a unit the store refuses
+(revision, identity, busy) leaves no receipt and the same command may later be accepted; a
+*domain* refusal leaves a refusal receipt bound to its revision (E3). JC-15 a redelivered inbox key is
 `DuplicateMessage`; an inbox-only unit commits. JC-16 `lookup_event` finds each id at its place and
 none of a refused batch. JC-17 the manifest lists every kind ever committed and none of a refused
 unit. JC-18 epochs: raised to the batch maximum, never lowered, a stream above the build refuses
@@ -734,7 +750,10 @@ nothing partial is visible after reopen. JC-24 everything (heads, receipts, inbo
 epochs) survives reopen. JC-25 a fault at `COMMIT` is `OutcomeUnknown` and every other error is
 definite (fault-injecting adapter hooks, §7.5). JC-26 a store without its durability settings is
 refused at open unless the test profile allows it. JC-27 raw `UPDATE`/`DELETE` of journal rows is
-refused by the store (adapter modes only).
+refused by the store (adapter modes only). JC-28 a refusal receipt answers a repeat at the same
+revision with the recorded refusal; after the stream moved, the repeat is decided afresh and its
+acceptance replaces the refusal receipt; a refusal receipt whose stream moved before commit is
+refused (E3).
 
 **Delivery (DC).** DC-01 no consumer: no mark and no write beyond the unit. DC-02 each registered consumer
 is marked at the new head. DC-03 a refused unit leaves no mark. DC-04 bootstrap marks every
@@ -762,7 +781,10 @@ kinds differ from what this build would fold is ignored.
 **Projections (PC).** PC-01 rebuild equals live (I16), also as a property over random histories;
 PC-02 a version bump rebuilds; PC-03 inline rows commit with their events; PC-04 a refused unit
 leaves none; PC-05 a row keyed by a stream outside the unit is `Malformed`; PC-06 a version below
-the stored one rebuilds too (§6.1).
+the stored one rebuilds too (§6.1). PC-07 during an online rebuild every unit writes both
+generations and readers see the active one only; PC-08 the cutover flips the generation in one
+transaction and refuses a unit computed for the old generation set; PC-09 a crash mid-rebuild
+resumes from the applied revisions, never from a head (E9).
 
 ### 7.2 Concurrency cases beyond the contract
 
@@ -777,8 +799,8 @@ the stored one rebuilds too (§6.1).
 
 ### 7.3 The store model (`formal/event_store.qnt`)
 
-It states the store's mechanisms of §2 that a model can state, without the online rebuild's
-generations.
+It states the store's mechanisms of §2 that a model can state, the online rebuild's generations
+(E9) included.
 
 - **State:** streams (lists of `(id, epoch)`), heads, identity registry, receipts (command id,
   intent, outcome), inbox keys, manifest, open transactions with their held head locks and
@@ -860,14 +882,18 @@ expiring on the store clock. SW10 inbox redelivery storms.
 **Nemesis.** Worker SIGKILL at `before_commit` (expect absent) and `after_commit` (expect present);
 SIGSTOP of a worker holding the write lock or a head until others report `Busy` (definite);
 PostgreSQL `pg_terminate_backend` of a worker's session at either barrier; store crash (SW7);
-lease expiry by advancing the SQLite store clock or using short TTLs on PostgreSQL. No Docker,
-proxy or privileged network fault is needed: PostgreSQL runs from pinned binaries in a temporary
-directory the lab creates and marks (O4). A fault that hit no operation does not count: each
+lease expiry by advancing the SQLite store clock or using short TTLs on PostgreSQL. No proxy or
+privileged network fault is needed: PostgreSQL runs in a Docker container the lab starts, labels
+with its run id and kills or restarts for SW7 (E4, ADR 0035). A fault that hit no operation does not count: each
 scenario declares its required faults and their proof of hit.
 
-**Checker.** Per stream, the **known-order checker**: because the journal is append-only and
-records its own order (ES-I7), the quiescent audit's per-stream event-id list is the candidate
-linearization. The checker requires that every `ok` append sits at its reported revision; every
+**Checker (E5, ADR 0035).** Linearizability is checked by **Knossos**, pinned with its SHA-256 and
+run on the JVM already pinned for Apalache, never by a home-grown checker. The history is exported
+in Knossos's format with each stream an independent key whose model is a compare-and-set register
+over its revision (append = cas(expected, new), read = read). Elle's list-append checker is the
+named fallback if Knossos's search does not scale (switching needs an amendment of ADR 0035).
+What Knossos cannot state is checked as plain assertions over the quiescent audit, which records
+its own order (ES-I7); those assertions require that every `ok` append sits at its reported revision; every
 `fail` with `WrongExpectedRevision` is explainable (the head was not at the expected revision at
 some instant of the operation's window, given the windows of the operations that produced the
 neighbouring revisions); every `fail` id is absent unless a later operation explains it; an `info`
@@ -876,9 +902,8 @@ completed `ok` before the read began and none invoked after it ended; real-time 
 `ok` operations matches revision order. Identity: each id at most one place, and `lookup` answers
 consistent with the audit. Delivery: per consumer and stream, delivered revisions cover the
 committed ones, within a claim ascending, checkpoints never regress, fences strictly increase per
-takeover. This is the list-append reasoning Elle uses, valid here because the store is the
-witness; it is polynomial and needs no JVM. Porcupine-style checkers are rejected (no indeterminate
-operations: dropping `info` hides the anomaly); Knossos is an optional cross-check (O5).
+takeover. Porcupine-style checkers are rejected (no indeterminate operations: dropping `info` hides the
+anomaly).
 
 **Audit, verdicts, artefacts, guardrails.** As ver §8.5 and §8.6: a quiescent audit with the lab's
 own SQL (heads equal the last revision, no holes, identity ↔ event one to one, trigger presence,
@@ -917,111 +942,33 @@ The curated-mutant table of ver §9 gains the store rows that are not already co
 
 ---
 
-## 8. Proposed task changes for `doc/tasks.md`
+## 8. Task changes (applied to `doc/tasks.md` by DEC-01)
 
 ### 8.1 The ES lane, rewritten and extended
 
+The cards (Cites, dependencies, model, acceptance) live in `doc/tasks.md`, Phase 2; this table is
+the lane's shape. ES-01 landed before the owner's decisions; ES-01F realigns it with them and with
+its review.
+
 | ID | Title | Depends on | Model | ⛳ |
 |---|---|---|---|---|
-| ES-01 | Storage-neutral `Journal` port, memory journal, journal contract | KER-03 | opus | |
-| ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01 | opus | |
-| ES-03 | `AggregateStore`: single write path, receipts, epochs, retry, reactors | ES-01 | opus | |
-| ES-04 | Projections: stream-local inline specs, rebuild by enumeration, first read models | ES-02, ES-03 | sonnet | ⛳ |
-| ES-05 | Durable delivery ledger, worker and `catch_up`; outbox as a consumer | ES-02, ES-03, ES-06 | opus | |
-| ES-06 | Event-store Quint model and scenarios | FND-06, ES-01 | opus | |
+| ES-01 | Storage-neutral `Journal` port, memory journal, journal contract (landed) | KER-03 | opus | |
+| ES-01F | Align the landed journal port with E2/E3/E6 and the ES-01 review | ES-01 | opus | |
+| ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
+| ES-03 | `AggregateStore`: single write path, receipts, epochs, retry, reactors | ES-01F | opus | |
+| ES-04 | Projections: stream-local inline specs, generations, rebuild by enumeration, first read models | ES-02, ES-03 | sonnet | ⛳ |
+| ES-06 | Event-store Quint model and scenarios (before delivery, E7) | FND-06, ES-01F | opus | |
+| ES-05 | Durable delivery ledger, worker and `catch_up`; the directive relay | ES-02, ES-03, ES-06 | opus | |
 | ES-07 | Event-store conformance driver over memory and SQLite | ES-06, ES-05, VER-01 | opus | |
-| ES-08 | Snapshots: port, memory and SQLite, worker, snapshot + tail load | ES-03, ES-07 | opus | |
-| ES-09 | PostgreSQL adapter, schema parity, `pg` stage and CI job | ES-04, ES-05, ES-08 | opus | ⛳ |
-| ES-10 | Store lab: worker, store workloads, known-order checker, mutants | VER-03, ES-05, ES-09 | opus | |
-| ES-11 | Compatibility harness N → N+1 → N | OPS-03, ES-09 | sonnet | |
+| ES-08 | Snapshots: port, memory and SQLite, worker, snapshot + tail load (E8) | ES-03, ES-07 | opus | |
+| ES-09 | PostgreSQL adapter in Docker, schema parity, `contract-postgres` stage and CI job (E4) | ES-04, ES-05, ES-08 | opus | ⛳ |
+| ES-10 | Store lab: worker, store workloads, Knossos checker, mutants (E5) | VER-03, ES-05, ES-09 | opus | |
+| ES-11 | Compatibility harness N → N+1 → N and the upgrade matrix | OPS-03, ES-09 | sonnet | |
+| ES-12 | Online projection rebuild: shadow generations, dual writes, cutover fence (E9) | ES-04, ES-05, ES-07 | opus | |
 
-**ES-01 Storage-neutral `Journal` port, memory journal, journal contract.** Cites: this document
-§2, §3.1–§3.3, §7.1; ADR 0021. `mayfly-control::store`: values, `UnitOfWork` (multi-stream
-appends with sorted checks, validated read set, receipt with intent digest, inbox key, projection
-writes, snapshot request, supported epochs), `Journal` (no `read_all`, no global sequence, no
-journal head), `AppendError` with the refusal order of §3.3. `MemoryJournal` in testkit with full
-transactional semantics. The journal contract JC-01..JC-22, JC-24 as functions over a factory with
-a `check_*` form; broken journals `LooseRevision`, `PartialCommit`, `ForgetfulReceipts`,
-`IntentBlind`, `ForgetfulInbox`, `CachedHead`, `GlobalLock`, `LateIdCheck` each fail their named
-cases. ADR 0021 (the port). Amend plan §5.2, fnd §6.3 and D7's wording (§1.4).
-*Alignment for the in-flight ES-01 draft:* drop `read_all`, `Sequence` and the journal-wide `head`;
-drop the outbox table and its transitions from the port pending O2; key receipts by command id
-with an intent digest and store no refusals (O3); add `reads`, `supported_epochs`,
-`lookup_event`, `streams`, `stored_kinds`, `Busy`, `StreamEpochUnsupported`, `EpochAboveBuild`,
-`CommandIdReused`.
-Accept: suite green on memory; every broken journal fails exactly its named cases; no method of
-any store port returns events of more than one stream (`ARCH-no-global-order` lands with ES-03).
+### 8.2 Existing tasks that change (applied)
 
-**ES-02 SQLite journal adapter.** Cites: §4.1–§4.3, D7. Migrations (`schema_meta` with
-`compat_floor`), triggers, durability verification at open, one writer thread plus the two
-test-only modes, classification by extended code and constraint name, `StoreHooks` with
-`NoHooks`. Contract in modes fresh, reopened, two-connection, two-handle, crash-injected; JC-23,
-JC-25..JC-27 added. Migration test from empty and from the previous schema fixture.
-Accept: all JC cases green in five modes; `ARCH-store-sql` refuses an `INSERT OR IGNORE` fixture.
-
-**ES-03 `AggregateStore`.** Cites: §3.7, §6.2–§6.3. The single write path with the step order of
-§3.7, derived event ids (golden-tested), canonical intent digests per command type (a test fails
-on a command without one), `with_revision_retry` (only `WrongExpectedRevision`; load and decide
-inside), `OutcomeUnknown` resolution by receipt, after-commit notification, `SUPPORTED_EPOCH` and
-`required_epoch` in the kernel, the start-up kind check feeding safe mode; architecture rules
-`ARCH-single-append`, `ARCH-no-global-order`, `ARCH-migration-frozen`, the epoch rule.
-Accept: fixtures fail a second `append` caller and a global-order query; a retried command returns
-its receipt; a reused id with another intent is refused; an unknown stored kind starts safe mode.
-
-**ES-04 ⛳ Projections.** Cites: §3.6, §6.1, §6.4, I16. `ProjectionSpec`, stream-local inline
-projections computed outside the transaction, `projection_row` documents with generations,
-rebuild by stream enumeration with applied revisions, rebuild on any version or `written_by`
-mismatch, first projections `attempts`, `slots`, `pools`, `recent_failures` (query-time views for
-cross-stream counts). PC-01..PC-06 on memory and SQLite; `ARCH-projection-locality`.
-Accept: PC green; "rebuild equals live" property; a cross-stream inline write is refused.
-
-**ES-05 Durable delivery.** Cites: §3.4, §5. `DeliveryLedger` (memory, SQLite), marks written by
-the append for registered consumers, `DeliveryWorker`, `catch_up`, kicks, `retry_after` with
-jittered backoff, DC-01..DC-25 with `UnfencedLedger`, `ClearAllMarksLedger`, `HeadTrustingWorker`,
-`SkippingLedger`; the `DirectiveIssued` event shape for O2.
-Accept: DC green on memory and SQLite (all modes); every broken ledger fails its cases.
-
-**ES-06 Event-store model.** Cites: §7.3, D10, ver §6. `formal/event_store.qnt` and its
-scenarios module with `step`, `implStepSerial`, the biased relation and `allInvariants`; every
-invariant shown to catch a scratch mutation; registered in `MODELS`; regression traces exported.
-Accept: scenarios pass; the two negative worlds break their invariants; `formal-freshness` green.
-
-**ES-07 Event-store conformance driver.** Cites: §7.3, ver §6.2. Driver over memory (`step`)
-and SQLite (`implStepSerial`, two connections), reading state through the ports only; the driver
-mutants of §7.3 each fail a named committed trace at a named step; generated traces per push.
-Accept: committed and 30 generated traces replay clean; each mutant caught where declared.
-
-**ES-08 Snapshots.** Cites: §3.5, ES-I8. Port, memory and SQLite stores, worker, restore path
-reachable only from `AggregateStore` (architecture rule), SC-01..SC-11, model actions and
-scenarios added to ES-06's model with traces replayed by ES-07's driver, a property "snapshot plus
-tail equals whole fold".
-Accept: SC green; `BlindSnapshotUpsert` and `ResealingSnapshots` caught by contract and trace.
-
-**ES-09 ⛳ PostgreSQL adapter.** Cites: §4, §7.1, §7.3. New crate `mayfly-adapter-postgres`
-(members, `architecture.toml`, external allowlist: the PostgreSQL client crate its ADR picks,
-`tokio`, `serde_json`, `tracing`, `thiserror`); migrations mirroring ES-02's numbers;
-`cargo xtask schema-parity`; journal, delivery, snapshot and projection stores; owner lease (§4.5);
-`cargo xtask` stage `contract-postgres` that starts a throwaway PostgreSQL 17 cluster from pinned
-binaries (`tools/versions.toml`, `doctor` checks them; missing binaries fail closed); every
-contract in the PostgreSQL modes; ES-07's driver on PostgreSQL with `pg_blocking_pids` checks; a
-`postgres` job in `ci.yml` under `required`. ADR for the client crate and the CI placement (O4).
-Accept: every JC/DC/SC/PC case green on PostgreSQL; committed traces replay with blocker checks;
-parity green; `GlobalLockJournal` caught by JC-22's blocking half.
-
-**ES-10 Store lab.** Cites: §7.5, ver §8, D11. `tools/storelab-worker`, `ARCH-store-hooks`,
-workloads SW1–SW10 on SQLite and PostgreSQL, nemesis of §7.5, the known-order, identity and
-delivery checkers, fixture histories with expected verdicts, the lab mutants of §7.6 each turning
-its workload `FAIL` with a witness on its key; `faultlab suite --only store-` in the weekly lane.
-Accept: fixtures give their verdicts; core store workloads PASS; each mutant FAIL; a scenario
-whose fault never hits is `INCONCLUSIVE`.
-
-**ES-11 Compatibility harness.** Cites: §6.5. `cargo xtask compat` with a scenario corpus, run on
-SQLite locally and on both engines in CI, from the first tagged release on.
-Accept: a deliberately incompatible event change (a rename) fails it.
-
-### 8.2 Existing tasks that change
-
-- **CP-02 AttemptSaga and OutboxRelay:** both become durable consumers on ES-05 (depends on ES-05
+- **CP-02 AttemptSaga and directive relay:** both become durable consumers on ES-05 (depends on ES-05
   instead of ES-04 alone); the relay delivers `DirectiveIssued` events; "record `Unknown` on
   timeout" becomes the saga's `RecordDirectiveTimeout` command; accept clauses unchanged plus "a
   relay killed between send and advance resends the same `directive_id`".
@@ -1047,14 +994,17 @@ Accept: a deliberately incompatible event change (a rename) fails it.
 
 ### 8.3 Owner decisions
 
-| # | Decision | Recommendation |
-|:--|:--|:--|
-| O1 | ADR 0021: a stream-scoped, storage-neutral design, SQLite first, PostgreSQL second and CI-tested; not deploying PostgreSQL in v0.x | accept (already decided in substance) |
-| O2 | The outbox becomes `DirectiveIssued` events delivered by a durable consumer, replacing the mutable `outbox` table (§5.3) | accept: one at-least-once mechanism, no time-ordered scan |
-| O3 | Refusals and zero-event decisions write no receipt; receipts store an intent digest and refuse a reused id | accept |
-| O4 | PostgreSQL in tests runs from pinned binaries in a temporary cluster (no Docker), inside `check` and as a required CI job, failing closed when the binaries are missing | accept; alternative: CI-only service container, outside the local gate |
-| O5 | The store lab's checker is mayfly's own known-order checker; Knossos only as an optional weekly cross-check | accept: no JVM in the store lane, the store is its own witness |
-| O6 | Stream epochs are built now (ES-01/ES-03), not deferred | accept: one column now, a schema migration and a compatibility break later |
-| O7 | The store model (ES-06) precedes delivery (ES-05) but not the in-flight ES-01/ES-02 | accept: the journal contract suite covers the append half meanwhile |
-| O8 | Snapshots (ES-08) are built in this lane rather than avoided by bounding streams (for example one `scaleset` stream per session) | accept ES-08, and bound streams where the domain model allows it anyway (DDD-01) |
-| O9 | Online projection rebuild (shadow generations, dual writes, cutover fence) is not built; rebuild runs at start-up under the owner lease | accept for v0.x; revisit with the multi-host edition |
+Decided by the owner on 2026-11-09. The E-numbers are the owner's; this document's earlier drafts
+called them O1–O9.
+
+| # | Question | Decision | Record |
+|:--|:--|:--|:--|
+| E1 | A stream-scoped, storage-neutral design, SQLite first, PostgreSQL second and CI-tested; not deploying PostgreSQL in v0.x | **accepted** | ADR 0021 (Accepted) |
+| E2 | The outbox becomes `DirectiveIssued` events delivered by a durable consumer | **accepted**: no outbox table (§5.3) | ADR 0034 |
+| E3 | Receipts for refusals | **keep refusal receipts, bound to the stream revision decided at**; a retry after the stream moved is re-decided, not replayed; intent digest; a reused id with another intent is refused (ES-I5, JC-28) | ADR 0034 |
+| E4 | How PostgreSQL runs in tests | **Docker**, in CI and locally and in the agent sandbox, image from `mirror.gcr.io/library/postgres` pinned by digest; fails closed without a running daemon (not pinned binaries) | ADR 0035 |
+| E5 | The store lab's checker | **an existing checker, Knossos** (the JVM is already pinned for Apalache), not a home-grown one; Elle as the named fallback | ADR 0035 |
+| E6 | Stream epochs now or later | **now** (ES-01F, ES-03) | ADR 0034 |
+| E7 | Store model before delivery | **yes**: ES-06 before ES-05 | ADR 0034 |
+| E8 | Snapshots or bounded streams | **build snapshots** (ES-08); bound streams where the domain allows anyway | ADR 0034 |
+| E9 | Online projection rebuild | **build it** (shadow generations, dual writes, cutover fence), not start-up only (ES-12) | ADR 0034 |

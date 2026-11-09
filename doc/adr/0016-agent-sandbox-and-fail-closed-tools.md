@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Proposed (amended by 0035)
 
 ## Context
 
@@ -27,3 +27,7 @@ A gate result means the same thing everywhere, at the price of an install step o
 machine (`cargo xtask install-tools`, foundation section 8). The shipped binary never needs Node
 or Java. Implemented by FND-02 (`doctor`, `tools/versions.toml`, action pins) and FND-06 (the
 formal toolchain); a stage that skips counts as failed in the stage table.
+
+Amended by ADR 0035 (2026-11-09, owner): Docker is used for the PostgreSQL contract stage and the
+store lab (images from `mirror.gcr.io`, pinned by digest); without a running daemon those stages
+fail closed.

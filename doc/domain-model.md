@@ -1,12 +1,14 @@
 # mayfly: domain model
 
-**Status:** proposed, 2026-11-09 (task DDD-01, ⛳ owner review). Owner: Patryk Żmigrodzki.
+**Status:** owner-reviewed, 2026-11-09 (task DDD-01; decisions applied by DEC-01). Owner: Patryk
+Żmigrodzki. Every OWNER hot spot except OD2 is decided and recorded as an ADR (§10.1 names it).
 **What:** the bounded contexts, ubiquitous language, aggregates, policies and read models of
 mayfly, converged from an event-storming session. It sits *upstream* of [`plan.md`](plan.md),
 the Quint models in `formal/` and the code: plan.md says what the product does and how it is
 structured; this document says what the words mean and where each rule is protected. A citation
 "dm §6.4" points here. Hot spots marked **OWNER** (§10) are open until the owner decides; until
-then the recommended option is the working assumption of every later section.
+then the recommended option is the working assumption of every later section; today that holds
+only for OD2 (and the remaining sub-items of OD20).
 
 ---
 
@@ -115,7 +117,8 @@ The pivotal events cut the timeline into phases: **run** (2–6), **demand** (12
 **U1 Lost effect reply (clone, start, delete).** `DirectiveIssued` → `DirectiveOutcomeUnknown` →
 (no new directive for that target) → `InventoryObserved` → `VmCloned` | `VmDeleted` | observed
 absence → state advances. A stalled `Unknown` raises `UnknownEffectAged` (read model, alert);
-only an observation or an operator `OutcomeAsserted` (OD10) clears it.
+only an observation clears it; when the provider cannot answer, it stays `Unknown` and is
+reported as a provider limitation (OD10, ADR 0025).
 
 **U2 Guest never ready.** `VerifyGuest` deadline → `AttemptBackedOff{stage, n}` (same name and
 generation) → budget spent → `AttemptRetired{reason: guest_unready}` → delete → FLT
@@ -136,7 +139,7 @@ is empty by construction) with the same retirement.
 deregister if proven ours → ATT `AttemptRetired{reason: jit_presumed_leaked}`; never relaunched.
 
 **U6 Cancel before start (poisoned idle).** DEM `MessageRecorded{statistics: assigned↓}` →
-reconciler: standby surplus → ATT `RetirementRequested` → REG `DeregistrationRequested` →
+reconciler: surplus Listening runner (no standby exists: OD8) → ATT `RetirementRequested` → REG `DeregistrationRequested` →
 `RegistrationDeregistered` → ATT `AttemptRetired` → stop/delete. If GitHub answers 422,
 `DeregistrationRefusedBusy` → retirement withdrawn, the attempt stays and serves the job (I21).
 
@@ -145,7 +148,7 @@ reconciler: standby surplus → ATT `RetirementRequested` → REG `Deregistratio
 from GitHub as `JobCompleted{abandoned}` and closes the registration.
 
 **U8 Daemon crash while Busy.** next `RunStarted` → `PreviousRunEndedUnclean` → `EpochMinted{e+1}`
-→ `InventoryObserved` (VM still running under the detached process model, OD1) →
+→ `InventoryObserved` (VM still running under its per-VM shim, OD1, ADR 0037) →
 `AttemptAdopted{epoch}` → job completes → normal reclamation. Never deleted while the registration
 is not terminal and the VM runs.
 
@@ -153,8 +156,10 @@ is not terminal and the VM runs.
 `VmObservedStopped` → Busy attempts become `AttemptRetired{reason: host_rebooted}` and their
 registrations are reaped once GitHub reports them offline or abandoned.
 
-**U10 Disk low / foreign macOS guest.** FLT `DiskLowWaterCrossed` | `ExternalConsumptionObserved
-{macos_running: n}` | EXE observation `HypervisorLimitHit` → `AdmissionClosed{cause}` / admissible shrinks → DEM
+**U10 Disk low / foreign macOS guest.** EXE `CapacityReported{free shrinks: disk | macOS slots
+held by a foreign guest}` → FLT `CapacityReportApplied` (and `DiskLowWaterCrossed` below the
+reserve) | EXE refusal `DirectiveRefused{insufficient_resources}` or `HypervisorLimitHit` →
+`AdmissionClosed{cause}` / admissible shrinks → DEM
 `ReportedMaxChanged{reason}` at the next poll (≤ one long-poll of lag).
 
 **U11 GitHub degraded.** DEM `SessionDegraded{cause: 401|403|429|5xx|network}` → JIT minting frozen
@@ -189,13 +194,13 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
 | Context | Plane | Purpose | Owned language | Aggregates | Upstream of / downstream of |
 |:--|:--|:--|:--|:--|:--|
 | **Demand** | CP | Turn GitHub's scale-set queue into a number of runners we owe; decide which offers to acquire; tell GitHub what we can deliver | scale set, session, message, ack, offer, acquire, statistics, assigned, desired, reported max, trust tier (of an offer) | `ScaleSet` | downstream of GitHub (ACL); upstream of Fleet (desired) |
-| **Fleet** | CP | Own the host's scarce resources and every admission decision; pools as policy | host, slot, slot generation, lease, admissible, deliverable, pool, pool terms, pause, drain, breaker, prepared policy | `Host`, `Pool` | downstream of Demand, Image, Operations; upstream of Attempt |
+| **Fleet** | CP | Allocate the capacity each host's data plane reports and make every admission decision; pools as policy (OD4, ADR 0024) | host, slot, slot generation, lease, admissible, deliverable, pool, pool terms, pause, drain, breaker, prepared policy | `Host`, `Pool` | downstream of Demand, Image, Operations; upstream of Attempt |
 | **Attempt** | CP | One disposable VM's life from admission to observed deletion, serving at most one job | attempt, VM name, clone, boot, verify, prepared, activation, listening, busy, retire, backoff, adopt, quarantine (as a state), unknown outcome | `Attempt` | downstream of Fleet (lease), Image (digest); customer of Registration and Secrets; supplier of directives to Execution |
 | **Registration** | CP | The GitHub-side runner registration as a resource with its own lifecycle; reaping leaks | runner registration, runner name, runner id, JIT config, issue, deliver, consume, deregister, presumed leaked, reaper | `RunnerRegistration` | supplier to Attempt; downstream of GitHub (ACL) |
 | **Image** | CP | Catalog of immutable images and their placement on hosts | image, digest, manifest, image revision, runner version, verify, withdraw, placement, image base, pull, materialise, evict | `Image`, `ImagePlacement` | upstream of Fleet (pool pin) and Attempt (digest); supplier of image directives to Execution |
 | **Operations** | CP | The daemon's run, its epoch and its containment; human-in-the-loop work | run, epoch, epoch floor, safe mode, recovery (automatic), repair (plan), recovery plan, quarantine case, operator, actor, assertion | `HostRun`, `RecoveryPlan`, `QuarantineCase` | upstream of every CP context (epoch fence, mode); downstream of all (reads their state for plans) |
 | **Secrets** | CP (supporting) | Hold dangerous values; hand out single-take handles | secret, credential, secret handle, take, sweep, seal | none (service; handle *events* land on `Attempt`) | supplier to Attempt, Demand, Registration; conformist link adapter |
-| **VM Execution** | DP | Execute directives safely against the provider and guest; observe what exists | directive, observation, fence, executor, supervisor, process lost, inventory (complete/incomplete), image cache, guest session, resource meter | none durable (pure FSMs: executor, supervisor, image cache, guest session) | downstream of CP via published language; ACL over Tart, host OS, guest |
+| **VM Execution** | DP | Execute directives safely against the provider and guest; observe what exists; account for and enforce the host's resources and report capacity (ADR 0024) | directive, observation, fence, executor, supervisor, shim, process lost, inventory (complete/incomplete), image cache, guest session, resource ledger, capacity report | none durable (pure FSMs: executor, supervisor, image cache, guest session) | downstream of CP via published language; ACL over Tart, host OS, guest |
 
 **Shared kernel** (`mayfly-domain`): ids, `OwnedVmName`, `SlotGeneration`, `Epoch`, `Fence`,
 `ImageDigest`, `Resources`, `Deadline`, `OwnershipProof`, `TrustTier`, `GuestOs`.
@@ -212,8 +217,9 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
    own failure mode (leak) and its own reaper. It sits on the *opposite* side of the flow from
    Demand (Attempt is its customer; Demand is Fleet's supplier), which is why the two are not
    merged although they share the GitHub ACL.
-3. **Fleet/Capacity: one context, two aggregates.** `Host` owns every scarce resource of one
-   machine and every admission and activation decision; `Pool` owns policy (tier, image pin,
+3. **Fleet/Capacity: one context, two aggregates.** `Host` owns the *allocation* of one
+   machine's capacity, as its data plane reports it, and every admission and activation decision
+   (the data plane owns accounting and hard enforcement: OD4, ADR 0024); `Pool` owns policy (tier, image pin,
    limits, prepared policy, pause/drain, breaker). Capacity is **not** the pool's: limits cross
    every pool on a host. Host enforces pool limits through **pool terms** it has accepted (§6.3).
 4. **Attempt vs VM lease: not split.** An attempt and its VM have the same identity, name,
@@ -349,7 +355,7 @@ Context in brackets.
 | **Runner registration** [Registration] | The GitHub-side runner record (`runner_id`, runner name), existing from `RegistrationIssued` until deregistration or GitHub's own removal. | bare "runner" |
 | **Runner process** [Execution] | The `actions/runner` OS process inside a guest. | bare "runner" |
 | **Runner name** [Registration] | Generated from the attempt (`= VmName`), never from workflow data, never reused (I19). | — |
-| **JIT config** [Registration, Secrets] | GitHub's single-use runner configuration for one runner name. A secret. States: issued, delivered, consumed, deregistered, presumed leaked. "Single-use" bounds its use; it does not make it harmless. | "token", "registration token" (classic mode's REST token is a different artefact) |
+| **JIT config** [Registration, Secrets] | GitHub's single-use runner configuration for one runner name. A secret. States: issued, delivered, consumed, deregistered, presumed leaked. "Single-use" bounds its use; it does not make it harmless. | "token", "registration token" (mayfly has no classic registration token: ADR 0028) |
 | **Delivered / consumed / presumed leaked** [Registration] | Delivered: the launcher took the bytes. Consumed: GitHub bound a job to the runner. Presumed leaked: delivery outcome unknown, or the handle orphaned, or identity doubt after delivery. Never say "used". | "used" |
 | **Deregister** [Registration] | REST delete of a runner registration by its journaled id. | "unregister", "remove runner" |
 | **Cancel / abandon / reassign** | Cancel: a human cancelled the job. Abandon: GitHub gave up because the runner vanished mid-job. Reassign: GitHub offers the job again. Three paths, three recoveries. | — |
@@ -363,7 +369,7 @@ Context in brackets.
 | **Host** [Fleet] | One Apple Silicon machine with one dedicated `TART_HOME` and one data-plane session at a time, named by `host_id`. | "node", "worker" |
 | **Host agent** [Execution] | The data-plane process (or role) on a host. | "host" |
 | **VM** [Execution] | A machine registered in the provider, identified by its provider name. Exists independently of any attempt (image bases are VMs too). | "runner", "instance" |
-| **Provider instance id** [Execution, shared] | The provider's identity of one VM *incarnation*, recorded at clone observation; distinguishes "our VM" from "another VM with the same name". Shape per provider (OD6). | "VM name" (reusable) |
+| **Provider instance id** [Execution, shared] | The provider's identity of one VM *incarnation*, recorded at clone observation; distinguishes "our VM" from "another VM with the same name". For Tart: the random MAC set on every clone (`tart set --random-mac`; OD6, ADR 0026). | "VM name" (reusable) |
 | **Image** [Image] | An immutable, content-addressed artefact (digest) plus its manifest (guest OS, runner version, image revision, launcher hash). Never run directly. | "golden", "template" |
 | **Image base** [Image, Execution] | The materialised local VM on a host from which clones are made (`mfb-<digest12>`); never started, never deleted except by an explicit eviction of an unreferenced digest (I05). | "base image", "template", "golden" |
 | **Image revision** [Image] | The maintainer's version label of an image (I14's "image generation"). | "image generation" (collides with slot generation) |
@@ -373,8 +379,9 @@ Context in brackets.
 | **Slot** [Fleet] | A numbered admission position on a host for one guest-OS class, held by at most one lease. | "capacity" |
 | **Slot generation** [Fleet] | Counter per slot, bumped at each reservation; part of the VM name and of the ownership proof. Retries keep it. | "generation" alone, "epoch" |
 | **Lease** [Fleet] | Host's record that an attempt holds a slot and a resource vector, from `SlotReserved` to `SlotReleased`. States: reserved, activated, quarantined, released. | "VM lease aggregate" (not an aggregate) |
-| **Physical / admissible / deliverable / reported max** [Fleet, Demand] | Physical: what the host can run. Admissible: physical minus reserves, external consumption, closed terms. Deliverable: runners we can produce for a scale set (admissible carve-out incl. live leases). Reported max: the `maxCapacity` we send, ≤ deliverable (I07, I24). | bare "capacity" |
-| **External consumption** [Fleet] | Resources used by things we did not admit (a foreign macOS guest holding one of the two tokens, foreign memory). Observed, shrinks admissible. | — |
+| **Physical / admissible / deliverable / reported max** [Fleet, Demand] | Physical: what the data plane reports the host can run (ADR 0024). Admissible: physical minus reserves, external consumption, closed terms. Deliverable: runners we can produce for a scale set (admissible carve-out incl. live leases). Reported max: the `maxCapacity` we send, ≤ deliverable (I07, I24). | bare "capacity" |
+| **External consumption** [Execution, Fleet] | Resources used by things we did not admit (a foreign macOS guest holding one of the two tokens, foreign memory). Counted by the data plane's resource ledger and carried in its capacity report; shrinks admissible. | — |
+| **Resource ledger / capacity report** [Execution] | The data plane's in-memory accounting of a host's resources per dimension (total, used by ours and foreign, free), rebuilt from observation; it refuses directives that do not fit and reports capacity (`CapacityReported`) to the control plane (ADR 0024). | "capacity" alone |
 | **Prepared** [Attempt] | Booted, guest verified, unregistered, no secret, no workflow code ever ran. | "warm" (as a state), "ready" |
 | **Warm** [Fleet] | The pool policy of holding Prepared attempts ahead of demand (`min_prepared`). Never a state name. | "warm registered" |
 | **Activation** [Attempt, Fleet] | The step that gives a prepared VM a secret: Host grant, fresh guest verification, registration, launch. | "start" |
@@ -383,7 +390,8 @@ Context in brackets.
 | **Idle** | Only GitHub's `TotalIdleRunners` (connected, no job). Never used for an unregistered VM. | — |
 | **Guest identity** [Attempt, Execution] | The proof, by a per-attempt challenge through a channel addressed by VM name, that the answering guest is *this* clone. Belongs to an attempt, never to an image or IP. | "host key matched" |
 | **Running / guest ready** | Running: the provider says the VM runs. Guest ready: we verified the guest's facts. Never "ready" alone. | "booted" for both |
-| **Process lost** [Execution] | A running VM whose `tart run` process is not a child of this host agent (after a restart); controlled only via provider commands. | — |
+| **Shim** [Execution] | The per-VM `mayfly vm-shim` process that owns one `tart run` as its child, holds its lock and writes `exit.json` (OD1, ADR 0037). | "wrapper" |
+| **Process lost** [Execution] | A running VM whose shim is gone (killed, host trouble); controlled only via provider commands by name with proof. | — |
 | **Inventory (complete / incomplete)** [Execution] | A full provider listing at time T, or a failed/unparseable one. Incomplete is never read as absence (I25). | "empty inventory" |
 
 ### 5.3 Ownership, fencing and modes
@@ -406,15 +414,15 @@ Context in brackets.
 | **Drain** [Fleet] | Host or pool terms closed *and* prepared/standby attempts retired; Busy finish. Completes when the scope has no non-terminal lease. Never kills a Busy VM. | attempt state "Draining" (removed), session "Draining" (now `Closing`) |
 | **Force** | Operator-only, journaled, stops Busy VMs (jobs fail). Never automatic. | — |
 | **Tripped** [Fleet] | Pool breaker open for an image digest after N stage failures in a window; reset only by an operator. | "paused" |
-| **Quarantine** [Attempt, Operations] | An attempt held because automation cannot act safely: VM kept (stopped unless evidence of a live job), slot leased, never reused; resolved through a **quarantine case**. Reasons are a closed enum (§6.10). | "retained", safe mode, pause |
+| **Quarantine** [Attempt, Operations] | An attempt held because automation cannot prove ownership or an outcome: VM kept (stopped unless evidence of a live job), slot leased, never reused, **never deleted automatically** (OD9, ADR 0025); resolved only through a **quarantine case** by an operator. Reasons are a closed enum (§6.10). | "retained", safe mode, pause |
 | **Retire** [Attempt] | The decision that an attempt will serve no (further) job and cleanup begins. A decision, not an effect. A Busy attempt is never retired, only finished or forced. | "delete", "destroy" |
 | **Withdraw** [Image] | Stop new use of an image; eviction follows when unreferenced. | "retire image" |
 | **Delete / deleted** | Delete: the provider effect. `VmDeleted`: the observed absence. "Destroy" only in prose. | — |
 | **Adopt** [Attempt] | After a restart, take responsibility for an owned VM under the new epoch without launching anything (`AttemptAdopted`). Never applied without ownership. | "import", "claim" |
 | **Recovery** [Operations] | The automatic startup reconcile (classify, adopt, resolve). | — |
 | **Repair** [Operations] | Operator-approved application of a recovery plan (safe mode, quarantine). The CLI verb `mayfly recover` keeps its name (never rename) and means repair; docs say so. | — |
-| **Unknown (outcome)** | A directive was sent and whether it took effect is not known. An overlay on the attempt's state, not a state. | "unknown VM" (that is *managed-looking* or *foreign*) |
-| **Assertion** [Operations] | An operator's journaled statement of an outcome with evidence (`OutcomeAsserted`); a decision, flagged as such in every read model, never a fact. | "manual fix" |
+| **Unknown (outcome)** | A directive was sent and whether it took effect is not known (the daemon was killed mid-call, a hung command was killed at its deadline, a reply was lost, the host slept). An overlay on the attempt's state, not a state; resolved only by re-observation, never by assertion (OD10, ADR 0025). | "unknown VM" (that is *managed-looking* or *foreign*) |
+| **Provider limitation** [Operations] | The report that the provider cannot answer a re-observation (command, last error, age): the effect stays `Unknown` and its slot held. There is **no operator assertion** of an outcome (OD10, ADR 0025). | "assertion", "manual fix" |
 | **Actor** | Who issued a command: `operator(uid)`, `automation(policy)`, `startup`. Recorded in every event's envelope. | — |
 | **Secret / secret handle** [Secrets] | Secret: a value granting authority, never serialised except to its one destination. Handle: an opaque, random, single-take reference scoped to `(attempt_id, directive_id, epoch)` with an expiry, valid only in the issuing process; journaled by id. | — |
 
@@ -450,9 +458,9 @@ tables. "Anemic" data is the intended shape.
 
 ### 6.0.1 New invariants
 
-I01–I16 keep their verification.md meaning, with two refinements: **I10** gains "or explicitly
-asserted by an operator (recorded as an assertion, not a fact)" (OD10), and **I14** reads "image
-revision" for "image generation".
+I01–I16 keep their verification.md meaning, with one refinement: **I14** reads "image revision"
+for "image generation". **I10 stays strict**: an ambiguous effect leaves `Unknown` only on an
+observation; the proposed operator assertion was declined (OD10, ADR 0025).
 
 | Id | Invariant | Protected by |
 |:--|:--|:--|
@@ -467,11 +475,12 @@ revision" for "image generation".
 | I25 | An incomplete inventory is never read as the absence of any VM. | DP observer + inbox policy |
 | I26 | No activation grant while host or pool terms are closed (drain, pause, trip, admission closed) (refines I08). | `Host` |
 | I27 | Stage failures per (pool, digest) are bounded per window; at N the breaker trips and nothing is admitted for that digest until an operator resets it. | `Pool` + `Host` terms |
-| I28 | Quarantined leases per pool ≤ the pool's quarantine cap; at the cap the pool trips. | `Host` |
+| I28 | A quarantined VM is never deleted automatically (no timer, no cap); its lease keeps counting against capacity until an operator resolves the case, and a pool whose capacity is consumed admits nothing (OD9, ADR 0025). | `Host` + `QuarantineCase` + DP refusal of unproven deletes |
 | I29 | In safe mode no clone, start, stop, delete, pull or evict executes, and no secret is minted or taken. | relay, DP executor, broker (effect boundary) |
 | I30 | Guest-originated data never decides ownership or a job's result and never reaches a VM name, path, argv or shell. | `Attempt` + guest ACL |
 | I31 | A recovery plan applies only against the journal heads, inventory digest and epoch it was drawn from; each action is intent-then-outcome. | `RecoveryPlan` |
-| I32 | A pool serves one trust tier; an offer is acquired only by a pool whose tier admits it. | `ScaleSet` (classification) + `Pool` |
+| I32 | A pool serves one trust tier; an offer is acquired only by a pool whose tier admits it (v0.x: `trusted` only, ADR 0027). | `ScaleSet` (classification) + `Pool` |
+| I33 | The data plane never executes a create, start, pull or materialise directive that does not fit its own resource ledger (memory, disk, macOS-guest slots including foreign guests), whatever the control plane allocated (OD4, ADR 0024). | DP executor + resource ledger |
 
 ### 6.1 `ScaleSet` [Demand]
 
@@ -509,7 +518,7 @@ revision" for "image generation".
 - **Stream:** `pool-<name>`. Lifetime: config lifetime; a removed pool is `Decommissioned`, never
   deleted (attempts reference it).
 - **State:** `revision`; `tier`; `image_pin: ImageDigest` (+ `draining_digests`); limits
-  (`max_running`, `min_prepared`, `quarantine_cap`); `mode ∈ {Active, Paused, Draining, Drained,
+  (`max_running`, `min_prepared`); `mode ∈ {Active, Paused, Draining, Drained,
   Decommissioned}`; `breaker: map digest → {failures in window, Tripped{at}|Closed}`;
   `terms_revision` (bumped by every change that affects admission).
 - **Commands:** `ConfigurePool{revision, …}`, `PinImage{digest}` (only an `Image` the policy saw
@@ -527,27 +536,33 @@ revision" for "image generation".
 ### 6.3 `Host` [Fleet]
 
 - **Stream:** `host-<host_id>`. Lifetime: the host's; snapshot-backed.
+- **Authority (OD4, ADR 0024):** the data plane accounts for and enforces the host's resources
+  and reports them; `Host` *allocates* within the last report. Its leases are allocation
+  bookkeeping, not the source of truth: when they disagree the data plane's refusal wins.
 - **State:** slot table per guest-OS class with `generation` per slot; leases
   `attempt_id → {slot, generation, pool, os, resources, phase ∈ {Reserved, Activated, Quarantined
-  {holds}}}`; physical vector `{slots, memory, disk_ceiling, macos_tokens = 2}`; reserves;
-  `external` consumption; `pool_terms: pool → {revision, open, max_running, quarantine_cap, tier}`;
+  {holds}}}`; `capacity: {report_id, totals, used, free, foreign}` (the last applied
+  `CapacityReported`, including external consumption); operator reserves;
+  `pool_terms: pool → {revision, open, max_running, tier}`;
   `gate: {drain: Option<Drain>, closed_causes: set{disk_low, tart_unsupported, woke, recovering,
   inventory_incomplete}}`; highest `run_epoch`.
-- **Commands:** `RegisterHost{physical, reserves}`, `ApplyPoolTerms{pool, revision, …}` (refused if
+- **Commands:** `RegisterHost{reserves}`, `RecordCapacityReport{report_id, capacity}` (an older
+  `report_id` is ignored), `ApplyPoolTerms{pool, revision, …}` (refused if
   `revision ≤` stored), `ReserveSlot{attempt_id, pool, os, resources, terms_revision}`,
   `GrantActivation{attempt_id}`, `QuarantineLease{attempt_id, vm_running: bool}`,
   `ReleaseSlot{attempt_id, evidence: VmDeleted|AttemptLost}`, `RecordResourceThreshold{disk_low|
-  disk_ok|…}`, `RecordExternalConsumption{macos_running, memory}`, `CloseAdmission{cause}`,
+  disk_ok|…}`, `CloseAdmission{cause}`,
   `OpenAdmission{cause}`, `StartHostDrain{deadline}`, `CancelHostDrain`, `CompleteHostDrain`,
   `ForceDrain{scope, actor}` (operator only).
-- **Events:** `HostRegistered`, `PoolTermsApplied`, `SlotReserved{slot, generation, attempt_id,
+- **Events:** `HostRegistered`, `CapacityReportApplied{report_id}`, `PoolTermsApplied`, `SlotReserved{slot, generation, attempt_id,
   pool, os, resources}`, `LeaseActivated`, `LeaseQuarantined{holds}`, `SlotReleased`,
-  `DiskLowWaterCrossed`, `DiskRecovered`, `ExternalConsumptionObserved`, `AdmissionClosed{cause}`,
+  `DiskLowWaterCrossed`, `DiskRecovered`, `AdmissionClosed{cause}`,
   `AdmissionOpened{cause}`, `HostDrainStarted`, `HostDrainCancelled`, `HostDrainCompleted`, `DrainForced{scope, actor}`,
   `ForeignVmReported{name_escaped, class}` (first sighting per run).
-- **Protects alone:** I01, I02, I03 (every lease counts on every dimension from `SlotReserved` to
-  `SlotReleased`; a stopped quarantined lease shrinks to disk + slot), G3's two macOS tokens minus
-  external consumption, per-pool `max_running` against accepted terms, generations strictly
+- **Protects alone:** I01, I02, I03 at allocation (every lease counts on every dimension from
+  `SlotReserved` to `SlotReleased` against the reported free capacity; a stopped quarantined lease
+  shrinks to disk + slot), G3's two macOS tokens minus the foreign guests the report shows (the
+  data plane enforces the same limits again: I33), per-pool `max_running` against accepted terms, generations strictly
   monotonic per slot, I26 (no grant with the gate closed or the pool's terms closed), I28, I08 (no
   reservation and no grant after drain start; drain completes only with zero leases in scope).
 - **Must not protect:** that an attempt exists for a lease (P2 starts it; a lease whose attempt
@@ -571,7 +586,7 @@ revision" for "image generation".
   `BeginActivation{grant_ref}`, `RecordJitHandle{handle_id, registration_ref}`, `BindJob`,
   `RequestRetirement{reason}`, `ConfirmRetirement` (after deregistration or when no registration),
   `WithdrawRetirement` (422), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
-  `AssertOutcome{directive_id, outcome, evidence, actor}`, `ResolveQuarantine{disposition}`, `Close`.
+  `ResolveQuarantine{disposition}`, `Close`. (No `AssertOutcome`: OD10, ADR 0025.)
 - **Events:** `AttemptStarted`, `DirectiveIssued`, `DirectiveRefused{reason}`,
   `DirectiveOutcomeUnknown`, `VmCloned{instance_id}`, `VmBooted`, `GuestVerified{facts, nonce_ref}`,
   `GuestRejected{reason}`, `AttemptPrepared`, `ActivationStarted`, `JitHandleIssued`,
@@ -579,11 +594,11 @@ revision" for "image generation".
   `RunnerExited{code}`, `VmObservedStopped`, `AttemptBackedOff`, `RetirementRequested`,
   `RetirementWithdrawn`, `AttemptRetired{reason}`, `DiagnosticsExported{bytes, hash}`,
   `DiagnosticsLost{reason}`, `VmStopped`, `VmDeleted`, `AttemptLost{evidence}`,
-  `AttemptQuarantined{reason, vm}`, `AttemptAdopted{epoch}`, `OutcomeAsserted{actor, evidence}`,
+  `AttemptQuarantined{reason, vm}`, `AttemptAdopted{epoch}`,
   `StaleObservationIgnored{generation|epoch}` (sampled), `AttemptClosed`.
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
-  `OutcomeAsserted`), I13 (retries reuse name and generation; at most one in-flight directive per
+  nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per
   target), I14 (one job binding, one digest), I22's attempt half (activation needs a grant ref and
   a fresh `GuestVerified` in the current epoch; a launch `Unknown` or orphaned handle forbids any
   further launch), I30 (guest facts are typed claims; ownership fields are set only from
@@ -600,7 +615,7 @@ Prepared → Activating → Listening → Busy → Finished
 Prepared|Listening --RetirementRequested--> (Listening: wait deregistration) → Retiring
 Finished|stage failure (budget spent)|Retiring → (diagnostics) → Deleting → Deleted
 Cloning|Booting|Verifying|Activating → Backoff{n} → same stage (same name, generation)
-any state ↔ pending.Unknown overlay (no transition until observed or asserted)
+any state ↔ pending.Unknown overlay (no transition until observed)
 Verifying|Activating --GuestRejected--> Quarantined;  Deleting --proof refused--> Quarantined
 any non-terminal --observed absence without our delete--> Lost
 Quarantined --case resolved--> Deleting | Lost
@@ -676,7 +691,8 @@ Quarantined --case resolved--> Deleting | Lost
   refused, expired or superseded.
 - **State:** bindings `{stream heads digest, inventory digest, github snapshot digest | unreachable,
   epoch}`, `actions[]` (target name + instance id, attempt, kind ∈ {adopt, stop, delete_with_proof,
-  release_slot, mark_lost, assert_outcome, rebuild_projection, ignore}, evidence, irreversible
+  release_slot, mark_lost (only on observed absence), rebuild_projection, ignore}; there is no
+  `assert_outcome` action (OD10), evidence, irreversible
   flag), `do_not_touch[]`, `phase ∈ {Proposed, Approved{actor}, Applying{next}, Completed,
   Failed{partial}, Refused{reason}, Expired}`.
 - **Events:** `RecoveryPlanProposed`, `RecoveryPlanApproved`, `RecoveryActionApplied{index,
@@ -684,22 +700,24 @@ Quarantined --case resolved--> Deleting | Lost
 - **Protects alone:** I31, immutability once proposed, "no delete action without ownership evidence"
   (checked at propose and re-checked at apply), single approval, resumable application.
   "At most one plan Applying per host" is a policy rule (P20) using `HostRun.safe_mode.plan_id`.
-- **Applies through ordinary commands** (`Attempt.AssertOutcome`, `Attempt.Adopt`, …), never by
+- **Applies through ordinary commands** (`Attempt.Adopt`, `Attempt.ResolveQuarantine`, …), never by
   writing other streams' events.
 
 ### 6.10 `QuarantineCase` [Operations]
 
-- **Stream:** `quarantine-<attempt_id>`. Lifetime: until resolved; the stopped VM's disk has a
-  retention deadline.
+- **Stream:** `quarantine-<attempt_id>`. Lifetime: until an operator resolves it; there is no
+  retention deadline and no automatic deletion (OD9, ADR 0025).
 - **State:** `reason` (closed enum: `ownership_doubt`, `guest_identity_refused`,
   `jit_presumed_leaked`, `provider_identity_mismatch`, `delete_refused_repeatedly`,
-  `redaction_violation`, `forensic_retention`), `holds {disk, memory?, macos_token?}`, `evidence`
+  `redaction_violation`, `forensic_retention`, `outcome_unprovable`), `holds {disk, memory?, macos_token?}`, `evidence`
   refs, `opened_at`, `escalation_level`, `phase ∈ {Open, Inspected, Resolving, Resolved{disposition,
-  actor}}`; dispositions `delete_with_proof`, `released_as_lost`, `keep_until{deadline}`.
+  actor}}`; dispositions (operator only) `delete_with_proof` (the data plane re-checks the proof),
+  `released_observed_absent` (only on a complete inventory without the VM), `keep`.
 - **Events:** `QuarantineCaseOpened`, `QuarantineCaseInspected{actor}`,
   `QuarantineCaseEscalated{level}`, `QuarantineCaseResolved{disposition, actor}`.
-- **Protects alone:** "resolution needs an actor", "`keep_until` has a deadline", closed reason set.
-  **Must not protect:** the cap (Host, I28), freeing the slot (Attempt → Host only on observed absence).
+- **Protects alone:** "resolution needs an operator actor", "no disposition is applied by a timer
+  or a cap" (I28), closed reason set. Escalation (`QuarantineCaseEscalated`) is loud and never acts
+  on the VM. **Must not protect:** capacity accounting (Host), freeing the slot (Attempt → Host only on observed absence).
 
 ---
 
@@ -721,20 +739,20 @@ literally (F25).
 | P6 | any `Attempt` event that completes a stage | `IssueNext`: the stage's directive (`CloneVm`, `StartVm`, `VerifyGuest{nonce}`, `ExportDiagnostics`, `StopVm`, `DeleteVm{proof}`) | ATT saga | `directive_id = (attempt_id, stage, try)` | stage retry budget, same name and generation | per-stage deadline per guest OS | budget spent → retire (stage failure, P15) or quarantine (identity, proof) |
 | P7 | `DirectiveIssued` (attempt, placement) | send over the link, stamped with the current epoch; in safe mode hold every create/destroy/pull/evict kind (I29) | relay | `directive_id` | at-least-once, backoff | directive deadline | deadline → `DirectiveOutcomeUnknown` + `ReportInventory`; never a new directive for the same target while `Unknown` |
 | P8 | `Observation` from the DP | route to the attempt/placement stream: `RecordObservation`; inventory: per owned VM, delta only; unrecognised `mf-*`/foreign → `ForeignVmReported` (first sighting per run) | CP inbox | `observation_id` | — | — | stale epoch/generation → `StaleObservationIgnored` (sampled), still audited when it reports a consumed JIT; incomplete inventory → no change (I25) |
-| P9 | `AttemptPrepared` ∧ shortfall > 0 for its pool | `GrantActivation` (Host) → `BeginActivation` (fresh `VerifyGuest`) → on `GuestVerified` in Activating: `RequestRegistration` → mint JIT → `RecordIssued` → broker `issue` → `RecordJitHandle` + `LaunchRunner{handle}` | ATT activation manager | `attempt_id`; runner name = `vm_name` (re-mint impossible by I19) | grant: next pass; mint: once, never retried with the same name | JIT delivery deadline T_jit (≈ 2 min) | grant refused → stays Prepared; mint `Unknown` → P10; delivery `Unknown` / deadline → P13 |
+| P9 | `AttemptPrepared` ∧ shortfall > 0 for its pool | `GrantActivation` (Host) → `BeginActivation` (fresh `VerifyGuest` through `tart exec`) → on `GuestVerified` in Activating: `RequestRegistration` → mint JIT → `RecordIssued` → broker `issue` → `RecordJitHandle` + `LaunchRunner{handle}` (DP checks lock PID = shim child, then `tart exec -i` on stdin: ADR 0038) → GitHub shows the runner id online, else P13 | ATT activation manager | `attempt_id`; runner name = `vm_name` (re-mint impossible by I19) | grant: next pass; mint: once, never retried with the same name | JIT delivery deadline T_jit (≈ 2 min) | grant refused → stays Prepared; mint `Unknown` → P10; delivery `Unknown` / deadline → P13 |
 | P10 | `RegistrationIssueUnknown` | list runners by `runner_name`; `RecordFoundByName{runner_id}` → `RequestDeregistration`, or `RecordAbsent`; attempt `RequestRetirement{jit_lost}` | REG reaper | `runner_name` | GitHub budget | — | GitHub unreachable → stays on reaper list (I20), alert after T_reap |
 | P11 | `RetirementRequested` on an attempt holding a registration | `RequestDeregistration` → 204/404 → `ConfirmRetirement`; 422 → `WithdrawRetirement` | ATT↔REG | `(attempt_id, retirement event_id)` | GitHub budget | T_dereg | GitHub down → retirement waits; never stop before the answer (I21); hysteresis H_idle before choosing a victim |
 | P12 | `MessageRecorded.JobStarted` / `.JobCompleted` | find registration by runner name (projection) → `BindJob` + `RecordConsumed`; on completion `RecordCompleted{result}`, then `RequestRetirement{job_done}` once `RunnerExited` or grace G expires (then probe) | DEM→ATT/REG | `request_id` | — | grace G | unknown runner name → `UnrecognisedRegistrations`; a JobStarted for a registration already completed → audit, ignore |
 | P13 | `RunnerLaunchUnknown`, `JitHandleOrphaned`, identity doubt after delivery, redaction violation | `PresumeLeaked` → `RequestDeregistration` (if journaled id); attempt `RequestRetirement{jit_presumed_leaked}` or `Quarantine` | REG/SEC | `attempt_id` | GitHub budget | — | deregistration impossible → stays on reaper list; attempt never relaunched (I22) |
 | P14 | `RunStarted`, daily timer, `mayfly doctor`, `SessionOpened` after a long outage | list our scale set's runners; journaled + non-live → `RequestDeregistration`; our name shape, unjournaled → report only | REG reaper | `(run_no, day)` | GitHub budget, ≤ 1 listing per hour | — | report, never delete by name pattern |
 | P15 | final `AttemptBackedOff`, stage-failure `AttemptRetired`, `GuestRejected` | `CountAttemptFailure{digest, stage}` on Pool; trip at N in window W → P4 closes terms | FLT breaker | source `event_id` | backoff | — | — |
-| P16 | `AttemptQuarantined` | `QuarantineLease` (Host), `QuarantineCaseOpened`, `StopVm` unless a job is live; Host closes the pool's terms at the cap (I28) | OPS | `attempt_id` | backoff | escalation at T_q1 (ticket), T_q2 (page) | `forensic_retention` past deadline with proof → delete; any other reason → escalate only |
+| P16 | `AttemptQuarantined` | `QuarantineLease` (Host), `QuarantineCaseOpened` (ERROR event, metric, status), `StopVm` unless a job is live; the lease keeps counting, so a pool whose capacity is consumed admits nothing (I28) | OPS | `attempt_id` | backoff | escalation at T_q1 (ticket), T_q2 (page) | every reason → escalate only; never delete, never on a timer or a cap (ADR 0025) |
 | P17 | `ImagePinned` | `PlacementRequested` per host; on `ImageMaterialised` the pool becomes admissible there; prepared attempts on the old digest retired; old digest unreferenced → `EvictionRequested`; `WithdrawImage` refused while pinned | IMG placement manager | `(host, digest)` | backoff; single pull per host | pull deadline (large) | `PlacementFailed` → pool not admissible on that host, reason shown; drift → `ImageRejected` |
 | P18 | `ImageRunnerVersionExpired` | trip the breaker for that digest with reason `runner_version`; alert the maintainer | IMG→FLT | `digest` | — | — | admission for the pool stops with a named reason, never silent queueing |
-| P19 | `pending.Unknown` older than T_u1 / T_u2 | re-observe (`ReportInventory`); at T_u2 alert and add a plan entry | ATT | `(attempt_id, directive_id, level)` | — | — | never auto-resolved; operator `AssertOutcome` (OD10) |
+| P19 | `pending.Unknown` older than T_u1 / T_u2 | re-observe (`ReportInventory`, provider queries are idempotent reads); at T_u2 alert; a provider that cannot answer is reported as a provider limitation | ATT | `(attempt_id, directive_id, level)` | re-observation with backoff, for ever | — | never resolved except by an observation; no assertion (OD10, ADR 0025); the slot stays held |
 | P20 | `SafeModeEntered` | propose a plan draft automatically (dry run); on approval apply actions as commands, intent then outcome; `RecoveryPlanCompleted` → re-verify → `LeaveSafeMode` | OPS repair | `plan_id`, action index | per action | plan expiry T_plan | stale bindings → `RecoveryPlanRefused`; partial → `Failed{partial}`, resumable; one plan Applying per host |
 | P21 | queue 401, REST 401/403, 409, 429, 5xx streak, host wake | queue 401 → refresh session; REST 401/403 → refresh token once, then `SessionDegraded`; 409 → backoff under TTL; 429 → `Retry-After`; degraded → minting frozen, jobs continue | DEM session supervisor | `(session_id, cause)` | per endpoint family | session TTL | degraded is self-healing; never delete on missing GitHub data |
-| P22 | DP host facts: disk threshold, wake (clock gap), Tart version change, hypervisor limit, external guests | Host `RecordResourceThreshold` / `RecordExternalConsumption` / `CloseAdmission`; on wake: treat deadlines as expired by jump, re-observe before acting, retire prepared VMs older than the gap, reopen sessions | FLT/OPS | observation id | — | — | — |
+| P22 | DP host facts: `CapacityReported`, disk threshold, wake (clock gap), Tart version change, hypervisor limit | Host `RecordCapacityReport` / `RecordResourceThreshold` / `CloseAdmission`; on wake: treat deadlines as expired by jump, re-observe before acting, retire prepared VMs older than the gap, reopen sessions | FLT/OPS | observation id | — | — | — |
 | P23 | `HostDrainStarted` / `PoolDrainStarted` | retire prepared/standby in scope; `ReportedMaxChanged{0}`; zero leases in scope → `CompleteHostDrain`/`CompletePoolDrain`; timeout → alert, never force | FLT | drain event id | — | drain deadline | `DrainForced` only by an operator command |
 | P24 | `ShutdownStarted` (SIGTERM) | close admission, stop acquiring and acking, finish durable writes, leave VMs running (adoptable), exit before the service manager's deadline | OPS | `run_no` | — | `ExitTimeOut` − margin | missed deadline = crash path, recovered by P1 |
 | P25 | stall of any supervised loop (listener, relay, reconciler, store writer) > T_wd | exit with the distinct watchdog code; the service manager restarts; next run records `PreviousRunEndedUnclean` | OPS watchdog | — | service manager throttle | T_wd | crash loop (K starts in W before `RecoveryCompleted`) → start straight into safe mode |
@@ -750,7 +768,7 @@ stream) or live queries over them; none is an input to a command (policies may r
 |:--|:--|:--|:--|
 | `OperatingMode` | What mode is the host in, since when, why? | `HostRun`, `Host` gate, `Pool` mode/breaker, `ScaleSet` phase | effective mode = pure `operations::mode` over the flags; never stored as one enum |
 | `AdmissionExplain` | **Why is nothing starting?** | `OperatingMode`, `CapacityReport` (last reconciler pass), `ScaleSet` statistics, `Pool` | one ordered cause chain: safe mode > recovering > drain > pause > breaker/runner version > quarantine cap > disk > memory > macOS tokens (incl. external) > image not placed > GitHub degraded > no demand |
-| `CapacityBoard` | physical / admissible / deliverable / reported max per host and scale set, per dimension | `Host`, reconciler output | carries the min() winner of `desired` |
+| `CapacityBoard` | reported (by the data plane) / allocated / admissible / deliverable / reported max per host and scale set, per dimension | `Host` (applied capacity reports, leases), reconciler output | carries the min() winner of `desired` |
 | `Attempts` + `AttemptTimeline` | state, stage durations, pending directive, evidence per attempt | `Attempt` | `mayfly vm inspect`; feeds `ProvisionTimeline` percentiles |
 | `PendingEffects` | every in-flight and `Unknown` directive with age and the observation that would resolve it | `Attempt`, `ImagePlacement` | alert source for P19 |
 | `Inventory` | each VM: owned (attempt, generation, instance id) / leaked / managed-looking / foreign / image base; size; age | `Attempt`, `ImagePlacement`, `ForeignVmReported`, latest DP inventory (live) | `mayfly vm list`; labels orphan classes |
@@ -781,12 +799,12 @@ settled by the protocol capture (GH-00) before the fake is written.
 | Credential | Obtained from | Used for | Lifetime | On failure |
 |:--|:--|:--|:--|:--|
 | 1. **App JWT** (RS256, from the private key in the secret store) | signed locally | exchanging for an installation token | ≤ 10 min, backdated `iat` | key unreadable/locked → `SessionDegraded{app_auth}` |
-| 2. **Installation access token** | `POST /app/installations/{id}/access_tokens` | REST: runner list/get/delete, classic registration token, permission probe | ≈ 1 h | 401/403 → refresh once, then degraded (permission drift is an audit fact) |
+| 2. **Installation access token** | `POST /app/installations/{id}/access_tokens` | REST: runner list/get/delete, permission probe | ≈ 1 h | 401/403 → refresh once, then degraded (permission drift is an audit fact) |
 | 3. **Actions-service token** (+ service URL) | the scale-set registration handshake | scale set CRUD, JIT generation, session create/delete | own expiry [VERIFY] | refresh by re-handshake; degraded on repeat |
 | 4. **Message-queue access token** | `SessionOpened` | poll, ack, acquire | own expiry; 401 → refresh session | `SessionExpired` → reopen, initial statistics |
 
 Secret *artefacts* that are not mayfly's credentials but flow through the ACL: the **JIT config**
-(per runner), the classic **registration token** (classic mode only), registry pull credentials
+(per runner) and registry pull credentials
 (Image). All are `Secret<T>`; none is journaled; fixtures are scrubbed with a canary test.
 
 What crosses in: messages (`JobAvailable/Assigned/Started/Completed`, statistics), runner
@@ -804,15 +822,22 @@ only code that knows wire shapes; the domain sees neither JSON nor HTTP.
   parse or exit failure; I25); exit codes → `Definite`/`Ambiguous`; "2 macOS guests running"
   refusal → `HypervisorLimitHit`; version string → capability set checked against fixture
   versions (unsupported → admission closed, R12).
-- **Process model when the daemon dies (OD1, recommended):** `tart run` is spawned **detached**
-  (own session and process group, stdio to bounded log files in the state dir, not to the
-  daemon), so a daemon crash or upgrade leaves VMs running. While the spawning host agent lives it
-  supervises the child; after a restart the VM is `ProcessLost` and is controlled only via `tart
-  stop`/`tart delete` by name with proof; runner exit is observed through the guest launcher's
-  status (read by `tart exec`) and GitHub's `JobCompleted`, not through `tart run`'s exit code.
+- **Process model when the daemon dies (OD1, decided: ADR 0037):** each VM runs under a per-VM
+  shim, `mayfly vm-shim`, started with `setsid`; the shim runs `tart run` as its child with stdio
+  to bounded files (never a pipe: SIGPIPE would kill the VM), holds its own lock and writes
+  `exit.json` atomically when the child exits. A daemon crash or upgrade leaves VMs and shims
+  running. On start the daemon reconciles the journal, `tart list`, each shim's lock and
+  `exit.json`: a live shim's VM is adopted, a stopped one finalised from `exit.json`. VMs are
+  stopped only by `tart stop` by name with proof, never by SIGTERM or SIGKILL.
+- **Resource ledger (OD4, ADR 0024):** the host agent accounts for memory, disk, VM slots and the
+  two macOS-guest slots (foreign guests included) from inventory and probes, refuses directives
+  that do not fit (I33) and reports `CapacityReported`.
 - **Never:** read TART_HOME internals to decide ownership; delete a VM whose source is OCI or whose
-  name is an image base; trust an empty inventory. `TART_HOME` carries a deployment marker
-  (`deployment_id`, epoch floor: OD7); a mismatch fails `doctor` and closes admission.
+  name is an image base; trust an empty inventory; clone from an OCI reference (only from a local
+  base, ADR 0039); send a signal to `tart run`. `TART_HOME` carries a deployment marker
+  (`deployment_id`, epoch floor: OD7, ADR 0026), fsynced before an epoch is used; a mismatch fails
+  `doctor` and closes admission. Every clone gets `tart set --random-mac`, read back as the
+  provider instance id (OD6).
 
 ### 9.3 OCI registry (Image, via DP)
 
@@ -832,9 +857,11 @@ facts (`DiskLowWaterCrossed`, `HostWoke`); raw readings are metrics with a fresh
 - **In:** typed, bounded claims (runner version, image revision, clock skew, free disk, launcher
   status, runner exit code), diagnostics as a 0600 artefact (hash and size journaled, never the
   content). Control sequences stripped before any terminal output.
-- **Identity (OD5):** transport `tart exec` (addressed by VM name through the hypervisor, no IP);
-  the nonce answer proves *this* clone. SSH only with a per-clone host key learned through
-  `tart exec` at first boot; a per-image pinned key alone never authorises a secret.
+- **Identity (OD5, decided: ADR 0038):** transport `tart exec` only (addressed by VM name through
+  the hypervisor, no IP, no SSH); the nonce answer proves *this* clone; before the JIT is sent with
+  `tart exec -i <vm> <fixed launcher>` on stdin, the DP checks that the lock PID is the shim's
+  child and the instance id matches; afterwards GitHub must show the issued runner id online.
+  `TART_HOME` is `0700` under a dedicated user; images without the guest agent are refused.
 
 ### 9.6 Service manager and operator
 
@@ -852,7 +879,9 @@ GD (GitHub demand), VF (VM fleet), SR (SRE/ops), SC (security).
 
 ### 10.1 OWNER decisions (ordered by impact)
 
-Each has a recommended option (the working assumption until decided) and the alternatives.
+Each has a recommended option (the working assumption until decided) and the alternatives. The
+owner's answers of 2026-11-09 follow each item; the original text is kept as the record of what
+was asked.
 
 **OD1 (B) `tart run` process model on daemon death.** [VF HS6, SR H4, H19] Whether VMs survive a
 daemon crash/upgrade decides adoption, upgrades and "never delete Busy".
@@ -860,6 +889,7 @@ daemon crash/upgrade decides adoption, upgrades and "never delete Busy".
 runner outcome via guest launcher status + GitHub (§9.2); HW-01 must confirm survival and `tart
 stop` semantics. *Alternatives:* (a) a per-VM launchd job (heavy, needs plist management);
 (c) VMs die with the daemon, upgrades require drain, F13 becomes "job lost, cleaned up".
+**Decided (owner, 2026-11-09), ADR 0037:** a per-VM shim (`mayfly vm-shim`, containerd-style) owns each `tart run`; the daemon re-adopts on start from the journal, `tart list`, shim locks and `exit.json`; stop only through `tart stop`.
 
 **OD2 (B) Upgrade and rollback rule; recovery from an untrusted journal.** [SR H1, H4, SC HS-8]
 A forward-only journal plus "unknown event → safe mode" makes every binary rollback a safe-mode
@@ -873,6 +903,7 @@ epoch floor detects (I17) → safe mode → **salvage plan**: trust the verified
 created after it as *managed-looking with evidence*, and let the operator assert ownership per VM
 in the plan (journaled `OutcomeAsserted`, never automatic). *Alternatives:* drain-before-upgrade
 mandatory and no rollback; or inventory+GitHub-only rebuild (nothing deletable: hosts fill up).
+**OWNER DECISION PENDING.** Working assumption (the owner's question was that users may skip versions): any forward jump is supported (every upcaster and migration kept for ever; an upgrade-matrix test from every released version); rollback is supported one release back; deeper rollback means restoring the automatic pre-upgrade backup, which the epoch floor detects (I17); an older build refuses writes on streams whose epoch is newer than it supports. The salvage plan may no longer assert ownership (OD10 forbids assertions): VMs created after the verified prefix are classified managed-looking and quarantined (`ownership_doubt`), never deleted. Alternatives as above.
 
 **OD3 (B) Trust tiers for v0.x.** [SC HS-2, Q10; GD H5] Scale-set runners are interchangeable, so
 trust can only be enforced per scale set, and offer data may not carry a fork flag [VERIFY].
@@ -882,6 +913,7 @@ untrusted or `pull_request_target`/`workflow_run`/`issue_comment`-triggered are 
 `allow_untrusted_prs` by `tier` (the old key is refused with a message, never silently ignored).
 *Alternatives:* untrusted tier with its own scale set, per-repo caps, no cross-tier co-residency
 on a host (I32's second half) and the reachability tests of SEC-01 as a gate.
+**Decided (owner, 2026-11-09), ADR 0027:** trusted-only, as recommended.
 
 **OD4 (B) `maxCapacity` semantics and AcquirePolicy; capture before fake.** [GD H1, H11, H15]
 *Recommend:* acquire only while `assigned < deliverable` (I23); send `reported_max =
@@ -889,12 +921,14 @@ deliverable` per scale set as the *total* concurrent runners, adjusted once the 
 whether the service reads it as total or increment; **GH-00 (owner) records a live session in a
 disposable org before GH-01**, and the fake is built from that capture.
 *Alternatives:* acquire every offer and rely on `maxCapacity` alone (parks jobs; F11 hole).
+**Decided (owner, 2026-11-09), ADR 0024:** the acquire policy as recommended (GH-00 capture first), and in addition **the data plane owns host resource accounting and hard enforcement** (memory, disk, macOS-VM slots including foreign VMs; refuses directives that do not fit; reports capacity); the control plane allocates only within reported capacity (pools, admission order, `maxCapacity` to GitHub). §3, §5 and §6.3 follow.
 
 **OD5 (B) Guest identity per attempt.** [SC HS-4, VF HS8] Per-image host keys identify the image,
 not the clone; IP reuse can deliver a JIT to the wrong guest.
 *Recommend:* `tart exec` + per-attempt nonce challenge, re-run immediately before the mint (I22);
 images without `tart exec` are refused for v0.x. *Alternatives:* SSH with per-clone keys learned
 at first boot; SSH with per-image key (rejected: confused deputy).
+**Decided (owner, 2026-11-09), ADR 0038:** JIT delivery by `tart exec -i <exact VM> <fixed in-image launcher>` on stdin only; lock-PID = shim-child check before the exec; random MAC per clone; `TART_HOME` `0700` under a dedicated user; GitHub confirms the issued runner id came online; no SSH; images without the guest agent refused.
 
 **OD6 (B) Ownership proof shape and provider instance id.** [SC HS-1, VF HS7, HS18]
 *Recommend:* proof = §5.3; Tart's instance id = the VM's MAC address (Tart assigns a fresh one on
@@ -902,12 +936,14 @@ clone [VERIFY]) plus the observed creation time, recorded at `VmCloned`; the DP 
 before `DeleteVm` and also refuses any name in its image-base set. *Alternatives:* name +
 generation only (plan today; a re-created VM with our name is deletable); a marker file written
 into the VM directory (touches provider internals).
+**Decided (owner, 2026-11-09), ADR 0026:** instance id = random MAC per clone (`tart set --random-mac`, Tart keeps a clone's MAC otherwise), recorded at `VmCloned`, re-observed right before `DeleteVm`; image-base names refused.
 
 **OD7 (H) External epoch floor.** [SC HS-8, SR H4] *Recommend:* adopt; the floor lives in the
 `TART_HOME` deployment marker (not restored with the state dir, and it also makes "dedicated
 TART_HOME" checkable), written with fsync before `EpochMinted` is used. *Alternatives:* Keychain
 item (headless access issues), sidecar in the state dir (restored with it: useless against
 restores), none (accept ghost-actor risk).
+**Decided (owner, 2026-11-09), ADR 0026:** the floor file in `TART_HOME`, fsynced before the epoch is used; a journal epoch below the floor means safe mode.
 
 **OD8 (H) Warm vs standby.** [GD H2, H12, Q2; VF HS17; SC Q9] *Recommend:* only **Prepared**
 (unregistered) VMs ahead of demand (`min_prepared`, default 0, and 0 enforced for macOS unless
@@ -915,6 +951,7 @@ explicitly overridden: one prepared macOS VM halves the host); **standby** (regi
 of v0.x (`min_standby = 0`, desired = `min(deliverable, assigned)`), so poisoned-idle exists only
 for acquired-then-cancelled jobs, handled by P11. Prepared VMs expire after `max_prepared_age`
 and on wake. *Alternatives:* standby for latency (needs P11 at scale and more GitHub budget).
+**Decided (owner, 2026-11-09), ADR 0028:** as recommended: prepared, unregistered VMs only (`min_prepared`, default 0, 0 for macOS); no registered standby.
 
 **OD9 (H) Quarantine cap, reasons and expiry.** [SR H6, SC HS-12, VF HS13] *Recommend:* closed
 reason enum (§6.10); safe failures are *not* quarantined (delete refused once → retry with
@@ -922,16 +959,19 @@ proof; guest wedge with proof → force stop then delete); cap = 1 per pool for 
 max_running/2)` for Linux, at the cap the pool trips (I28); ticket at 4 h, page at 24 h;
 `forensic_retention` cases auto-delete with proof after 7 days, every other reason escalates only.
 *Alternatives:* no cap (silent capacity erosion), auto-delete on expiry (unsafe for ownership doubt).
+**Decided (owner, 2026-11-09), ADR 0025 (differs from the recommendation):** quarantine whenever ownership or an outcome cannot be proven; **never** delete a quarantined VM automatically (evidence preserved): no cap-driven deletion, no `forensic_retention` expiry; the capacity loss is accepted; escalation is loud; a pool stops admitting when its capacity is consumed. I28 is rewritten accordingly.
 
 **OD10 (H) Unknown escalation by operator assertion (I10 amendment).** [SR H7] *Recommend:*
 `mayfly attempt assert <id> --outcome absent|stopped|… --evidence <text>`, journaled as
 `OutcomeAsserted{actor, evidence}`, flagged in every read model, allowed only after T_u2.
 *Alternatives:* keep I10 strict (slots can be held forever with no exit but a recovery plan).
+**Decided (owner, 2026-11-09), ADR 0025 (the recommendation is declined):** never assume. `Unknown` resolves only by re-observation (provider queries are idempotent reads); there is no operator assertion of outcomes; when a provider cannot answer, the effect stays `Unknown` and is reported as a provider limitation. I10 stays strict.
 
 **OD11 (H) Registration lifecycle and reaper cadence.** [GD H3, SC HS-5] *Recommend:* §6.5 and
 P10/P14: the reaper runs at run start, after long outages and daily, deletes only journaled ids,
 reports unrecognised ones. Live capture answers how long an unclaimed JIT registration lingers
 [VERIFY]. *Alternatives:* rely on GitHub's own cleanup (leaks inflate `TotalRegisteredRunners`).
+**Decided (owner, 2026-11-09), ADR 0029:** as recommended.
 
 **OD12 (H) Runner version shelf life.** [GD H6, VF HS9, SC HS-6] *Recommend:* keep the runner
 baked and self-update off; record the runner version in the manifest; detect expiry
@@ -940,40 +980,48 @@ baked and self-update off; record the runner version in the manifest; detect exp
 refresh SLA (recommend: rebuild monthly and on every runner release flagged as required).
 *Alternatives:* allow runner self-update in the guest (a VM does work that is not the job; slower,
 non-reproducible).
+**Decided (owner, 2026-11-09), ADR 0030:** as recommended, plus convenient refresh tooling (`mayfly image refresh <pool>`, ADR 0039).
 
 **OD13 (H) Image placement in v0.x.** [VF HS1, HS2, SC HS-6] *Recommend:* split pull from clone:
 `ImagePlacement` with `PullImage/MaterialiseImage/EvictImage` directives; `CloneVm` clones only
 from a local base. *Alternatives:* operator materialises bases by hand and CP only verifies
 presence (smaller v0.x, keeps a manual step; acceptable as a first cut if DP-07 slips).
+**Decided (owner, 2026-11-09), ADR 0039:** never pull at job time; clones only from local service-owned bases; `mayfly image refresh <pool>` (pull and record the digest, a base named by digest and runner version, boot once and install the pinned SHA-checked runner via `tart exec`, move the pool's base pointer in the journal keeping the previous one, GC unreferenced bases); `TART_NO_AUTO_PRUNE`; runner-age warning; optional daily runner-only refresh.
 
 **OD14 (M) Scale set cardinality and scope.** [GD H5, H16, Q1] *Recommend:* one pool = one scale
 set, strictly; org scope only in v0.x, repo scope second, enterprise later; scale sets are left in
 place on decommission (deleting one fails queued workflows). *Alternatives:* several pools per scale
 set (needs label routing GitHub does not do for JIT).
+**Decided (owner, 2026-11-09), ADR 0040:** one scale set per pool; organisation scope (repository scope allowed for testing); never deleted automatically.
 
 **OD15 (M) Wire behaviour of pause and safe mode.** [SR H2, Q7–Q9] *Recommend:* pause reports
 `reported_max` = live runners of the pool (no new offers) and acquires nothing; safe mode keeps the
 session open if the journal is writable, reports 0, acquires nothing and acks only recorded
 messages; if the journal is not writable it stops polling (redelivery is safe). Drain reports 0.
 *Alternatives:* close the session on pause/safe mode (expiry churn on resume).
+**Decided (owner, 2026-11-09), ADR 0029:** as recommended.
 
 **OD16 (M) launchd mode, sleep and unattended recovery.** [VF HS11, SR H9, H13] *Recommend:*
 LaunchAgent in an auto-login session for v0.x (Keychain and Virtualization.framework work),
 `pmset`/power assertion "never sleep" checked by `doctor` as FAIL; `HostWoke` handled anyway (P22);
 ADR before OPS-01. *Alternatives:* LaunchDaemon (prototype first; Keychain and GUI-session risks).
+**Decided (owner, 2026-11-09), ADR 0031:** both: `mayflyd` in the foreground by hand locally, launchd auto-start (LaunchAgent, auto-login session) on servers.
 
 **OD17 (M) Wedged-daemon detection.** [SR H8, H17] *Recommend:* internal watchdog (P25) +
 `mayfly_heartbeat_timestamp_seconds` and an external dead-man alert documented in the runbook; the
 metrics endpoint is loopback HTTP (scrapable), not the CLI socket. *Alternatives:* KeepAlive only
 (misses hangs).
+**Decided (owner, 2026-11-09), ADR 0031:** internal watchdog plus launchd `KeepAlive`.
 
 **OD18 (M) Classic mode scope.** [GD H14] *Recommend:* keep as a smoke-test adapter only (`min_ready
 ≤ 1`, trusted repos), behind the same `RunnerRegistration` aggregate; not a supported production
 mode in v0.x. *Alternatives:* drop it (GH-05 removed); full support (doubles the state space).
+**Decided (owner, 2026-11-09), ADR 0028:** no classic mode at all; scale sets only; GH-05 removed.
 
 **OD19 (M) Softnet and the non-root service.** [VF HS16, SC HS-9] *Recommend:* no Softnet in
 v0.x (trusted-only, OD3), NAT with the reachability matrix of SEC-01 recorded; revisit with the
 untrusted tier. *Alternatives:* Softnet with a privileged helper (ADR, breaks "non-root").
+**Decided (owner, 2026-11-09), ADR 0032 (differs from the recommendation):** support Softnet; its privilege model (Tart's softnet behind a narrow sudoers rule, or a privileged helper) is designed by NET-01 with its own ADR; the daemon stays non-root.
 
 **OD20 (M) Operator authorization, key at rest, audit.** [SC HS-3, HS-10, Q3, Q7, Q8; SR H14]
 *Recommend:* App key as a 0600 file in a 0700 dir (recorded risk acceptance), `RLIMIT_CORE=0`,
@@ -981,6 +1029,7 @@ zeroize; socket peer-uid allowlist = service uid, CLI via `sudo -u` so `SUDO_USE
 audit in the journal envelopes for v0.x, no sidecar/off-host shipping until phase 7; repo names and
 logins in job facts are pseudonymisable fields (hash + display copy in a projection only).
 *Alternatives:* Keychain under launchd; separate admin uid; hash-chained sidecar now.
+**Decided in part (owner, 2026-11-09), ADR 0033:** secrets come from a `SecretProvider` port with backends chosen per secret by URI (`keychain:`, `file:` 0600, `env:`, `exec:`, extensible), Envoy-style; Keychain on a laptop, file or exec on a server; never persisted by mayfly. The other sub-items (peer-uid allowlist, actor via `sudo -u`, audit in envelopes, pseudonymisable fields) stay planner defaults.
 
 ### 10.2 Resolved by the facilitator (no owner decision needed; owner may override)
 
@@ -1011,6 +1060,10 @@ logins in job facts are pseudonymisable fields (hash + display copy in a project
 
 ## 11. Consequences (for the orchestrator, after owner review)
 
+**Applied by DEC-01 (2026-11-09)** to plan.md, tasks.md and verification.md together with the
+owner's decisions of §10.1; where a decision differs from a row below (OD4, OD9, OD10, OD18,
+OD19, OD1, OD5), the decision and the target document win, and the row is annotated.
+
 ### 11.1 plan.md
 
 | Section | Change |
@@ -1029,12 +1082,12 @@ logins in job facts are pseudonymisable fields (hash + display copy in a project
 | §7.2 | Session states (`Closing` for draining); AcquirePolicy (I23); trust classification before acquire; desired/shortfall formulas (R3); initial statistics authoritative; unknown message types (R7); capture first (OD4). |
 | §7.3 | Classic mode as smoke-test only (OD18). |
 | new §7.5 | Runner registrations: lifecycle, deregister-before-stop, 422, reaper (dm §6.5, P10–P14). |
-| §8.1 | `VmProvider` gains `instance_id` in `VmObservation`, `inventory()` returns `Complete|Incomplete`; `start` returns a detached handle (OD1); image operations on a separate `ImageStore` port (pull, materialise, evict, list bases). |
+| §8.1 | `VmProvider` gains `instance_id` in `VmObservation`, `inventory()` returns `Complete|Incomplete`; `start` goes through the per-VM shim (OD1, ADR 0037); image operations on a separate `ImageStore` port (pull, materialise, evict, list bases). |
 | §8.3 | Guest identity per attempt (OD5); runner shelf life (OD12); launcher status for exit codes after restart. |
 | §8.4 | Ownership proof and instance id (OD6); image base names `mfb-*` and the DP base set; TART_HOME deployment marker. |
 | §9 | Resource vector, external consumption, per-scale-set deliverable carve-out (I24), quarantine shrink, macOS `min_prepared = 0` default. |
 | §10 | Startup sequence = P1 with the floor check; table rows of §11.3; safe mode = dm §5.3 + OD15; drain = P23, shutdown = P24, force separate; salvage plan (OD2). |
-| §11 | CLI: `mayfly host drain|resume`, `mayfly pool reset-breaker`, `mayfly quarantine list|inspect|resolve`, `mayfly attempt assert`, `mayfly image pull|withdraw`, `mayfly safe-mode enter`; config: `tier`, `min_prepared`, `max_prepared_age`, `quarantine_cap`, breaker N/W. |
+| §11 | CLI: `mayfly host drain|resume`, `mayfly pool reset-breaker`, `mayfly quarantine list|inspect|resolve`, ~~`mayfly attempt assert`~~ (dropped: OD10), `mayfly image pull|withdraw`, `mayfly safe-mode enter`; config: `tier`, `min_prepared`, `max_prepared_age`, `quarantine_cap`, breaker N/W. |
 | §12 | Metrics of dm §8; heartbeat; loopback metrics endpoint (OD17). |
 | §13 | Trust tiers, reachability matrix, residual risks (JIT visible to workflow code by design; hypervisor escape), operator authz (OD20). |
 
@@ -1049,7 +1102,7 @@ New tasks:
 | KER-10 | Operations aggregates: `HostRun`, `RecoveryPlan`, `QuarantineCase`, effective mode | KER-03, KER-07 | opus | I17, I31; mode precedence pure fn with exhaustive table; plan bindings refuse when stale |
 | KER-11 | Image catalog: `Image`, `ImagePlacement` | KER-03, KER-02 | sonnet | status monotonic; single pull; eviction refused while referenced |
 | CP-05 | Registration manager and reaper | KER-09, GH-03, CP-02 | opus | F06, F32 component tests; only journaled ids deleted; unrecognised reported |
-| CP-06 | Breaker, quarantine and Unknown-escalation policies; operator assertion | KER-10, CP-03 | sonnet | F36, F46; P19 thresholds on fake clock; assertion journaled with actor |
+| CP-06 | Breaker, quarantine and Unknown-escalation policies (no operator assertion: OD10) | KER-10, CP-03 | sonnet | F36, F46; P19 thresholds on fake clock; a quarantined VM is never deleted by a policy |
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | pin → placement on every host; withdraw refused while pinned |
 | DP-07 | Image cache directives and `ImageStore` port (pull, materialise, evict, base set) | DP-04 | opus | contract suite on fake and fake-tart; base deletion refused by identity |
 | OPS-05 | Watchdog, heartbeat metric, distinct exit codes | RT-02, RT-04 | sonnet | F40; lock-refused and watchdog codes distinct |
@@ -1067,7 +1120,7 @@ Changed tasks:
   or fresh verification is refused".
 - **KER-05:** `Host` = admission ledger with resource vector, pool terms, gate, leases (reserved/
   activated/quarantined), I24, I26, I27, I28; `Pool` with breaker; scheduling model adds
-  `externalConsumptionShrinksAdmissible`, `noGrantWhileClosed`, `quarantineCap`.
+  `externalConsumptionShrinksAdmissible`, `noGrantWhileClosed`, `quarantineHoldsCapacity` (OD9: no cap that deletes); capacity from data-plane reports (OD4).
 - **KER-06:** AcquirePolicy (I23), trust classification (I32), per-scale-set carve-out input,
   initial statistics authoritative, unknown message type; mutants add "acquire every offer".
 - **KER-07:** rows of §11.3; safe-mode and salvage classification; I25; depends on KER-09.
@@ -1077,15 +1130,15 @@ Changed tasks:
 - **CP-03:** reconciler = P5 with carve-out, shortfall, prepared policy, hysteresis; simulation
   adds I23, I24, I26, I27.
 - **CP-04:** startup = P1 with floor; `AdmissionOpened{recovery_done}`; F35, F42, F43.
-- **DP-04:** detached `tart run` (OD1), `InventoryIncomplete`, `HypervisorLimitHit`, instance id.
-- **DP-05:** `tart exec` + nonce challenge (OD5); SSH only with per-clone key; launcher status file.
+- **DP-04:** per-VM shim (OD1, ADR 0037), resource ledger and refusals (OD4), `InventoryIncomplete`, `HypervisorLimitHit`, instance id.
+- **DP-05:** `tart exec` + nonce challenge (OD5); lock-PID check, no SSH (ADR 0038); launcher status file.
 - **GH-01:** depends on GH-00; fake built from the capture.
 - **GH-04:** adds F41, F42, F44; acquire budget.
-- **GH-05:** scope reduced to smoke test (OD18).
+- **GH-05:** removed (OD18 decided: no classic mode, ADR 0028).
 - **RT-03:** CLI additions of §11.1 §11; peer-cred check; actor in every mutating command.
 - **OPS-02:** manifest fields (runner version, launcher hash), `image pull|withdraw` (with CP-07).
 
-Removed: none. KER-04..08 must list KER-09/KER-10 where they consume their events.
+Removed: GH-05 (OD18). KER-04..08 must list KER-09/KER-10 where they consume their events.
 
 ### 11.3 Recovery table rows to add (KER-07)
 
@@ -1104,7 +1157,7 @@ Removed: none. KER-04..08 must list KER-09/KER-10 where they consume their event
 
 ### 11.4 verification.md
 
-- **§6.1:** add I17–I32 (dm §6.0.1); amend I10 (assertion) and I14 (image revision). Model rows:
+- **§6.1:** add I17–I32 (dm §6.0.1); I10 stays strict (OD10) and I14 reads (image revision). Model rows:
   lifecycle + I22 (attempt half), I30; scheduling + I24, I26, I27, I28; recovery + I17, I25, I29,
   I31; scaleset + I23, I32; link + I18 (fence), I29 (held kinds); **new model**
   `formal/registration.qnt` (KER-09): I19, I20, I21, I22 (registration half), model-local
@@ -1127,7 +1180,7 @@ Removed: none. KER-04..08 must list KER-09/KER-10 where they consume their event
 | F43 | Zombie writer of an older run | replay a delayed command with run epoch e−1 | every aggregate refuses it; nothing changes | I18 | ● |
 | F44 | Unknown message type | fake-github injects a new type | recorded and acked; degraded past threshold; never safe mode | I12 | |
 | F45 | Recovery plan applied after the world moved | inventory changes between dry run and apply | `RecoveryPlanRefused{stale}`; no action executed | I31 | |
-| F46 | Hostile workflow wedges its VM repeatedly | fake-tart stop/delete hang per attempt | quarantine cap reached; pool tripped; page; capacity of other pools intact | I28 | |
+| F46 | Hostile workflow wedges its VM repeatedly | fake-tart stop/delete hang per attempt | quarantined VMs kept (never deleted); the pool's capacity consumed, it admits nothing; page; capacity of other pools intact | I28 | |
 
 - Core gate becomes F01–F16, F19, F20, F24, F31, F32–F36, F39, F41–F43.
 - **§9 mutants:** "acquire every offer", "mint before fresh verification", "stop before deregister",

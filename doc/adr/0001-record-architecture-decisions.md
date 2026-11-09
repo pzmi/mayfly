@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09); amended 2026-11-09.
 
 ## Context
 
@@ -24,10 +24,10 @@ same commit. A decision is never edited away: a reversal is a new ADR and the ol
 `Superseded by NNNN`. A later ADR that only refines an earlier one is named in the earlier one's
 Status (`Proposed (amended by NNNN)`) with a note in its text.
 
-Status is `Accepted` for an owner decision and `Proposed` for a planner default that the owner may
+Status is `Accepted` for an owner decision *(statuses extended by the amendment below)* and `Proposed` for a planner default that the owner may
 override; tasks follow a Proposed decision as written until then, and only the owner flips one to
 Accepted. `doc/tasks.md` cites decision D*n* as ADR *n*+1, so ADR 0001 is this record and
-ADRs 0002-0016 are D1-D15.
+ADRs 0002-0016 are D1-D15 *(no new D-ids since the amendment below)*.
 
 ## Consequences
 
@@ -36,3 +36,22 @@ drift from the files because a stage checks it. The cost is one small file per d
 discipline to write it in the commit that makes the decision. FND-03 writes the records for
 D1-D15; ADRs 0017 and later come from the tasks that decided them. Enforced by `cargo xtask adr
 index` in the `docs` stage; the practice is described in foundation section 10.3.
+
+## Amended 2026-11-09 (owner): records, not rules; dated amendments; Rejected; ids
+
+- **An ADR is a decision record, not a rule.** It records a decision in its context at the time.
+  When the context changes the decision may change, deliberately and on the record; an ADR is
+  never cited as a reason not to do the better thing, and code never drifts from one silently.
+  The rules, fixtures and tests that pin an ADR change in the same commit as the ADR.
+- **Dated amendments in place.** A refinement that keeps the decision (a bound, a name, a scope)
+  is appended as `## Amended YYYY-MM-DD (owner|planner): <what>` with its reason; the original
+  Context and Decision stay, and a replaced passage gets an italic pointer. A refinement by a
+  later record adds `amended by NNNN` to this record's status. A reversal is still a superseding
+  ADR. An amendment of an Accepted record by anyone but the owner is marked `amendment proposed`
+  until the owner accepts it.
+- **Statuses** carry the decider and date: `Accepted (owner, YYYY-MM-DD)`, and a new
+  `Rejected (owner, YYYY-MM-DD)` for a considered and declined option. The `docs` stage's parser
+  accepts `Rejected` from FND-07 on; until then no record uses it.
+- **Ids.** The ADR number is the decision id. D1-D15 stay as aliases (D*n* = ADR *n*+1); no new
+  D-id is minted. Owner decisions of `doc/domain-model.md` (OD*n*) and `doc/event-store.md` (E*n*)
+  name the ADR that records them once decided.

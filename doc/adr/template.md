@@ -16,4 +16,9 @@ What we will do, stated actively.
 
 ## Consequences
 
-What becomes easier or harder; which tasks implement or enforce it.
+What becomes easier or harder; which tasks implement it, and which rules, fixtures or tests pin
+it.
+
+## Alternatives considered
+
+Optional. Each option in a line or two, and why not.

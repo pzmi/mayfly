@@ -33,7 +33,7 @@ points here.
 5. **Races are found, never retried.** nextest runs with zero retries. A failure that passes on
    a rerun is a race: repeat it, read its trace, name the race, then add a test that forces the
    interleaving every time (barriers, scripted fakes, fake clock), never one that relies on load.
-6. **Every invariant names its pins.** Each of I01–I16 lists the model, tests, fault scenarios
+6. **Every invariant names its pins.** Each of I01–I33 lists the model, tests, fault scenarios
    and mutants that would fail if it broke (§11.2). A claim without a pin is a hope.
 
 ---
@@ -157,15 +157,18 @@ production is a bug in the fake.
 
 | Port | Implementations run | Broken implementations that must fail | Core cases | Task |
 |:--|:--|:--|:--|:--|
-| `Journal` | `MemoryJournal`; SQLite on a fresh file; the same file **reopened**; SQLite with an **injected crash** (connection dropped) after each statement of a unit of work | `LooseRevisionJournal` (ignores expected revision), `PartialCommitJournal` (writes half a unit), `ForgetfulReceiptsJournal` (loses receipts on reopen), `LeakyInboxJournal` (reprocesses a redelivery), `RacyHeadJournal` (checks the head apart from advancing it), `GlobalWriterJournal` (one writer across all streams) | expected-revision conflict without mutation; duplicate event id; all-or-nothing unit; receipt replay returns the original result; inbox dedupe; outbox status transitions; racing writers on one stream (exactly one wins); independent streams; per-stream reads, the event-id registry and the kind manifest (no global order, ADR 0021); nothing partial visible after a crash | ES-01, ES-02 |
-| Projections | memory and SQLite | `ClockReadingProjection`, `OrderDependentProjection` | rebuild from sequence 0 equals live (I16); spec bump rebuilds; watermark catch-up | ES-04 |
+| `Journal` | the modes of event-store §7.1: memory; SQLite fresh, reopened, two-connection, two-handle, crash-injected; PostgreSQL in Docker fresh, two-pool, crash-injected (ADR 0035) | event-store §7.6: `LooseRevisionJournal`, `PartialCommitJournal`, `ForgetfulReceiptsJournal`, `IntentBlindReceipts`, `ForgetfulInbox`, `CachedHeadJournal`, `GlobalLockJournal`, `LateIdCheckJournal` | JC-01..JC-28 (event-store §7.1): expected-revision conflict without mutation; duplicate event id; all-or-nothing unit; receipt replay; refusal receipts bound to their revision (E3); intent reuse refused; inbox dedupe; racing writers on one stream (exactly one wins); independent streams; read sets; epochs; per-stream reads, the event-id registry and the kind manifest (no global order); nothing partial visible after a crash; `OutcomeUnknown` only at commit | ES-01, ES-01F, ES-02, ES-09 |
+| Projections | memory, SQLite, PostgreSQL | `ClockReadingProjection`, `OrderDependentProjection` | PC-01..PC-09: rebuild by stream enumeration equals live (I16); version bump (either direction) rebuilds; inline rows commit with their events; stream locality; online rebuild with dual writes and the cutover fence (E9) | ES-04, ES-12 |
+| `DeliveryLedger` | memory, SQLite (all modes), PostgreSQL | `UnfencedLedger`, `ClearAllMarksLedger`, `HeadTrustingWorker`, `SkippingLedger` | DC-01..DC-25: marks per registered consumer, revision-ordered delivery, fenced leases, no skip, redelivery after a crash | ES-05, ES-09 |
+| `SnapshotStore` | memory, SQLite, PostgreSQL | `BlindSnapshotUpsert`, `ResealingSnapshots` | SC-01..SC-11: snapshot plus tail equals whole fold; stale, corrupt or foreign snapshots ignored | ES-08, ES-09 |
 | Link (`DirectiveSink`/`ObservationSink` pairs) | `inproc`; `uds` | `SilentDropLink` (loses a message and reports success), `NoVersionCheckLink` | handshake; unsupported major refused; at-least-once; no ordering assumed; bounded backpressure; close semantics; every message survives a serde round trip | DP-02, LNK-01 |
-| `VmProvider` | `FakeVmProvider` (testkit); Tart adapter over `mayfly-fake-tart`; Tart adapter over real Tart (hardware lane) | `PrefixDeleteProvider` (deletes by prefix), `AmbiguousAsDefiniteProvider` (timeout reported as definite) | clone/start/stop/delete idempotent by name; delete of a base image or foreign name refused; hang → deadline → `Ambiguous`, then re-inspect; inventory reports exactly what exists | DP-01, DP-04, HW-01 |
-| `GuestTransport` | fake; `tart exec` over fake-tart; SSH and `tart exec` on real Tart (hardware lane) | `ArgvSecretTransport` (passes the JIT config in argv) | readiness probe; launcher receives the secret on stdin only; bounded, redacted diagnostics | DP-05 |
+| `VmProvider` | `FakeVmProvider` (data-plane kit); Tart adapter over `mayfly-fake-tart`; Tart adapter over real Tart (hardware lane) | `PrefixDeleteProvider` (deletes by prefix), `AmbiguousAsDefiniteProvider` (timeout reported as definite), `MacBlindProvider` (deletes without re-reading the instance id), `EmptyInventoryProvider` (reads a failed listing as empty) | clone/start/stop/delete idempotent by name; clone sets a random MAC and reports it; delete of a base image, a foreign name or a mismatched instance id refused; hang → deadline → `Ambiguous`, then re-inspect; inventory reports exactly what exists or `Incomplete`; start goes through the shim and a daemon restart re-adopts it; stop only by `tart stop` | DP-01, DP-04, HW-01 |
+| `ImageStore` | fake; Tart adapter over fake-tart; real Tart (hardware lane) | `TagPullStore` (pulls by tag), `BaseEvictingStore` (evicts a referenced base) | pull by digest only, re-hash; materialise a base named by digest and runner version; evict only unreferenced bases; base set listed | DP-07 |
+| `GuestTransport` | fake; `tart exec` over fake-tart; `tart exec` on real Tart (hardware lane) | `ArgvSecretTransport` (passes the JIT config in argv), `UncheckedLockTransport` (skips the lock-PID check) | nonce verification; launcher receives the secret on stdin only (`tart exec -i`), after the lock-PID = shim-child and instance-id checks; bounded, redacted diagnostics; no SSH (ADR 0038) | DP-05 |
 | `ScaleSetApi` | `FakeScaleSetApi` (testkit); GitHub adapter against `mayfly-fake-github`; the recorded-fixture replayer; live (hardware lane) | `NoCursorApi` (omits `lastMessageId`), `RetryAfterIgnoringApi` | session open/refresh/expiry; redelivery until delete; 50-message cap; idempotent acquire; 401/403/429 + Retry-After; ack after a lost response | GH-03, HW-02 |
-| `RunnerRegistry` | fake; classic adapter against fake-github; live | `NameGuessingRegistry` (deletes by name pattern) | token fetched after readiness; lookup and delete by recorded id only | GH-05 |
-| `SecretStore` | memory; file store; Keychain (macOS, hardware lane) | `PermissiveFileStore` (accepts `0644`) | refuses wrong permissions; never returns a secret through `Debug` | RT-01 |
-| `HostProbe` | fake; Linux; macOS (CI `macos` job) | `CachedProbe` (returns a stale value) | disk and memory reported for the provider's home; low-water mark visible | DP-06 |
+| `RunnerRegistry` | fake; GitHub adapter against fake-github; live | `NameGuessingRegistry` (deletes by name pattern) | list by runner name, get and delete by recorded id only; 204/404/422 classified; no classic registration token (ADR 0028) | CP-05, GH-03 |
+| `SecretProvider` | memory; `file:`; `env:`; `exec:` (over a test script); `keychain:` (macOS, hardware lane) | `PermissiveFileProvider` (accepts `0644` or another owner), `ShellExecProvider` (runs through a shell) | resolves a reference URI to `Secret<T>`; refuses wrong permissions, symlinks, relative paths, unset variables, non-zero exits and timeouts; never returns a secret through `Debug`; re-resolves on refresh (ADR 0033) | SEC-02 |
+| `HostProbe` | fake; Linux; macOS (CI `macos` job) | `CachedProbe` (returns a stale value) | disk and memory reported for the provider's home; low-water mark visible; feeds the data plane's resource ledger (ADR 0024) | DP-06 |
 
 ---
 
@@ -200,14 +203,37 @@ Invariant ids (plan §1, §6, §8–§10):
 | I14 | One VM serves at most one job and one image generation. |
 | I15 | The guest cannot reach host state or keys. |
 | I16 | Journal replay gives identical projections. |
+| I17 | Run epochs strictly increase across restarts, DP reconnects and journal restores; the external floor is written before an epoch is used; a journal below the floor puts the host in safe mode (ADR 0026). |
+| I18 | An aggregate refuses a command whose `run_epoch` is lower than the highest it has accepted. |
+| I19 | A registration is deregistered only by a journaled `runner_id`; a runner name is issued at most once, ever. |
+| I20 | Every issued registration reaches a terminal state or is on the reaper's list (bounded liveness). |
+| I21 | A registered-idle runner is deregistered before its VM is stopped; a busy refusal (422) cancels that retirement. |
+| I22 | A JIT config is minted only after an activation grant and a guest verification of this attempt in the current epoch, delivered at most once; a delivery `Unknown` or orphaned handle means presumed leaked and the attempt never serves a job. |
+| I23 | Acquisition stops when assigned ≥ deliverable. |
+| I24 | Σ `reported_max` over the scale sets a host serves ≤ that host's deliverable (refines I07). |
+| I25 | An incomplete inventory is never read as the absence of any VM. |
+| I26 | No activation grant while host or pool terms are closed (refines I08). |
+| I27 | Stage failures per (pool, digest) are bounded per window; at N the breaker trips until an operator resets it. |
+| I28 | A quarantined VM is never deleted automatically; its lease keeps counting until an operator resolves the case; a pool whose capacity is consumed admits nothing (ADR 0025). |
+| I29 | In safe mode no clone, start, stop, delete, pull or evict executes, and no secret is minted or taken. |
+| I30 | Guest-originated data never decides ownership or a job's result and never reaches a VM name, path, argv or shell. |
+| I31 | A recovery plan applies only against the journal heads, inventory digest and epoch it was drawn from; each action is intent-then-outcome. |
+| I32 | A pool serves one trust tier; an offer is acquired only by a pool whose tier admits it (v0.x: trusted only). |
+| I33 | The data plane never executes a create, start, pull or materialise directive that does not fit its own resource ledger (ADR 0024). |
+
+Definitions and the aggregate that protects each: `doc/domain-model.md` §6.0.1. I10 is strict:
+`Unknown` leaves only on an observation, never on a timeout or an operator assertion (ADR 0025).
+I14 reads "image revision" for "image generation".
 
 | Model | File | Governs | Invariants | Model-local invariants | Task |
 |:--|:--|:--|:--|:--|:--|
-| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and `AttemptSaga` (plan §6) | I06, I10, I13, I14 | `busyNeverWarm`, `quarantineTerminal`, `retryKeepsNameAndGeneration` | KER-04 |
-| scheduling | `formal/scheduling.qnt` | `Host`/`Pool` aggregates, capacity policy (plan §9) | I01, I02, I03, I07, I08, I13 | `generationsMonotonic`, `macosGuestsAtMostTwo` | KER-05 |
-| recovery | `formal/recovery.qnt` | startup use case and decision table (plan §10), crash at every await | I04, I05, I09, I10, I11, I12 | `safeModeNoDestructiveAction`, `deleteNeedsProof` | KER-07 |
-| scaleset | `formal/scaleset.qnt` | `ScaleSet` aggregate, listener, demand (plan §7.2) | I07, I12, I13 | `noDoubleReservationPerRequest`, `desiredFromLatestStatistics` | KER-06 |
-| link | `formal/link.qnt` | CP↔DP protocol: at-least-once, duplicates, reordering, fencing (plan §3.2) | I09 | `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened` | KER-02 |
+| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and saga (plan §6, dm §6.4) | I06, I10, I13, I14, I22 (attempt half), I30 | `busyNeverWarm`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | KER-04 |
+| scheduling | `formal/scheduling.qnt` | `Host`/`Pool` aggregates, capacity policy, the data plane's resource ledger (plan §9) | I01, I02, I03, I07, I08, I13, I24, I26, I27, I28, I33 | `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `noGrantWhileClosed`, `quarantineHoldsCapacity`, `allocationWithinReport` | KER-05 |
+| recovery | `formal/recovery.qnt` | startup use case and decision table (plan §10), crash at every await | I04, I05, I09, I10, I11, I12, I17, I25, I29, I31 | `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion` | KER-07 |
+| scaleset | `formal/scaleset.qnt` | `ScaleSet` aggregate, listener, demand (plan §7.2) | I07, I12, I13, I23, I32 | `noDoubleReservationPerRequest`, `desiredFromLatestStatistics` | KER-06 |
+| link | `formal/link.qnt` | CP↔DP protocol: at-least-once, duplicates, reordering, fencing, held kinds in safe mode (plan §3.2) | I09, I18, I29 | `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened` | KER-02 |
+| registration | `formal/registration.qnt` | `RunnerRegistration` aggregate, reaper, deregister-before-stop, 422 race, issue unknown | I19, I20, I21, I22 (registration half) | `noRemintAfterUnknown`, `deregisterBeforeStop` | KER-09 |
+| event_store | `formal/event_store.qnt` | the journal, receipts, inbox, delivery, snapshots, online rebuild (event-store §7.3) | I16 via ES-I11; ES-I1..ES-I8, ES-I12, ES-I14..ES-I16 | the ES invariants | ES-06 |
 
 I15 is not model-checkable: it is pinned by security tests (SEC-01: no host path, socket or key
 reachable from the guest; secrets only over stdin) and the redaction tests. I16 is pinned by the
@@ -275,8 +301,8 @@ must be reported as violated. The lane runs nightly and on any change under `for
 | `MemoryJournal` | `Journal` | full transactional semantics; passes the journal contract |
 | `FakeVmProvider` | `VmProvider` | scripted faults per call: delay, hang, fail before or after effect, ambiguous |
 | `FakeGuestTransport`, `FakeHostProbe` | `GuestTransport`, `HostProbe` | scripted readiness and resources |
-| `FakeScaleSetApi`, `FakeRunnerRegistry` | `ScaleSetApi`, `RunnerRegistry` | scripted jobs, statistics, redelivery, 429 |
-| `MemorySecretStore` | `SecretStore` | holds `Secret<T>` only |
+| `FakeScaleSetApi`, `FakeRunnerRegistry` | `ScaleSetApi`, `RunnerRegistry` | scripted jobs, statistics, redelivery, 409, 422, 429 |
+| `MemorySecretProvider` | `SecretProvider` | holds `Secret<T>` only |
 | `inproc` link pair | link ports | the production transport, used directly |
 
 Every fake runs its port's contract suite (§5). A fake grows a capability only together with the
@@ -284,8 +310,9 @@ contract case that pins it.
 
 ### 7.2 `mayfly-fake-tart`
 
-A `tart`-compatible binary (`--version`, `clone`, `run`, `ip`, `list --format json`, `stop`,
-`delete`, `exec`) over a state directory named by `TART_HOME`. Each invocation reads an optional
+A `tart`-compatible binary (`--version`, `clone`, `set --random-mac`, `get`, `run` (holding a
+lock on the VM's `config.json` while it runs), `ip`, `list --format json`, `stop`, `delete`,
+`exec [-i]`, `pull`) over a state directory named by `TART_HOME`. Each invocation reads an optional
 **fault file** in that directory: rules matched by command and VM name with an occurrence
 selector, each one of `delay_ms`, `hang`, `fail_before_effect`, `fail_after_effect`,
 `crash_after_effect` (exit by signal after the state change), or `exit_code`. It records each
@@ -300,7 +327,8 @@ chooses. Its output formats follow the real Tart versions pinned in the Tart JSO
 
 An HTTP server implementing the scale-set endpoints (scale set CRUD, session create, refresh and
 delete, long-poll messages with redelivery until delete, the 50-message cap, statistics, acquire,
-JIT config) and the REST runner endpoints (registration token, list and delete runners). Fault
+JIT config) and the REST runner endpoints (list, get and delete runners; no registration token,
+ADR 0028), built from the GH-00 capture. Fault
 knobs per endpoint: status override (401, 403, 429 with `Retry-After`, 5xx), dropped response
 after the effect, session expiry, latency. A control API under a reserved prefix scripts the job
 queue (queue, cancel, reassign) and dumps its state as JSON for the fault lab's observer. Wire
@@ -322,7 +350,7 @@ the other.
 ### 8.1 Claims and non-claims
 
 **Claims.** Under the faults of §8.4, at every observed cut of a run, the safety invariants I01–I10,
-I12–I14 hold over what the controller observed (fake-tart state, fake-github state, `mayfly status
+I12–I14 and the observable ones of I17–I33 (I17, I18, I19, I21–I25, I27–I29, I32, I33) hold over what the controller observed (fake-tart state, fake-github state, `mayfly status
 --json`, the journal read with the lab's own SQL), and after the faults heal, I11 holds within the
 scenario's bound: the system converges to a classified inventory without unbounded replacements.
 
@@ -393,12 +421,12 @@ pins the same reason, so the lab is never the only evidence.
 | F04 | Kill while VM starting | SIGKILL during `StartVm` | adopted or stopped and deleted with proof; slot never double-booked | I02, I03 | ● | recovery table |
 | F05 | Guest never reachable | fake-tart `exec` hangs | probe deadline → backoff → budget → quarantine or delete; slot held until delete observed | I03, I11 | ● | lifecycle conformance |
 | F06 | JIT accepted, response dropped | fake-github drop-after-effect on JIT | attempt retired; new attempt with new generation; stale runner removed by recorded id | I06, I14 | ● | GH-03 contract |
-| F07 | Registration succeeds, reply lost (classic) | fake-github drop-after-effect | resolved by lookup of the recorded name; no second runner in use | I10 | ● | GH-05 contract |
+| F07 | JIT registration issued, reply lost | fake-github drop-after-effect on JIT generation | `RegistrationIssueUnknown`; the reaper finds it by name and deregisters it by id; the attempt retired, never relaunched; no second runner in use | I10, I19, I20 | ● | CP-05 component |
 | F08 | Disconnect during poll | fake-github drops the long-poll | session resumes; no message lost; desired from latest statistics | I12 | ● | GH-04 component |
 | F09 | `DeleteMessage` response dropped after ack | drop-after-effect on delete | ack retried idempotently; redelivery deduped; no double reservation | I12, I13 | ● | GH-04 component |
 | F10 | Duplicate and out-of-order lifecycle messages | fake-github redelivers and reorders | inbox dedupes; stale ignored; no double provision | I13, I14 | ● | GH-04 component |
 | F11 | 100 queued jobs, 2 slots, > 50 messages | none (load) | never more than 2 VMs; all jobs complete; demand never from message count | I03, I07 | ● | E2E-02 |
-| F12 | Idle runner, then cancel or reassign | control API cancel/reassign | warm runner retired or serves the reassigned job; never two jobs | I06, I14 | ● | E2E-02 |
+| F12 | Listening runner, then cancel or reassign | control API cancel/reassign | runner deregistered then retired, or serves the reassigned job; never two jobs | I06, I14, I21 | ● | E2E-02 |
 | F13 | SIGKILL daemon while a job runs | SIGKILL during `Busy` | restart adopts the busy VM; **never deletes it**; job completes; then cleanup | I04, I11 | ● | recovery table |
 | F14 | Guest dies during job | fake-tart kills the guest | exit observed; attempt finished; VM deleted; slot released; never reused | I06, I14 | ● | lifecycle conformance |
 | F15 | Delete finishes, reply missed | `crash_after_effect` on delete | `Unknown` until inventory shows absence; slot released once | I10 | ● | lifecycle conformance |
@@ -416,10 +444,27 @@ pins the same reason, so the lab is never the only evidence.
 | F27 | Timeout just as `AcquireJobs` succeeded | drop-after-effect on acquire | idempotent re-acquire; job served once | I13 | | GH-04 component |
 | F28 | Invalid guest bootstrap secret | launcher rejects the JIT config | definite failure; attempt retired; secret absent from all records | I14 (I15 by SEC-01) | | DP-05 integration |
 | F29 | Stop while exporting logs | SIGTERM during diagnostics export | shutdown within its deadline; attempt left recoverable; deletion completes after restart | I11 | | RT-02 integration |
-| F30 | Provider recovers after all jobs complete | fake-tart faults cleared at the end | converges to `min_warm` and nothing more | I07, I11 | | CP-03 simulation |
+| F30 | Provider recovers after all jobs complete | fake-tart faults cleared at the end | converges to `min_prepared` and nothing more | I07, I11 | | CP-03 simulation |
 | F31 | Kill the data-plane process alone (UDS split) | SIGKILL `mayflyd --role data` | CP marks in-flight directives `Unknown`, mints epoch N+1 on reconnect, reconciles by inventory | I09, I10 | ● | LNK-01 e2e |
+| F32 | Crash after JIT issued, before handle issue | SIGKILL after `RegistrationIssued` | `JitHandleOrphaned` at restart; registration deregistered by id; new attempt, new name | I19, I20, I22 | ● | CP-05 component |
+| F33 | Cancel while runner registered-idle; job lands during deregistration | fake-github 422 on delete | retirement withdrawn; job served; no VM stopped before the answer | I06, I21 | ● | KER-09 model |
+| F34 | `tart list` unparseable / Tart upgraded mid-run | fake-tart garbage output, version change | `InventoryIncomplete`; no slot released; admission closed until re-probe | I25 | ● | KER-08 unit |
+| F35 | Journal restored from an older backup | replace state dir with an older copy | epoch below floor → safe mode; no destructive action | I17, I29 | ● | CP-04 component |
+| F36 | Broken image: every guest fails to verify | fake-tart exec hangs for one digest | ≤ N attempts per window; breaker trips; pool terms closed; other pools unaffected | I27 | ● | CP-06 component |
+| F37 | Foreign macOS guest running | pre-seed a running foreign macOS VM | the capacity report shows one macOS slot; a third start never executed (refused by the data plane if the CP over-allocates) | I03, I33 | | KER-05 property |
+| F38 | Host sleep/wake with many deadlines | clock jump during provisioning | no mass quarantine; re-observe; prepared VMs older than the gap retired; session reopened | I10, I09 | | CP-03 component |
+| F39 | Wrong guest answers (IP reuse / sibling clone / lock PID not the shim's child) | fake-tart routes exec to another VM or reports a foreign lock PID | challenge or lock check fails; no JIT minted or delivered; quarantine `guest_identity_refused` | I22, I30 | ● | DP-05 contract |
+| F40 | Daemon wedged (store writer stalls) | fault knob stalls the writer | watchdog exit with its code; restart recovers; nothing duplicated | I11, I13 | | OPS-05 integration |
+| F41 | 100 offers on 2 slots in one batch | none (load) | acquired ≤ deliverable at every point; others declined `no_capacity` | I23, I07 | ● | KER-06 unit |
+| F42 | Restart within the session TTL | SIGKILL, fake-github keeps the old session | 409 → backoff; reopen; desired from initial statistics; no job lost or double-served | I12, I13 | ● | GH-04 component |
+| F43 | Zombie writer of an older run | replay a delayed command with run epoch e−1 | every aggregate refuses it; nothing changes | I18 | ● | KER-03 determinism |
+| F44 | Unknown message type | fake-github injects a new type | recorded and acked; degraded past threshold; never safe mode | I12 | | GH-04 component |
+| F45 | Recovery plan applied after the world moved | inventory changes between dry run and apply | `RecoveryPlanRefused{stale}`; no action executed | I31 | | KER-10 unit |
+| F46 | Hostile workflow wedges its VM repeatedly | fake-tart stop/delete hang per attempt | quarantined VMs kept, never deleted; the pool's capacity consumed, it admits nothing; page; other pools intact | I28 | | CP-06 component |
+| F47 | Provider cannot answer for a long time | fake-tart `list` hangs or fails after a lost delete reply | effect stays `Unknown`, reported as a provider limitation; slot held; nothing asserted or released | I10, I25 | ● | CP-06 component |
+| F48 | Daemon killed and upgraded while VMs run | SIGKILL `mayflyd`, restart a newer binary | shims keep VMs running; re-adopted from shim locks and `exit.json`; a Busy job completes | I04, I11 | ● | DP-04 integration |
 
-Core gate: F01–F16, F19, F20, F24, F31. Every scenario declares the faults it requires; a
+Core gate: F01–F16, F19, F20, F24, F31–F36, F39, F41–F43, F47, F48. Every scenario declares the faults it requires; a
 required fault that hit no operation makes the run `INCONCLUSIVE`.
 
 ### 8.5 Audit and verdicts
@@ -471,15 +516,15 @@ an unnamed test is needed to kill it.
 |:--|:--|:--|:--|
 | 1 | Remove the slot capacity check | capacity policy | unit property "admitted ≤ every limit" (KER-05); scheduling conformance (I03); F11 |
 | 2 | Reuse a generation | `Host` aggregate | unit "generations strictly increase" (KER-05); scheduling conformance (I01, I02) |
-| 3 | Treat a timeout as definite failure | executor / outbox relay | component "lost reply → `Unknown`" (CP-02); lifecycle conformance (I10); F03 |
+| 3 | Treat a timeout as definite failure | executor / directive relay | component "lost reply → `Unknown`" (CP-02); lifecycle conformance (I10); F03 |
 | 4 | Ack before journal commit | listener | component ack-after-record (GH-04); scaleset conformance (I12); F09 |
 | 5 | Count `JobAssigned` messages for demand | demand | unit (KER-06); F11 |
 | 6 | Add `TotalRunningJobs` to demand | demand | unit (KER-06) |
 | 7 | Ignore redelivery dedupe | inbox | journal contract "inbox dedupe" (ES-01); component F10 (GH-04) |
 | 8 | Prefix-only cleanup | recovery / ownership | unit recovery table "unknown `mf-*` never deleted" (KER-07); VmProvider contract; F24 |
-| 9 | Replay an outbox effect without an inventory check | startup / relay | component recovery rows (CP-04); recovery conformance (I13); F02 |
+| 9 | Re-send a directive without an inventory check | startup / relay | component recovery rows (CP-04); recovery conformance (I13); F02 |
 | 10 | Lose receipts on reopen | SQLite journal | journal contract, reopened mode (ES-02) |
-| 11 | Count a warm guest as a registered runner | demand | unit (KER-06); scaleset conformance (I07) |
+| 11 | Count a Prepared VM as a registered runner | demand | unit (KER-06); scaleset conformance (I07) |
 | 12 | Delete a busy VM during drain | reconciler | component drain test (CP-03); scheduling conformance (I08, I14); F13 |
 | 13 | Accept an old epoch in the data plane | data-plane domain | unit fencing matrix (KER-08); link conformance (I09); F20 |
 | 14 | `Unknown` → `Deleted` without evidence | `Attempt` aggregate | exhaustive matrix (KER-04); lifecycle conformance (I10); F15 |
@@ -487,6 +532,15 @@ an unnamed test is needed to kill it.
 | 16 | Secret in a log field | any log path | redaction test feeding secrets through every path (RT-04, SEC-01) |
 | 17 | Data plane executes a directive twice on a duplicate `directive_id` | data-plane domain / executor | unit idempotency table (KER-08); component duplicate directive (DP-01); link conformance |
 | 18 | Projection rebuild differs from live | projections | projection contract "rebuild equals live" (ES-04, I16); F21 |
+| 19 | Acquire every offer | `ScaleSet` acquire policy | unit (KER-06); scaleset conformance (I23); F41 |
+| 20 | Mint a JIT before a fresh verification | activation manager | lifecycle matrix (KER-04, I22); F39 |
+| 21 | Stop before deregister | retirement policy | registration model and unit (KER-09, I21); F33 |
+| 22 | Release a slot on an incomplete inventory | inbox / recovery | unit (KER-08, KER-07, I25); F34 |
+| 23 | Accept an older run epoch | any aggregate | determinism cases (KER-03, I18); F43 |
+| 24 | Execute a directive that does not fit the resource ledger | data-plane executor | unit (KER-08, I33); scheduling conformance; F37 |
+| 25 | Delete without re-reading the instance id | data-plane executor | `VmProvider` contract (`MacBlindProvider`); unit (KER-08); F39 |
+| 26 | Delete a quarantined VM on a timer or a cap | quarantine policy | component (CP-06, I28); F46 |
+| 27 | Resolve `Unknown` without an observation | `Attempt` aggregate / P19 | matrix (KER-04, I10); F47 |
 
 Each core fault-lab scenario additionally has a mutant (from this table or a lab-only one in
 `tools/faultlab/mutants/`) that turns it `FAIL` (VER-04).
@@ -505,7 +559,7 @@ triaged before the next ⛳ checkpoint.
 | Lane | Trigger | Runs | Budget |
 |:--|:--|:--|:--|
 | **quick** | while working | fmt-check, architecture, clippy, unit tests | < 3 min |
-| **check / per push** | every commit to `main`, every pull request, `land` | static, architecture, unit, golden, property (1024 cases), contract (memory, SQLite fresh/reopened/crash; link inproc/uds; VmProvider fake and fake-tart; ScaleSetApi fake-github and recordings), component, integration, e2e, conformance (committed traces + 30 generated per model, negative controls, field sensitivity), coverage, changed lines, security; `macos` native job; `cross` | < 25 min wall clock in CI |
+| **check / per push** | every commit to `main`, every pull request, `land` | static, architecture, unit, golden, property (1024 cases), contract (memory, SQLite in its five modes, PostgreSQL in Docker (`contract-postgres`, ADR 0035); link inproc/uds; VmProvider fake and fake-tart; ScaleSetApi fake-github and recordings), component, integration, e2e, conformance (committed traces + 30 generated per model, negative controls, field sensitivity), coverage, changed lines, security; `macos` native job; `cross` | < 25 min wall clock in CI |
 | **nightly** | schedule | fresh-seed conformance (more traces, longer), Apalache `formal-verify`, `mutants-curated`, `cargo-mutants` in-diff, fuzz per target (time-boxed) | < 3 h |
 | **weekly** | schedule | fault lab core then extended suite, `cargo-mutants` full (sharded), security over full history | < 6 h |
 | **release** | tag | full `check`, fault lab core, `mutants-curated`, `formal-verify`, `release-check` per target, SBOM | must be green on the tagged commit |
@@ -559,7 +613,24 @@ fail.
 | I13 | lifecycle, scheduling, scaleset | same name and generation on retry (CP-02) | F01–F03, F09, F27 | 7, 9 |
 | I14 | lifecycle | matrix (KER-04); duplicate directive (DP-01) | F12, F14, F23 | 12, 17 |
 | I15 | — | SEC-01 security tests; redaction (RT-04); fake-tart invocation records (DP-05) | F28 (secret absence) | 16 |
-| I16 | — | projection contract and replay property (ES-04) | F21 | 18 |
+| I16 | event_store | projection contract and replay property (ES-04); online rebuild PC-07..PC-09 (ES-12) | F21 | 18 |
+| I17 | recovery | floor check (CP-04); `HostRun` (KER-10) | F35 | — |
+| I18 | link | run-epoch determinism cases (KER-03) | F43 | 23 |
+| I19 | registration | `RunnerRegistration` unit (KER-09); `RunnerRegistry` contract | F07, F32 | — |
+| I20 | registration | reaper component (CP-05) | F07, F32 | — |
+| I21 | registration | 422 race (KER-09) | F12, F33 | 21 |
+| I22 | lifecycle, registration | activation matrix (KER-04); `GuestTransport` contract (DP-05) | F32, F39 | 20 |
+| I23 | scaleset | `PlanAcquire` unit (KER-06) | F41 | 19 |
+| I24 | scheduling | carve-out property (KER-05) | F11, F41 | — |
+| I25 | recovery | inventory `Incomplete` (KER-08, KER-07) | F34, F47 | 22 |
+| I26 | scheduling | grant refusal table (KER-05) | F23 | 12 |
+| I27 | scheduling | breaker unit (KER-05, CP-06) | F36 | — |
+| I28 | scheduling | quarantine policy component (CP-06) | F46 | 26 |
+| I29 | link, recovery | held kinds (KER-02, KER-08) | F22, F35 | — |
+| I30 | lifecycle | guest-claim parsing (DP-05, KER-04) | F39 | — |
+| I31 | recovery | plan bindings (KER-10) | F45 | — |
+| I32 | scaleset | trust classification (KER-06) | — | 19 |
+| I33 | scheduling | resource ledger refusals (KER-08, DP-01) | F37 | 24 |
 
 ### 11.3 Verification status
 

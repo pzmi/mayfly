@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Proposed (amended by 0033, 0034)
 
 ## Context
 
@@ -28,3 +28,6 @@ secret can appear in the journal, so replay, backups and the fault lab read it f
 type that holds a secret must use `Secret<T>`, and the secret scan (`gitleaks`, FND-04) covers
 the repository. Implemented by KER-01/KER-02 (the type and handle) and enforced by the
 architecture and redaction tests.
+
+Amended by ADR 0033 (secrets come from providers selected by URI) and ADR 0034 (the
+`SecretHandle` travels in a `DirectiveIssued` event; there is no outbox table).

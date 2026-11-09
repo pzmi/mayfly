@@ -1,6 +1,7 @@
 # mayfly: product and architecture plan
 
-**Status:** plan, 2026-11-09. Owner: Patryk Żmigrodzki.
+**Status:** plan, 2026-11-09; the owner's decisions on the domain model (ADRs 0024–0040) and on the
+event store (ADRs 0021, 0034, 0035) applied by DEC-01. Owner: Patryk Żmigrodzki.
 **What:** a headless Rust service that runs **single-use GitHub Actions runners in disposable
 virtual machines** on Apple Silicon hosts. Each job gets a freshly cloned VM; the VM is destroyed
 after one job. Demand comes from GitHub **Runner Scale Sets** (JIT runners); the VM layer is an
@@ -11,8 +12,11 @@ Why the name: a mayfly lives for a day. So does every runner VM here: one job, t
 This document owns *what* and *how it is structured*. [`foundation.md`](foundation.md) owns the
 engineering rules (workspace, enforcement, gate, commands, agent contract),
 [`verification.md`](verification.md) owns the test levels, formal models and fault lab,
-[`philosophy.md`](philosophy.md) (a draft awaiting the owner) says why and where the lines are, and
-[`tasks.md`](tasks.md) owns order and size. A citation "plan §4.2" points here.
+[`philosophy.md`](philosophy.md) says why and where the lines are,
+[`domain-model.md`](domain-model.md) is upstream of this plan (contexts, language, aggregates,
+invariants I01–I33, policies P1–P25: "dm §6.4"), [`event-store.md`](event-store.md) owns the
+journal's design, and [`tasks.md`](tasks.md) owns order and size. A citation "plan §4.2" points
+here.
 
 ---
 
@@ -22,10 +26,10 @@ engineering rules (workspace, enforcement, gate, commands, agent contract),
 
 | ID | Goal |
 |:--|:--|
-| G1 | **No job-to-job state.** Every job runs in a VM cloned from a pinned, immutable image; the VM is destroyed or quarantined after it. A VM that ran workflow code never re-enters the warm pool. |
+| G1 | **No job-to-job state.** Every job runs in a VM cloned from a pinned, immutable image; the VM is destroyed or quarantined after it. A VM that ran workflow code never becomes Prepared again or serves a second job. |
 | G2 | **No orphan storm.** After a daemon crash, host reboot, GitHub outage, VM crash or cleanup failure, the system converges to a known inventory and never starts unbounded replacements. |
-| G3 | **No overcommit.** Admitted VMs never exceed configured slots, guest-OS limits (at most two macOS guests per host), memory headroom or disk reserve. |
-| G4 | **No unsafe cleanup.** Only VMs with positive ownership evidence (journal record + exact name + generation) are deleted. Never a base image, never a foreign VM, never by name prefix. |
+| G3 | **No overcommit.** Admitted VMs never exceed configured slots, guest-OS limits (at most two running macOS guests per host, foreign ones included), memory headroom or disk reserve. The data plane accounts for and enforces these limits; the control plane allocates within what it reports (ADR 0024). |
+| G4 | **No unsafe cleanup.** Only VMs with positive ownership evidence (journal record + exact name + generation + the recorded provider instance id) are deleted, and the data plane re-observes before deleting (ADR 0026). Never a base image, never a foreign VM, never by name prefix; a VM whose ownership or outcome cannot be proven is quarantined and kept, never deleted automatically (ADR 0025). |
 | G5 | **No fictional success.** An effect whose outcome is unknown stays `Unknown` until externally observed. |
 | G6 | **Headless and scriptable.** Configured by a TOML file, driven by `mayfly` CLI over a local socket; no GUI. |
 | G7 | **Auditable.** Every decision is an event in a journal; every side effect has a durable intent and a reconciliation path; every failure mode has a deterministic test. |
@@ -43,7 +47,11 @@ we guarantee idempotent intent and at-least-once effects).
 - **Licensing:** Tart and Orchard are FSL-1.1-ALv2. mayfly *executes* the `tart` binary; it never
   incorporates their source. Commercial hosting needs a legal review (owner).
 - **macOS guests:** at most two macOS VMs per Apple-branded host; enforced by admission, not trust.
-- **Untrusted code:** public-fork PRs are off by default (`allow_untrusted_prs = false`).
+- **Untrusted code:** v0.x serves only the `trusted` tier: every pool declares `tier = "trusted"`;
+  untrusted offers (forks, `pull_request_target`, `workflow_run`, `issue_comment`, unclassifiable)
+  are declined before acquire; the old key `allow_untrusted_prs` is refused at load (ADR 0027).
+- **No phoning home:** no telemetry, usage statistics, crash upload or update check, ever; bug
+  evidence is a local, redacted `mayfly diagnostics bundle` the operator sends by hand (ADR 0036).
 - **Public repository:** no secrets, internal hostnames, private-repo content or personal paths.
 
 ---
@@ -58,10 +66,10 @@ GitHub (Scale Set API, App auth, runner registry)
 │  CONTROL PLANE                                    │  DATA PLANE                          │
 │  decides: desired state, admission, lifecycle     │  does: VM clone/start/stop/delete,   │
 │  owns: journal (SQLite), projections, GitHub      │  guest probe, runner launch,         │
-│  session, secrets broker, operator API            │  inventory + resource observation    │
+│  session, secrets broker, operator API            │  inventory, resource ledger + caps   │
 │                                                   │                                      │
-│  commands → aggregates → events → outbox ─ Directive ─▶ executor ─▶ VmProvider (Tart)    │
-│  inbox ◀─────────────────────────────── Observation ─── observer ◀─ GuestTransport (SSH) │
+│  commands → aggregates → DirectiveIssued ─ Directive ─▶ executor ─▶ VmProvider (Tart)    │
+│  inbox ◀─────────────────────────────── Observation ─── observer ◀─ GuestTransport (exec)│
 │                                                   │                    HostProbe         │
 └───────────────────────────────────────────────────┴──────────────────────────────────────┘
         ▲ Unix socket (0600)                                       │ argv, never a shell
@@ -69,9 +77,11 @@ GitHub (Scale Set API, App auth, runner registry)
                                                         official actions/runner, JIT config
 ```
 
-**Authorities.** GitHub is the authority on job assignment and runner registration; the VM
-provider is the authority on which VMs exist; the control-plane journal is the authority on **who
-may act on which VM**. They can disagree, so reconciliation is mandatory and continuous.
+**Authorities.** GitHub is the authority on job assignment and runner registrations; the VM
+provider is the authority on which VMs exist; the data plane is the authority on a host's free
+resources (ADR 0024) and the last line of refusal for every effect; the control-plane journal is
+the authority on **who may act on which VM**. They can disagree, so reconciliation is mandatory
+and continuous.
 
 ---
 
@@ -85,40 +95,48 @@ a rewrite, and it gives each plane a narrow, testable contract.
 
 | | Control plane | Data plane |
 |:--|:--|:--|
-| Question it answers | *What should exist?* | *What exists, and make it so.* |
-| State | Durable: event journal, projections, outbox, inbox (SQLite) | None durable. In-memory in-flight table, rebuilt from the provider's inventory on start |
+| Question it answers | *What should exist?* | *What exists, what fits, and make it so.* |
+| State | Durable: event journal, receipts, inbox, delivery ledger, projections (SQLite) | Nothing durable but the epoch-floor marker in `TART_HOME` (a fence, ADR 0026) and each VM's shim lock and `exit.json` (ADR 0037). In memory: the in-flight table and the resource ledger, rebuilt from the provider's inventory and host probes on start |
 | Talks to | GitHub, operator CLI, the data plane | Tart (or another provider), guests, the host OS |
-| Decides | Desired capacity, admission, which VM is retired, quarantine | Nothing about demand. Only *how* to execute a directive safely (timeouts, process groups, retries within a directive's deadline) |
-| Secrets | GitHub App key (via secret store), mints JIT configs | Receives a JIT config in memory for exactly one launch; never stores it |
-| Failure stance | Safe mode on journal doubt; never acts on guessed ownership | Fail closed: refuse a directive it cannot fence or validate |
+| Decides | Desired capacity, admission and its order within reported capacity, which VM is retired, quarantine | Nothing about demand. Whether a directive fits the host's resources (refused if not: I33) and *how* to execute it safely (timeouts, process groups, retries within a directive's deadline) |
+| Secrets | Resolves the GitHub App key through a `SecretProvider` (ADR 0033); mints JIT configs; holds them in a single-take broker scoped to `(attempt, directive, epoch)` | Receives a JIT config in memory for exactly one launch over `tart exec` stdin; never stores it |
+| Failure stance | Safe mode on journal doubt; never acts on guessed ownership; never assumes an outcome | Fail closed: refuse a directive it cannot fence or validate, that does not fit, whose proof does not match after re-observation, or that safe mode holds |
 
 ### 3.2 The CP↔DP contract (`mayfly-protocol`)
 
 Versioned, transport-agnostic, serde-encoded messages. Every message carries
 `protocol_version`; a peer refuses an unsupported major version.
 
-- **Handshake:** `Hello { host_id, boot_id, dp_version, capabilities }` →
-  `Welcome { epoch, accepted_version }`. The control plane mints a new **host epoch** per data-plane
-  session; the data plane rejects any directive with an older epoch (**fencing**, invariant I09).
+- **Handshake:** `Hello { host_id, boot_id, dp_version, capabilities, epoch_floor }` →
+  `Welcome { epoch, mode, accepted_version }`. The control plane mints a new **run epoch** per
+  data-plane session (every run and every reconnect), above both its journal and the floor; the
+  data plane raises the floor in `TART_HOME` (fsync) before acknowledging and rejects any
+  directive with an older epoch (**fencing**, I09, I17). `mode` is `normal` or `safe`.
 - **Directive** (CP → DP): `{ directive_id, epoch, attempt_id, generation, deadline, kind }` where
-  `kind` ∈ `CloneVm{image_digest, vm_name}`, `StartVm{vm_name, run_options}`,
-  `ProbeGuest{vm_name}`, `LaunchRunner{vm_name, launch: SecretHandle}`,
-  `StopVm{vm_name, grace}`, `DeleteVm{vm_name, ownership_proof}`, `ReportInventory`,
-  `ReportResources`. Directives are **idempotent by `directive_id`** and by target name: a repeat
-  returns the earlier outcome or re-observes.
+  `kind` ∈ `PullImage{digest}`, `MaterialiseImage{digest, base_name, runner}`,
+  `EvictImage{base_name}`, `CloneVm{base_name, vm_name}`, `StartVm{vm_name, run_options}`,
+  `VerifyGuest{vm_name, nonce}`, `LaunchRunner{vm_name, launch: SecretHandle}`,
+  `ExportDiagnostics{vm_name}`, `StopVm{vm_name, grace, proof}`, `DeleteVm{vm_name,
+  ownership_proof}`, `ReportInventory`, `ReportCapacity`, `ReportHostFacts`. Directives are
+  **idempotent by `directive_id`** and by target name: a repeat returns the earlier outcome or
+  re-observes. The stored form of `LaunchRunner` carries a handle; the wire frame that carries
+  the secret is built by the link adapter and is not `Serialize`.
 - **Observation** (DP → CP): `{ observation_id, epoch, directive_id?, observed_at_dp, kind }` where
-  `kind` ∈ `VmCloned`, `VmStarted{ip?}`, `GuestReady{facts}`, `RunnerStarted`,
-  `RunnerExited{code}`, `VmStopped`, `VmDeleted`, `Inventory{vms}`, `Resources{mem, disk}`,
-  `DirectiveRefused{reason}` (definite, nothing happened), `DirectiveOutcomeUnknown{reason}`
-  (ambiguous: timeout, lost process). Observations are facts, deduplicated by `observation_id` in
-  the control plane's inbox.
+  `kind` ∈ `VmCloned{instance_id}`, `VmStarted`, `GuestVerified{facts}`, `GuestRejected{reason}`,
+  `RunnerLaunched`, `RunnerLaunchUnknown`, `RunnerExited{code}`, `VmStopped`, `VmDeleted`,
+  `Inventory{vms}` | `InventoryIncomplete{reason}`, `CapacityReported{report_id, totals, used,
+  free, foreign}`, `HostFacts{disk, wake, tart_version}`, `HypervisorLimitHit`, `ImagePulled`,
+  `ImageMaterialised`, `DirectiveRefused{reason}` (definite, nothing happened; reasons include
+  `insufficient_resources`, `proof_mismatch`, `stale_epoch`, `safe_mode`),
+  `DirectiveOutcomeUnknown{reason}` (ambiguous: timeout, lost process). Observations are facts,
+  deduplicated by `observation_id` in the control plane's inbox.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
-  the control plane's in-memory secrets broker. The outbox stores a handle, never a JIT config. A
-  crash loses the secret; the attempt is retired and a new one minted (a possibly leaked JIT
-  config is never reused; it expires server-side).
+  the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
+  JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly
+  leaked JIT config is never reused; its registration is deregistered by id).
 - Both directions are **at-least-once**; both ends are idempotent. Ordering is not assumed:
   observations carry the directive and generation they answer, and stale ones are ignored by the
-  aggregate (`evolve` of an older generation is a no-op recorded as `StaleObservationIgnored`).
+  aggregate (`StaleObservationIgnored`).
 
 ### 3.3 Transports
 
@@ -150,17 +168,19 @@ crates/
   mayfly-control-domain/    pure: aggregates (Host, Pool, Attempt, ScaleSet), commands, events,
                             decide/evolve, capacity policy, recovery decision table
   mayfly-control/           CP application: command bus, AggregateStore, projections, queries,
-                            reactors (process managers), reconciler, listener, outbox relay;
-                            ports: Journal, Clock, Ids, ScaleSetApi, RunnerRegistry, SecretStore
+                            durable consumers (saga, directive relay), reconciler, listener;
+                            ports: Journal, DeliveryLedger, Clock, Ids, ScaleSetApi,
+                            RunnerRegistry, SecretProvider
   mayfly-data-domain/       pure: directive executor FSM, fencing, VM supervisor FSM
                             (depends on mayfly-domain and mayfly-protocol)
-  mayfly-data/              DP application: executor, inventory observer, resource monitor;
-                            ports: VmProvider, GuestTransport, HostProbe, ProcessClock
-  mayfly-adapter-sqlite/    CP: journal, receipts, outbox, inbox, projections, migrations
-  mayfly-adapter-github/    CP: App JWT/installation tokens, Scale Set client, JIT, classic
-  mayfly-adapter-secrets/   CP: file (0600) and macOS Keychain secret stores
-  mayfly-adapter-tart/      DP: Tart CLI by argv, version probe, JSON parsing
-  mayfly-adapter-guest/     DP: SSH (pinned host key) and `tart exec` guest transports
+  mayfly-data/              DP application: executor, inventory observer, resource ledger;
+                            ports: VmProvider, ImageStore, GuestTransport, HostProbe, ProcessClock
+  mayfly-adapter-sqlite/    CP: journal, receipts, inbox, delivery ledger, snapshots, projections
+  mayfly-adapter-postgres/  CP: the same stores on PostgreSQL (ES-09; tested, not deployed in v0.x)
+  mayfly-adapter-github/    CP: App JWT/installation tokens, Scale Set client, JIT, runner REST
+  mayfly-adapter-secrets/   CP: secret providers by URI: keychain, file (0600), env, exec (ADR 0033)
+  mayfly-adapter-tart/      DP: Tart CLI by argv, per-VM shim, version probe, JSON parsing
+  mayfly-adapter-guest/     DP: `tart exec` guest transport (no SSH, ADR 0038)
   mayfly-adapter-host/      DP: disk/memory probes (cfg per OS)
   mayfly-adapter-link/      inproc and UDS transports for the protocol
   mayfly-composition/       config, wiring, runtime, supervision tree, startup sequence, roles
@@ -173,7 +193,8 @@ tools/
   xtask/                    gate, architecture checker, adr, land, doctor (ported from site-preview)
   faultlab/                 Jepsen-style harness: controller, history, nemesis, checker; imports
                             no production crate (an independent oracle)
-formal/                     Quint models (lifecycle, scheduling, recovery, scaleset, link)
+formal/                     Quint models (lifecycle, scheduling, recovery, scaleset, link,
+                            registration, event_store)
 ```
 
 Dependency direction (enforced by `cargo xtask architecture`, foundation §2):
@@ -191,6 +212,7 @@ Dependency direction (enforced by `cargo xtask architecture`, foundation §2):
         └──────────────────► mayfly-domain ◄───────────────┘
 ```
 
+No new crate per bounded context in v0.x: contexts are modules of the existing crates (dm §4.1).
 Pure crates (`mayfly-domain`, `mayfly-protocol`, `*-domain`) use no `std::{fs,net,process,env}`,
 no clock, no randomness, no Tokio, no HTTP, no SQL. Application crates use `tokio` (`sync`, `time`
 only through the `Clock` port) and their ports; no adapter types. Test crates are never reached
@@ -202,140 +224,184 @@ from production.
 
 ### 5.1 Streams and aggregates
 
-| Stream | Aggregate | Holds |
-|:--|:--|:--|
-| `host-<host_id>` | `Host` | epoch, slots with monotonic generations, reservations, drain flag, safe-mode flag |
-| `pool-<name>` | `Pool` | config revision, image digest, labels, warm policy, pause/drain |
-| `attempt-<attempt_id>` | `Attempt` | lifecycle (§6), VM name, generation, image digest, runner identity, pending directive, retry budget |
-| `scaleset-<id>` | `ScaleSet` | session state (§7.2), last statistics, message cursor, acquired request ids |
+Ten aggregates, defined in dm §6 (state, commands, events, the invariants each protects alone):
 
-Every aggregate exports pure `decide(&State, Command) -> Result<Vec<Event>, Rejection>` and
+| Stream | Aggregate | Context | Holds |
+|:--|:--|:--|:--|
+| `scaleset-<pool>` | `ScaleSet` | Demand | session phase, cursor, latest statistics, deliverable and reported max, acquired-unbound request ids, tier |
+| `pool-<name>` | `Pool` | Fleet | config revision, tier, image pin, limits (`max_running`, `min_prepared`), mode, breaker per digest |
+| `host-<host_id>` | `Host` | Fleet | applied capacity reports, slots with monotonic generations, leases (allocation), pool terms, admission gate, drain |
+| `attempt-<attempt_id>` | `Attempt` | Attempt | lifecycle (§6), VM name, generation, instance id, image digest, pending directive overlay, JIT handle phase, job binding |
+| `registration-<attempt_id>` | `RunnerRegistration` | Registration | runner name and id, phase (issued … deregistered, presumed leaked) |
+| `image-<digest>` | `Image` | Image | manifest, status, runner-version expiry |
+| `placement-<host>-<digest12>` | `ImagePlacement` | Image | pull/materialise/evict phase, base name |
+| `hostrun-<host_id>` | `HostRun` | Operations | run number, epoch, safe mode |
+| `recovery-<plan_id>` | `RecoveryPlan` | Operations | bindings, actions, approval, progress |
+| `quarantine-<attempt_id>` | `QuarantineCase` | Operations | reason, holds, evidence, escalation, resolution |
+
+**One command, one stream**; every cross-aggregate rule is a policy (dm §7), eventually
+consistent, through durable per-stream consumers. Every command carries `command_id`, `actor`,
+`issued_at` and `run_epoch`; each aggregate refuses an epoch lower than the highest it accepted
+(I18). Every aggregate exports pure `decide(&State, Command) -> Result<Vec<Event>, Rejection>` and
 `evolve(State, &Event) -> State`. No clock, randomness, ids or logging inside: time and ids arrive
 in the command. `decide` is deterministic, refusals included (DETERMINISM cases, verification §3).
 
-### 5.2 Journal (SQLite)
+### 5.2 Journal
 
-**Stream-scoped, with no global order (ADR 0021):** a stream head per stream holds its revision,
-compared and advanced by each append; event ids are unique through a registry; readers enumerate
-streams and read each after a revision; no correctness rests on a single writer, so the port is
-storage-neutral (SQLite first, PostgreSQL possible). `recorded_at` is the writer's control-plane
-`Clock` reading (ADR 0020). Tables: `event_stream(stream_id, revision)`,
-`event_journal(stream_id, stream_revision, event_id UNIQUE, type, schema_version, payload_json,
-recorded_at, PRIMARY KEY(stream_id, stream_revision))`, `command_receipt(command_id, status, result_json)`, `outbox(directive_id,
-attempt_id, generation, kind, request_json, status, attempts, next_attempt_at)`,
-`inbox(source, message_id, processed_at)` (GitHub messages and DP observations), projection tables
-with `projection_meta(name, spec_version, watermark)`, `schema_meta`.
+The journal is the stream-scoped, storage-neutral event store of
+[`event-store.md`](event-store.md) (ADR 0021, Accepted; ADR 0034): stream heads with per-stream
+revisions, a global event-id registry, command receipts with intent digests (refusals bound to the
+revision decided at), an inbox, durable delivery by per-consumer, per-stream checkpoints with
+fenced leases, snapshots, stream epochs and online projection rebuild. There is no global order,
+no `read_all` and no outbox table: a directive is a `DirectiveIssued` event delivered by the
+`directive_relay` consumer. SQLite is the shipped adapter; PostgreSQL is tested in Docker (ADR
+0035). `recorded_at` is the writer's control-plane `Clock` reading (ADR 0020).
 
-**One write path.** `AggregateStore::save` is the only caller of `Journal::append`: in one SQLite
-transaction it checks expected revisions, appends events, updates synchronous projections, writes
-outbox rows the events request, records the command receipt and the inbox entry that caused it;
-commits; then notifies reactors (never replayed). An architecture rule pins this (foundation §3).
+**One write path.** `AggregateStore::save` is the only caller of `Journal::append`: one store
+transaction holds the expected revisions, the events, inline projections, dispatch marks, the
+command receipt and the inbox entry that caused it; reactors are only kicks after commit and are
+never replayed. An architecture rule pins this (foundation §3).
 
-SQLite: WAL, `foreign_keys=ON`, `synchronous=FULL`, one writer connection, `busy_timeout`.
-Migrations are forward-only, raw SQL, never edited once released. Secrets never enter the journal.
+SQLite: WAL, `foreign_keys=ON`, `synchronous=FULL`, `busy_timeout`; a single writer thread is an
+implementation detail, never a premise. Migrations are forward-only, raw SQL, never edited once
+released; a backup is taken automatically before every migration. Secrets never enter the journal.
 
 ### 5.3 Events
 
-Immutable, past-tense, `#[non_exhaustive]` structs in `mayfly-control-domain::events`, each with
-`EVENT_TYPE` and `SCHEMA_VERSION`, registered in one registry, with a **golden JSON fixture** per
-event and version. Evolution: add optional fields or new event types; never rename; pure
-upcasters for old versions; an unknown event type in the journal puts the daemon in **safe mode**
-(it cannot prove it understands ownership).
+Immutable, past-tense, `#[non_exhaustive]` structs, each with `EVENT_TYPE` and `SCHEMA_VERSION`,
+registered in one registry, with a **golden JSON fixture** per event and version. Evolution: add
+optional fields or new event types; never rename; pure upcasters for old versions. A change an
+older build must not ignore ships in two releases: **prepare** (N+1 reads it and raises its
+aggregate's supported epoch) then **activate** (N+2 writes it); a stream whose epoch exceeds a
+build's support refuses that build's writes and is still read (event-store §6). An unknown event
+type in the journal puts the daemon in **safe mode** (it cannot prove it understands ownership).
+Upgrade and rollback beyond one release are an open owner decision (dm OD2); the working
+assumption is in event-store §6 and dm §10.1.
 
 ### 5.4 Commands, queries, reactors
 
-- **Commands** (`mayfly-control::commands`): `ReserveSlot`, `StartAttempt`, `RecordObservation`,
-  `RetireAttempt`, `QuarantineAttempt`, `DrainPool`, `ResumePool`, `UpdateDemand`, `OpenSession`,
-  `RecordMessage`, … Each has a `command_id` (idempotency via receipts). Commands never read
-  projections and never return read DTOs.
-- **Queries** (`mayfly-control::queries`): read projections only (`pool_status`, `slot_status`,
-  `vm_inventory`, `attempt_timeline`, `pending_directives`, `session_status`, `recent_failures`).
-  Queries never import write ports.
-- **Reactors / process managers:** the `AttemptSaga` turns lifecycle events into the next command
-  or directive; the `Reconciler` compares desired capacity with projections and observations and
-  issues commands; the `OutboxRelay` sends pending directives over the link with backoff. Reactors
-  are idempotent and restartable from the journal.
+- **Commands** (`mayfly-control::commands`): those of dm §6 (`ReserveSlot`, `StartAttempt`,
+  `RecordObservation`, `RequestRetirement`, `Quarantine`, `StartPoolDrain`, `PausePool`,
+  `RecordMessage`, `RecordCapacityReport`, `RequestRegistration`, …). Each has a `command_id`
+  (idempotency via receipts). Commands never read projections and never return read DTOs; a
+  policy that read another stream passes it as a validated read.
+- **Queries** (`mayfly-control::queries`): read the projections of dm §8 only
+  (`OperatingMode`, `AdmissionExplain`, `CapacityBoard`, `Attempts`, `PendingEffects`,
+  `Inventory`, `Registrations`, `QuarantineBoard`, …). Queries never import write ports.
+- **Policies / process managers** (dm §7, P1–P25) are durable consumers with per-stream
+  checkpoints: the attempt saga issues the next command; the `directive_relay` sends
+  `DirectiveIssued` over the link, stamped with the current epoch, holding create/destroy kinds in
+  safe mode; the reconciler (P5) compares desired capacity with projections and the last capacity
+  report and issues commands. Effects carry the idempotency key dm §7 names.
 
 ### 5.5 Projections
 
-Each projection is a versioned spec (`name`, `spec_version`, `tables`, `apply(event)`), rebuildable
-stream by stream; it keeps a per-stream applied revision, and on start each stream's tail after it
-is applied (no global watermark, ADR 0021). A change of meaning is a
-new spec version, rebuilt alongside. `mayfly recover --rebuild-projections` exists and is tested.
-Projection rebuild equals live projection (contract test).
+Each projection is a versioned spec (`NAME`, `VERSION`, subscribed kinds, pure `apply`), with
+stream-local rows written inline by the unit; it keeps a per-stream applied revision (no global
+watermark). A change of meaning is a new spec. A version mismatch starts an **online rebuild**
+into a shadow generation with dual writes and a cutover fence (event-store §3.6, ADR 0034);
+admission does not wait for it. Projection rebuild equals live projection (contract test, I16).
 
 ---
 
 ## 6. Attempt lifecycle (control-plane view)
 
-One **attempt** = one VM name, one generation, at most one GitHub job.
+One **attempt** = one VM name, one `(host, slot, generation)`, at most one registration, at most
+one GitHub job. The authoritative definition is dm §6.4.
 
 ```text
-Reserved → Cloning → Cloned → Booting → Booted → Probing → Warm
-   Warm → Activating (JIT minted, LaunchRunner sent) → Listening → Busy → Finished
-   Finished|Warm(retired)|Failed → Stopping → Deleting → Deleted (slot released)
-   any active state → Unknown (outcome ambiguous) → resolved by observation
-   Cloning|Booting|Probing|Activating → Backoff → (retry same name) | Quarantined
-   Warm|Listening → Draining → Stopping;   Busy + drain → wait for Finished
+Reserved → Cloning → Booting → Verifying → Prepared
+Prepared → Activating → Listening → Busy → Finished
+Prepared|Listening --RetirementRequested--> (Listening: deregister first) → Retiring
+Finished|stage failure (budget spent)|Retiring → (diagnostics) → Deleting → Deleted
+Cloning|Booting|Verifying|Activating → Backoff{n} → same stage (same name, generation)
+any state ↔ pending.Unknown overlay (no transition until observed)
+Verifying|Activating --GuestRejected--> Quarantined;  Deleting --proof refused--> Quarantined
+any non-terminal --observed absence without our delete--> Lost
+Quarantined --operator resolves the case--> Deleting | Lost (observed absent)
 ```
 
 Rules (each pinned by a test and by `formal/lifecycle.qnt`):
 
-1. State reflects an **observed fact**, never an attempted command (persist intent, send directive,
-   transition on observation).
-2. `Busy` never returns to `Warm`; `Finished` never becomes `Activating` (I06).
+1. State reflects an **observed fact**, never an attempted command (persist intent as
+   `DirectiveIssued`, send, transition on observation).
+2. No path leads from Listening, Busy or Finished back to Prepared; a retired attempt never
+   activates (I06).
 3. A retry reuses the **same VM name and generation** so a lost reply cannot create a duplicate
-   clone (I13); a new attempt gets a new generation.
-4. `Unknown` leaves only on an observation (inventory, GitHub runner state); timeouts never
-   convert `Unknown` to success or to `Deleted` (I10).
-5. `Quarantined` is terminal for automation: slot held, operator decides via `mayfly recover`.
-6. Every State × Stimulus pair is either a defined transition or a defined refusal (exhaustive
+   clone (I13); a new attempt gets a new slot generation.
+4. `Unknown` leaves only on an observation (inventory, launcher status, GitHub runner state);
+   timeouts never convert it to success or to `Deleted`, and there is no operator assertion
+   (I10, ADR 0025). A provider that cannot answer leaves it `Unknown`, reported as a provider
+   limitation.
+5. **Activation** requires a Host grant (no grant while host or pool terms are closed, I26) and a
+   fresh guest verification of this attempt in the current epoch; the JIT config is minted after
+   both and delivered at most once (I22).
+6. `Quarantined` is terminal for automation: the VM is kept, the lease keeps its resources, and
+   only an operator resolves the case; nothing deletes a quarantined VM automatically (I28).
+7. Drain is not a state: it closes admission terms and retires Prepared and Listening attempts;
+   Busy attempts finish.
+8. Every State × Stimulus pair is either a defined transition or a defined refusal (exhaustive
    matrix test, no wildcard arms).
 
 The **data plane** has its own small FSM per directive (`Received → Executing → Done |
-Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → Stopped`), observed from
-the provider rather than remembered.
-
----
+Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → Stopped`, plus
+`ProcessLost` when a shim is gone), observed from the provider and the shim's lock and
+`exit.json` rather than remembered.
 
 ## 7. GitHub integration
 
 ### 7.1 Auth
 
-GitHub App (RS256 JWT → installation token), key from the secret store (file `0600` or Keychain).
-Tokens live in memory only, are refreshed before expiry, never logged (`Secret<T>` with redacting
-`Debug`/`Display`, a test proves it). Permissions are verified against a disposable installation
-(owner task), never guessed.
+GitHub App (RS256 JWT → installation token). Four credentials (dm §9.1): App JWT, installation
+token, Actions-service token, message-queue token; all in memory only, refreshed before expiry,
+never logged (`Secret<T>` with redacting `Debug`/`Display`, a test proves it). The App key comes
+from a `SecretProvider` reference (`keychain:`, `file:`, `env:`, `exec:`; ADR 0033). Permissions
+are verified against a disposable installation (GH-00, owner), never guessed; the documented
+permission list is an open owner item (philosophy §5.3).
 
 ### 7.2 Scale Set session
 
-`Unconfigured → Authenticating → ScaleSetEnsured → SessionOpening → SessionActive ⇄ Refreshing |
-Backoff | Degraded → Draining → Closed`. One listener per scale set (local lease).
+One pool is one scale set at organisation scope (repository scope for testing), never deleted
+automatically (ADR 0040). Session states: `Unconfigured → Ensured → Opening → Active ⇄ Backoff |
+Degraded → Closing → Closed`. One listener per scale set (local lease). GH-00 records a live
+session before the fake is built.
 
 Processing loop (the poller never waits on VM work):
 
-1. Long-poll with `lastMessageId` and the **deliverable** `maxCapacity`.
-2. For `JobAvailable`, `AcquireJobs` for the request ids we intend to serve (idempotent retry).
-3. In one transaction: inbox `(session, message_id)`, latest `statistics`, normalised lifecycle
-   events, and the new **desired count**. A redelivered message is a no-op.
-4. Only then `DeleteMessage` (ack). Ack failure is retried; it never re-reserves.
-5. Empty poll → still reconcile.
+1. Long-poll with `lastMessageId` and `maxCapacity` = the scale set's **reported max** (≤ its
+   deliverable carve-out, I24; pause, drain and safe mode per ADR 0029).
+2. Classify each `JobAvailable` offer by trust tier and plan acquisition (pure
+   `PlanAcquire`): acquire only while `assigned < deliverable` (I23) and only offers the pool's
+   tier admits (I32); the rest are declined with a reason.
+3. In one unit: inbox `(session, message_id)`, latest `statistics` (an older message never
+   replaces newer), job facts, declined offers and the new **desired** count. A redelivered
+   message is `DuplicateMessage`.
+4. Only then `DeleteMessage` (ack). Ack failure is retried; it never re-acquires.
+5. Empty poll → still reconcile. A session open recomputes desired from its initial statistics.
+6. An unknown message type is recorded, acked and counted; past a threshold the session is
+   `Degraded{protocol_drift}`, never safe mode.
 
-**Demand:** `desired = min(C, TotalAssignedJobs + warm_registered)` where `C` is admissible capacity.
-Never count `JobAssigned` messages (≤50 per batch); never add `TotalRunningJobs` (already in the
-total). A warm *unregistered* VM is not a GitHub-ready runner.
+**Demand:** `desired = min(deliverable, assigned)` where `assigned = TotalAssignedJobs`; there is
+no registered standby (ADR 0028). Never count `JobAssigned` messages (≤ 50 per batch); never add
+`TotalRunningJobs`. `shortfall = max(0, desired − (Activating + Listening + Busy))`; Prepared
+VMs serve it first and do not count in it.
 
-### 7.3 Classic mode
+### 7.3 Runner registrations
 
-`config.sh --ephemeral` with a registration token fetched *after* guest readiness. A smoke-test and
-fallback mode behind the same `RunnerRegistry` port; no demand signal (fixed `min_ready`).
+Scale sets only: there is no classic or `--ephemeral` mode (ADR 0028). A registration is its own
+aggregate (`RunnerRegistration`, dm §6.5): the runner name is the VM name, issued at most once
+(I19); a JIT config is minted once per registration; a registered-idle runner is deregistered
+before its VM is stopped, and a 422 (busy) cancels that retirement (I21); a lost mint or delivery
+is presumed leaked and deregistered by its journaled id. The reaper (ADR 0029) runs at run start,
+after long outages and daily, deletes only journaled ids and reports unrecognised ones.
 
 ### 7.4 Protocol fidelity
 
 The Scale Set API is in public preview. The adapter is versioned; recorded request/response
 fixtures (redacted) are the contract; `mayfly-fake-github` implements the wire behaviour
-independently (redelivery, 50-message cap, session expiry, 401/403/429 + Retry-After), and a gated
-live test runs against a disposable repository (owner-provisioned).
+independently (redelivery, 50-message cap, session expiry, 401/403/409/429 + Retry-After), built
+from the GH-00 capture, and a gated live test runs against a disposable organisation
+(owner-provisioned).
 
 ---
 
@@ -345,101 +411,150 @@ live test runs against a disposable repository (owner-provisioned).
 
 ```rust
 pub trait VmProvider: Send + Sync {
-    fn inventory(&self) -> impl Future<Output = Result<Vec<VmObservation>, VmError>> + Send;
-    fn clone_vm(&self, image: &ImageRef, name: &OwnedVmName) -> impl Future<Output = Result<(), VmError>> + Send;
-    fn start(&self, name: &OwnedVmName, opts: &RunOptions) -> impl Future<Output = Result<RunHandle, VmError>> + Send;
-    fn stop(&self, name: &OwnedVmName, grace: Duration) -> impl Future<Output = Result<(), VmError>> + Send;
-    fn delete(&self, name: &OwnedVmName) -> impl Future<Output = Result<(), VmError>> + Send;
-    fn ip(&self, name: &OwnedVmName) -> impl Future<Output = Result<Option<IpAddr>, VmError>> + Send;
+    fn inventory(&self) -> impl Future<Output = Result<Inventory /* Complete | Incomplete */, VmError>> + Send;
+    fn clone_vm(&self, base: &BaseName, name: &OwnedVmName) -> impl Future<Output = Result<InstanceId, VmError>> + Send;
+    fn start(&self, name: &OwnedVmName, opts: &RunOptions) -> impl Future<Output = Result<ShimHandle, VmError>> + Send;
+    fn stop(&self, proof: &OwnershipProof, grace: Duration) -> impl Future<Output = Result<(), VmError>> + Send;
+    fn delete(&self, proof: &OwnershipProof) -> impl Future<Output = Result<(), VmError>> + Send;
+    fn instance_id(&self, name: &OwnedVmName) -> impl Future<Output = Result<Option<InstanceId>, VmError>> + Send;
 }
 ```
 
-`VmError` classifies `Definite` (nothing happened) vs `Ambiguous` (may have happened). Providers:
-**Tart** (v0.x), fake in-memory (testkit), `mayfly-fake-tart` binary (e2e and fault lab on Linux),
-Orchard or direct Virtualization.framework (later, ADR first).
+`VmError` classifies `Definite` (nothing happened) vs `Ambiguous` (may have happened). An
+inventory that cannot be read or parsed is `Incomplete` and never read as the absence of any VM
+(I25). Image operations live on a separate `ImageStore` port (pull, materialise, evict, list
+bases; DP-07). Providers: **Tart** (v0.x), fake in-memory (testkit), `mayfly-fake-tart` binary
+(e2e and fault lab on Linux), Orchard or direct Virtualization.framework (later, ADR first).
 
 ### 8.2 Tart adapter
 
-argv only (never `sh -c`); version handshake and capability probe; `tart list --format json`
-parsed against version-pinned fixtures; every call has a deadline, its own process group, bounded
-captured output and redaction; an ambiguous result is re-inspected. Dedicated `TART_HOME` per
-deployment; cache GC explicit (`TART_NO_AUTO_PRUNE`). Softnet is optional and is *not* an egress
-allowlist.
+argv only (never `sh -c`); version handshake and capability probe (an unsupported version closes
+admission); `tart list --format json` parsed against version-pinned fixtures; every call has a
+deadline, its own process group, bounded captured output and redaction; an ambiguous result is
+re-inspected. `TART_NO_AUTO_PRUNE` is set on every call. Dedicated `TART_HOME` per deployment,
+`0700`, owned by the service user, carrying the deployment marker with the epoch floor (ADR 0026).
+
+- **Per-VM shim (ADR 0037).** `StartVm` starts `mayfly vm-shim` with `setsid`; the shim runs
+  `tart run` as its child, stdio to bounded files (never a pipe), holds its own lock and writes
+  `exit.json` atomically. A daemon crash or upgrade leaves VMs running; on start the daemon
+  re-adopts them from the journal, `tart list`, the shim locks and `exit.json`. A VM is stopped
+  only with `tart stop`, never by a signal.
+- **Clones** come only from local image bases (`mfb-<digest12>…`, ADR 0039), followed by `tart
+  set --random-mac`; the MAC read back is the provider instance id (ADR 0026).
+- **Softnet** is supported (ADR 0032); its privilege model is NET-01's ADR, and the daemon stays
+  non-root. Softnet isolates; it is not an egress allowlist.
 
 ### 8.3 Guest transport and runner launch
 
-`tart exec` where the image supports it, else SSH with a pinned per-image host key (never
-`StrictHostKeyChecking no`). The runner binary is baked into the image (pinned version, self-update
-off). The JIT config is passed over stdin to a fixed, reviewed launcher script; never interpolated
-into a shell string, never written to disk unencrypted, never logged. Runner diagnostics are
-exported before deletion (bounded, redacted).
+Guests are reached only by `tart exec` (ADR 0038; no SSH): `VerifyGuest` sends a per-attempt
+nonce and reads typed, bounded claims; images without the guest agent are refused. The JIT config
+is delivered by `tart exec -i <exact VM> <fixed in-image launcher>` **on stdin only**, after the
+data plane checked that the PID holding the VM's run lock is its shim's child and the instance id
+matches; afterwards the control plane confirms through GitHub that the issued runner id came
+online. Never interpolated into a shell string, never written to disk unencrypted, never logged.
+The runner is baked into the image at a pinned, SHA-checked version with self-update off; expiry
+trips the pool's breaker with reason `runner_version` (ADR 0030). Runner exit after a restart is
+read from the launcher's status and GitHub, not from `tart run`. Runner diagnostics are exported
+before deletion (bounded, redacted; `DiagnosticsLost` and proceed).
 
 ### 8.4 Ownership
 
 A managed VM name is `mf-<pool>-<host>-s<slot>-g<generation>-<attempt_short>`, where pool and
-host ids are `[a-z0-9]{1,16}` so the `-` separators are unambiguous; ownership requires
-the journal record **and** the exact name **and** the generation. The data plane refuses
-`DeleteVm` without an `ownership_proof` that matches its fence; the control plane never emits one
-for a VM it has no record of. A `mf-*` VM unknown to the journal is reported for operator review,
-never deleted (I04, F24).
+host ids are `[a-z0-9]{1,16}` so the `-` separators are unambiguous; the name is a hint, never
+ownership. A VM is **owned** only if the journal records `VmCloned` for an attempt **and** the
+observed name equals its `OwnedVmName` **and** the slot generation matches **and** the observed
+provider instance id equals the recorded one (ADR 0026). The control plane attaches an
+`OwnershipProof {attempt_id, host_id, run_epoch, slot, generation, vm_name, provider_instance_id}`
+to every destructive directive; the data plane re-observes right before acting and refuses on any
+mismatch, and refuses any name in its image-base set. A `mf-*` VM unknown to the journal is
+reported, never deleted (I04, F24); a VM whose ownership or outcome cannot be proven is quarantined
+and kept (ADR 0025).
 
 ---
 
 ## 9. Capacity and admission (pure policy)
 
-Inputs: host resources (observed), per-pool limits, global slot limit, macOS-guest limit, reserved
-memory/disk, attempts in `Reserved..Deleting` (all count against capacity, I03), drain flags,
-GitHub demand. Output: a `CapacityReport { physical_slots, starting, busy, warm, draining,
-admissible, reported_max }` and a list of admit/retire decisions. `reported_max` sent to GitHub never
-exceeds what can be delivered (I07). Low disk → admission stops and `reported_max` drops (F17).
+**The data plane accounts and enforces; the control plane allocates (ADR 0024).** Each host's data
+plane keeps a resource ledger (VM slots, memory, disk ceilings of live clones and bases, the two
+macOS-guest slots, operator reserves; ours and foreign VMs) rebuilt from observation, refuses any
+directive that does not fit (I33) and reports `CapacityReported`. The control plane's `Host`
+applies the latest report and allocates leases within it; the pure capacity policy computes a
+`CapacityReport` per host and scale set: reported, allocated, admissible (reported minus reserves,
+closed terms and quarantined holds), deliverable per scale set (a carve-out so that Σ reported max
+≤ deliverable, I24) and reported max. Attempts from `Reserved` to `Deleted` count on every
+dimension (I03); a stopped quarantined lease shrinks to disk + slot but is never released by
+policy. `min_prepared` defaults to 0 (and 0 for macOS unless overridden per pool). Low disk →
+admission stops and `reported_max` drops (F17); a pool whose capacity quarantined leases consume
+admits nothing, and `AdmissionExplain` says why.
 
 ---
 
 ## 10. Recovery
 
-Startup sequence (composition): lock state dir → open/migrate journal → replay and verify
-projections → new host epoch (no VMs launched yet) → data-plane handshake and inventory → GitHub
-session → reconcile every `Unknown` outbox entry by observation → classify each owned VM (adopt /
-continue / cleanup / wait / quarantine) by the **recovery decision table** (pure, in
-`mayfly-control-domain::recovery`, model `formal/recovery.qnt`) → resume admission.
+Startup sequence (P1): lock state dir → open/migrate the store (automatic backup first) → verify
+(epoch floor, stored kinds, structure) → `StartRun` → `MintEpoch` above journal and floor → data
+plane handshake (floor raised and fsynced) → inventory, shim locks, `exit.json` and capacity →
+resolve `Unknown` effects by observation only → classify each VM by the **recovery decision
+table** (pure, `mayfly-control-domain::operations::recovery`, model `formal/recovery.qnt`) →
+`CompleteRecovery` → admission opens → GitHub sessions.
 
 | Journal | Provider | GitHub | Decision |
 |:--|:--|:--|:--|
-| Cloning | owned clone exists | — | adopt, continue |
-| Cloning | absent | — | retry same name (budgeted) |
-| Listening/Busy | running | online/busy | adopt and monitor; never delete |
-| Busy | absent | offline/unknown | job outcome unknown; report; release slot after GitHub check |
-| Deleting | absent | absent | confirm deletion, release slot |
+| Cloning | owned clone exists (instance id matches) | — | adopt, continue |
+| Cloning | absent (complete inventory) | — | retry same name (budgeted) |
+| any | inventory incomplete | any | wait; admission closed; nothing released (I25) |
+| any | name present, instance id differs | any | quarantine `provider_identity_mismatch`; never delete |
+| Prepared | running, shim alive | no registration | adopt; re-verify before any activation |
+| Listening/Busy | running, shim alive | online/busy | adopt and monitor; never delete |
+| Listening/Busy | running | unreachable | adopt and monitor; never delete; `unreachable` ≠ `absent` |
+| Listening | running | registration absent | retire (consumed elsewhere or expired) |
+| Busy | stopped (`exit.json` or host rebooted) | offline/abandoned | retire, delete with proof, reap the registration |
+| Activating | any | registration issued, not delivered | presume leaked; deregister by id; retire |
+| Deleted | owned clone present | any | leaked VM: delete with proof |
+| Deleting | absent | — | confirm deletion, release slot |
 | Deleting | present | active | suspend cleanup, inspect |
+| Quarantined | any | any | keep; the case continues |
 | no record | `mf-*` name | any | report for operator review; never delete |
-| any | — | — | journal untrusted (unknown event, failed verification) → safe mode |
+| journal epoch < floor, unknown event kind, failed verification | — | — | safe mode |
 
-Safe mode: no new VMs, no destructive action; `mayfly recover --dry-run` prints a plan,
-`--apply <plan-id>` executes exactly that plan.
+**Safe mode** (dm §5.3): no clone, start, stop, delete, pull or evict is executed and no secret
+minted (I29); `reported_max = 0`, nothing acquired, only recorded messages acked (ADR 0029);
+observation, status and plan proposal continue. `mayfly recover --dry-run` prints a plan bound to
+the journal heads, inventory digest and epoch; `--apply <plan-id>` executes exactly that plan,
+intent then outcome (I31). A plan never asserts an outcome (ADR 0025).
 
-Graceful drain: stop admission, lower `reported_max`, retire idle/warm, wait for busy up to a
-timeout, close the session. `--force` is a separate, explicit operator action.
+**Drain** (P23): close terms, `reported_max = 0`, retire Prepared and Listening, wait for Busy up
+to a timeout, then alert; never force. `--force` is a separate, explicit operator action.
+**Shutdown** (P24, SIGTERM or Ctrl-C): close admission, stop acquiring and acking, finish durable
+writes, leave VMs running under their shims, exit before the service manager's deadline.
 
 ---
 
 ## 11. Operator interface
 
-`mayflyd [--config path] [--role all|control|data]`. `mayfly` talks to the daemon over a `0600`
-Unix socket:
+`mayflyd [--config path] [--role all|control|data]` runs in the foreground by hand or under launchd
+(ADR 0031). `mayfly vm-shim` is internal (started by the daemon only). `mayfly` talks to the daemon
+over a `0600` Unix socket (peer-uid allowlist, default the service uid); every mutating command
+carries an actor and is journaled before it acts:
 
 ```text
-mayfly status [--json]            mayfly pool list|drain|resume|pause <name>
-mayfly vm list [--owned-only]     mayfly vm inspect <attempt>     mayfly vm logs <attempt>
+mayfly status [--json]            mayfly pool list|drain|resume|pause|reset-breaker <name>
+mayfly host drain|resume          mayfly vm list [--owned-only]   mayfly vm inspect <attempt>
+mayfly vm logs <attempt>          mayfly quarantine list|inspect|resolve <case>
 mayfly events --follow [--since]  mayfly doctor [--json]          mayfly config validate <path>
-mayfly recover --dry-run | --apply <plan-id>                      mayfly diagnostics export --redact
-mayfly image verify <manifest>    mayfly metrics
+mayfly recover --dry-run | --apply <plan-id>                      mayfly safe-mode enter
+mayfly image verify <manifest>    mayfly image refresh <pool>     mayfly image withdraw <digest>
+mayfly service install|uninstall  mayfly diagnostics bundle [--out <path>]   mayfly metrics
 ```
 
-Config (TOML, `schema_version = 1`): `state_dir`, `[github]` (mode `scaleset|classic`, scope URL,
-App client id, installation id, `private_key_ref`), `[host]` (slots, macOS guest limit, memory and
-disk reserves), `[[pools]]` (name/labels, image manifest, guest OS, cpu/memory, `min_warm`,
-`max_running`, `allow_untrusted_prs`), `[provider]` (`tart` + `tart_home`). Validated on load;
-secrets only by reference.
+Config (TOML, `schema_version = 1`): `state_dir`, `[github]` (organisation, App client id,
+installation id, `private_key` as a secret reference URI), `[host]` (operator reserves for
+memory and disk), `[[pools]]` (name, `tier = "trusted"`, image manifest, guest OS, cpu/memory,
+`min_prepared`, `max_prepared_age`, `max_running`, breaker N and W, optional daily runner refresh),
+`[provider]` (`tart` + `tart_home`). Validated on load; refused keys (`allow_untrusted_prs`, a
+classic `mode`) are refused with a message, never ignored. Secrets only by reference (ADR 0033).
+Uninstall and the packaging channel (Homebrew, `mayfly uninstall --purge`) are an open owner
+decision (philosophy §4.3).
 
 ---
 
@@ -447,23 +562,32 @@ secrets only by reference.
 
 `tracing` with JSON output; fixed `snake_case` event names, variable data in fields
 (`attempt_id`, `pool`, `generation`, `directive_id`, `session_id`, `error_class`). A healthy daemon
-logs (almost) nothing at INFO: start/stop, migrations, config changes only. Metrics (bounded
-labels, no ids): `mayfly_attempt_state{pool,state}`, `mayfly_provision_seconds{pool,stage}`,
-`mayfly_directives_total{kind,outcome}`, `mayfly_outbox_backlog{status}`, `mayfly_capacity{pool,kind}`,
-`mayfly_github_requests_total{op,status_class}`, `mayfly_github_assigned_jobs`,
-`mayfly_last_poll_age_seconds`, `mayfly_orphans`, `mayfly_disk_free_bytes`, `mayfly_reconcile_errors_total{kind}`.
-One trace spans poll → reconcile → clone → boot → probe → JIT → runner → job → stop → delete.
+logs (almost) nothing at INFO: start/stop, migrations, config changes only; a quarantine opens with
+an ERROR. Metrics (bounded labels, no ids) on a loopback HTTP endpoint: `mayfly_attempt_state{pool,state}`,
+`mayfly_provision_seconds{pool,stage}`, `mayfly_directives_total{kind,outcome}`,
+`mayfly_capacity{pool,kind}`, `mayfly_github_requests_total{op,status_class}`,
+`mayfly_github_assigned_jobs`, `mayfly_last_poll_age_seconds`, `mayfly_orphans`,
+`mayfly_disk_free_bytes`, `mayfly_reconcile_errors_total{kind}`, plus dm §8's `mayfly_mode{mode}`,
+`mayfly_epoch`, `mayfly_unknown_effects{age_bucket}`, `mayfly_quarantined{pool,reason}`,
+`mayfly_breaker_open{pool}`, `mayfly_registrations{phase}`, `mayfly_job_result_total{pool,result}`,
+`mayfly_heartbeat_timestamp_seconds`, `mayfly_secret_handles_outstanding`. Nothing is sent
+anywhere (ADR 0036). One trace spans poll → reconcile → clone → boot → verify → JIT → runner →
+job → stop → delete.
 
 ---
 
 ## 13. Security
 
-Host service runs as a non-root user; state dir `0700`, DB/socket `0600`; single instance via
-`flock`. No host directory, socket, key or credential is shared with a guest. JIT configs are
-single-use, in memory, delivered over stdin. No token in argv, env of child processes (except the
-guest launcher's stdin), logs, metrics, status, or diagnostics (redaction tests + secret scan).
-Threat model (`doc/security.md`, task SEC-01): untrusted workflow code, guest-to-host network,
-supply chain of images and runner, operator mistakes.
+Host service runs as a non-root user (Softnet's privilege lives outside it, ADR 0032); state dir
+`0700`, DB/socket `0600`; `TART_HOME` `0700` under a dedicated user; single instance via `flock`.
+No host directory, socket, key or credential is shared with a guest. JIT configs are single-use,
+in memory, delivered over `tart exec` stdin to the exact VM after its identity checks (ADR 0038).
+No token in argv, env of child processes, logs, metrics, status, diagnostics or the diagnostics
+bundle (redaction tests + secret scan). Trust: `trusted` tier only in v0.x, enforced per scale set
+(ADR 0027). Residual risks stated in `doc/security.md`: a JIT config is visible to the workflow
+code it serves, by design; hypervisor escape. Threat model (SEC-01): untrusted workflow code,
+guest-to-host network (with and without Softnet), supply chain of images and runner, operator
+mistakes.
 
 ---
 
@@ -473,10 +597,10 @@ supply chain of images and runner, operator mistakes.
 |:--|:--|:--|
 | 0 Foundation | Workspace, gate, architecture law, CI, process | `cargo xtask check` green in CI; forbidden edge fixtures fail |
 | 1 Kernel | Pure domain, protocol, lifecycle FSM, aggregates, models | exhaustive FSM matrix, golden events, Quint models check |
-| 2 Journal | SQLite journal, AggregateStore, projections, outbox/inbox | journal contract on memory + SQLite + reopened |
+| 2 Journal | Stream-scoped store: SQLite journal, AggregateStore, projections, inbox, durable delivery, snapshots, PostgreSQL in Docker | store contracts on memory, SQLite (five modes) and PostgreSQL |
 | 3 Planes | CP reconciler/saga, DP executor, inproc link | **walking skeleton**: `mayflyd` + fake-tart + fake GitHub runs a job end to end on Linux |
-| 4 GitHub | Scale Set client, listener, JIT, classic | fake-GitHub contract, redelivery/ack-loss tests |
+| 4 GitHub | Live capture (GH-00), Scale Set client, listener, JIT, registrations and reaper | fake-GitHub contract built from the capture, redelivery/ack-loss tests |
 | 5 Real world | Tart adapter, guest transport, host probes, launchd | (owner) real Tart smoke on the Mac |
 | 6 Evidence | Conformance replay, fault lab F01–F31, mutants, fuzz | core faults PASS, curated mutants killed |
 | 7 Operate | Packaging, signing, runbooks, canary next to Tartelet | (owner) canary on a real repository |
-| 8 Later | Warm pools tuning, macOS images, UDS split roles, multi-host | ADR per step |
+| 8 Later | Prepared-pool tuning, untrusted tier, UDS split roles, multi-host | ADR per step |

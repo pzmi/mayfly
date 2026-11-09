@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted (owner, 2026-11-09); amended by 0034.
 
 ## Context
 
@@ -55,3 +55,7 @@ cannot afford.
   effects ordered by `next_attempt_at`, not a feed of the journal.
 - SQLite's single writer remains an implementation detail of ES-02, never a premise of the port
   or the suite.
+
+Amended by ADR 0034 (2026-11-09, owner): directives become `DirectiveIssued` events delivered by a
+durable consumer (no outbox table); refusal receipts are bound to the stream revision they were
+decided at; stream epochs and snapshots are built now; the projection rebuild is online.

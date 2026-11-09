@@ -562,9 +562,10 @@ boundaries), not as an object model.
    refused `DETERMINISM_CASES` (verification §3). Matches over state and stimulus are exhaustive
    (`ARCH-exhaustive-transition`).
 3. **One write path.** `AggregateStore::save` is the only caller of the journal's write methods
-   (`ARCH-single-append`): one SQLite transaction holds the expected-revision check, the events,
-   synchronous projections, outbox rows, the command receipt and the inbox entry; reactors run
-   after commit and are never replayed (plan §5.2).
+   (`ARCH-single-append`): one store transaction holds the expected-revision check, the events
+   (a directive is a `DirectiveIssued` event; there is no outbox table, ADR 0034), inline
+   projections, dispatch marks, the command receipt and the inbox entry; reactors are kicks after
+   commit and are never replayed (plan §5.2, `doc/event-store.md`).
 4. **Idempotency.** Commands carry a `command_id`; a repeat returns the receipt's result.
    Observations and GitHub messages are deduplicated by the inbox. Directives are idempotent by
    `directive_id` and target name.
@@ -764,10 +765,13 @@ One commit lands per green CI run on `main`. A red `main` is fixed immediately, 
 ### 10.3 ADRs
 
 Nygard format in `doc/adr/NNNN-kebab-title.md`: `# NNNN. Title`, `Date:`, `## Status`
-(`Proposed`, `Accepted`, `Superseded by NNNN`), `## Context`, `## Decision`, `## Consequences`.
-The index `doc/adr/README.md` is checked against the files by the `docs` stage. ADR 0001 records
-the practice; D*n* in tasks.md is ADR *n*+1. A new or reversed architectural decision adds or
-supersedes an ADR in the same commit; a decision is never edited away. Only the owner moves a
+(`Proposed`, `Accepted (owner, YYYY-MM-DD)`, `Rejected (owner, YYYY-MM-DD)` once FND-07 lands,
+`Superseded by NNNN`, with annotations such as `amended by NNNN`), `## Context`, `## Decision`,
+`## Consequences`, optional `## Alternatives considered`. The index `doc/adr/README.md` is checked
+against the files by the `docs` stage. ADR 0001 (amended 2026-11-09) records the practice: an ADR
+is a decision record, not a rule; refinements are dated amendments in place, reversals are
+superseding ADRs, and the rules, fixtures and tests that pin an ADR change with it. The ADR number
+is the decision id; D1-D15 in tasks.md are aliases (D*n* = ADR *n*+1). Only the owner moves a
 decision to Accepted.
 
 ---

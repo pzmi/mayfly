@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Proposed (amended by 0024, 0026, 0037)
 
 ## Context
 
@@ -29,3 +29,8 @@ can be killed and restarted without a recovery of its own: it reports inventory 
 plane reconciles (plan section 10). The control plane carries the whole durability burden, which
 ADR 0008 and ADR 0021 shape; the codec and registry are ADR 0018, and time enters as a value
 (ADR 0020). Implemented by KER-03, ES-01 to ES-04.
+
+Amended by later records: the data plane keeps an in-memory resource ledger rebuilt from
+observation (ADR 0024), owns one durable artefact, the epoch-floor marker in `TART_HOME`, a fence
+rather than state (ADR 0026), and leaves a per-VM shim's lock and `exit.json` beside each VM
+(ADR 0037). None of these is a journal or a record of decisions.
