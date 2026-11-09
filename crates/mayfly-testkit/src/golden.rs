@@ -14,7 +14,14 @@
 //! `evolve` from `initial()` without a panic. Together, the samples of a kind must show every
 //! field and enum variant of the payload's traced shape
 //! ([`mayfly_control_domain::shape`]): an optional field or a variant no sample shows could be
-//! renamed without breaking a frozen fixture, so it fails as [`GoldenFailure::Uncovered`].
+//! renamed without breaking a frozen fixture, so it fails as [`GoldenFailure::Uncovered`]. A
+//! payload part the tracer cannot see (an enum coded as a string or integer, a type that needs a
+//! self-describing format, a part nothing reaches: [`shape::Gap`]) fails as
+//! [`GoldenFailure::Untraceable`], and a registered kind whose set reports no shape at all as
+//! [`GoldenFailure::NoShape`], so coverage is never skipped silently. A `#[serde(alias)]` name
+//! counts as a field or variant of its own that a sample must show, and a sample that shows it
+//! cannot re-encode byte for byte: aliases are refused in event payloads (pinned by
+//! `should_refuse_an_alias_when_an_event_declares_one`).
 //!
 //! [`verify`] reports every failure, not just the first. Each kind of failure is pinned by a test
 //! in `tests/harness/golden.rs` (for example `should_fail_when_a_registered_kind_has_no_fixture`,
@@ -31,7 +38,7 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use mayfly_control_domain::shape::{self, Atom, Node, Shape};
+use mayfly_control_domain::shape::{self, Atom, Gap, Node, Shape};
 use mayfly_control_domain::{
     Aggregate, AggregateRegistry, AggregateVisitor, DecodeError, DeterminismCases, EventKind,
     EventSet,
@@ -132,13 +139,19 @@ pub enum GoldenFailure {
         /// Each missing field or variant, as [`Atom`] displays it.
         missing: Vec<String>,
     },
-    /// The kind's payload type cannot be traced (see [`mayfly_control_domain::shape`]), so its
-    /// coverage cannot be checked.
+    /// Parts of the kind's payload type cannot be traced (see
+    /// [`mayfly_control_domain::shape`]), so its coverage cannot be checked.
     Untraceable {
         /// The kind.
         kind: EventKind,
-        /// The paths that need a self-describing format or that nothing reaches.
-        paths: Vec<String>,
+        /// Each untraced path (`""` is the root) and why.
+        gaps: Vec<(String, Gap)>,
+    },
+    /// `EventSet::shape` returns `None` for a registered kind, so its coverage cannot be
+    /// checked at all (an event set written by hand instead of with `event_set!`).
+    NoShape {
+        /// The kind.
+        kind: EventKind,
     },
     /// The same kind is registered more than once, or two aggregates share a name.
     Duplicate {
@@ -221,11 +234,26 @@ impl fmt::Display for GoldenFailure {
                 "{kind}: no sample shows {}; add a v<n>.<slug>.json that does",
                 missing.join(", ")
             ),
-            Self::Untraceable { kind, paths } => write!(
+            Self::Untraceable { kind, gaps } => {
+                let gaps: Vec<String> = gaps
+                    .iter()
+                    .map(|(path, gap)| {
+                        let path = if path.is_empty() { "<root>" } else { path };
+                        format!("`{path}` {gap}")
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "{kind}: the payload cannot be traced: {}; events use structs, externally \
+                     tagged enums, Option, Vec, maps, plain strings and numbers, and the value \
+                     types with a mayfly_domain::Sample (ADR 0018)",
+                    gaps.join("; ")
+                )
+            }
+            Self::NoShape { kind } => write!(
                 f,
-                "{kind}: the payload cannot be traced at {}; use structs, externally tagged \
-                 enums, Option, Vec and string-keyed maps",
-                paths.join(", ")
+                "{kind}: EventSet::shape has no shape for a registered kind, so its coverage \
+                 cannot be checked; declare the set with event_set!"
             ),
             Self::Duplicate { what } => write!(f, "registered twice: {what}"),
             Self::InvalidKind { kind } => write!(
@@ -657,33 +685,26 @@ impl Run<'_> {
                 }
             }
         }
-        if !samples.is_empty() {
-            self.check_coverage::<A::Event>(kind, &samples);
+        match <A::Event as EventSet>::shape(kind) {
+            None => self.failures.push(GoldenFailure::NoShape { kind }),
+            Some(shape) if !samples.is_empty() => self.check_coverage(kind, &shape, &samples),
+            Some(_) => {}
         }
     }
 
-    fn check_coverage<E: EventSet>(&mut self, kind: EventKind, samples: &[Value]) {
-        let Some(shape) = E::shape(kind) else {
-            return;
-        };
+    fn check_coverage(&mut self, kind: EventKind, shape: &Shape, samples: &[Value]) {
         if !shape.untraceable.is_empty() {
             self.failures.push(GoldenFailure::Untraceable {
                 kind,
-                paths: shape
+                gaps: shape
                     .untraceable
                     .iter()
-                    .map(|p| {
-                        if p.is_empty() {
-                            "<root>".to_owned()
-                        } else {
-                            p.clone()
-                        }
-                    })
+                    .map(|(path, gap)| (path.clone(), *gap))
                     .collect(),
             });
             return;
         }
-        let seen = observed(&shape, samples);
+        let seen = observed(shape, samples);
         let missing: Vec<String> = shape
             .atoms()
             .difference(&seen)

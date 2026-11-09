@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::VmNameError;
 use crate::fence::Generation;
 use crate::ids::{AttemptId, HostId, PoolName};
+use crate::sample::Sample;
 
 const PREFIX: &str = "mf-";
 
@@ -176,6 +177,18 @@ impl TryFrom<String> for OwnedVmName {
     type Error = VmNameError;
     fn try_from(s: String) -> Result<Self, VmNameError> {
         Self::parse(&s)
+    }
+}
+
+impl Sample for OwnedVmName {
+    fn sample() -> Self {
+        Self::new(
+            PoolName::sample(),
+            HostId::sample(),
+            Slot(0),
+            Generation::FIRST,
+            AttemptId::sample(),
+        )
     }
 }
 

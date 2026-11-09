@@ -4,14 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mayfly_control_domain::EventKind;
-use mayfly_control_domain::shape::{Atom, trace};
+use mayfly_control_domain::shape::{Atom, Gap, trace};
 use mayfly_testkit::golden::{GoldenFailure, GoldenFailures, GoldenSummary, observed, verify};
 use tempfile::TempDir;
 
 use crate::support::{
     DOOR_CLOSED_V1, DOOR_CLOSED_V1_HAND, DOOR_CLOSED_V1_WIND, DOOR_OPENED_V1,
     DOOR_OPENED_V1_EXPECTED, DOOR_OPENED_V2, Doors, DoorsAndFlaky, DoorsTwice, Gates, Jammed,
-    Latches, Malformeds, Misrouted, NoAggregates, SignalPosts, Twins,
+    Ladders, Latches, Malformeds, Misrouted, NoAggregates, Shapelesses, SignalPosts, Twins,
 };
 
 const OPENED_V2: EventKind = EventKind {
@@ -402,8 +402,59 @@ fn should_fail_when_payload_cannot_be_traced() {
                 event_type: "signalled",
                 schema_version: 1
             },
-            paths: vec!["signal".to_owned()],
+            gaps: vec![("signal".to_owned(), Gap::SelfDescribing)],
         }]
+    );
+}
+
+#[test]
+fn should_fail_when_the_event_set_has_no_shape_for_a_registered_kind() {
+    // given
+    let dir = tree(&complete());
+    // when
+    let failures = verify::<Shapelesses>(dir.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![
+            GoldenFailure::NoShape { kind: OPENED_V2 },
+            GoldenFailure::NoShape { kind: CLOSED_V1 },
+            GoldenFailure::NoShape { kind: OPENED_V1 },
+        ]
+    );
+}
+
+const CLIMBED_V1: EventKind = EventKind {
+    event_type: "rung_climbed",
+    schema_version: 1,
+};
+
+#[test]
+fn should_refuse_an_alias_when_an_event_declares_one() {
+    // given: the alias needs a sample, and a sample that uses it cannot re-encode as itself
+    let without_alias = tree(&[("rung_climbed/v1.json", "{\n  \"rung\": 1\n}\n")]);
+    let with_alias = tree(&[
+        ("rung_climbed/v1.json", "{\n  \"rung\": 1\n}\n"),
+        ("rung_climbed/v1.old.json", "{\n  \"step\": 1\n}\n"),
+    ]);
+    // when
+    let uncovered = verify::<Ladders>(without_alias.path()).unwrap_err().0;
+    let rewritten = verify::<Ladders>(with_alias.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        uncovered,
+        vec![GoldenFailure::Uncovered {
+            kind: CLIMBED_V1,
+            missing: vec!["field `step`".to_owned()],
+        }]
+    );
+    assert!(
+        matches!(
+            rewritten.as_slice(),
+            [GoldenFailure::NotByteIdentical { kind, path, .. }]
+                if *kind == CLIMBED_V1 && *path == at(with_alias.path(), "rung_climbed/v1.old.json")
+        ),
+        "{rewritten:?}"
     );
 }
 
@@ -738,21 +789,27 @@ fn should_name_what_to_fix_when_each_failure_is_displayed() {
         },
         GoldenFailure::Untraceable {
             kind: CLOSED_V1,
-            paths: vec!["<root>".to_owned()],
+            gaps: vec![
+                (String::new(), Gap::NotConverged),
+                ("mode".to_owned(), Gap::OpaqueLeaf),
+            ],
         },
+        GoldenFailure::NoShape { kind: CLOSED_V1 },
     ]);
     // when
     let report = failures.to_string();
     // then
     for expected in [
-        "7 golden fixture failure(s)",
+        "8 golden fixture failure(s)",
         "cannot list events/door_opened/v1.json: not a directory",
         "cannot read an entry of events/door_opened/v1.json: gone",
         "cannot read events/door_opened/v1.json: invalid UTF-8",
         "legacy door_opened/v1 (events/door_opened/v1.json) upcasts to door_closed/v1, not to the current door_opened/v2",
         "door: evolve(initial, door_closed/v1) panicked on events/door_opened/v1.json: jammed",
         "door_closed/v1: no sample shows variant `reason::wind`",
-        "door_closed/v1: the payload cannot be traced at <root>",
+        "door_closed/v1: the payload cannot be traced: `<root>` did not settle",
+        "; `mode` is an opaque leaf",
+        "door_closed/v1: EventSet::shape has no shape for a registered kind",
     ] {
         assert!(report.contains(expected), "{expected:?} not in {report}");
     }

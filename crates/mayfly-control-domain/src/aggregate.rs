@@ -10,9 +10,11 @@ use crate::event::EventSet;
 /// stable `snake_case` name a command receipt and the operator see.
 pub trait Rejection: Clone + Debug + PartialEq {
     /// Every code [`Rejection::code`] can return. The determinism harness refuses a case whose
-    /// refusal code is not listed and pins the list in the aggregate's decisions golden, so a
-    /// renamed code shows in review (`mayfly_testkit::determinism`, pinned by its
-    /// `should_fail_when_refusal_code_is_not_declared` and
+    /// refusal code is not listed and a listed code that no refused case returns, and pins the
+    /// codes and outcomes in the aggregate's decisions golden, so a renamed code shows in review
+    /// (`mayfly_testkit::determinism`, pinned by its
+    /// `should_fail_when_refusal_code_is_not_declared`,
+    /// `should_fail_when_a_declared_code_has_no_refused_case` and
     /// `should_fail_when_decisions_differ_from_the_golden`).
     const CODES: &'static [&'static str];
 

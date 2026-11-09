@@ -5,9 +5,10 @@
 use std::cell::Cell;
 use std::fmt;
 
+use mayfly_control_domain::shape::Shape;
 use mayfly_control_domain::{
-    Aggregate, AggregateRegistry, AggregateVisitor, Command, DeterminismCase, DeterminismCases,
-    DomainEvent, Expect, Rejection, event_set,
+    Aggregate, AggregateRegistry, AggregateVisitor, Command, DecodeError, DeterminismCase,
+    DeterminismCases, DomainEvent, EventKind, EventSet, Expect, Rejection, event_set,
 };
 use mayfly_domain::{CommandId, Millis};
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,12 @@ impl DeterminismCases for Door {
                 command: command(DoorBody::Open { by: 3 }),
                 expect: Expect::Refused,
             },
+            DeterminismCase {
+                name: "close_closed_door",
+                history: vec![],
+                command: command(DoorBody::Close),
+                expect: Expect::Refused,
+            },
         ]
     }
 }
@@ -166,6 +173,7 @@ pub const DOOR_DECISIONS: &str = "\
 # door: refusal codes, then the outcome of each determinism case
 code already_closed
 code already_open
+case close_closed_door refused already_closed
 case close_open_door accepted
   door_closed/v1 {}
 case open_closed_door accepted
@@ -297,16 +305,7 @@ door_with_cases!(
 door_with_cases!(
     /// A door whose cases all start from a closed door.
     ForgetfulDoor = "forgetful_door",
-    |cases| {
-        let mut cases: Vec<_> = cases.filter(|c| c.history.is_empty()).collect();
-        cases.push(DeterminismCase {
-            name: "close_closed_door",
-            history: vec![],
-            command: command(DoorBody::Close),
-            expect: Expect::Refused,
-        });
-        cases
-    }
+    |cases| cases.filter(|c| c.history.is_empty()).collect()
 );
 
 /// A door whose `decide` reads hidden mutable state: each call opens it "by" someone new.
@@ -413,6 +412,24 @@ door_refusing!(
     TaciturnDoor = "taciturn_door",
     Taciturn,
     Taciturn
+);
+
+/// A refusal type whose `CODES` list a code no refusal returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Wordy(pub DoorRejection);
+impl Rejection for Wordy {
+    const CODES: &'static [&'static str] = &["already_open", "already_closed", "jammed"];
+
+    fn code(&self) -> &'static str {
+        self.0.code()
+    }
+}
+
+door_refusing!(
+    /// A door that declares a code none of its cases is refused with.
+    WordyDoor = "wordy_door",
+    Wordy,
+    Wordy
 );
 
 /// A refusal type whose `CODES` list a malformed code and one twice.
@@ -934,6 +951,66 @@ event_holder!(
     SignalEvent
 );
 
+/// `DoorEvent` behind an `EventSet` written by hand that reports no shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shapeless(pub DoorEvent);
+
+impl EventSet for Shapeless {
+    const KINDS: &'static [EventKind] = DoorEvent::KINDS;
+    const LEGACY_KINDS: &'static [EventKind] = DoorEvent::LEGACY_KINDS;
+
+    fn kind(&self) -> EventKind {
+        self.0.kind()
+    }
+
+    fn encode<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.encode(serializer)
+    }
+
+    fn decode<'de, D: serde::Deserializer<'de>>(
+        event_type: &str,
+        schema_version: u32,
+        deserializer: D,
+    ) -> Result<Self, DecodeError<D::Error>> {
+        DoorEvent::decode(event_type, schema_version, deserializer).map(Self)
+    }
+
+    fn shape(_kind: EventKind) -> Option<Shape> {
+        None
+    }
+}
+
+event_holder!(
+    /// An aggregate whose event set has no shape for its kinds.
+    ShapelessDoor = "shapeless_door",
+    Shapeless
+);
+
+/// A ladder's rung was climbed; `step` is the field's old name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RungClimbed {
+    #[serde(alias = "step")]
+    pub rung: u8,
+}
+impl DomainEvent for RungClimbed {
+    const EVENT_TYPE: &'static str = "rung_climbed";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+event_set! {
+    /// What happened to a ladder.
+    pub enum LadderEvent {
+        /// Climbed.
+        Climbed(RungClimbed),
+    }
+}
+
+event_holder!(
+    /// An aggregate whose event declares a serde alias.
+    Ladder = "ladder",
+    LadderEvent
+);
+
 macro_rules! registry {
     ($name:ident: $($aggregate:ty),*) => {
         pub struct $name;
@@ -958,6 +1035,7 @@ registry!(DoorsAndForgetful: Door, ForgetfulDoor);
 registry!(DoorsAndGrudging: Door, GrudgingDoor);
 registry!(DoorsAndMoody: Door, MoodyDoor);
 registry!(DoorsAndTaciturn: Door, TaciturnDoor);
+registry!(DoorsAndWordy: Door, WordyDoor);
 registry!(DoorsAndGarbled: Door, GarbledDoor);
 registry!(DoorsAndDrifting: Door, DriftingDoor);
 registry!(DoorsAndVeiled: Door, VeiledDoor);
@@ -970,6 +1048,8 @@ registry!(Malformeds: Malformed);
 registry!(Latches: Latch);
 registry!(Twins: Twin);
 registry!(SignalPosts: SignalPost);
+registry!(Shapelesses: ShapelessDoor);
+registry!(Ladders: Ladder);
 
 /// The canonical fixtures of [`Door`]'s events.
 pub const DOOR_OPENED_V2: &str = "{\n  \"by\": 4\n}\n";

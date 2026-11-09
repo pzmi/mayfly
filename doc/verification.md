@@ -82,8 +82,12 @@ Rules across levels:
    `PartialEq`, by the `Debug` form of states and results, by each event's encoded bytes and by
    the refusal's `Rejection::code()`, so a hand-written `PartialEq` cannot hide a difference.
    Every module contributes at least one accepted and one refused case, at least one case with a
-   non-empty history, and unique names; a refusal's code must be in `Rejection::CODES`. The set
-   of modules with cases must equal the set of `Aggregate` impls (a missing module fails). Each
+   non-empty history, and unique names; a refusal's code must be in `Rejection::CODES`, and every
+   code listed there must be returned by some refused case. The set of modules with cases must
+   equal the set of `Aggregate` impls: a registered aggregate without cases does not compile
+   (`AggregateVisitor::visit` requires `DeterminismCases`), and an `impl Aggregate` left out of
+   `ControlAggregates` is refused by the architecture rule `ARCH-aggregate-registered`
+   (fnd §3.3), not by the harness, which only sees registered aggregates. Each
    aggregate's codes and case outcomes are pinned in a decisions golden (§4), which catches an
    outcome that changes between builds or processes. The data-plane FSMs carry the same harness
    over `step`.
@@ -119,7 +123,7 @@ and on an orphan fixture.
 
 | Family | Location | Harness rule | Task |
 |:--|:--|:--|:--|
-| Events | `crates/mayfly-control-domain/tests/fixtures/events/<type>/v<n>.json`, plus any `v<n>.<slug>.json` (`<slug>` is `[a-z0-9][a-z0-9-]*`) | every registered `(EVENT_TYPE, SCHEMA_VERSION)` has its primary sample `v<n>.json`; every sample decodes, re-encodes byte-identically and folds through `evolve` from `initial()` without a panic; together the samples show every field and enum variant of the payload's traced shape (an optional field or variant no sample shows fails); an unregistered file or a name outside the layout fails | KER-03 |
+| Events | `crates/mayfly-control-domain/tests/fixtures/events/<type>/v<n>.json`, plus any `v<n>.<slug>.json` (`<slug>` is `[a-z0-9][a-z0-9-]*`) | every registered `(EVENT_TYPE, SCHEMA_VERSION)` has its primary sample `v<n>.json`; every sample decodes, re-encodes byte-identically and folds through `evolve` from `initial()` without a panic; together the samples show every field and enum variant of the payload's traced shape (an optional field or variant no sample shows fails, and so does a part the tracer cannot see, such as an enum coded as a string or integer: ADR 0018); an unregistered file or a name outside the layout fails | KER-03 |
 | Event upcasts | `…/events/<type>/v<n>.json` and `v<n>.<slug>.json` of a legacy version, each with its `.expected.json` (`v<n>.expected.json`, `v<n>.<slug>.expected.json`) | each old sample decodes through its upcaster into the current version of its own type and into exactly the expected current encoding; the samples cover the old shape as above; the chain has no gaps, one current version, no legacy version at or above it | KER-03, first bump |
 | Decisions | `crates/mayfly-control-domain/tests/fixtures/decisions/<aggregate>.txt` | the aggregate's sorted `Rejection::CODES` and each determinism case's outcome (events as kind and compact payload, or the refusal code) equal the file; a file for no registered aggregate fails; regenerated deliberately from the failure's text | KER-03 |
 | Protocol | `crates/mayfly-protocol/tests/fixtures/<message>/v<major>.json` | one per message kind and major version; round trip byte-identical; an unknown major is refused | KER-02 |
@@ -131,8 +135,9 @@ and on an orphan fixture.
 
 Rules:
 
-1. **Existing event and protocol fixtures are frozen** (every sample and expectation alike). Their hashes are listed in
-   `fixtures.lock`; changing one fails. A shape change adds a new fixture (new version or new
+1. **Existing event and protocol fixtures are frozen** (every sample and expectation alike).
+   Planned (ES-03): their hashes listed in `fixtures.lock`, so changing one fails; until then
+   the rule is kept by review and by the byte-identical round trip. A shape change adds a new fixture (new version or new
    type) beside the old; the old one stays for ever, because the journal is backward-transitive
    (fnd §6).
 2. Other families may be regenerated, but only deliberately: the commit says which fixture

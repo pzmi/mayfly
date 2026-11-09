@@ -90,3 +90,62 @@ harness trusted `PartialEq` alone, which a hand-written impl can make blind to a
 Consequences: an event type's author commits one sample per optional field and variant (the
 failure names each missing one) and an aggregate's author commits its decisions golden. The
 tracer lives in the pure crate because only it may name `serde` (fnd §2.4); it uses no format.
+
+## Amendment (2026-11-09): what the tracer can see, and where it lives
+
+Review of the sample-coverage amendment (KER-03G) found four ways the shape tracer passed a
+payload it had not fully seen: recursion was detected by serde container name alone, so a
+generic `Change<T>` nested as `Change<Limits>` holding `Change<Mode>` (or two types both named
+`Detail`) silently lost the inner one's variants; an enum carried as a string or integer
+(`try_from`/`into`, `with`, `deserialize_with`) traced as a plain leaf whose variants no sample
+had to show; a validated id refused the tracer's made-up `""` and `0`, so an id-keyed map or an
+id-first tuple was untraceable; and two different nodes at one path kept the first silently.
+
+- **Recursion.** A container is identified by its kind, serde name, field or variant names
+  (compared by content: a promoted constant can be duplicated across codegen units, so address
+  identity could miss a real cycle) and the Rust type name of its visitor, which carries a
+  generic type's parameters. A container that reappears inside itself is unrolled once more and
+  every node of the copy must match the original at the same relative path; the third
+  appearance ends the run. A copy that differs is reported (`Gap::Recursion`), and nesting past
+  `MAX_DEPTH` is reported (`Gap::TooDeep`): the tracer never stops silently.
+- **Leaf samples.** A leaf is offered values in turn, one per run: a string the empty string,
+  then the text of each validated value type events carry, from a new pure trait
+  `mayfly_domain::Sample` (pool and host names, the hex ids, `ImageDigest`, `OwnedVmName`);
+  an integer its type's maximum, then 0 and 1. A refusal is caught where the leaf's visitor
+  rejects the value and where the value's conversion (`try_from`) fails right after it. The
+  list in `mayfly_control_domain::shape` is the allowlist of value types; the integer value
+  types (`Generation`, `Epoch`, `Millis`, `Deadline`, `Slot`, `Resources`' fields) accept their
+  maximum and need no entry.
+- **Opaque leaves: the mechanism chosen.** A leaf that refuses every sample, or an integer that
+  refuses its maximum, is reported as `Gap::OpaqueLeaf`, so the golden harness fails it as
+  `Untraceable`. Rejected alternatives: a per-event declaration that the payload holds no coded
+  enum (nothing could check it), and a marker trait on leaf types (serde hands the tracer a
+  `String` or `u8` visitor, never the enum, so the tracer cannot see a leaf's Rust type). The
+  behavioural rule is checkable and costs an author nothing unless they add a validated value
+  type, which then implements `Sample` and joins the list. **Limitation:** an enum coded as an
+  integer with a variant at the type's maximum, or as a string with a variant spelled exactly
+  like a sample, still traces as a plain leaf. The complementary static rule (no
+  `try_from`/`into`/`with` on an event payload's enums) belongs to the architecture checker and
+  is not part of this amendment.
+- **Gaps.** `Shape::untraceable` maps each path to its `Gap` (self-describing format, unreached,
+  opaque leaf, conflict, recursion, too deep, not converged); two different nodes at one path
+  (a tuple's elements share `[]`) are a `Conflict`, not first-wins.
+- **Aliases.** serde lists a `#[serde(alias)]` name among a struct's fields and an enum's
+  variants, and the tracer cannot tell it from the primary name, so it is an item a sample must
+  show, and a sample that shows it re-encodes under the primary name and fails byte identity:
+  aliases are refused in event payloads, consistent with "a rename is a new version".
+- **Harness.** A registered kind whose `EventSet::shape` is `None` fails (`NoShape`) instead of
+  skipping coverage. Every code in `Rejection::CODES` must be returned by some refused
+  determinism case (`UncoveredCode`), so each code's outcome is pinned in the decisions golden.
+- **Registration.** An `impl Aggregate` left out of `ControlAggregates` is refused by the
+  architecture rule `ARCH-aggregate-registered` (ARCH-01), as the consequences above asked;
+  `fixtures.lock` remains planned (ES-03).
+
+**Why the tracer lives in the pure crate.** Only `event_set!` knows which payload type each
+`(type, version)` kind decodes to, and it expands in the crate that declares the events, so the
+shape must be reachable from `EventSet` there; the tracer itself names no format, so it may sit
+beside the codec (fnd §2.3, §2.4). The alternative was a `visit_payload::<V>(kind, visitor)`
+hook on `EventSet` that hands the payload type to a visitor generic over `DeserializeOwned`,
+with the tracer in the test kit; it keeps the pure crate smaller but adds a second generic entry
+point every event set must carry and splits the shape rules from the codec they describe. It
+remains open if the pure crate's tracer grows.

@@ -110,7 +110,9 @@ pub trait EventSet: Sized + Clone + fmt::Debug + PartialEq {
 
     /// The traced shape of the payload stored under `kind`, current or legacy; `None` for a
     /// kind this set does not read. The golden harness requires every field and variant of it
-    /// to appear in some committed sample ([`crate::shape`]).
+    /// to appear in some committed sample ([`crate::shape`]), and fails a registered kind whose
+    /// shape is `None` (`mayfly_testkit::golden`, pinned by its
+    /// `should_fail_when_the_event_set_has_no_shape_for_a_registered_kind`).
     fn shape(kind: EventKind) -> Option<crate::shape::Shape>;
 }
 

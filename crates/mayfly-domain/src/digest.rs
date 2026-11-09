@@ -6,6 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::DigestError;
+use crate::sample::Sample;
 
 /// `sha256:` followed by 64 lowercase hex digits; a tag is never an identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -59,5 +60,11 @@ impl TryFrom<String> for ImageDigest {
 impl From<ImageDigest> for String {
     fn from(v: ImageDigest) -> String {
         v.0
+    }
+}
+
+impl Sample for ImageDigest {
+    fn sample() -> Self {
+        Self(format!("sha256:{}", "0".repeat(64)))
     }
 }

@@ -6,6 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::IdError;
+use crate::sample::Sample;
 
 fn valid_name(s: &str) -> bool {
     (1..=16).contains(&s.len())
@@ -129,6 +130,12 @@ macro_rules! hex_id {
                 v.to_string()
             }
         }
+
+        impl Sample for $name {
+            fn sample() -> Self {
+                Self(1)
+            }
+        }
     };
 }
 
@@ -155,6 +162,18 @@ hex_id!(
     /// append cannot record the same fact twice (the journal contract's `duplicate_event_id`).
     EventId
 );
+
+impl Sample for PoolName {
+    fn sample() -> Self {
+        Self("pool0".to_owned())
+    }
+}
+
+impl Sample for HostId {
+    fn sample() -> Self {
+        Self("host0".to_owned())
+    }
+}
 
 impl AttemptId {
     /// The eight lowercase hex digits that end an [`crate::OwnedVmName`]: the id's LOW 32 bits.

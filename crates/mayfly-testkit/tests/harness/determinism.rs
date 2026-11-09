@@ -12,8 +12,8 @@ use tempfile::TempDir;
 use crate::support::{
     DOOR_DECISIONS, Doors, DoorsAndConfused, DoorsAndDrifting, DoorsAndEcho, DoorsAndFlaky,
     DoorsAndForgetful, DoorsAndGarbled, DoorsAndGrudging, DoorsAndMoody, DoorsAndMuted,
-    DoorsAndOptimist, DoorsAndSilent, DoorsAndTaciturn, DoorsAndTally, DoorsAndVeiled, DoorsTwice,
-    NoAggregates,
+    DoorsAndOptimist, DoorsAndSilent, DoorsAndTaciturn, DoorsAndTally, DoorsAndVeiled,
+    DoorsAndWordy, DoorsTwice, NoAggregates,
 };
 
 /// A decisions directory holding `files` (name, content).
@@ -67,7 +67,7 @@ fn should_pass_when_every_case_is_deterministic_and_as_declared() {
         summary,
         Ok(DeterminismSummary {
             aggregates: 1,
-            cases: 3
+            cases: 4
         })
     );
 }
@@ -113,7 +113,10 @@ fn should_fail_when_refusal_is_not_deterministic() {
     // then
     assert_eq!(
         nondeterministic_decides(&failures),
-        vec![("grudging_door", "open_open_door")]
+        vec![
+            ("grudging_door", "open_open_door"),
+            ("grudging_door", "close_closed_door")
+        ]
     );
 }
 
@@ -126,7 +129,10 @@ fn should_fail_when_only_the_refusal_code_differs() {
     // then
     assert_eq!(
         nondeterministic_decides(&failures),
-        vec![("moody_door", "open_open_door")]
+        vec![
+            ("moody_door", "open_open_door"),
+            ("moody_door", "close_closed_door")
+        ]
     );
 }
 
@@ -271,6 +277,7 @@ fn should_fail_when_case_declares_the_wrong_outcome() {
             ("open_closed_door", Expect::Refused),
             ("close_open_door", Expect::Refused),
             ("open_open_door", Expect::Accepted),
+            ("close_closed_door", Expect::Accepted),
         ]
     );
 }
@@ -288,6 +295,22 @@ fn should_fail_when_refusal_code_is_not_declared() {
             aggregate: "taciturn_door",
             case: "open_open_door",
             code: "already_open"
+        }]
+    );
+}
+
+#[test]
+fn should_fail_when_a_declared_code_has_no_refused_case() {
+    // given
+    let root = decisions();
+    // when
+    let failures = verify::<DoorsAndWordy>(root.path()).unwrap_err().0;
+    // then
+    assert_eq!(
+        failures,
+        vec![DeterminismFailure::UncoveredCode {
+            aggregate: "wordy_door",
+            code: "jammed"
         }]
     );
 }
@@ -436,7 +459,7 @@ fn should_return_the_summary_when_assert_deterministic_passes() {
     // when
     let summary = assert_deterministic::<Doors>(root.path());
     // then
-    assert_eq!(summary.cases, 3);
+    assert_eq!(summary.cases, 4);
 }
 
 #[test]
@@ -477,6 +500,10 @@ fn should_name_what_to_fix_when_each_failure_is_displayed() {
             case: "open_open_door",
             code: "already_open",
         },
+        DeterminismFailure::UncoveredCode {
+            aggregate: "door",
+            code: "jammed",
+        },
         DeterminismFailure::MissingDecisions {
             aggregate: "door",
             path: path.clone(),
@@ -498,7 +525,8 @@ fn should_name_what_to_fix_when_each_failure_is_displayed() {
     let report = failures.to_string();
     // then
     for expected in [
-        "8 determinism failure(s)",
+        "9 determinism failure(s)",
+        "door: no refused case returns code jammed",
         "door: no determinism case has a history",
         "door: Rejection::CODES lists x twice",
         "door/count: an event does not encode: key must be a string",

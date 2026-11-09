@@ -7,8 +7,9 @@
 //! the accepted events onto both states again. Agreement is checked four ways, because a
 //! hand-written `PartialEq` can hide a field: `PartialEq`, the `Debug` form of states and
 //! results, each event's encoded bytes ([`crate::golden::encode`]) and the refusal's
-//! `Rejection::code()`. The result must match the declared outcome, and a refusal's code must
-//! be in `Rejection::CODES`.
+//! `Rejection::code()`. The result must match the declared outcome, a refusal's code must be in
+//! `Rejection::CODES`, and every code listed there must be returned by some refused case, so
+//! each one is pinned in the decisions golden below.
 //!
 //! Each aggregate's codes and case outcomes are also pinned in a decisions golden,
 //! `<root>/<aggregate>.txt` (for the control plane, `crates/mayfly-control-domain/tests/
@@ -122,6 +123,14 @@ pub enum DeterminismFailure {
         /// The code.
         code: &'static str,
     },
+    /// A code in `Rejection::CODES` that no refused case returns, so the decisions golden pins
+    /// no outcome for it.
+    UncoveredCode {
+        /// The aggregate.
+        aggregate: &'static str,
+        /// The code.
+        code: &'static str,
+    },
     /// The aggregate's decisions golden does not exist.
     MissingDecisions {
         /// The aggregate.
@@ -213,6 +222,11 @@ impl fmt::Display for DeterminismFailure {
             } => write!(
                 f,
                 "{aggregate}/{case}: refusal code {code} is not in Rejection::CODES"
+            ),
+            Self::UncoveredCode { aggregate, code } => write!(
+                f,
+                "{aggregate}: no refused case returns code {code}; add a determinism case that \
+                 does"
             ),
             Self::MissingDecisions {
                 aggregate,
@@ -411,6 +425,7 @@ impl AggregateVisitor for Run<'_> {
         let codes = <A::Rejection as Rejection>::CODES;
         self.check_codes(aggregate, codes);
         let mut outcomes = BTreeMap::new();
+        let mut refused = BTreeSet::new();
         for case in cases {
             self.cases += 1;
             let name = case.name;
@@ -423,13 +438,20 @@ impl AggregateVisitor for Run<'_> {
             }
             match check_case::<A>(case) {
                 Ok(outcome) => {
-                    outcomes.insert(name, outcome);
+                    refused.extend(outcome.code);
+                    outcomes.insert(name, outcome.show());
                 }
                 Err(failure) => self.failures.push(failure),
             }
         }
-        // A golden is compared only for an aggregate that kept every other rule, so one
-        // broken case reports itself once, not again as a changed golden.
+        // Uncovered codes and the golden are checked only for an aggregate that kept every
+        // other rule, so one broken case reports itself once, not again as a changed golden.
+        if self.failures.len() == before {
+            for code in codes.iter().filter(|code| !refused.contains(*code)) {
+                self.failures
+                    .push(DeterminismFailure::UncoveredCode { aggregate, code });
+            }
+        }
         if self.failures.len() == before {
             self.check_golden(aggregate, &render(aggregate, codes, &outcomes));
         }
@@ -521,8 +543,8 @@ fn same<T: PartialEq + fmt::Debug>(first: &T, second: &T) -> bool {
     first == second && format!("{first:?}") == format!("{second:?}")
 }
 
-/// One case: the rendered outcome for the golden, or the first rule it breaks.
-fn check_case<A: Aggregate>(case: DeterminismCase<A>) -> Result<String, DeterminismFailure> {
+/// One case: its outcome, or the first rule it breaks.
+fn check_case<A: Aggregate>(case: DeterminismCase<A>) -> Result<Outcome, DeterminismFailure> {
     let aggregate = A::NAME;
     let name = case.name;
     let evolve_failure =
@@ -582,5 +604,5 @@ fn check_case<A: Aggregate>(case: DeterminismCase<A>) -> Result<String, Determin
     if !same(&after_first, &after_second) {
         return Err(evolve_failure(&after_first, &after_second));
     }
-    Ok(first_outcome.show())
+    Ok(first_outcome)
 }

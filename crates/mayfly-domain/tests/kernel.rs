@@ -1,8 +1,9 @@
 //! Kernel behaviour through the public API: names, ids, fences, digests, time, serde validation.
 
 use mayfly_domain::{
-    AttemptId, Deadline, Epoch, Fence, FenceError, Generation, HostId, ImageDigest, Millis,
-    OwnedVmName, PoolName, Resources, Slot, VmNameClass, VmNameError, classify_vm_name,
+    AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Fence, FenceError, Generation,
+    HostId, ImageDigest, Millis, ObservationId, OwnedVmName, PoolName, Resources, Sample, Slot,
+    VmNameClass, VmNameError, classify_vm_name,
 };
 use proptest::prelude::*;
 use serde::Deserialize;
@@ -471,4 +472,56 @@ fn should_validate_when_a_value_is_deserialized() {
     );
     let zero: U32Deserializer<DeError> = 0_u32.into_deserializer();
     assert!(Generation::deserialize(zero).is_err());
+}
+
+/// `T`'s sample, decoded from its own text as an event payload would carry it.
+fn decoded_sample<T>() -> Result<T, DeError>
+where
+    T: Sample + for<'de> Deserialize<'de>,
+    String: From<T>,
+{
+    let text = String::from(T::sample());
+    T::deserialize(StrDeserializer::<DeError>::new(&text))
+}
+
+#[test]
+fn should_decode_its_own_text_when_a_sample_is_serialised() {
+    // given
+    let expected = (
+        PoolName::sample(),
+        HostId::sample(),
+        AttemptId::sample(),
+        CommandId::sample(),
+        DirectiveId::sample(),
+        EventId::sample(),
+        ObservationId::sample(),
+        ImageDigest::sample(),
+        OwnedVmName::sample(),
+    );
+    // when
+    let decoded = (
+        decoded_sample::<PoolName>(),
+        decoded_sample::<HostId>(),
+        decoded_sample::<AttemptId>(),
+        decoded_sample::<CommandId>(),
+        decoded_sample::<DirectiveId>(),
+        decoded_sample::<EventId>(),
+        decoded_sample::<ObservationId>(),
+        decoded_sample::<ImageDigest>(),
+        decoded_sample::<OwnedVmName>(),
+    );
+    // then
+    assert_eq!(decoded.0, Ok(expected.0));
+    assert_eq!(decoded.1, Ok(expected.1));
+    assert_eq!(decoded.2, Ok(expected.2));
+    assert_eq!(decoded.3, Ok(expected.3));
+    assert_eq!(decoded.4, Ok(expected.4));
+    assert_eq!(decoded.5, Ok(expected.5));
+    assert_eq!(decoded.6, Ok(expected.6));
+    assert_eq!(decoded.7, Ok(expected.7));
+    assert_eq!(decoded.8, Ok(expected.8));
+    assert_eq!(
+        String::from(OwnedVmName::sample()),
+        "mf-pool0-host0-s0-g1-00000001"
+    );
 }
