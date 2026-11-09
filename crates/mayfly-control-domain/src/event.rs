@@ -107,6 +107,11 @@ pub trait EventSet: Sized + Clone + fmt::Debug + PartialEq {
         schema_version: u32,
         deserializer: D,
     ) -> Result<Self, DecodeError<D::Error>>;
+
+    /// The traced shape of the payload stored under `kind`, current or legacy; `None` for a
+    /// kind this set does not read. The golden harness requires every field and variant of it
+    /// to appear in some committed sample ([`crate::shape`]).
+    fn shape(kind: EventKind) -> Option<crate::shape::Shape>;
 }
 
 /// Declares an aggregate's event enum and its [`EventSet`] codec.
@@ -151,8 +156,11 @@ pub trait EventSet: Sized + Clone + fmt::Debug + PartialEq {
 /// ```
 ///
 /// The `legacy` block is the upcaster hook: each older struct is decoded, then mapped by a
-/// pure `fn(Old) -> Enum`. The golden harness requires every version from 1 to the current
-/// one to be registered, and a `v<n>.expected.json` beside each legacy fixture.
+/// pure `fn(Old) -> Enum` that must land on the current version of the same type. The golden
+/// harness requires every version from 1 to the current one to be registered, a
+/// `v<n>[.<slug>].expected.json` beside each legacy sample, and the upcast's kind to be that
+/// current version (`mayfly_testkit::golden`, pinned by its
+/// `should_fail_when_upcast_lands_on_another_kind`).
 #[macro_export]
 macro_rules! event_set {
     (
@@ -218,6 +226,22 @@ macro_rules! event_set {
                     event_type: ::std::string::String::from(event_type),
                     schema_version,
                 })
+            }
+
+            fn shape(
+                kind: $crate::event::EventKind,
+            ) -> ::core::option::Option<$crate::shape::Shape> {
+                $(
+                    if kind == $crate::event::EventKind::of::<$event>() {
+                        return ::core::option::Option::Some($crate::shape::trace::<$event>());
+                    }
+                )+
+                $($(
+                    if kind == $crate::event::EventKind::of::<$old>() {
+                        return ::core::option::Option::Some($crate::shape::trace::<$old>());
+                    }
+                )+)?
+                ::core::option::Option::None
             }
         }
     };

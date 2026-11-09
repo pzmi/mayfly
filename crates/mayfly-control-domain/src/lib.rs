@@ -7,12 +7,14 @@
 //!
 //! An aggregate plugs in by implementing [`Aggregate`] and [`DeterminismCases`], declaring its
 //! events with [`event_set!`], and adding one line to [`ControlAggregates`]; the testkit's
-//! golden and determinism harnesses then cover it.
+//! golden and determinism harnesses then cover it. [`shape`] traces an event payload's fields
+//! and variants, so the golden harness can require a sample of each (ADR 0018).
 
 mod aggregate;
 mod command;
 pub mod event;
 mod registry;
+pub mod shape;
 
 pub use aggregate::{
     Aggregate, AggregateRegistry, AggregateVisitor, DeterminismCase, DeterminismCases, Expect,

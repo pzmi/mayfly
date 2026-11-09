@@ -9,6 +9,13 @@ use crate::event::EventSet;
 /// Why `decide` refused a command. Each aggregate has its own refusal type; `code` is the
 /// stable `snake_case` name a command receipt and the operator see.
 pub trait Rejection: Clone + Debug + PartialEq {
+    /// Every code [`Rejection::code`] can return. The determinism harness refuses a case whose
+    /// refusal code is not listed and pins the list in the aggregate's decisions golden, so a
+    /// renamed code shows in review (`mayfly_testkit::determinism`, pinned by its
+    /// `should_fail_when_refusal_code_is_not_declared` and
+    /// `should_fail_when_decisions_differ_from_the_golden`).
+    const CODES: &'static [&'static str];
+
     /// A fixed `snake_case` code, never formatted from data.
     fn code(&self) -> &'static str;
 }
@@ -67,7 +74,9 @@ pub enum Expect {
 }
 
 /// One determinism case (ver §3.1): fold `history`, decide `command`, expect `expect`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` and `Clone` are written by hand: a derive would bound them on the marker type `A`,
+/// which implements neither, instead of on its events and bodies.
 pub struct DeterminismCase<A: Aggregate> {
     /// Unique within the aggregate; shown when the case fails.
     pub name: &'static str,
@@ -79,12 +88,37 @@ pub struct DeterminismCase<A: Aggregate> {
     pub expect: Expect,
 }
 
+impl<A: Aggregate> Debug for DeterminismCase<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeterminismCase")
+            .field("aggregate", &A::NAME)
+            .field("name", &self.name)
+            .field("history", &self.history)
+            .field("command", &self.command)
+            .field("expect", &self.expect)
+            .finish()
+    }
+}
+
+impl<A: Aggregate> Clone for DeterminismCase<A> {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name,
+            history: self.history.clone(),
+            command: self.command.clone(),
+            expect: self.expect,
+        }
+    }
+}
+
 /// The `DETERMINISM_CASES` of one aggregate module (ver §3.1): at least one accepted and one
-/// refused case. A registry admits only aggregates that implement this, so a registered
-/// aggregate without cases does not compile and one with an empty or one-sided list fails
+/// refused case, at least one of them with a non-empty history, names unique. A registry
+/// admits only aggregates that implement this, so a registered aggregate without cases does
+/// not compile and one with an empty, one-sided or history-free list fails
 /// `mayfly_testkit::determinism::verify` (pinned by the testkit's
-/// `should_fail_when_aggregate_module_has_no_cases` and
-/// `should_fail_when_aggregate_module_has_no_refused_case`).
+/// `should_fail_when_aggregate_module_has_no_cases`,
+/// `should_fail_when_aggregate_module_has_no_refused_case` and
+/// `should_fail_when_no_case_has_a_history`).
 pub trait DeterminismCases: Aggregate + Sized {
     /// The cases, built fresh on each call.
     fn determinism_cases() -> Vec<DeterminismCase<Self>>;

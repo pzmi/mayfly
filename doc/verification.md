@@ -77,10 +77,16 @@ Rules across levels:
 
 1. **`DETERMINISM_CASES`.** Each aggregate module of `mayfly-control-domain` exports a list of
    cases `{ name, history: Vec<Event>, command, expect: Accepted | Refused }`. The testkit
-   harness folds `history`, calls `decide` twice from equal states and requires equal results,
-   refusals included, and the declared outcome. Every module contributes at least one accepted
-   and one refused case; the set of modules with cases must equal the set of `Aggregate` impls
-   (a missing module fails). The data-plane FSMs carry the same harness over `step`.
+   harness folds `history` twice, calls `decide` once from each state and requires the two
+   results to agree, refusals included, and the declared outcome. Agreement is checked by
+   `PartialEq`, by the `Debug` form of states and results, by each event's encoded bytes and by
+   the refusal's `Rejection::code()`, so a hand-written `PartialEq` cannot hide a difference.
+   Every module contributes at least one accepted and one refused case, at least one case with a
+   non-empty history, and unique names; a refusal's code must be in `Rejection::CODES`. The set
+   of modules with cases must equal the set of `Aggregate` impls (a missing module fails). Each
+   aggregate's codes and case outcomes are pinned in a decisions golden (§4), which catches an
+   outcome that changes between builds or processes. The data-plane FSMs carry the same harness
+   over `step`.
 2. **Fake clock.** Time reaches application code only through the `Clock` port (`now`,
    `sleep_until`, `timeout`). `FakeClock` advances only when the test says so; component tests
    that exercise Tokio timers use `tokio::time::pause` and `advance`. Deadlines, backoff,
@@ -113,8 +119,9 @@ and on an orphan fixture.
 
 | Family | Location | Harness rule | Task |
 |:--|:--|:--|:--|
-| Events | `crates/mayfly-control-domain/tests/fixtures/events/<type>/v<n>.json` | every registered `(EVENT_TYPE, SCHEMA_VERSION)` has exactly one fixture; decode → encode is byte-identical; an unregistered fixture fails | KER-03 |
-| Event upcasts | `…/events/<type>/v<n>.<slug>.json` + `.expected.json` | an old payload decodes through the upcaster chain into exactly the expected current encoding; the chain has no gaps | KER-03, first bump |
+| Events | `crates/mayfly-control-domain/tests/fixtures/events/<type>/v<n>.json`, plus any `v<n>.<slug>.json` (`<slug>` is `[a-z0-9][a-z0-9-]*`) | every registered `(EVENT_TYPE, SCHEMA_VERSION)` has its primary sample `v<n>.json`; every sample decodes, re-encodes byte-identically and folds through `evolve` from `initial()` without a panic; together the samples show every field and enum variant of the payload's traced shape (an optional field or variant no sample shows fails); an unregistered file or a name outside the layout fails | KER-03 |
+| Event upcasts | `…/events/<type>/v<n>.json` and `v<n>.<slug>.json` of a legacy version, each with its `.expected.json` (`v<n>.expected.json`, `v<n>.<slug>.expected.json`) | each old sample decodes through its upcaster into the current version of its own type and into exactly the expected current encoding; the samples cover the old shape as above; the chain has no gaps, one current version, no legacy version at or above it | KER-03, first bump |
+| Decisions | `crates/mayfly-control-domain/tests/fixtures/decisions/<aggregate>.txt` | the aggregate's sorted `Rejection::CODES` and each determinism case's outcome (events as kind and compact payload, or the refusal code) equal the file; a file for no registered aggregate fails; regenerated deliberately from the failure's text | KER-03 |
 | Protocol | `crates/mayfly-protocol/tests/fixtures/<message>/v<major>.json` | one per message kind and major version; round trip byte-identical; an unknown major is refused | KER-02 |
 | CLI JSON | `crates/mayfly-cli/tests/fixtures/json/<command>.json` | `--json` output equals the fixture after normalising the fields listed in one place (instants, ids) | RT-03 |
 | Config | `crates/mayfly-composition/tests/fixtures/config/{valid,invalid}/*.toml` | valid files load; each invalid file fails with the error naming the field recorded beside it | RT-01 |
@@ -124,7 +131,7 @@ and on an orphan fixture.
 
 Rules:
 
-1. **Existing event and protocol fixtures are frozen.** Their hashes are listed in
+1. **Existing event and protocol fixtures are frozen** (every sample and expectation alike). Their hashes are listed in
    `fixtures.lock`; changing one fails. A shape change adds a new fixture (new version or new
    type) beside the old; the old one stays for ever, because the journal is backward-transitive
    (fnd §6).

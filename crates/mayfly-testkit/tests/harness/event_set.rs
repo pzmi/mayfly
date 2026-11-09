@@ -1,7 +1,7 @@
 //! The codec `event_set!` generates, driven through serde_json.
 
 use mayfly_control_domain::{
-    Aggregate, DecodeError, EventKind, EventSet, Rejection, known_kinds, replay,
+    Aggregate, DecodeError, DeterminismCases, EventKind, EventSet, Rejection, known_kinds, replay,
 };
 use mayfly_testkit::golden::{decode, encode};
 
@@ -99,7 +99,7 @@ fn should_fold_history_in_order_when_stream_is_replayed() {
     // given
     let history = [
         DoorEvent::Opened(DoorOpened { by: 1 }),
-        DoorEvent::Closed(DoorClosed {}),
+        DoorEvent::Closed(DoorClosed { reason: None }),
         DoorEvent::Opened(DoorOpened { by: 2 }),
     ];
     // when
@@ -118,6 +118,7 @@ fn should_expose_stable_codes_when_rejections_are_named() {
     let codes = rejections.map(|r| r.code());
     // then
     assert_eq!(codes, ["already_open", "already_closed"]);
+    assert_eq!(codes, DoorRejection::CODES);
 }
 
 #[test]
@@ -128,4 +129,36 @@ fn should_decide_from_command_alone_when_aggregate_has_no_state() {
     let events = Gate::decide(&Gate::initial(), command);
     // then
     assert_eq!(events, Ok(vec![GateEvent::Swung(GateSwung {})]));
+}
+
+#[test]
+fn should_trace_current_and_legacy_kinds_and_no_other_when_shape_is_asked() {
+    // given
+    let legacy = EventKind {
+        event_type: "door_opened",
+        schema_version: 1,
+    };
+    let unknown = EventKind {
+        event_type: "door_slammed",
+        schema_version: 1,
+    };
+    // when
+    let shapes = [legacy, unknown].map(DoorEvent::shape);
+    // then
+    assert!(shapes[0].as_ref().is_some_and(|s| s.atoms().is_empty()));
+    assert_eq!(shapes[1], None);
+}
+
+#[test]
+fn should_show_aggregate_name_and_history_when_case_is_debug_formatted() {
+    // given
+    let case = Door::determinism_cases().swap_remove(1);
+    // when
+    let shown = format!("{:?}", case.clone());
+    // then
+    assert!(
+        shown.starts_with("DeterminismCase { aggregate: \"door\", name: \"close_open_door\""),
+        "{shown}"
+    );
+    assert!(shown.contains("Opened(DoorOpened { by: 1 })"), "{shown}");
 }
