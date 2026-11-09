@@ -152,6 +152,7 @@ crates/
                             reactors (process managers), reconciler, listener, outbox relay;
                             ports: Journal, Clock, Ids, ScaleSetApi, RunnerRegistry, SecretStore
   mayfly-data-domain/       pure: directive executor FSM, fencing, VM supervisor FSM
+                            (depends on mayfly-domain and mayfly-protocol)
   mayfly-data/              DP application: executor, inventory observer, resource monitor;
                             ports: VmProvider, GuestTransport, HostProbe, ProcessClock
   mayfly-adapter-sqlite/    CP: journal, receipts, outbox, inbox, projections, migrations
@@ -470,6 +471,6 @@ supply chain of images and runner, operator mistakes.
 | 3 Planes | CP reconciler/saga, DP executor, inproc link | **walking skeleton**: `mayflyd` + fake-tart + fake GitHub runs a job end to end on Linux |
 | 4 GitHub | Scale Set client, listener, JIT, classic | fake-GitHub contract, redelivery/ack-loss tests |
 | 5 Real world | Tart adapter, guest transport, host probes, launchd | (owner) real Tart smoke on the Mac |
-| 6 Evidence | Conformance replay, fault lab F01–F30, mutants, fuzz | core faults PASS, curated mutants killed |
+| 6 Evidence | Conformance replay, fault lab F01–F31, mutants, fuzz | core faults PASS, curated mutants killed |
 | 7 Operate | Packaging, signing, runbooks, canary next to Tartelet | (owner) canary on a real repository |
 | 8 Later | Warm pools tuning, macOS images, UDS split roles, multi-host | ADR per step |

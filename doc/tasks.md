@@ -120,7 +120,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | VER-01 | Conformance crate: ITF replay, lifecycle driver | KER-04, FND-06 | opus | |
 | VER-02 | Conformance drivers: scheduling, recovery, scaleset, link | VER-01, CP-04, GH-04, LNK-01 | opus | |
 | VER-03 | Fault lab: controller, history, verdicts, guardrails | E2E-01 | opus | |
-| VER-04 | Fault lab: nemesis, checker, scenarios F01–F16, F19, F20, F24 | VER-03, E2E-02 | opus | ⛳ |
+| VER-04 | Fault lab: nemesis, checker, core scenarios (ver §8.4) | VER-03, E2E-02, LNK-01 | opus | ⛳ |
 | VER-05 | Curated mutants (negative controls) and mutation lane | VER-02, VER-04 | sonnet | |
 | VER-06 | Fuzz targets and nightly fuzz lane | DP-04, GH-03, RT-01 | sonnet | |
 | VER-07 | Apalache invariant verification lane | KER-07, KER-06 | sonnet | |
@@ -225,13 +225,13 @@ Accept: harnesses fail on a missing fixture and on an aggregate without cases (t
 
 #### KER-04 Lifecycle model and `Attempt` aggregate
 Cites: plan §6, ver §6, D10. Model first: `formal/lifecycle.qnt` with invariants I06, I10, I13, I14
-(names in ver §6.1), scenario tests. Then the `Attempt` aggregate: states and stimuli of plan §6,
+(names in ver §6.1), scenario tests. Adds the `ARCH-exhaustive-transition` rule (fnd §3.3). Then the `Attempt` aggregate: states and stimuli of plan §6,
 exhaustive State × Stimulus matrix (no wildcard arms; an architecture or unit test proves every
 pair is listed), events with goldens, determinism cases.
 Accept: matrix test covers every pair; model tests pass; register the model in `MODELS`.
 
 #### KER-05 Scheduling model, `Host`/`Pool`, capacity policy
-Cites: plan §9, §5.1. Model first: `formal/scheduling.qnt` (I02, I03, I07, I08, I13). `Host`
+Cites: plan §9, §5.1. Model first: `formal/scheduling.qnt` (I01, I02, I03, I07, I08, I13). `Host`
 aggregate (epoch, slots, monotonic generations, reservations, drain, safe mode), `Pool` aggregate,
 pure `capacity::plan(inputs) -> CapacityReport + decisions`.
 Accept: proptest "admitted ≤ every limit" over random inputs; two macOS guests max; drain admits
@@ -240,14 +240,14 @@ nothing; generations strictly increase per slot.
 #### KER-06 Scale-set model, `ScaleSet` aggregate, demand
 Cites: plan §7.2. Model first: `formal/scaleset.qnt` (redelivery, ack loss, >50 messages,
 reassignment; invariants: no double reservation per request id, desired derives from latest
-statistics only, ack only after durable record). `ScaleSet` aggregate (session FSM, cursor,
+statistics only, ack only after durable record; I12, shared with recovery). `ScaleSet` aggregate (session FSM, cursor,
 statistics, acquired ids) and pure `demand::desired(stats, warm, capacity)`.
 Accept: tests for the mutants "count messages", "add TotalRunningJobs", "ack before record" fail
 the model or the unit tests (ver §9 items 4–7).
 
 #### KER-07 Recovery model and decision table
 Cites: plan §10. Model first: `formal/recovery.qnt` (crash at every await, epochs, unknown
-outcomes; I04, I09, I10, I11, I12). Pure `recovery::classify(journal_view, provider_view,
+outcomes; I04, I05, I09, I10, I11, I12). Pure `recovery::classify(journal_view, provider_view,
 github_view) -> Decision` covering every row of plan §10's table plus safe mode.
 Accept: exhaustive table test; `mf-*` VM unknown to the journal is never `Delete`.
 
@@ -280,7 +280,8 @@ schema fixture.
 #### ES-03 AggregateStore, command bus, reactors
 Cites: plan §5.2, §5.4. `AggregateStore::save` as the only caller of `Journal::append`
 (architecture rule added to xtask), load = fold of stream (snapshots deferred), `with_version_retry`
-for `WrongExpectedVersion` only, command bus with receipts (idempotent by `command_id`), reactor
+for `WrongExpectedVersion` only, `ARCH-migration-frozen` (released migrations hash-locked),
+the golden-fixture `fixtures.lock` (fnd §3.3), command bus with receipts (idempotent by `command_id`), reactor
 notification after commit only.
 Accept: architecture fixture fails a second `append` caller; a retried command returns its receipt.
 
@@ -380,7 +381,7 @@ Accept: metric names and labels golden-tested; no id-valued label.
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +
 fake guest runner completes one "job", VM deleted, slot released; then a demand of 3 with 2 slots
 never exceeds 2; then kill -9 mid-clone and restart converges without duplicates.
-Accept: these tests in the e2e level, green in CI on Linux.
+Accept: these tests in the e2e level (the `e2e-tests` stage, registered here), green in CI on Linux.
 
 ### Phase 4 — GitHub
 
@@ -447,12 +448,13 @@ Accept: a scenario whose fault never lands is INCONCLUSIVE; malformed history is
 #### VER-04 ⛳ Fault lab nemesis and checker
 Cites: ver §8. Nemesis (SIGKILL daemon at observed history points, fake-tart fault file, fake-github
 faults, data-plane process kill with LNK-01), independent checker (temporal safety invariants at
-every observation cut, bounded liveness after the healthy tail), scenarios F01–F16, F19, F20, F24.
+every observation cut, bounded liveness after the healthy tail), the core scenarios F01–F16, F19, F20, F24, F31 (ver §8.4),
+`cargo xtask faultlab suite|check|replay`, `doc/verification-status.md`.
 Accept: core scenarios PASS on fakes in a weekly CI lane and on demand; each scenario has a mutant
 that turns it FAIL.
 
 #### VER-05 Curated mutants
-Cites: ver §9. The 16 negative controls as source patches applied by `cargo xtask mutants-curated`,
+Cites: ver §9. The 18 negative controls of ver §9 as source patches applied by `cargo xtask mutants-curated`,
 each expected to be killed by a named test; `cargo-mutants` nightly lane with a baseline document.
 Accept: every curated mutant killed; survivors listed in `doc/mutation-baseline.md`.
 
@@ -463,7 +465,7 @@ Accept: targets build; corpus seeded from golden fixtures.
 
 #### VER-07 Apalache verification lane
 Cites: ver §6. `quint verify` with Apalache for each model's invariants at bounded depth in
-`formal.yml` (scheduled + on model changes).
+`formal.yml` (scheduled + on model changes); depths and timings in `doc/formal-models.md`.
 Accept: every invariant listed in ver §6.1 is checked; a seeded bad invariant fails.
 
 #### SEC-01 Threat model and secret audit
