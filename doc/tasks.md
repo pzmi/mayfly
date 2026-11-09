@@ -64,7 +64,7 @@ follow them as written. Only the owner flips a decision to Accepted.
     registry) follow the orchestrator's serialisation table.
 
 **Model key:** `opus` — design, security boundaries, concurrency, protocols, formal models, the
-architecture checker, anything under ⛳. `sonnet` — well-specified implementation. `haiku` —
+architecture checker. `sonnet` — well-specified implementation. `haiku` —
 mechanical docs and config.
 
 **Review checkpoints (⛳):** after a ⛳ task lands green, the orchestrator runs `/review` plus an
@@ -116,7 +116,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | GH-04 | Listener use case: inbox, statistics demand, ack after commit | GH-03, KER-06, CP-04 | opus | |
 | GH-05 | Classic ephemeral registration adapter | GH-02 | sonnet | |
 | E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, E2E-01 | sonnet | ⛳ |
-| LNK-01 | UDS transport and `--role control|data` | DP-02, RT-02 | sonnet | |
+| LNK-01 | UDS transport and split control/data roles | DP-02, RT-02 | sonnet | |
 | VER-01 | Conformance crate: ITF replay, lifecycle driver | KER-04, FND-06 | opus | |
 | VER-02 | Conformance drivers: scheduling, recovery, scaleset, link | VER-01, CP-04, GH-04, LNK-01 | opus | |
 | VER-03 | Fault lab: controller, history, verdicts, guardrails | E2E-01 | opus | |
@@ -138,7 +138,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 ### Phase 0 — foundation
 
 #### FND-01 Workspace, toolchain, crate stubs, licences, repo hygiene
-Cites: plan §4, fnd §2, D1, D2, D5.
+Cites: plan §4, fnd §2, D1, D2, D5. (Landed; `rust-toolchain.toml` was already present.)
 Create the Cargo workspace with every crate of plan §4 as a stub (`lib.rs` with a crate doc
 comment stating its role and plane; `mayfly-cli` with two `[[bin]]`s `mayflyd` and `mayfly` that
 print the version; `mayfly-fake-tart` with a `tart` binary stub). Copy `[workspace.lints]`,
@@ -150,7 +150,7 @@ Accept: fallback gate green; `cargo metadata` lists all crates; `publish = false
 
 #### FND-02 Port xtask core and architecture law from site-preview
 Cites: fnd §2–§3, §9, D3, D11.
-Port `tools/xtask` from `/home/user/site-preview/tools/xtask` (and its tests and fixtures): cli,
+Port `tools/xtask` from [site-preview](https://github.com/pzmi/site-preview) `tools/xtask` (and its tests and fixtures): cli,
 process, tools/doctor + `tools/versions.toml`, catalog + `check`/`quick`/`list-checks`,
 architecture (graph, policy, external allowlist, inventory, semantic rules for purity, hygiene and
 CQRS adapted to mayfly's crate names), adr, land, action pins, secret scan. Drop bench, docs,
@@ -195,7 +195,7 @@ Accept: stages fail closed when Quint is missing; CI runs them.
 ### Phase 1 — kernel (pure crates, models first)
 
 #### KER-01 Shared kernel
-Cites: plan §4, §8.4. `mayfly-domain`: `AttemptId`, `HostId`, `PoolName`, `DirectiveId`,
+Cites: plan §4, §8.4. `mayfly-domain`: `PoolName` and `HostId` restricted to `[a-z0-9]{1,16}` so the name separators are unambiguous, `AttemptId`, `HostId`, `PoolName`, `DirectiveId`,
 `ObservationId`, `CommandId`, `Generation`, `Epoch`, `Fence`, `OwnedVmName` (format and strict
 parse of `mf-<pool>-<host>-s<slot>-g<gen>-<short>`; rejects anything else), `ImageDigest`,
 `Resources`, `Millis`/`Deadline` value types (no clock), error types. No serde in the domain unless

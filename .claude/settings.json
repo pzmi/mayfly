@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(cargo xtask *)",
+      "Bash(cargo fmt*)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo test*)",
+      "Bash(cargo nextest *)",
+      "Bash(cargo build*)",
+      "Bash(cargo check*)",
+      "Bash(cargo run *)",
+      "Bash(cargo doc*)",
+      "Bash(cargo fetch*)",
+      "Bash(cargo tree*)",
+      "Bash(cargo metadata*)",
+      "Bash(cargo deny *)",
+      "Bash(cargo llvm-cov*)",
+      "Bash(cargo update -w*)",
+      "Bash(cargo update --workspace*)",
+      "Bash(rustfmt *)",
+      "Bash(rustup show*)",
+      "Bash(target/debug/mayflyd *)",
+      "Bash(target/debug/mayfly *)",
+      "Bash(target/release/mayflyd *)",
+      "Bash(target/release/mayfly *)",
+      "Bash(npm ci --prefix formal*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git ls-files*)",
+      "Bash(git ls-remote*)",
+      "Bash(git check-ignore*)",
+      "Bash(git rev-parse*)",
+      "Bash(git branch*)",
+      "Bash(git tag --list*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git fetch*)",
+      "Bash(git switch *)",
+      "Bash(git checkout *)",
+      "Bash(git rebase *)",
+      "Bash(git merge --ff-only *)",
+      "Bash(git cherry-pick *)",
+      "Bash(git worktree *)",
+      "Bash(git -C *)",
+      "Bash(git push origin *)",
+      "Bash(git push -u origin *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f*)",
+      "Bash(git push * +*)",
+      "Bash(git push --tags*)",
+      "Bash(git push * --tags*)",
+      "Bash(git push --delete*)",
+      "Bash(git push * --delete*)",
+      "Bash(git -C * push --force*)",
+      "Bash(git -C * push -f*)",
+      "Bash(git -C * push * --force*)",
+      "Bash(git -C * push * -f*)",
+      "Bash(git -C * push * --tags*)",
+      "Bash(git -C * commit --no-verify*)",
+      "Bash(git -C * commit * --no-verify*)",
+      "Bash(git reset --hard*)",
+      "Bash(git commit --no-verify*)",
+      "Bash(git commit * --no-verify*)",
+      "Bash(git add -A*)",
+      "Bash(git add .)",
+      "Bash(rm -rf /*)",
+      "Bash(tart delete*)",
+      "Bash(tart prune*)",
+      "Bash(tart stop*)",
+      "Bash(tart rename*)",
+      "Bash(docker *)",
+      "Bash(pkill *)",
+      "Bash(killall *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post-edit.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop-gate.sh",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

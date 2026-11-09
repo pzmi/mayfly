@@ -113,7 +113,8 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   the control plane's inbox.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory secrets broker. The outbox stores a handle, never a JIT config. A
-  crash loses the secret; the attempt is retired and a new one minted (blueprint §4 "JIT leaked").
+  crash loses the secret; the attempt is retired and a new one minted (a possibly leaked JIT
+  config is never reused; it expires server-side).
 - Both directions are **at-least-once**; both ends are idempotent. Ordering is not assumed:
   observations carry the directive and generation they answer, and stale ones are ignored by the
   aggregate (`evolve` of an older generation is a no-op recorded as `StaleObservationIgnored`).
@@ -368,7 +369,8 @@ exported before deletion (bounded, redacted).
 
 ### 8.4 Ownership
 
-A managed VM name is `mf-<pool>-<host>-s<slot>-g<generation>-<attempt_short>`; ownership requires
+A managed VM name is `mf-<pool>-<host>-s<slot>-g<generation>-<attempt_short>`, where pool and
+host ids are `[a-z0-9]{1,16}` so the `-` separators are unambiguous; ownership requires
 the journal record **and** the exact name **and** the generation. The data plane refuses
 `DeleteVm` without an `ownership_proof` that matches its fence; the control plane never emits one
 for a VM it has no record of. A `mf-*` VM unknown to the journal is reported for operator review,
