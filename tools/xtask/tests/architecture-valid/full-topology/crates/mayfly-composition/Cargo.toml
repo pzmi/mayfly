@@ -1,0 +1,21 @@
+[package]
+name = "mayfly-composition"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+mayfly-control = { path = "../mayfly-control" }
+mayfly-adapter-sqlite = { path = "../mayfly-adapter-sqlite" }
+mayfly-adapter-github = { path = "../mayfly-adapter-github" }
+mayfly-protocol = { path = "../mayfly-protocol" }
+mayfly-data = { path = "../mayfly-data" }
+mayfly-adapter-tart = { path = "../mayfly-adapter-tart" }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
+
+[build-dependencies]
+mayfly-domain = { path = "../mayfly-domain" }

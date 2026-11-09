@@ -1,0 +1,8 @@
+[package]
+name = "mayfly-faultlab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mayfly-control-domain = { path = "../../crates/mayfly-control-domain" }

@@ -1,0 +1,3 @@
+rule: ARCH-policy-schema
+at: architecture.toml
+contains: unknown field `prod`

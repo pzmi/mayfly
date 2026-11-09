@@ -1,0 +1,4 @@
+rule: ARCH-query-purity
+at: crates/mayfly-control/src/queries/mod.rs:8
+contains: fn `drained` takes `pools` as `&mut crate::state::Pools`
+only: true

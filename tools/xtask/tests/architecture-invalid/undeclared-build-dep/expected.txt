@@ -1,0 +1,3 @@
+rule: ARCH-undeclared-build-dep
+at: crates/mayfly-adapter-github/Cargo.toml
+contains: mayfly-adapter-github -> mayfly-domain

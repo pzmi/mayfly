@@ -1,0 +1,3 @@
+rule: ARCH-forbidden-edge
+at: crates/mayfly-data/Cargo.toml
+contains: mayfly-data -> mayfly-control-domain

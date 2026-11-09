@@ -1,0 +1,3 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-domain/src/lib.rs:5
+contains: `std::net::TcpStream::connect`

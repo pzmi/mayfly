@@ -1,0 +1,8 @@
+[package]
+name = "percent-encoding"
+version = "1.0.0"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = []

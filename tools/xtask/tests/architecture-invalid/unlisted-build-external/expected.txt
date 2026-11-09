@@ -1,0 +1,3 @@
+rule: ARCH-unlisted-external
+at: crates/mayfly-adapter-github/Cargo.toml
+contains: build dependency mayfly-adapter-github -> cc is not in `[external.build] mayfly-adapter-github`

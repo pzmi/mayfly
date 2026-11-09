@@ -1,0 +1,4 @@
+rule: ARCH-observability-isolation
+at: crates/mayfly-control/src/commands/mod.rs:9
+contains: `crate::metrics::queue_depth` in an if condition
+only: true

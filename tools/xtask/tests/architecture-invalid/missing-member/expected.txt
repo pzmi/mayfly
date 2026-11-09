@@ -1,0 +1,3 @@
+rule: ARCH-missing-member
+at: Cargo.toml
+contains: crates/ghost

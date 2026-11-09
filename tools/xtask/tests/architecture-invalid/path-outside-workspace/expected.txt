@@ -1,0 +1,3 @@
+rule: ARCH-external-source
+at: crates/mayfly-control/Cargo.toml
+contains: package `shim` comes from a path outside the workspace

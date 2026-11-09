@@ -1,0 +1,3 @@
+rule: ARCH-policy-schema
+at: architecture.toml
+contains: unsupported schema version 2

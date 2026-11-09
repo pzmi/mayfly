@@ -1,0 +1,3 @@
+rule: ARCH-unlisted-external
+at: crates/mayfly-cli/Cargo.toml
+contains: dev dependency mayfly-cli -> predicates is not in `[external.dev] mayfly-cli`

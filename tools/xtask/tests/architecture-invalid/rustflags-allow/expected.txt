@@ -1,0 +1,4 @@
+rule: ARCH-lint-config
+at: .cargo/config.toml
+contains: rustflags `-A`
+only: true

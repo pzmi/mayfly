@@ -1,0 +1,4 @@
+rule: ARCH-test-name
+at: crates/mayfly-domain/src/lib.rs:6
+contains: `roundtrip`
+only: true

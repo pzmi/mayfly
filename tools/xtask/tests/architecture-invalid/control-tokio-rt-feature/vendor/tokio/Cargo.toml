@@ -1,0 +1,10 @@
+[package]
+name = "tokio"
+version = "1.53.2"
+edition = "2021"
+
+[features]
+default = []
+sync = []
+rt = []
+full = ["sync", "rt"]

@@ -1,0 +1,16 @@
+[package]
+name = "mayfly-conformance"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+mayfly-control = { path = "../mayfly-control" }
+mayfly-testkit = { path = "../mayfly-testkit" }
+mayfly-adapter-sqlite = { path = "../mayfly-adapter-sqlite" }
+mayfly-adapter-github = { path = "../mayfly-adapter-github" }
+gitdep = { git = "https://example.invalid/gitdep.git" }

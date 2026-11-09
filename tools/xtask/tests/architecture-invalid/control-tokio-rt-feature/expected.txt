@@ -1,0 +1,3 @@
+rule: ARCH-external-feature
+at: crates/mayfly-control/Cargo.toml
+contains: mayfly-control -> tokio enables features [rt]

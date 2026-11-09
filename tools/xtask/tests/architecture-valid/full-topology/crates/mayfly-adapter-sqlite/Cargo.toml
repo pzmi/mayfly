@@ -1,0 +1,21 @@
+[package]
+name = "mayfly-adapter-sqlite"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-control = { path = "../mayfly-control" }
+mayfly-domain = { path = "../mayfly-domain" }
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = "1"
+
+[target.'cfg(windows)'.dependencies]
+winstub = "1"

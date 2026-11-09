@@ -1,0 +1,12 @@
+[package]
+name = "mayfly-testkit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+mayfly-control = { path = "../mayfly-control" }

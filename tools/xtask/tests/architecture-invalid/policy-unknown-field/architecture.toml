@@ -1,0 +1,10 @@
+schema = 1
+
+[workspace]
+prod = ["app"]
+
+[dependencies.normal]
+app = []
+
+[semantic]
+absent = ["mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-control", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-domain", "mayfly-testkit"]

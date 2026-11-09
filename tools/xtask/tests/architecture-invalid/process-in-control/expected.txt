@@ -1,0 +1,4 @@
+rule: ARCH-process-authority
+at: crates/mayfly-control/src/lib.rs:7
+contains: mayfly-control names `std::process::Command::new`
+only: true

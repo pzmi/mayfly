@@ -1,0 +1,3 @@
+rule: ARCH-unknown-crate
+at: crates/extra/Cargo.toml
+contains: `extra`

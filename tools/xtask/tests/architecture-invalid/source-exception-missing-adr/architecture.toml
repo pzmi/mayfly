@@ -1,0 +1,22 @@
+schema = 1
+
+[workspace]
+production = ["mayfly-domain", "mayfly-control", "mayfly-adapter-github", "mayfly-composition", "mayfly-cli"]
+test_only = ["mayfly-testkit"]
+
+[dependencies.normal]
+mayfly-domain = []
+mayfly-control = ["mayfly-domain"]
+mayfly-adapter-github = ["mayfly-control", "mayfly-domain"]
+mayfly-composition = ["mayfly-domain", "mayfly-control", "mayfly-adapter-github"]
+mayfly-cli = ["mayfly-composition"]
+mayfly-testkit = ["mayfly-domain", "mayfly-control"]
+
+[external.normal]
+mayfly-control = { gitdep = ["default"] }
+
+[exceptions.sources]
+"git+https://example.invalid/gitdep.git" = { adr = "9999" }
+
+[semantic]
+absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-fake-github", "mayfly-fake-tart", "mayfly-faultlab", "mayfly-protocol"]

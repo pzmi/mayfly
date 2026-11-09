@@ -1,0 +1,16 @@
+[package]
+name = "mayfly-control"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+mayfly-testkit = { path = "../mayfly-testkit" }
+tokio = { version = "1", default-features = false, features = ["sync"] }

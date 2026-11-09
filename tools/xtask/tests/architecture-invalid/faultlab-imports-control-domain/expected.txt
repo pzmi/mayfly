@@ -1,0 +1,3 @@
+rule: ARCH-independent-oracle
+at: tools/faultlab/Cargo.toml
+contains: normal dependency mayfly-faultlab -> mayfly-control-domain

@@ -1,0 +1,22 @@
+[package]
+name = "xtask"
+description = "Repository automation: gate, architecture checker and tool management."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+cargo_metadata = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+proc-macro2 = { version = "1.0.107", default-features = false, features = ["span-locations"] }
+serde = { version = "1.0.229", features = ["derive"] }
+syn = { version = "3.0.10", default-features = false, features = ["parsing", "full", "visit", "clone-impls"] }
+tempfile = "3.27.0"
+toml = "1.2.1"
+yaml-rust2 = { version = "0.13.0", default-features = false }

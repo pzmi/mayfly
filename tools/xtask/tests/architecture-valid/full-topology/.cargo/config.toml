@@ -1,0 +1,10 @@
+# Third-party crates resolve to local stubs, so the fixture needs no network.
+[source.crates-io]
+replace-with = "fixture-stubs"
+
+[source."git+https://example.invalid/gitdep.git"]
+git = "https://example.invalid/gitdep.git"
+replace-with = "fixture-stubs"
+
+[source.fixture-stubs]
+directory = "vendor"

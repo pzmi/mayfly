@@ -1,0 +1,15 @@
+[package]
+name = "mayfly-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-composition = { path = "../mayfly-composition" }
+
+[dev-dependencies]
+mayfly-composition = { path = "../mayfly-composition" }
+predicates = "1"

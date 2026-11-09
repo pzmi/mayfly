@@ -1,0 +1,29 @@
+# Pinned development tools (D15). `cargo xtask doctor` checks them, `cargo xtask
+# install-tools [tool...]` installs the ones it can. Versions are exact; bump them here only.
+# Only the tools a registered `check` stage needs are pinned: the task that adds a stage adds
+# its tool here (cargo-nextest and cargo-llvm-cov with FND-05, actionlint and shellcheck with
+# FND-04, Quint and Apalache with FND-06).
+#
+# method = "cargo"   : cargo install --locked <crate>@<version>
+# method = "rustup"  : rustup toolchain install nightly-<date> --profile minimal
+# method = "manual"  : not installable by xtask; `url` says where to get it
+# method = "lockfile": version owned by a package-lock.json, noted here, not checked by doctor
+# features = "a b"   : (method cargo) passed as --features to cargo install
+#
+# probe = [program, args...] is run to read the installed version; the output must contain
+# the exact version as a whitespace-separated token (a leading "v" is ignored), or, with
+# contains = true, as a substring.
+
+# The `deny` stage: advisories, licences, bans and sources against `deny.toml`.
+[tools.cargo-deny]
+version = "0.20.2"
+method = "cargo"
+probe = ["cargo-deny", "deny", "--version"]
+
+# The `secrets` stage: the whole git history against `.gitleaks.toml` (D13). Install the
+# release archive for the platform and check it against the release's checksums file.
+[tools.gitleaks]
+version = "8.30.1"
+method = "manual"
+url = "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
+probe = ["gitleaks", "version"]

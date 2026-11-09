@@ -1,0 +1,9 @@
+[package]
+name = "mayfly-adapter-sqlite"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mayfly-control = { path = "../mayfly-control" }
+mayfly-testkit = { path = "../mayfly-testkit" }

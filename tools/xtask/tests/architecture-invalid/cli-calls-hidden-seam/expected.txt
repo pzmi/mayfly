@@ -1,0 +1,3 @@
+rule: ARCH-hidden-seam
+at: crates/mayfly-cli/src/lib.rs:2
+contains: mayfly-cli names `start_with_unavailable_watcher`

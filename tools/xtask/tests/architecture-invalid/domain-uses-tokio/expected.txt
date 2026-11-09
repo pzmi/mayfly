@@ -1,0 +1,3 @@
+rule: ARCH-unlisted-external
+at: crates/mayfly-domain/Cargo.toml
+contains: normal dependency mayfly-domain -> tokio

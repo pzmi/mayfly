@@ -1,0 +1,10 @@
+[package]
+name = "fz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+app = { path = "../crates/app" }
+
+[workspace]

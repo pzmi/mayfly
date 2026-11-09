@@ -1,0 +1,79 @@
+# Positive fixture: a workspace using every allowed edge kind, which must pass.
+# - normal workspace edges along the whole dependency law;
+# - dev edges to a test_only crate (a dev cycle with mayfly-domain), to a crate in the normal
+#   list (mayfly-cli -> mayfly-composition) and from the tool crate to a test_only crate;
+# - a listed workspace build edge (mayfly-composition -> mayfly-domain);
+# - third-party edges: a feature list, "default" with its implied features, a feature implied
+#   by a listed one (tokio "full"), "*"; dev through the normal list and through
+#   [external.dev]; build through [external.build];
+# - a listed Linux-only dependency and an unlisted Windows-only one (Windows not evaluated);
+# - a git source approved in [exceptions.sources] by an ADR that exists;
+# - both planes over the shared kernel and the protocol, with composition the only crate that
+#   sees both (plan section 3.4); the fault lab as a tool crate reaching no workspace crate;
+# - semantic constructs that pass: process authority in the Tart adapter, composition and the
+#   fault lab, an `ExitCode` in the CLI, file access outside the pure crates, test-only code,
+#   literal include!, macro_rules, cfg branches, the testkit poll helper's sleep, todo! in
+#   test code, and a lint suppression approved in [[exceptions.lints]];
+# - application commands that publish and are traced, queries that only read (a `&mut` of a
+#   non-state buffer, a Formatter), and an instrumentation module whose values decide nothing.
+# Third-party crates are empty stubs behind .cargo/config.toml; Cargo.lock is committed.
+schema = 1
+
+[workspace]
+production = [
+  "mayfly-domain", "mayfly-protocol", "mayfly-control", "mayfly-data-domain", "mayfly-data",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-tart",
+  "mayfly-composition", "mayfly-cli",
+]
+test_only = ["mayfly-testkit", "mayfly-conformance"]
+tool_only = ["xtask", "mayfly-faultlab"]
+
+[dependencies.normal]
+mayfly-domain = []
+mayfly-protocol = ["mayfly-domain"]
+mayfly-control = ["mayfly-domain"]
+mayfly-data-domain = ["mayfly-domain"]
+mayfly-data = ["mayfly-data-domain", "mayfly-domain", "mayfly-protocol"]
+mayfly-adapter-tart = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
+mayfly-adapter-sqlite = ["mayfly-control", "mayfly-domain"]
+mayfly-adapter-github = ["mayfly-control", "mayfly-domain"]
+mayfly-composition = [
+  "mayfly-domain", "mayfly-protocol", "mayfly-control", "mayfly-data",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-tart",
+]
+mayfly-cli = ["mayfly-composition"]
+mayfly-testkit = ["mayfly-domain", "mayfly-control"]
+mayfly-conformance = [
+  "mayfly-domain", "mayfly-control", "mayfly-testkit",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github",
+]
+xtask = []
+mayfly-faultlab = []
+
+[dependencies.build]
+mayfly-composition = ["mayfly-domain"]
+
+[external.normal]
+mayfly-domain = { percent-encoding = ["default"] }
+mayfly-control = { tokio = ["sync"] }
+mayfly-adapter-sqlite = { rustix = ["default"] }
+mayfly-composition = { tokio = ["full"] }
+mayfly-conformance = { gitdep = ["default"] }
+xtask = { toml = "*" }
+
+[external.dev]
+mayfly-cli = { predicates = ["default"] }
+
+[external.build]
+mayfly-adapter-sqlite = { cc = ["default"] }
+
+[exceptions.sources]
+"git+https://example.invalid/gitdep.git" = { adr = "0001" }
+
+[[exceptions.lints]]
+path = "crates/mayfly-adapter-github/src/lib.rs"
+lint = "clippy::type_complexity"
+adr = "0002"
+
+[semantic]
+absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-control-domain", "mayfly-fake-github", "mayfly-fake-tart"]

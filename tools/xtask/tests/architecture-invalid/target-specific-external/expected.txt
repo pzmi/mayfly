@@ -1,0 +1,4 @@
+rule: ARCH-unlisted-external
+at: crates/mayfly-composition/Cargo.toml
+contains: mayfly-composition -> macstub
+contains: [targets: aarch64-apple-darwin]

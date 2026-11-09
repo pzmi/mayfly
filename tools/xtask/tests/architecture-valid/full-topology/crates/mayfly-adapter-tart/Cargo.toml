@@ -1,0 +1,13 @@
+[package]
+name = "mayfly-adapter-tart"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+mayfly-data = { path = "../mayfly-data" }
+mayfly-data-domain = { path = "../mayfly-data-domain" }

@@ -1,0 +1,3 @@
+rule: ARCH-external-source
+at: crates/mayfly-control/Cargo.toml
+contains: cites ADR 9999, which is not in doc/adr/

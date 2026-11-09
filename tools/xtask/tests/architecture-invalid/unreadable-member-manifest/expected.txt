@@ -1,0 +1,3 @@
+rule: ARCH-metadata
+at: Cargo.toml
+contains: cargo metadata failed

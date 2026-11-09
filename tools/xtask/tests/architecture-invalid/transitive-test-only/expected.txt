@@ -1,0 +1,3 @@
+rule: ARCH-production-closure
+at: crates/mayfly-cli/Cargo.toml
+contains: mayfly-cli -> mayfly-composition -> mayfly-adapter-sqlite -> mayfly-testkit

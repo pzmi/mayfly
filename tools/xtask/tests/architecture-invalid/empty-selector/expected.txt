@@ -1,0 +1,3 @@
+rule: ARCH-empty-selector
+at: architecture.toml
+contains: test_only

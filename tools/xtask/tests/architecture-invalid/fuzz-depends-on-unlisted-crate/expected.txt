@@ -1,0 +1,6 @@
+rule: ARCH-fuzz-crate
+at: fuzz/Cargo.toml
+contains: `fz`
+contains: `app`
+contains: [dependencies.normal] fz
+only: true

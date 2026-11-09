@@ -1,0 +1,3 @@
+rule: ARCH-production-closure
+at: crates/mayfly-adapter-github/Cargo.toml
+contains: mayfly-adapter-github -> mayfly-testkit

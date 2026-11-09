@@ -1,0 +1,4 @@
+rule: ARCH-query-purity
+at: crates/mayfly-control/src/queries/mod.rs:3
+contains: `crate::commands::Apply` (written `super::commands::Apply`)
+only: true

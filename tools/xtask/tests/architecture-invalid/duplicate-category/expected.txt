@@ -1,0 +1,3 @@
+rule: ARCH-duplicate-category
+at: architecture.toml
+contains: production, tool_only

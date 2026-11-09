@@ -1,0 +1,3 @@
+rule: ARCH-source-parse
+at: crates/mayfly-domain/src/policy.rs:3
+contains: does not parse

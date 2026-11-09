@@ -1,0 +1,4 @@
+[workspace]
+resolver = "3"
+members = ["crates/mayfly-domain", "crates/mayfly-control", "crates/mayfly-adapter-github", "crates/mayfly-composition", "crates/mayfly-cli", "crates/mayfly-testkit"]
+exclude = ["third_party/shim"]

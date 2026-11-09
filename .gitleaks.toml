@@ -1,0 +1,10 @@
+# Gitleaks policy (D13, D15). The default rule set is the baseline; the repository is scanned
+# across its whole history by `cargo xtask security` and the `secrets` stage of `check`.
+#
+# There is deliberately no allowlist: test fixtures build their fake secrets at run time in a
+# temporary directory instead of committing them. Add an entry here only for a reviewed false
+# positive, scoped to one rule and one path, with a comment saying why. Commit trailers such
+# as the session URL are not matched by any default rule.
+
+[extend]
+useDefault = true

@@ -1,0 +1,3 @@
+rule: ARCH-policy-cycle
+at: architecture.toml
+contains: mayfly-domain -> mayfly-cli

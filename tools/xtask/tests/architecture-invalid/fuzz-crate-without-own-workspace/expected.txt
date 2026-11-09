@@ -1,0 +1,5 @@
+rule: ARCH-fuzz-crate
+at: fuzz/Cargo.toml
+contains: `fz`
+contains: [workspace]
+only: true

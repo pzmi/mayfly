@@ -1,0 +1,4 @@
+rule: ARCH-command-isolation
+at: crates/mayfly-control/src/commands/mod.rs:3
+contains: `crate::queries::Read` (written `crate::Read`)
+only: true

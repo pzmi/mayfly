@@ -1,0 +1,3 @@
+rule: ARCH-not-a-member
+at: crates/stray/Cargo.toml
+contains: `stray`

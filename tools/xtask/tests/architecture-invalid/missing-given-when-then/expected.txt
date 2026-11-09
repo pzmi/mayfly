@@ -1,0 +1,3 @@
+rule: ARCH-test-structure
+at: crates/mayfly-domain/src/lib.rs:6
+contains: lacks `// given`

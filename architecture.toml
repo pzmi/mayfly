@@ -1,0 +1,103 @@
+# The dependency law of plan section 4, checked by `cargo xtask architecture` (D1, D3).
+# Every workspace crate is in exactly one category; a new crate gets its `members` entry and its
+# entry here in the same commit. An architecture failure is fixed by fixing the structure, never
+# by loosening this file (unless the task says so, with an ADR).
+schema = 1
+
+[workspace]
+production = [
+  "mayfly-domain", "mayfly-protocol",
+  "mayfly-control-domain", "mayfly-control",
+  "mayfly-data-domain", "mayfly-data",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-secrets",
+  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-adapter-link",
+  "mayfly-composition", "mayfly-cli",
+]
+test_only = [
+  "mayfly-testkit", "mayfly-conformance",
+  "mayfly-fake-tart", "mayfly-fake-github",
+]
+tool_only = ["xtask", "mayfly-faultlab"]
+
+# Allowed workspace edges (plan section 4). A dev-dependency may target a test_only crate or a
+# crate in the dependent's normal list. No production crate may reach a test_only or tool_only
+# crate over normal or build edges, and the lists must be acyclic.
+#
+# The control plane / data plane split (plan section 3.4, D1) is structural: no mayfly-control*
+# crate or control-plane adapter lists a mayfly-data* crate or a data-plane adapter, and the
+# reverse; both planes reach only mayfly-domain and mayfly-protocol. Only mayfly-composition
+# sees both planes.
+[dependencies.normal]
+mayfly-domain = []
+mayfly-protocol = ["mayfly-domain"]
+
+mayfly-control-domain = ["mayfly-domain"]
+mayfly-control = ["mayfly-control-domain", "mayfly-domain", "mayfly-protocol"]
+
+mayfly-data-domain = ["mayfly-domain"]
+mayfly-data = ["mayfly-data-domain", "mayfly-domain", "mayfly-protocol"]
+
+# Control-plane adapters.
+mayfly-adapter-sqlite = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
+mayfly-adapter-github = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
+mayfly-adapter-secrets = ["mayfly-control", "mayfly-control-domain", "mayfly-domain"]
+
+# Data-plane adapters.
+mayfly-adapter-tart = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
+mayfly-adapter-guest = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
+mayfly-adapter-host = ["mayfly-data", "mayfly-data-domain", "mayfly-domain"]
+
+# The CP<->DP transports carry protocol messages only.
+mayfly-adapter-link = ["mayfly-protocol", "mayfly-domain"]
+
+mayfly-composition = [
+  "mayfly-domain", "mayfly-protocol",
+  "mayfly-control-domain", "mayfly-control",
+  "mayfly-data-domain", "mayfly-data",
+  "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-secrets",
+  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-adapter-link",
+]
+mayfly-cli = ["mayfly-composition"]
+
+mayfly-testkit = [
+  "mayfly-domain", "mayfly-protocol",
+  "mayfly-control-domain", "mayfly-control",
+  "mayfly-data-domain", "mayfly-data",
+]
+# Conformance drives the production crates the Quint models govern, over the testkit.
+mayfly-conformance = [
+  "mayfly-testkit",
+  "mayfly-domain", "mayfly-protocol",
+  "mayfly-control-domain", "mayfly-control",
+  "mayfly-data-domain", "mayfly-data",
+  "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-adapter-link",
+  "mayfly-composition",
+]
+
+# Independent oracles (D11): the fakes implement their wire behaviour themselves and the fault
+# lab drives the binaries, so none of them may reach a workspace crate.
+mayfly-fake-tart = []
+mayfly-fake-github = []
+mayfly-faultlab = []
+xtask = []
+
+# Workspace build-dependencies; none are allowed unless listed here.
+[dependencies.build]
+
+# Third-party crates each workspace crate may use directly, by dependency kind. The value lists
+# the features the dependency may enable ("default" stands for its default features), or is
+# "*" for any. A crate allowed under `normal` is also allowed as a dev-dependency. A new
+# dependency is added with `cargo add` and listed here in the same commit.
+[external.normal]
+xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
+
+[external.dev]
+
+[external.build]
+
+# Approved departures, each citing an ADR. `[exceptions.sources]` maps a non-crates.io source
+# (without query or revision) to `{ adr = "NNNN" }`; `[[exceptions.lints]]` approves one
+# `allow`/`expect`/`coverage(off)`/`todo!` in one file: `{ path, lint, adr }`.
+[exceptions]

@@ -1,0 +1,4 @@
+rule: ARCH-independent-oracle
+at: tools/faultlab/Cargo.toml
+contains: dev dependency mayfly-faultlab -> mayfly-testkit
+only: true

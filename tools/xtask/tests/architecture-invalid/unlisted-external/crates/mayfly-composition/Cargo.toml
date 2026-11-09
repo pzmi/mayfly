@@ -1,0 +1,10 @@
+[package]
+name = "mayfly-composition"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }
+mayfly-control = { path = "../mayfly-control" }
+mayfly-adapter-github = { path = "../mayfly-adapter-github" }

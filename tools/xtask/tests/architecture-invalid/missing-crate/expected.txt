@@ -1,0 +1,3 @@
+rule: ARCH-missing-crate
+at: architecture.toml
+contains: `gone`

@@ -1,0 +1,3 @@
+rule: ARCH-domain-purity
+at: crates/mayfly-domain/src/imp.rs:4
+contains: `std::fs::read`

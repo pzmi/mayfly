@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mayfly-domain",
+    "crates/mayfly-protocol",
+    "crates/mayfly-data-domain",
+    "crates/mayfly-data",
+    "crates/mayfly-adapter-tart",
+    "crates/mayfly-control",
+    "crates/mayfly-adapter-sqlite",
+    "crates/mayfly-adapter-github",
+    "crates/mayfly-composition",
+    "crates/mayfly-cli",
+    "crates/mayfly-testkit",
+    "crates/mayfly-conformance",
+    "tools/faultlab",
+    "tools/xtask",
+]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

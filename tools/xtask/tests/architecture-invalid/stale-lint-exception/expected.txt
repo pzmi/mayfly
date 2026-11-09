@@ -1,0 +1,3 @@
+rule: ARCH-lint-suppression
+at: architecture.toml
+contains: matches no suppression

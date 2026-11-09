@@ -1,0 +1,4 @@
+rule: ARCH-lint-config
+at: clippy.toml
+contains: `allow-unwrap-in-tests = true`
+only: true
