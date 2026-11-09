@@ -17,6 +17,7 @@ durable; `architecture.toml` enforces the split. Public, open source (`MIT OR Ap
 | `doc/plan.md` | Product and architecture: goals and guardrails (§1), CP/DP split and protocol (§3), crates (§4), event sourcing and CQRS (§5), attempt lifecycle (§6), GitHub (§7), data plane and ownership (§8), capacity (§9), recovery (§10), operator interface (§11), observability (§12), security (§13) |
 | `doc/foundation.md` | Engineering rules: dependency law (§2), enforcement (§3), logging (§5), event-sourcing rules (§6), CI (§7), commands (§9), commits (§10), agent contract (§11) |
 | `doc/verification.md` | Test levels (§2), contract suites (§5), formal models and conformance (§6), fault lab (§8), curated mutants (§9) |
+| `doc/philosophy.md` | Why mayfly is built this way and the lines it does not cross; the decision test (§8). A draft awaiting the owner |
 | `doc/tasks.md` | Decisions D1–D15, rules for every task, task order and dependencies, model per task, ⛳ checkpoints, the live gate |
 | `doc/adr/` | Decisions, Nygard style (`NNNN-kebab-title.md`: Status, Context, Decision, Consequences); index in `doc/adr/README.md` |
 
@@ -54,9 +55,14 @@ cargo xtask adr new "<title>" [--number N]   # and `cargo xtask adr index --fix`
 cargo xtask land <sha> --push origin main    # orchestrator only (D4)
 ```
 
-Later tasks add stages (coverage FND-05, formal FND-06, mutants VER-05). `quick` is not `check`;
+Coverage is live: `cargo xtask coverage [--changed-since REV]`, stages `coverage` and
+`changed-lines`; the floors in `coverage-floor.toml` only ratchet up. Later tasks add stages
+(formal FND-06, mutants VER-05). `quick` is not `check`;
 never report one as the other. A repeatable job becomes an `xtask` subcommand. A missing tool
 fails, never a skipped-but-green check. Run the gate in the foreground; commit only on green.
+**Never prefix a command with inline `MAYFLY_*`, `QUINT_SEED` or `PROPTEST_*` variables**; a
+scenario that needs one becomes an `xtask` flag or subcommand, so the command surface stays
+reviewable.
 
 ## Enforced rules
 
@@ -64,7 +70,8 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
   (`mayfly-control`, `mayfly-data`) → pure crates. Adapters never reference sibling adapters or
   composition. Production crates never depend on `mayfly-testkit`, `mayfly-conformance` or the
   fakes; `tools/faultlab` and the fakes import no production crate (D11). A new crate gets its `[planes]` entry,
-  `members` entry, `architecture.toml` entry and external allowlist in the same commit. Fix an
+  `members` entry, `architecture.toml` entry and external allowlist in the same commit; a crate named in an architecture rule's selector is also
+  added to every fixture's `absent` list. Fix an
   architecture failure in the structure, never by loosening `architecture.toml`.
 - **Control plane / data plane** (plan §3.4, D1): no `mayfly-control*` crate or CP adapter
   (sqlite, github, secrets) reaches a `mayfly-data*` crate or DP adapter (tart, guest, host), or
@@ -78,17 +85,34 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
   Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,
   locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`).
   Test kits are per plane (ADR 0019): `mayfly-testkit` is the control plane's; data-plane crates
-  never dev-depend on it or on `mayfly-conformance`. Spawns only in the modules fnd §3 lists.
+  never dev-depend on it or on `mayfly-conformance`; `mayfly-testkit-shared` is the plane-neutral
+  kit any crate may dev-depend on. Spawns only in the modules fnd §3 lists.
 - **Language**: `unsafe_code` forbidden; no `todo!`, `unimplemented!`, `dbg!`, `#[ignore]`; no
   `#[allow]`/`#[expect]` without an `architecture.toml` exception citing an ADR; zero clippy
   warnings; platform code by `#[cfg]` items or blocks, never a `cfg!(target_os…)` branch.
+- **A doc comment's behavioural claim names the test that pins it.** A promise a refactor could
+  silently falsify (an ordering, an idempotency, a refusal, a bound) carries
+  `/// Pinned by: <test path>::<name>`.
+- **A claim about behaviour in the README, a runbook, `doc/security.md`, a commit body or a task
+  report** (what is stored, refused, deleted, logged or sent) is checked against the code and
+  names the test that pins it; one without a test is written as planned or a limitation.
 - **Tests** (ver §2): `should_<outcome>_when_<condition>` with `// given`, `// when`, `// then`;
   at the lowest level that can fail for the reason it exists. No sleeps (fake clock,
-  `tokio::time::pause`, channels; a real-OS wait only through the shared test kit's `poll` helper (FND-05), bounded,
+  `tokio::time::pause`, channels; a real-OS wait only through `mayfly-testkit-shared::poll`, bounded,
   with a reason). Real objects or testkit fakes, no mocking frameworks; tempdirs, port 0. A port
   with a fake and a real adapter runs one contract suite against both (ver §5), and the suite's
   own tests prove a deliberately broken implementation fails it. Never delete a failing test,
   weaken a modelled invariant or rewrite a golden fixture to get green.
+  **A signal a test waits on promises exactly what its documentation says**: "ready", "settled"
+  or "drained" is read only from a signal documented to mean that (the daemon's ready line, an
+  observation's ack, `mayfly status --json` fields), never from a log line, a sleep or a side
+  effect that happens to come first; a new signal documents its promise where it is defined.
+  **Test support that keeps an object with a live task, timer or child process across tests
+  stops it before reusing or dropping it** (abort and await the task, kill and wait the child);
+  a kit type that spawns one owns its stop, e.g. a guard whose `Drop` stops and reaps it.
+  **A bound that pins a documented promise** (a deadline, a poll budget, a provisioning or
+  cleanup time) **is changed only by the owner**, never loosened to make a test pass; a test
+  that times something against a fixed bound runs in its own serial stage, after the others.
 - **Model first** (ver §6, D10): a change to lifecycle, scheduling, recovery, the scale-set
   session or the CP↔DP link updates the Quint model in `formal/`, its scenarios and the
   conformance driver before the Rust code. Never remove an invariant to get green.
@@ -106,6 +130,10 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
   optional fields, new types or upcasters, never a rename. Commands never read projections or
   return read DTOs; queries never take a write port. A projection's change of meaning is a new
   spec version. Migrations are forward-only raw SQL, never edited once released.
+  **Ask of every change to an event, the store, the protocol or the config: is an older build
+  that ignores this still correct?** Yes: one commit. No: two releases, prepare then activate
+  (`doc/event-store.md` §6). Never rename an event, field, config key, CLI flag, metric or socket
+  API field.
 - **Effects** (plan §6, §3.2): state reflects an observed fact, never an attempted command.
   `Unknown` leaves only on an observation; a timeout never becomes success or `Deleted`. A retry
   reuses the same VM name and generation. Directives carry the host epoch; a stale one is refused.
@@ -125,6 +153,9 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
 - **Decisions**: a change that adds or reverses an architectural decision adds an ADR
   (`cargo xtask adr new "<title>"`, with `--number N` when the orchestrator reserved one) or
   supersedes one, in the same commit. Only the owner flips Proposed to Accepted.
+- **Philosophy** (`doc/philosophy.md`, a draft awaiting the owner): every new feature, directive,
+  command, default, metric, log field or dependency passes its decision test (§8). A conflict
+  goes to the owner, not into the code.
 
 ## Commits
 
@@ -160,6 +191,13 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
 - Temporary files go in the session scratchpad, never `/tmp` or the repo.
 - Kill only PIDs you started, never by name pattern (`pkill -f`, `killall`). Never end a turn
   with the gate, a daemon or other work still running in the background.
+- **Never edit a worktree while its gate or `land` runs in it**; a change made under a running
+  gate makes its result meaningless: stop it and start again.
+- **A long run** (fault lab, Apalache, mutants) is foreground with an explicit timeout, or a
+  background job with its own timeout that the turn waits for.
+- **Destructive operations on a real host** (`recover --apply`, uninstall, deleting VMs or
+  images, rotating the App key) are run only by the owner or on the owner's explicit request,
+  never by an agent on its own judgement (extends D14).
 
 ## Public repository
 
@@ -167,4 +205,5 @@ Never commit secrets, tokens, JIT configs, private keys, credentials, internal h
 private-repo content or personal paths. **Never name a private project** of the owner's anywhere
 (code, docs, ADRs, fixtures, commit messages): no name, no path, and no hint that a design came
 from elsewhere; every design is described as mayfly's own, on its own merits. Fixtures (GitHub recordings, Tart JSON, configs) are
-redacted or synthetic.
+redacted or synthetic. An allowlist entry for the secret scan is added only after auditing the
+finding, inline with its reason where the tool allows, never as a blanket refresh.

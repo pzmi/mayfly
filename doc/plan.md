@@ -10,7 +10,8 @@ Why the name: a mayfly lives for a day. So does every runner VM here: one job, t
 
 This document owns *what* and *how it is structured*. [`foundation.md`](foundation.md) owns the
 engineering rules (workspace, enforcement, gate, commands, agent contract),
-[`verification.md`](verification.md) owns the test levels, formal models and fault lab, and
+[`verification.md`](verification.md) owns the test levels, formal models and fault lab,
+[`philosophy.md`](philosophy.md) (a draft awaiting the owner) says why and where the lines are, and
 [`tasks.md`](tasks.md) owns order and size. A citation "plan §4.2" points here.
 
 ---

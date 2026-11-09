@@ -22,7 +22,7 @@ Verify test coverage and run the gate for the working-tree diff. Read `CLAUDE.md
    - **compile-fail** (`trybuild`): an API misuse that must not compile (a secret that serialises, an unowned name passed to delete)
    - **conformance** (ver §6): Quint traces replayed against the real code, plus the negative control
    - **secret redaction**: every new log, error, status or diagnostics path fed a known secret, asserted absent
-3. Conventions: `should_<outcome>_when_<condition>`, `// given / when / then`, real objects over fakes, no mocking frameworks, no `#[ignore]`, no sleeps (fake clock, `tokio::time::pause`; real-OS waits only via `mayfly-testkit::poll`), port 0, `tempfile` dirs. Never assert on log lines alone. Never a real `tart`, the network or macOS outside an owner-gated test.
+3. Conventions: `should_<outcome>_when_<condition>`, `// given / when / then`, real objects over fakes, no mocking frameworks, no `#[ignore]`, no sleeps (fake clock, `tokio::time::pause`; real-OS waits only via `mayfly-testkit-shared::poll`), port 0, `tempfile` dirs. Never assert on log lines alone. Never a real `tart`, the network or macOS outside an owner-gated test.
 4. Run the gate (`cargo xtask check`, or the fallback `doc/tasks.md` names) in the foreground with the lane's `CARGO_TARGET_DIR`, never in the background. Iterate to green. A missing tool is installed at its pinned version or reported; a skipped check is never green. Kill any daemon or fake you started, by its PID.
 5. Failures outside your diff (someone else's WIP): report them, do not fix or hide them.
 

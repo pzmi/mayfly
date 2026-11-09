@@ -21,6 +21,7 @@ intake.{taskId, criteria, ownerCriteria, cites, affectedCrates, plane, invariant
    - **the test levels** touched (ver §2): unit, property, component, contract, architecture, integration, e2e, compile-fail, conformance; one test per `Accept:` clause at least, and each contract suite in `contractSuites` run against every implementation the task names, with a deliberately broken one
    - **new dependencies**: `cargo add`, why this crate, its licence, and whether `deny.toml` accepts it
    - **ADRs**: a step that adds or reverses an architectural decision (a dependency of consequence, a crate boundary, a protocol, security or recovery policy, a lint or rule exception) runs `cargo xtask adr new "<title>"` (with the reserved `--number`) or marks an existing one `Superseded by NNNN`, and `cargo xtask adr index --fix`
+   - **the decision test**: any user-, operator- or network-visible change (a command, directive, default, metric, log field, dependency, outbound call) passes `doc/philosophy.md` §8; a conflict goes to the owner
    - **`(owner)` criteria**: what is delivered up to them (workflow, gated test, docs) and left pending
 4. **Owner question.** LARGE with a genuine design fork: one short question with a recommended default, then continue on the answer. No fork: no question.
 5. Write `plan.json`.

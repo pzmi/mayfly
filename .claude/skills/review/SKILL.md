@@ -57,6 +57,8 @@ ports; `decide`/`evolve` have no logging; `DETERMINISM_CASES` cover every aggreg
 accepted **and** refused commands; State × Stimulus matrices list every pair with no wildcard
 arm (plan §6 rule 6).
 
+**Philosophy** (`doc/philosophy.md` §8, a draft awaiting the owner): a new feature, directive, command, default, metric, log field or dependency that fails the decision test (effect without proof of ownership, state nothing observed, one job seeing another, anything sent where the operator did not configure, a widened default) is a finding, HIGH when it breaks a safety or privacy line. A conflict with the document goes to the owner, not into the code.
+
 **Public repository**: flag any name or path of a private project of the owner's, private-repo content, personal paths or internal hostnames, in files and in commit messages (HIGH).
 
 **Data-oriented DDD** (ADR 0022): flag getters/setters, private fields or object ceremony on domain state, commands or events that add no safety; flag names that drift from `doc/domain-model.md` §5; flag a deviation from any Accepted or Proposed ADR without a new or superseding ADR.
@@ -157,7 +159,7 @@ agent is MEDIUM.
 **Tests** (ver §2): each `Accept:` clause has a test that would fail without the change, at the
 lowest level that can fail for its reason; names `should_<outcome>_when_<condition>` with
 `// given / when / then`; no sleeps (fake clock, `tokio::time::pause`; real-OS waits only via
-`mayfly-testkit::poll`); tempdirs and port 0; real objects or testkit fakes, no mocking
+`mayfly-testkit-shared::poll`); tempdirs and port 0; real objects or testkit fakes, no mocking
 frameworks; property regressions committed with their seed; no test depends on real Tart, macOS
 or the network unless gated for an owner lane. Missing tests for a new branch is MEDIUM.
 
@@ -169,7 +171,13 @@ code; self-hosted runners only in owner-dispatched workflows.
 
 **Public repository and housekeeping**: no tokens, keys, internal hostnames, personal paths,
 model ids or private-repo content in any file; fixtures redacted or synthetic; a doc comment's
-behavioural claim names the test that pins it, and that test exists; stale docs are findings; no
+behavioural claim names the test that pins it (`/// Pinned by: <test path>::<name>`), and that
+test exists; a behavioural claim in a README, runbook, commit body or task report (what is
+stored, refused, deleted, logged or sent) is checked against the code and either names its test
+or is written as planned or a limitation (MEDIUM); a new test file at the e2e, fault-lab or
+real-OS level opens with a line saying why it needs that level, and a test a lower level could
+hold is MEDIUM naming the level; an ADR changed without the rules, fixtures and tests that pin
+it, or code drifting from an ADR without an amendment or a superseding record, is MEDIUM; stale docs are findings; no
 unrelated files; commit subject `<ID>: summary`, an `Impact:` line, the trailer block last
 (`Signed-off-by`, `Co-Authored-By`, `Claude-Session`).
 

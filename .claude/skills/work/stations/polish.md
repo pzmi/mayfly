@@ -17,7 +17,7 @@ Read `CLAUDE.md` first. Delete comments that:
 5. narrate obvious control flow
 6. are commented-out code
 
-Keep: `// given`, `// when`, `// then` markers; invariant comments (`// SAFETY`-style, ordering and locking rules, "ack only after the inbox commit", "check the epoch before any effect"); why-comments for non-obvious constraints; the reason on a `mayfly-testkit::poll` call; doc comments (`///`, `//!`) that state behaviour and name the test that pins it. Check doc comments for stale behavioural claims and for a claim with no test named. Do not change behaviour. `cargo fmt --all` afterwards, then the gate once more (foreground, the lane's `CARGO_TARGET_DIR`).
+Keep: `// given`, `// when`, `// then` markers; invariant comments (`// SAFETY`-style, ordering and locking rules, "ack only after the inbox commit", "check the epoch before any effect"); why-comments for non-obvious constraints; the reason on a `mayfly-testkit-shared::poll` call; doc comments (`///`, `//!`) that state behaviour and name the test that pins it. Check doc comments for stale behavioural claims and for a claim with no test named. Do not change behaviour. `cargo fmt --all` afterwards, then the gate once more (foreground, the lane's `CARGO_TARGET_DIR`).
 
 ## Output
 

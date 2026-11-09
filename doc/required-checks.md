@@ -56,5 +56,14 @@ task, but does not make `Required` red. Later tasks add `formal.yml`, `faultlab.
 Read the failed job's log, name the failing line, and fix it on `main`. Locally,
 `cargo xtask check --only <stage>` reruns one stage through the same code, and `cargo xtask
 doctor` comes first when local and CI disagree. In CI a red job is fixed, never re-run to
-green; the one exception is a job that died before any test body ran (a runner or network
-failure), which may be re-run once and is reported.
+green.
+
+- **Re-run at most once**, and only when the job died before any test body ran (the runner was
+  lost, a checkout or toolchain download failed) or to prove the failure is not the commit's
+  (it is red on the previous commit too). Before the re-run, the report names the job, what
+  failed and why it is not this change. A second failure is real: fix it.
+- **A failure that passes on a rerun is a race to find**, not a flake: repeat it, read its
+  trace, name the race, and add a test that forces the interleaving every time (verification
+  §1.5).
+- **Before cancelling a run, read every job's state.** A run that looks stuck may have
+  recovered; cancelling it throws away its green jobs and, on `main`, its signal.

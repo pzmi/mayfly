@@ -19,18 +19,27 @@ body that explains why when it is not obvious.
 
 ## Build and test
 
-The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on first use. Until
-`cargo xtask` lands, the gate is:
+The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on first use. The other
+tools the gate needs are pinned in `tools/versions.toml`:
 
 ```text
-cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked
+cargo xtask doctor          # checks every pinned tool; run it first when local and CI disagree
+cargo xtask install-tools   # installs the ones xtask can install
+cargo xtask quick           # fmt check, architecture, clippy, fast tests: while working
+cargo xtask check           # the full blocking gate: before every commit
 ```
+
+`quick` is not `check`; a pull request says which stages it ran. `cargo xtask check --only
+<stages>` runs named stages through the same code CI runs.
 
 ## Architecture and decisions
 
 Read [doc/plan.md](doc/plan.md) (the workspace and dependency law is §4). Crate boundaries and the
-purity of the domain crates are enforced by checks once they land; fix the structure instead of
-loosening a lint or a test.
+purity of the domain crates are enforced by `cargo xtask architecture`; fix the structure instead
+of loosening a lint or a test. A change that adds or reverses an architectural decision adds an
+ADR (`cargo xtask adr new "<title>"`) or amends or supersedes one, in the same change, together
+with the tests that pin it. [doc/philosophy.md](doc/philosophy.md) (a draft) says which lines
+mayfly does not cross; a new feature, default, metric or dependency passes its decision test (§8).
 
 ## Pull requests
 

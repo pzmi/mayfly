@@ -138,6 +138,10 @@ context; a new Agent call starts cold. Never start a second agent on the same ta
    later task's agent, never "fix" it here.
 4. A rejected push: `git fetch`, then `land` again. Never force. Then delete the lane's target
    dir if the lane has no next task.
+5. When several commits are ready, land a change to how CI runs (a workflow, an xtask stage, a
+   toolchain pin) first, so every later run has it.
+6. Never edit a worktree while its gate or `land` runs in it: a change made under a running
+   gate makes its result meaningless; stop the run and start again.
 
 ## After the push
 
@@ -146,17 +150,25 @@ context; a new Agent call starts cold. Never start a second agent on the same ta
   `completed`, then `get_job_logs` with `failed_only` and `tail_lines` 60 to 120 (a large log
   lands in a file: grep it). Red is work now: name the failing line, hand the fix to a work
   agent (or the owning lane), land it. Never skip, `#[ignore]`, or retry a test to green; a
-  macOS-only failure is fixed from the log and said so.
+  macOS-only failure is fixed from the log and said so. Extract a long CI log through a
+  subagent and act on its verbatim summary of the failing lines, not on the raw dump.
+- **Before cancelling a run, read every job's state.** A run that looks stuck may have
+  recovered; cancelling it throws away its green jobs and, on `main`, its signal.
+- **A red job is re-run at most once**, and only when it died before any test body ran (runner
+  lost, checkout or toolchain download failed) or to prove the failure is not this commit's
+  (red on the previous commit too). Name the job, what failed and why it is not this change
+  before re-running; a second failure is real.
 - **A failure the owner reports**: read the failed job's log first, name the line that failed,
   then fix the code, or tell the owner the one setting to change and where.
 
 ## Checkpoints and the owner
 
-- ⛳ tasks: **FND-04, KER-08, ES-04, E2E-01, E2E-02, VER-04, OPS-03**. A ⛳ task stops its lane
+- ⛳ tasks: **FND-04, DDD-01, KER-08, ES-04, E2E-01, E2E-02, VER-04, OPS-03**. A ⛳ task stops its lane
   after its commit is landed and green: run `/review` over `<newest checkpoint-* tag>..HEAD` in a
   subagent (it reads `.claude/skills/review/SKILL.md`), then a **second, adversarial subagent**
   that tries to refute each HIGH and MEDIUM finding and to find what the first missed, aimed at
-  this checkpoint's risks (fencing and epochs at KER-08, single write path and atomicity at
+  this checkpoint's risks (language and aggregate boundaries against the data-oriented rule at
+  DDD-01, fencing and epochs at KER-08, single write path and atomicity at
   ES-04, ownership and `Unknown` outcomes at E2E-01, ack-after-commit and demand at E2E-02,
   oracle independence at VER-04, provenance and secrets at OPS-03). Hand the surviving findings
   to a work agent as a fix task, land it, then create the local annotated tag
