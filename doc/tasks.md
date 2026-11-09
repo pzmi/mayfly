@@ -90,6 +90,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | FND-05 | nextest profiles, testkit poll helper, coverage stage | FND-04 | sonnet | |
 | FND-06 | Formal toolchain: Quint and Apalache pins, `formal` stages | FND-04 | sonnet | |
 | ARCH-01 | Align the architecture policy with fnd §2–§3 | FND-04 | opus | |
+| ARCH-02 | Close the checker bypasses of the second FND-04 review | ARCH-01 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences | FND-02 | sonnet | |
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06, DDD-01 | opus | |
@@ -216,6 +217,15 @@ code-named design, whichever keeps the checker simpler (say which, and why, in t
 `ARCH-unbounded-channel`, `ARCH-detached-spawn`, `ARCH-secret-serialize`, each with a negative
 fixture; (4) the fault lab's package name (`mayfly-faultlab`) in fnd.
 Accept: `cargo xtask check` green; each new rule fails its fixture; fnd §2–§3 describe the code exactly.
+
+#### ARCH-02 Close the checker bypasses of the second FND-04 review
+Cites: fnd §2–§3, ADR 0019. The adversarial re-review of ARCH-01 bypassed the checker with a renamed
+`include!`, `include!` inside macros, clock and fs reads through aliases, `Self` and associated
+types, cross-crate `pub type` aliases, exported macros and declarations of the other plane's
+vocabulary. Landed: ARCH-include-macro, ARCH-pure-clippy-config (semantic `clippy.toml` layer per
+pure crate), ARCH-macro-export, declaration checks in ARCH-plane-vocabulary, YAML-parsed CI
+lockstep, the xtask checkout preflight, shared-crate dev edges (ADR 0019 amended).
+Accept: each bypass has a negative fixture failing for its rule; `cargo xtask check` green.
 
 ### Phase 1 — kernel (pure crates, models first)
 

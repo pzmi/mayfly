@@ -83,7 +83,11 @@ reviewable.
   Application crates take time and ids only through ports. `std::process` only in
   `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition` and test tools.
   Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,
-  locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`).
+  locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`). Each pure
+  crate's `clippy.toml` (`disallowed-methods`/`-types`, ARCH-pure-clippy-config) enforces this
+  semantically, tests included; never shadow it or set `CLIPPY_CONF_DIR`. No `include!` under any
+  name or inside a macro (ARCH-include-macro); `#[macro_export]` in production needs an ADR-cited
+  exception (ARCH-macro-export). Shared crates dev-depend only on shared crates.
   Test kits are per plane (ADR 0019): `mayfly-testkit` is the control plane's; data-plane crates
   never dev-depend on it or on `mayfly-conformance`; `mayfly-testkit-shared` is the plane-neutral
   kit any crate may dev-depend on. Spawns only in the modules fnd §3 lists.
