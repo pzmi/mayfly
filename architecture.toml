@@ -91,9 +91,11 @@ xtask = []
 # "*" for any. A crate allowed under `normal` is also allowed as a dev-dependency. A new
 # dependency is added with `cargo add` and listed here in the same commit.
 [external.normal]
+mayfly-domain = { serde = ["default", "derive"] }
 xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
 
 [external.dev]
+mayfly-domain = { proptest = ["std"] }
 
 [external.build]
 
