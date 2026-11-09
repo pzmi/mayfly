@@ -25,3 +25,4 @@ This directory holds the decisions behind mayfly, one file per decision, in Mich
 | [0019](0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane separation over dev closures and policy-driven planes | Proposed |
 | [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Proposed |
 | [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Proposed |
+| [0022](0022-strategic-ddd-with-a-data-oriented-implementation.md) | Strategic DDD with a data-oriented implementation | Accepted |

@@ -422,6 +422,10 @@ Context in brackets.
 
 ## 6. Aggregates
 
+Aggregates here are **consistency boundaries and their rules**, not classes (ADR 0022): each is
+implemented as plain data (state, commands, events) plus pure `decide`/`evolve` functions and
+tables. "Anemic" data is the intended shape.
+
 ### 6.0 Rules common to every aggregate (fit for a stream-scoped, multi-writer store)
 
 - **One command, one stream.** No command writes two streams; every cross-aggregate rule is a

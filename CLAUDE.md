@@ -92,6 +92,11 @@ fails, never a skipped-but-green check. Run the gate in the foreground; commit o
 - **Model first** (ver §6, D10): a change to lifecycle, scheduling, recovery, the scale-set
   session or the CP↔DP link updates the Quint model in `formal/`, its scenarios and the
   conformance driver before the Rust code. Never remove an invariant to get green.
+- **Data-oriented DDD** (ADR 0022): DDD is strategic (bounded contexts, ubiquitous language,
+  consistency boundaries in `doc/domain-model.md`; code names follow the language). Code is
+  data-oriented: plain data with public fields and enums, behaviour in free pure functions and
+  tables; no getters/setters or privacy ceremony beyond validated boundary value types. Follow the
+  ADRs: a task cites the ADRs it implements, and a deviation needs a new or superseding ADR.
 - **Event sourcing** (plan §5, fnd §6): `AggregateStore::save` is the only caller of
   `Journal::append`; one transaction holds the events, synchronous projections, outbox rows,
   command receipt and the inbox entry that caused it; reactors run after commit and are never

@@ -57,6 +57,8 @@ ports; `decide`/`evolve` have no logging; `DETERMINISM_CASES` cover every aggreg
 accepted **and** refused commands; State × Stimulus matrices list every pair with no wildcard
 arm (plan §6 rule 6).
 
+**Data-oriented DDD** (ADR 0022): flag getters/setters, private fields or object ceremony on domain state, commands or events that add no safety; flag names that drift from `doc/domain-model.md` §5; flag a deviation from any Accepted or Proposed ADR without a new or superseding ADR.
+
 **Event sourcing** (plan §5, fnd §6): `AggregateStore::save` is the only caller of
 `Journal::append`, pinned by an architecture rule; one transaction holds expected-revision
 checks, events, synchronous projections, outbox rows, the command receipt and the inbox entry
