@@ -118,8 +118,8 @@ rules! {
         "Owned code contains an unsafe block, fn, impl, trait, extern block or unsafe attribute.",
         ["unsafe-block"];
     MissingSelector => "ARCH-missing-selector", "FND-02",
-        "A crate the semantic rules name is missing and not listed in [semantic] absent, or absent lists a member or a crate no rule names.",
-        ["missing-selector"];
+        "A crate the semantic rules name is missing and not listed in [semantic] absent, or absent lists a member or a crate no rule names, or the shared test kit lacks the poll helper file the test-sleep exemption names.",
+        ["missing-selector", "poll-helper-missing"];
     LintConfig => "ARCH-lint-config", "FND-02",
         "A lint or source policy is relaxed outside source: a member's [lints] is not workspace = true, a workspace lint is allowed, rustflags allow or cap lints, clippy.toml allows, or a .cargo/config.toml replaces a package source.",
         ["cargo-source-replacement", "clippy-toml-allow", "member-lints-override", "rustflags-allow"];
@@ -133,7 +133,7 @@ rules! {
         "An allow, expect or coverage(off) attribute lacks an [exceptions.lints] entry citing an existing ADR, or an entry matches nothing.",
         ["allow-with-missing-adr", "stale-lint-exception", "unjustified-allow"];
     TestSleep => "ARCH-test-sleep", "FND-02",
-        "Test code sleeps outside the bounded poll helper mayfly-testkit/src/poll.rs.",
+        "Test code sleeps outside the bounded poll helper mayfly-testkit-shared/src/poll.rs.",
         ["sleep-in-test"];
     TestName => "ARCH-test-name", "FND-02",
         "A test function's name does not match should_<outcome>_when_<condition>, or a macro hides a test.",

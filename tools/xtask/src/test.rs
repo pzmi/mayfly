@@ -1,10 +1,10 @@
 //! `cargo xtask test`: the ordinary test levels of the workspace.
 //!
-//! Until FND-05 brings the nextest profiles, the runner is `cargo test`: `unit-tests` runs
-//! every test compiled into a library or binary (`--lib --bins`), `integration-tests` every
-//! `tests/*.rs` binary (`--test '*'`), `doctests` the documentation examples. Together they are
-//! the whole workspace run. The stage names are the ones nextest will keep, so CI jobs that
-//! name them (`check --only unit-tests`) survive the switch of runner.
+//! The runner is `cargo nextest` under the `ci` profile of `.config/nextest.toml` (no retries,
+//! every test run, a bound on each): `unit-tests` runs every test compiled into a library or
+//! binary (`not kind(test)`), `integration-tests` every `tests/*.rs` binary (`kind(test)`).
+//! Together they are the whole workspace run, and `coverage` measures that whole run in one
+//! pass. The documentation examples stay on `cargo test --doc`, which nextest does not run.
 
 use crate::process::{Stage, finish, run_report};
 use crate::tools;
@@ -28,24 +28,55 @@ pub fn stages() -> Vec<Stage> {
     stages_with(std::env::var("PROPTEST_CASES").ok().as_deref())
 }
 
-/// A `cargo test` stage over the whole workspace, narrowed by `selection`, with the proptest
-/// floor.
-fn cargo_test_stage(
+/// The `-E` filter of `unit-tests`: tests compiled into a library or binary.
+const UNIT_FILTER: &str = "not kind(test)";
+
+/// The `-E` filter of `integration-tests`: every `tests/*.rs` binary.
+const INTEGRATION_FILTER: &str = "kind(test)";
+
+/// A nextest stage over the workspace under the `ci` profile, narrowed by `filter`, with the
+/// proptest floor and the unknown-key guard. Pinned by
+/// `should_split_the_workspace_run_by_test_kind_when_test_is_built`.
+fn nextest_stage(
     name: &'static str,
-    selection: &[&str],
+    filter: Option<&str>,
     developer_cases: Option<&str>,
+    exclude: &[&str],
 ) -> Stage {
-    let mut args = vec!["test", "--workspace", "--locked"];
-    args.extend(selection);
-    Stage::new(name, "cargo", &args).env("PROPTEST_CASES", &proptest_cases(developer_cases))
+    let mut args = vec![
+        "nextest",
+        "run",
+        "--workspace",
+        "--locked",
+        "--profile",
+        "ci",
+    ];
+    for package in exclude {
+        args.extend(["--exclude", package]);
+    }
+    if let Some(filter) = filter {
+        args.extend(["-E", filter]);
+    }
+    Stage::new(name, "cargo", &args)
+        .needs("cargo-nextest")
+        // nextest has no profile-level environment table, so the case count is set here.
+        .env("PROPTEST_CASES", &proptest_cases(developer_cases))
+        // A configuration key nextest does not know is only a warning from it, and a silent
+        // no-op for the rule it was meant to set (retries, a timeout): fail closed on it.
+        .deny_stderr("ignoring unknown configuration key")
 }
 
 /// [`stages`] with the developer's `PROPTEST_CASES`, if any, given. Pinned by
 /// `should_split_the_workspace_run_by_test_kind_when_test_is_built`.
 fn stages_with(developer_cases: Option<&str>) -> Vec<Stage> {
     vec![
-        cargo_test_stage("unit-tests", &["--lib", "--bins"], developer_cases),
-        cargo_test_stage("integration-tests", &["--test", "*"], developer_cases),
+        nextest_stage("unit-tests", Some(UNIT_FILTER), developer_cases, &[]),
+        nextest_stage(
+            "integration-tests",
+            Some(INTEGRATION_FILTER),
+            developer_cases,
+            &[],
+        ),
         Stage::new(
             "doctests",
             "cargo",
@@ -65,19 +96,7 @@ fn stages_with(developer_cases: Option<&str>) -> Vec<Stage> {
 /// everything twice. Reached only as `cargo xtask test --only platform-tests`. Pinned by
 /// `should_run_the_product_crates_natively_when_platform_stage_is_built`.
 fn platform_stage(developer_cases: Option<&str>) -> Stage {
-    Stage::new(
-        "platform-tests",
-        "cargo",
-        &[
-            "test",
-            "--workspace",
-            "--exclude",
-            "xtask",
-            "--locked",
-            "--tests",
-        ],
-    )
-    .env("PROPTEST_CASES", &proptest_cases(developer_cases))
+    nextest_stage("platform-tests", None, developer_cases, &["xtask"])
 }
 
 /// The stages to run: all, or only the one named by `--only`. An unknown name is an error
@@ -128,6 +147,8 @@ mod tests {
         // then
         assert_eq!(names, ["unit-tests", "integration-tests", "doctests"]);
         assert!(format!("{:?}", stages[0].action).contains("\"--locked\""));
+        assert_eq!(stages[0].tool, Some("cargo-nextest"));
+        assert_eq!(stages[2].tool, None, "doctests stay on cargo test");
     }
 
     #[test]
@@ -154,12 +175,48 @@ mod tests {
         let integration = format!("{:?}", stages[1].action);
 
         // then
-        assert!(unit.contains("\"--lib\", \"--bins\""), "{unit}");
-        assert!(integration.contains("\"--test\", \"*\""), "{integration}");
+        assert!(unit.contains("\"-E\", \"not kind(test)\""), "{unit}");
+        assert!(
+            integration.contains("\"-E\", \"kind(test)\""),
+            "{integration}"
+        );
         for debug in [&unit, &integration] {
+            assert!(debug.contains("\"nextest\", \"run\""), "{debug}");
             assert!(debug.contains("\"--workspace\""), "{debug}");
+            assert!(debug.contains("\"--profile\", \"ci\""), "{debug}");
             assert!(debug.contains("(\"PROPTEST_CASES\", \"1024\")"), "{debug}");
+            assert!(
+                debug.contains("ignoring unknown configuration key"),
+                "an unknown nextest key must fail the stage: {debug}"
+            );
         }
+    }
+
+    #[test]
+    fn should_pin_zero_retries_and_the_three_profiles_when_nextest_config_is_read() {
+        // given
+        let text = std::fs::read_to_string(crate::repo::root().join(".config/nextest.toml"))
+            .expect("the nextest configuration");
+        let config: toml::Table = text.parse().expect("parse nextest.toml");
+
+        // when
+        let profiles = config["profile"].as_table().expect("profiles");
+
+        // then
+        let mut names: Vec<_> = profiles.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["ci", "default", "serial"]);
+        for (name, profile) in profiles {
+            assert_eq!(
+                profile["retries"].as_integer(),
+                Some(0),
+                "profile {name}: a failure that passes on a rerun is a race to find"
+            );
+            assert!(profile.get("slow-timeout").is_some(), "profile {name}");
+        }
+        assert_eq!(profiles["ci"]["fail-fast"].as_bool(), Some(false));
+        assert!(profiles["ci"].get("junit").is_some());
+        assert_eq!(profiles["serial"]["test-threads"].as_integer(), Some(1));
     }
 
     #[test]
@@ -173,10 +230,11 @@ mod tests {
         // then
         assert_eq!(stage.name, "platform-tests");
         for want in [
+            "\"nextest\", \"run\"",
             "\"--workspace\"",
             "\"--exclude\", \"xtask\"",
             "\"--locked\"",
-            "\"--tests\"",
+            "\"--profile\", \"ci\"",
         ] {
             assert!(rendered.contains(want), "{want} missing from {rendered}");
         }

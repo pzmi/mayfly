@@ -12,11 +12,13 @@
 # - both planes over the shared kernel and the protocol, with composition the only crate that
 #   sees both (plan section 3.4), every production crate in one [planes] list, a control
 #   crate dev-depending on the control-plane testkit and the shared kernel's tests using it
-#   too (ADR 0019), the data-plane domain on the protocol; the fault lab as a tool crate
+#   too (ADR 0019), the shared test kit with no workspace edge (the poll helper's home), which
+#   a data-plane crate dev-depends on, the data-plane domain on the protocol; the fault lab as
+#   a tool crate
 #   reaching no workspace crate;
 # - semantic constructs that pass: process authority in the Tart adapter, composition and the
 #   fault lab, an `ExitCode` in the CLI, file access outside the pure crates, test-only code,
-#   literal include!, macro_rules, cfg branches, the testkit poll helper's sleep, todo! in
+#   literal include!, macro_rules, cfg branches, the shared kit's poll helper sleep, todo! in
 #   test code, and a lint suppression approved in [[exceptions.lints]];
 # - application commands that publish and are traced, queries that only read (a `&mut` of a
 #   non-state buffer, a Formatter), and an instrumentation module whose values decide nothing.
@@ -29,7 +31,7 @@ production = [
   "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-tart",
   "mayfly-composition", "mayfly-cli",
 ]
-test_only = ["mayfly-testkit", "mayfly-conformance"]
+test_only = ["mayfly-testkit", "mayfly-testkit-shared", "mayfly-conformance"]
 tool_only = ["xtask", "mayfly-faultlab"]
 
 [dependencies.normal]
@@ -47,6 +49,7 @@ mayfly-composition = [
 ]
 mayfly-cli = ["mayfly-composition"]
 mayfly-testkit = ["mayfly-domain", "mayfly-control"]
+mayfly-testkit-shared = []
 mayfly-conformance = [
   "mayfly-domain", "mayfly-control", "mayfly-testkit",
   "mayfly-adapter-sqlite", "mayfly-adapter-github",
@@ -85,7 +88,7 @@ adr = "0002"
 [planes]
 control = ["mayfly-control", "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-testkit"]
 data = ["mayfly-data-domain", "mayfly-data", "mayfly-adapter-tart"]
-shared = ["mayfly-domain", "mayfly-protocol"]
+shared = ["mayfly-domain", "mayfly-protocol", "mayfly-testkit-shared"]
 both = ["mayfly-composition", "mayfly-cli", "mayfly-conformance"]
 
 [planes.vocabulary]

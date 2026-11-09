@@ -34,6 +34,14 @@ pub enum Command {
         #[arg(long, value_name = "STAGE")]
         only: Option<String>,
     },
+    /// Line coverage of the in-process suites against `coverage-floor.toml`, then the
+    /// changed-line gate.
+    Coverage {
+        /// The revision the changed-line gate diffs against (default: the merge base with
+        /// `origin/main`, or the last commit when `HEAD` is that base on a clean tree).
+        #[arg(long, value_name = "REV")]
+        changed_since: Option<String>,
+    },
     /// Dependency policy, secret scan and action pins.
     Security,
     /// The full blocking PR-quality gate.
@@ -126,6 +134,7 @@ impl Command {
             Self::Test { .. } => "test",
             Self::Security => "security",
             Self::Check { .. } => "check",
+            Self::Coverage { .. } => "coverage",
             Self::ListChecks => "list-checks",
             Self::Doctor { .. } => "doctor",
             Self::InstallTools { .. } => "install-tools",

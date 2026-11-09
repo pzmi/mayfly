@@ -9,3 +9,6 @@ workspace = true
 
 [dependencies]
 mayfly-domain = { path = "../mayfly-domain" }
+
+[dev-dependencies]
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }

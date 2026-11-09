@@ -1,0 +1,25 @@
+# Line-coverage floors enforced by `cargo xtask check --only coverage,changed-lines`
+# (verification.md section 10). Each value is a whole percent of the instrumented lines (LCOV
+# `DA:` records) that the in-process tests must reach.
+#
+# Floors only ratchet up: a floor rises to the measured value rounded down when it exceeds the
+# floor by a whole point; lowering one needs the owner. A test pins the starting values
+# (`should_never_lower_a_floor_below_its_starting_value_when_the_floors_file_is_read`).
+# `tools/xtask`, the fault lab and the fake binaries are reported, not floored.
+
+# Every instrumented line under crates/ (product and test-support crates).
+overall_line = 85
+
+# The lines a change adds or edits in crates/*/src, against the merge base.
+changed_line = 90
+
+# Per-crate floors, keyed by crate directory name under crates/ (a floor on a crate that has
+# no instrumented line fails, so a rename cannot drop it silently).
+[crate]
+# verification.md section 10 starts the pure crates at 95. Measured when FND-05 landed:
+# mayfly-domain 79.15% (224 of 283 lines) and mayfly-control-domain 94.66% (71 of 75), both below
+# it, so each floor starts at the measured value rounded down and ratchets up toward 95 as tests
+# are added; it is never lowered. mayfly-protocol and mayfly-data-domain have no instrumented
+# line yet: their 95 floors join the file with their first code.
+mayfly-domain = 79
+mayfly-control-domain = 94

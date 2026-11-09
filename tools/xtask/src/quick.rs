@@ -4,7 +4,7 @@
 //! This is not the full gate; `check` is (see `check.rs`).
 
 use crate::process::{Stage, run_stages};
-use crate::{architecture, test};
+use crate::{architecture, test, tools};
 
 /// The stages `quick` runs, in order. Their names are catalog ids; the test stages are the
 /// ones `check` runs, minus the integration tests.
@@ -38,6 +38,10 @@ pub fn stages() -> Vec<Stage> {
 
 /// Runs `quick` and returns the exit code.
 pub fn run() -> i32 {
+    if let Err(err) = tools::require("cargo-nextest") {
+        eprintln!("xtask: {err}");
+        return 1;
+    }
     run_stages(&stages())
 }
 

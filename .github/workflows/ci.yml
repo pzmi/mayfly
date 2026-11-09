@@ -71,7 +71,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           job: static
-          tools: cargo-deny
+          tools: cargo-deny cargo-nextest cargo-llvm-cov
 
       - name: Install Gitleaks, actionlint and shellcheck
         uses: ./.github/actions/install-scanners
@@ -119,7 +119,7 @@ jobs:
           hit: ${{ steps.rust.outputs.cache-hit }}
 
   # xtask's fixture tests run the real cargo-deny, Gitleaks and actionlint, so this job
-  # installs them.
+  # installs them; the runner is nextest.
   tests:
     name: Tests
     runs-on: ubuntu-24.04
@@ -134,7 +134,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           job: tests
-          tools: cargo-deny
+          tools: cargo-deny cargo-nextest
 
       - name: Install Gitleaks, actionlint and shellcheck
         uses: ./.github/actions/install-scanners
@@ -170,12 +170,45 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           job: macos
+          tools: cargo-nextest
 
       - name: Build
         run: cargo build --workspace --locked
 
       - name: Platform tests
         run: cargo xtask test --only platform-tests
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
+  # Line coverage of the whole nextest run against `coverage-floor.toml`, then the changed lines
+  # against the merge base. Full history, so the merge base with `origin/main` exists. It
+  # installs the scanners because xtask's fixture tests run them under instrumentation.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # changed-lines diffs against the merge base with origin/main
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: coverage
+          tools: cargo-deny cargo-nextest cargo-llvm-cov
+
+      - name: Install Gitleaks, actionlint and shellcheck
+        uses: ./.github/actions/install-scanners
+
+      - name: Coverage and changed lines
+        run: cargo xtask check --only coverage,changed-lines
 
       - name: Save caches (main only)
         uses: ./.github/actions/save-rust-cache
@@ -224,6 +257,7 @@ jobs:
       - cross
       - tests
       - macos
+      - coverage
       - security
     runs-on: ubuntu-24.04
     timeout-minutes: 5

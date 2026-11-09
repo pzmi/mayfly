@@ -1,7 +1,7 @@
 # Pinned development tools (D15). `cargo xtask doctor` checks them, `cargo xtask
 # install-tools [tool...]` installs the ones it can. Versions are exact; bump them here only.
 # Only the tools a registered `check` stage needs are pinned: the task that adds a stage adds
-# its tool here (cargo-nextest and cargo-llvm-cov with FND-05, Quint and Apalache with FND-06).
+# its tool here (Quint and Apalache with FND-06).
 #
 # method = "cargo"   : cargo install --locked <crate>@<version>
 # method = "rustup"  : rustup toolchain install nightly-<date> --profile minimal
@@ -12,6 +12,20 @@
 # probe = [program, args...] is run to read the installed version; the output must contain
 # the exact version as a whitespace-separated token (a leading "v" is ignored), or, with
 # contains = true, as a substring.
+
+# The test stages (`unit-tests`, `integration-tests`) and `platform-tests`: the runner, with the
+# profiles of `.config/nextest.toml`.
+[tools.cargo-nextest]
+version = "0.9.148"
+method = "cargo"
+probe = ["cargo-nextest", "nextest", "--version"]
+
+# The `coverage` and `changed-lines` stages: LLVM source-based line coverage over the nextest run
+# (needs the `llvm-tools-preview` component of rust-toolchain.toml).
+[tools.cargo-llvm-cov]
+version = "0.9.1"
+method = "cargo"
+probe = ["cargo-llvm-cov", "llvm-cov", "--version"]
 
 # The `deny` stage: advisories, licences, bans and sources against `deny.toml`.
 [tools.cargo-deny]

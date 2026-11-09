@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn should_report_isolation_in_tests_when_a_test_names_another_plane_but_not_test_kits() {
         // given
-        let source = "#[cfg(test)]\nmod tests {\n    use mayfly_control::Bus;\n    use mayfly_testkit::poll;\n}\n";
+        let source = "#[cfg(test)]\nmod tests {\n    use mayfly_control::Bus;\n    use mayfly_testkit_shared::poll;\n}\n";
 
         // when
         let data = diagnostics("mayfly-data", &[("src/lib.rs", source)]);

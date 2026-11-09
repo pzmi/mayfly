@@ -35,8 +35,8 @@ const fn row(
 
 /// All rows. `quick` runs the stage rows `fmt-check`, `architecture`, `clippy`, `unit-tests`
 /// and `doctests`. `platform-tests` is a stage of `test` that `check` leaves out (the macOS CI
-/// job runs it). Stages that later tasks bring (nextest, coverage, formal, conformance, fuzz,
-/// mutation, release) are absent until those tasks register them.
+/// job runs it). Stages that later tasks bring (formal, conformance, fuzz, mutation, release)
+/// are absent until those tasks register them.
 pub const CATALOG: &[Check] = &[
     row(
         "fmt-check",
@@ -63,15 +63,15 @@ pub const CATALOG: &[Check] = &[
     row(
         "unit-tests",
         "unit",
-        "cargo test --workspace --locked --lib --bins",
-        "FND-02",
+        "cargo nextest run --workspace --locked --profile ci -E not kind(test)",
+        "FND-05",
         true,
     ),
     row(
         "integration-tests",
         "integration",
-        "cargo test --workspace --locked --test *",
-        "FND-02",
+        "cargo nextest run --workspace --locked --profile ci -E kind(test)",
+        "FND-05",
         true,
     ),
     row(
@@ -97,6 +97,20 @@ pub const CATALOG: &[Check] = &[
         "cargo xtask test --only platform-tests",
         "FND-04",
         false,
+    ),
+    row(
+        "coverage",
+        "coverage",
+        "cargo llvm-cov nextest --workspace --locked --profile ci --lcov --output-path target/coverage/lcov.info, then coverage-floor.toml",
+        "FND-05",
+        true,
+    ),
+    row(
+        "changed-lines",
+        "coverage",
+        "changed lines of crates/*/src since the merge base, against coverage-floor.toml (reuses a fresh target/coverage/lcov.info)",
+        "FND-05",
+        true,
     ),
     row(
         "security",

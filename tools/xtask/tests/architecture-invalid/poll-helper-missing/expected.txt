@@ -1,0 +1,4 @@
+rule: ARCH-missing-selector
+at: crates/mayfly-testkit-shared/src/poll.rs
+contains: the test-sleep exemption names `src/poll.rs` in mayfly-testkit-shared, which does not exist
+only: true

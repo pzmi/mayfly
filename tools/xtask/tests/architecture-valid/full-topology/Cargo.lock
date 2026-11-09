@@ -97,6 +97,7 @@ name = "mayfly-data-domain"
 version = "0.1.0"
 dependencies = [
  "mayfly-domain",
+ "mayfly-testkit-shared",
 ]
 
 [[package]]
@@ -125,6 +126,10 @@ dependencies = [
  "mayfly-control",
  "mayfly-domain",
 ]
+
+[[package]]
+name = "mayfly-testkit-shared"
+version = "0.1.0"
 
 [[package]]
 name = "percent-encoding"

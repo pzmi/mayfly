@@ -15,4 +15,4 @@ data = ["mayfly-data"]
 both = ["mayfly-conformance"]
 
 [semantic]
-absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-control", "mayfly-control-domain", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit"]
+absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-control", "mayfly-control-domain", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]

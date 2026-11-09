@@ -1,0 +1,32 @@
+# nextest profiles (verification.md section 2, rule 4). A failure that passes on a rerun is a
+# race to find, never a flake to retry: `retries = 0` in every profile, never raised here.
+#
+# default: a developer's run; stops at the first failure.
+# ci:      the gate and CI; runs every test, writes JUnit.
+# serial:  one test at a time, for the timed modules and for chasing a race (a later task
+#          selects it); same bounds as the others.
+#
+# PROPTEST_CASES is set by `cargo xtask test` (tools/xtask/src/test.rs): nextest has no
+# profile-level environment table. Failing seeds persist under each crate's committed
+# `proptest-regressions/` directory.
+#
+# A test that runs 30 s is reported slow and is terminated after four such periods, so a hang
+# is a failure, never a stuck gate.
+
+[profile.default]
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[profile.serial]
+retries = 0
+fail-fast = false
+test-threads = 1
+slow-timeout = { period = "30s", terminate-after = 4 }

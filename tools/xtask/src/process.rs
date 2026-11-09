@@ -1,7 +1,8 @@
 //! Running external commands as gate stages.
 
 use std::fmt::Write as _;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// One gate stage: an external command, or a function of this binary.
@@ -29,6 +30,8 @@ pub enum Action {
         args: Vec<String>,
         /// Environment variables set for the child only.
         env: Vec<(String, String)>,
+        /// Stderr substrings that fail the stage even when the program exits 0.
+        deny_stderr: Vec<String>,
     },
     /// An xtask function returning an exit code, shown as `display` in the progress line.
     InProcess {
@@ -48,6 +51,7 @@ impl Stage {
                 program: program.to_owned(),
                 args: args.iter().map(|a| (*a).to_owned()).collect(),
                 env: Vec::new(),
+                deny_stderr: Vec::new(),
             },
             tool: None,
             also_tool: None,
@@ -59,6 +63,17 @@ impl Stage {
     pub fn env(mut self, key: &str, value: &str) -> Self {
         if let Action::Command { env, .. } = &mut self.action {
             env.push((key.to_owned(), value.to_owned()));
+        }
+        self
+    }
+
+    /// Fails the stage when its stderr contains `needle`, even if the program exits 0. Used for
+    /// tool warnings that must not pass silently (a warning is a failure at the gate): nextest
+    /// ignores a configuration key it does not know with a warning only.
+    #[must_use]
+    pub fn deny_stderr(mut self, needle: &str) -> Self {
+        if let Action::Command { deny_stderr, .. } = &mut self.action {
+            deny_stderr.push(needle.to_owned());
         }
         self
     }
@@ -89,22 +104,80 @@ impl Stage {
 
     fn execute(&self) -> i32 {
         match &self.action {
-            Action::Command { program, args, env } => {
+            Action::Command {
+                program,
+                args,
+                env,
+                deny_stderr,
+            } => {
                 eprintln!("xtask: stage {}: {program} {}", self.name, args.join(" "));
                 let mut command = Command::new(program);
                 command.args(args).envs(env.iter().map(|(k, v)| (k, v)));
-                match command.status() {
-                    Ok(status) => status.code().unwrap_or(1),
+                if deny_stderr.is_empty() {
+                    return match command.status() {
+                        Ok(status) => status.code().unwrap_or(1),
+                        Err(err) => {
+                            eprintln!("xtask: cannot run {program}: {err}");
+                            1
+                        }
+                    };
+                }
+                command.stderr(Stdio::piped());
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
                     Err(err) => {
                         eprintln!("xtask: cannot run {program}: {err}");
+                        return 1;
+                    }
+                };
+                let denied = child
+                    .stderr
+                    .take()
+                    .and_then(|stderr| scan_stderr(BufReader::new(stderr), deny_stderr));
+                let code = match child.wait() {
+                    Ok(status) => status.code().unwrap_or(1),
+                    Err(_) => 1,
+                };
+                match denied {
+                    Some(needle) if code == 0 => {
+                        eprintln!(
+                            "xtask: stage {} FAILED: stderr contains {needle:?}",
+                            self.name
+                        );
                         1
                     }
+                    _ => code,
                 }
             }
             Action::InProcess { display, run } => {
                 eprintln!("xtask: stage {}: {display}", self.name);
                 run()
             }
+        }
+    }
+}
+
+/// Echoes `stderr` line by line and returns the first denied needle any line contains.
+///
+/// Reads to the end of the stream whatever it holds: a line that is not UTF-8 is decoded
+/// lossily rather than ending the scan, so a denied warning after it is still seen and the
+/// child never blocks on a full pipe nobody drains. A read error ends the scan (the child's
+/// exit code still decides). Pinned by
+/// `should_fail_when_denied_text_follows_invalid_utf8_on_stderr`.
+fn scan_stderr(mut stderr: impl BufRead, deny: &[String]) -> Option<String> {
+    let mut denied = None;
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match stderr.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => return denied,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end_matches(['\n', '\r']);
+        eprintln!("{line}");
+        if denied.is_none() {
+            denied = deny.iter().find(|n| line.contains(n.as_str())).cloned();
         }
     }
 }
@@ -396,5 +469,48 @@ mod tests {
 
         // then
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn should_fail_when_denied_text_is_on_stderr_despite_exit_zero() {
+        // given
+        let stages = [
+            sh("warn", "echo 'ignoring unknown configuration key: x' >&2")
+                .deny_stderr("ignoring unknown configuration key"),
+        ];
+
+        // when
+        let code = run_stages(&stages);
+
+        // then
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn should_fail_when_denied_text_follows_invalid_utf8_on_stderr() {
+        // given: a line that is not UTF-8, then the denied warning
+        let stages = [sh(
+            "warn",
+            "printf 'bad \\377\\376 bytes\\n' >&2; echo 'ignoring unknown configuration key: x' >&2",
+        )
+        .deny_stderr("ignoring unknown configuration key")];
+
+        // when
+        let code = run_stages(&stages);
+
+        // then
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn should_keep_exit_code_when_no_denied_text_is_on_stderr() {
+        // given
+        let stages = [sh("quiet", "echo fine >&2; exit 3").deny_stderr("ignoring unknown")];
+
+        // when
+        let code = run_stages(&stages);
+
+        // then
+        assert_eq!(code, 3);
     }
 }

@@ -46,7 +46,7 @@ from the policy, or listed but absent, fails the checker.
 | **application** (production) | `mayfly-control`, `mayfly-data` | yes |
 | **adapter** (production) | CP: `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`; DP: `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host`; plane-neutral: `mayfly-adapter-link` | yes |
 | **root** (production) | `mayfly-composition`, `mayfly-cli` | yes |
-| **test_only** | `mayfly-testkit`, `mayfly-conformance`, `mayfly-fake-tart`, `mayfly-fake-github` | never |
+| **test_only** | `mayfly-testkit`, `mayfly-testkit-shared`, `mayfly-conformance`, `mayfly-fake-tart`, `mayfly-fake-github` | never |
 | **tool_only** | `xtask`, `mayfly-faultlab` (the package in `tools/faultlab`) | never |
 | **fuzz_only** | `mayfly-fuzz` (own workspace under `fuzz/`) | never |
 
@@ -62,7 +62,7 @@ closure stays; tools and the independent oracles are in none.
 |:--|:--|
 | **control** | `mayfly-control-domain`, `mayfly-control`, `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`, `mayfly-testkit` (the control plane's test kit) |
 | **data** | `mayfly-data-domain`, `mayfly-data`, `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host` |
-| **shared** | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-link` |
+| **shared** | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-link`, `mayfly-testkit-shared` (the shared test kit) |
 | **both** (sees CP and DP) | `mayfly-composition`, `mayfly-cli` (through composition), `mayfly-conformance` |
 
 `mayfly-fuzz` sees both planes too; it lives outside the root workspace and its policy entry
@@ -93,6 +93,7 @@ workspace crates (`[dependencies.normal]`). They are plan §4's diagram written 
 | `mayfly-composition` | every production crate except `mayfly-cli` |
 | `mayfly-cli` | `mayfly-composition` |
 | `mayfly-testkit` | `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`, `mayfly-control` (ADR 0019) |
+| `mayfly-testkit-shared` | — (no workspace crate; ADR 0019) |
 | `mayfly-conformance` | `mayfly-testkit`, pure and application crates, `mayfly-adapter-sqlite`, `mayfly-adapter-tart`, `mayfly-adapter-link`, `mayfly-composition` |
 | `mayfly-fake-tart`, `mayfly-fake-github`, `xtask`, `mayfly-faultlab` | — (no workspace crate) |
 | `mayfly-fuzz` | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-tart`, `mayfly-adapter-github`, `mayfly-composition` |
@@ -114,9 +115,10 @@ Rules over the table:
    production closure stays within the dependent's plane and the shared crates: a DP crate's
    tests do not use the SQLite adapter, not even through `mayfly-conformance` (ADR 0019).
    Test support is therefore split per plane: `mayfly-testkit` is the control plane's kit; the
-   data plane's kit (fake provider, `VmProvider` contract suite) and a shared kit (the poll
-   helper, the link contract suite) are created, each with its policy entry, by the first task
-   that needs them (DP-01; FND-05 or DP-02).
+   shared kit `mayfly-testkit-shared` (the poll helper, FND-05; the link contract suite,
+   DP-02) depends on no workspace crate, so every plane's tests may use it; the data plane's
+   kit (fake provider, `VmProvider` contract suite) is created, with its policy entry, by the
+   first task that needs it (DP-01).
 4. **Production closure.** No production crate reaches a test_only or tool_only crate by a
    normal or build edge, directly or through any package (`ARCH-production-closure`).
 5. **Build dependencies** are declared in `[dependencies.build]` (`ARCH-undeclared-build-dep`);
@@ -211,7 +213,9 @@ Dev ceilings: `proptest` (pure and application crates), `tempfile`, `tokio` (`rt
    harnesses (KER-03), the in-memory journal and its contract suite (ES-01), control-plane
    fakes (verification §3, §5, §7). It depends on no adapter, so an adapter's own tests can
    run the suites against it without a cycle, and on no data-plane crate (ADR 0019). The
-   data-plane kit and the shared kit of §2.2 rule 3 follow the same shape.
+   data-plane kit of §2.2 rule 3 follows the same shape. `mayfly-testkit-shared` holds what
+   both planes' tests need and depends on no workspace crate: the bounded `poll` helper
+   (verification §2.5) and, from DP-02, the link contract suite.
 2. `mayfly-conformance` holds ITF decoding, replay and per-model drivers (verification §6). It
    sees both planes, so no plane crate dev-depends on it.
 3. `fuzz/` is its own workspace with its own `Cargo.lock` and `deny.toml`; its crate is
@@ -344,7 +348,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-unfinished-code` | `todo!`/`unimplemented!`/`dbg!` without an exception | FND-02 |
 | `ARCH-ignored-test` | `#[ignore]` | FND-02 |
 | `ARCH-lint-suppression` | `#[allow]`, `#[expect]` or `coverage(off)` without a matching `[[exceptions.lints]]` row citing an ADR; a stale row | FND-02 |
-| `ARCH-test-sleep` | a sleep in test code outside `mayfly-testkit/src/poll.rs` | FND-02 |
+| `ARCH-test-sleep` | a sleep in test code outside `mayfly-testkit-shared/src/poll.rs` | FND-02 |
 | `ARCH-test-name`, `ARCH-test-structure` | a test not named `should_<outcome>_when_<condition>`; missing `// given`, `// when`, `// then` in order | FND-02 |
 | `ARCH-platform-branch` | `cfg!(target_os…)` runtime branches under `crates/*/src` | FND-02 |
 | `ARCH-command-isolation`, `ARCH-query-purity` (CQRS) | `mayfly-control` command code naming `crate::queries` or HTTP types; query code naming `crate::commands` or mutating state | FND-02 |
@@ -582,11 +586,11 @@ boundaries), not as an object model.
 1. **Each job is `cargo xtask check --only <stages>`.** CI never re-implements a stage in YAML;
    local and CI run the same code. Jobs today: `architecture`; `static` (`doctor`, then
    fmt-check, clippy, docs); `tests` (unit, integration, doctests); `security` (deny, secrets,
-   workflows, action-pins); `macos` (native build and tests on arm64 with
+   workflows, action-pins); `coverage` (`coverage`, `changed-lines`, full history); `macos` (native build and tests on arm64 with
    `RUSTFLAGS=-D warnings`, `test --only platform-tests`); `cross` (`check --only cross-check`:
    `cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D
    warnings` from Linux, so macOS-only code is linted, not just compiled). Later tasks add
-   `e2e`, `conformance` and `coverage` (coverage, changed-lines) with their stages.
+   `e2e` and `conformance` with their stages.
 2. **One aggregate job, `required`**, runs `if: always()`, needs every other job of `ci.yml`, and
    fails unless every result is `success` (skipped and cancelled fail).
 3. **Self-tests** in xtask parse `ci.yml` and fail when an `in_check` stage is in zero jobs or
@@ -668,7 +672,7 @@ valid ones), never a skipped stage.
 | `cargo xtask adr new "<title>" [--number N]` | allocate an ADR from the template and add its index row | FND-02 |
 | `cargo xtask adr index [--fix]` | check (or rewrite) the ADR index against the files | FND-02 |
 | `cargo xtask land <ref>… (--push R B \| --no-push)` | cherry-pick onto a clean, current `main`, run `check`, fast-forward and push only on green | FND-02 |
-| `cargo xtask test [--only <stage>]` | test stages alone (unit, integration, doctests, e2e, platform-tests) | FND-02, FND-05 |
+| `cargo xtask test [--only <stage>]` | test stages alone (unit and integration under nextest's `ci` profile, doctests, e2e, platform-tests) | FND-02, FND-05 |
 | `cargo xtask coverage [--changed-since <rev>]` | llvm-cov over in-process suites vs `coverage-floor.toml`; changed-line gate | FND-05 |
 | `cargo xtask formal-typecheck` / `formal-test` | typecheck every `.qnt`; run Quint scenario tests | FND-06 |
 | `cargo xtask conformance [--typecheck]` | all formal and replay stages: typecheck, scenarios, simulate, freshness, generate, replay, negative controls | VER-01 |

@@ -1,4 +1,4 @@
-//! The bounded polling helper: the one place test code may sleep.
+//! The bounded polling helper: the one place test code may sleep (the shared kit's own).
 
 use std::thread;
 use std::time::{Duration, Instant};

@@ -185,8 +185,10 @@ listed checks, if the owner wants one.
 #### FND-05 nextest profiles, testkit poll helper, coverage stage
 Cites: ver §2, §10, ADR 0019. `.config/nextest.toml` (default, ci, serial profiles), the `poll`
 helper (the only place a test may wait on a real-OS condition, bounded, with a reason) in the
-plane-neutral shared test kit, which this task creates (ADR 0019: data-plane tests cannot use the
-control plane's `mayfly-testkit`; move `ARCH-test-sleep`'s selector with it), coverage stage
+plane-neutral shared test kit `mayfly-testkit-shared` (test_only, plane `shared`, no workspace
+edge), which this task creates (ADR 0019: data-plane tests cannot use the control plane's
+`mayfly-testkit`; `ARCH-test-sleep`'s selector moves with it and `POLL_HELPER_REQUIRED` is on),
+coverage stage
 with `cargo-llvm-cov` and `coverage-floor.toml` (start 85% overall, 90% changed lines, ratcheted).
 Accept: `check` runs nextest; a sleeping test fails the hygiene rule; coverage stage in CI.
 

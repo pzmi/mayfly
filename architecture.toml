@@ -16,7 +16,7 @@ production = [
   "mayfly-composition", "mayfly-cli",
 ]
 test_only = [
-  "mayfly-testkit", "mayfly-conformance",
+  "mayfly-testkit", "mayfly-testkit-shared", "mayfly-conformance",
   "mayfly-fake-tart", "mayfly-fake-github",
 ]
 tool_only = ["xtask", "mayfly-faultlab"]
@@ -36,7 +36,10 @@ data = [
   "mayfly-data-domain", "mayfly-data",
   "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
 ]
-shared = ["mayfly-domain", "mayfly-protocol", "mayfly-adapter-link"]
+shared = [
+  "mayfly-domain", "mayfly-protocol", "mayfly-adapter-link",
+  "mayfly-testkit-shared",
+]
 both = ["mayfly-composition", "mayfly-cli", "mayfly-conformance"]
 
 # Names one plane owns (ARCH-plane-vocabulary): a crate of the other plane, or a shared crate,
@@ -100,6 +103,10 @@ mayfly-testkit = [
   "mayfly-domain", "mayfly-protocol",
   "mayfly-control-domain", "mayfly-control",
 ]
+# The shared test kit (ADR 0019): plane-neutral test support, today the poll helper. Its closure
+# is the shared crates only (none yet), so control and data crates, and both planes' kits, may
+# dev-depend on it.
+mayfly-testkit-shared = []
 # Conformance drives the production crates the Quint models govern, over the testkit, the
 # Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
 # dev-depend on it.

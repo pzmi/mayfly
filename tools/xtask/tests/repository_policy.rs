@@ -181,7 +181,12 @@ fn should_select_the_foundation_crates_when_repository_purity_and_planes_are_rea
             "mayfly-adapter-guest",
             "mayfly-adapter-host",
         ]),
-        sorted(&["mayfly-domain", "mayfly-protocol", "mayfly-adapter-link"]),
+        sorted(&[
+            "mayfly-domain",
+            "mayfly-protocol",
+            "mayfly-adapter-link",
+            "mayfly-testkit-shared",
+        ]),
         sorted(&["mayfly-composition", "mayfly-cli", "mayfly-conformance"]),
     ];
     assert_eq!(got, want);

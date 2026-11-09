@@ -13,7 +13,7 @@ mayfly-cli = ["mayfly-composition"]
 mayfly-testkit = ["mayfly-domain", "mayfly-control"]
 
 [semantic]
-absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-protocol"]
+absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-protocol", "mayfly-testkit-shared"]
 
 [purity]
 pure = ["mayfly-domain"]

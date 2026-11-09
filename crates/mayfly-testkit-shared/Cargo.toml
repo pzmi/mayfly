@@ -1,0 +1,14 @@
+[package]
+name = "mayfly-testkit-shared"
+description = "Test-only: plane-neutral test support (the bounded poll helper) both planes' kits and tests may use."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -12,6 +12,7 @@ members = [
     "crates/mayfly-composition",
     "crates/mayfly-cli",
     "crates/mayfly-testkit",
+    "crates/mayfly-testkit-shared",
     "crates/mayfly-conformance",
     "tools/faultlab",
     "tools/xtask",

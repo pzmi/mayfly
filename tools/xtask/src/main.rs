@@ -3,8 +3,8 @@
 //! Ported from site-preview (<https://github.com/pzmi/site-preview>, same owner, MIT OR
 //! Apache-2.0; mayfly D3) and cut to the foundation: the gate (`quick`, `check`), the
 //! architecture checker, the pinned-tool doctor, ADRs, `land` and the supply-chain stages.
-//! Later tasks register their own stages (nextest and coverage, the formal toolchain,
-//! conformance, fuzz, mutation, release); a stage that does not exist yet is absent from the
+//! Later tasks register their own stages (the formal toolchain, conformance, fuzz, mutation,
+//! release); a stage that does not exist yet is absent from the
 //! catalog, never a skipped row.
 
 mod action_pins;
@@ -14,6 +14,7 @@ mod architecture;
 mod catalog;
 mod check;
 mod cli;
+mod coverage;
 mod land;
 mod process;
 mod quick;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         Command::Quick => quick::run(),
         Command::Test { only } => test::run(only.as_deref()),
         Command::Check { only } => check::run(only),
+        Command::Coverage { changed_since } => coverage::command(changed_since.as_deref()),
         Command::Security => security::run(),
         Command::Fmt => run_fmt(),
         Command::Architecture { manifest_path } => architecture::run(manifest_path.as_deref()),

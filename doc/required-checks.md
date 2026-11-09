@@ -28,8 +28,9 @@ pull requests and by hand. A test in `tools/xtask/src/check.rs`
 | `architecture` | Architecture and policy | `check --only architecture` |
 | `static` | Static quality | `check --only fmt-check,clippy,docs` (docs: the ADR index matches the ADR files), after `doctor` has asserted every pinned tool |
 | `cross` | Cross check (aarch64-apple-darwin) | `check --only cross-check` (Clippy over every target for the macOS target, warnings denied) |
-| `tests` | Tests | `check --only unit-tests,integration-tests,doctests` |
+| `tests` | Tests | `check --only unit-tests,integration-tests,doctests` (nextest under the `ci` profile; doctests on `cargo test --doc`) |
 | `macos` | macOS (arm64) | `cargo build --workspace --locked`, then `test --only platform-tests` on `macos-latest`, with `RUSTFLAGS=-D warnings` |
+| `coverage` | Coverage | `check --only coverage,changed-lines` (the instrumented nextest run against `coverage-floor.toml`, then the changed lines against the merge base; full history) |
 | `security` | Security | `check --only deny,secrets,workflows,action-pins` |
 | `required` | Required | the aggregate; needs all of the above |
 

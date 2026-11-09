@@ -345,7 +345,7 @@ fn selector_crates() -> BTreeSet<String> {
 /// `ARCH-missing-selector`: each crate the rules name must be a workspace member unless
 /// `[semantic] absent` lists it (fixtures with part of the topology), an `absent` entry
 /// must name a crate a rule names and must not name a member, and, once
-/// [`rules_hygiene::POLL_HELPER_REQUIRED`] is set (FND-05), the poll helper's file must exist.
+/// [`rules_hygiene::POLL_HELPER_REQUIRED`] is set, the poll helper's file must exist.
 fn selector_problems(root: &Path, metadata: &Metadata, policy: &Policy) -> Vec<Diagnostic> {
     let members: BTreeMap<String, &Package> = metadata
         .workspace_packages()

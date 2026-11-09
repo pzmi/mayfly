@@ -7,4 +7,4 @@ prod = ["app"]
 app = []
 
 [semantic]
-absent = ["mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-control", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-domain", "mayfly-testkit"]
+absent = ["mayfly-adapter-github", "mayfly-adapter-sqlite", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-domain", "mayfly-testkit", "mayfly-testkit-shared"]

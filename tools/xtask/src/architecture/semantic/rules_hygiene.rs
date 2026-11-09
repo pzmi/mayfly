@@ -37,12 +37,14 @@ const SLEEPS: &[&[&str]] = &[
 ];
 
 /// The bounded polling helper: the one place test support may sleep, in its production code.
-/// Package and file inside it.
-pub const POLL_HELPER: (&str, &str) = ("mayfly-testkit", "src/poll.rs");
+/// Package and file inside it. It lives in the shared test kit, not in a plane's kit, so that
+/// both planes' tests can use it (ADR 0019).
+pub const POLL_HELPER: (&str, &str) = ("mayfly-testkit-shared", "src/poll.rs");
 
-/// Whether the poll helper's file must exist (`ARCH-missing-selector`). Off until FND-05
-/// writes `mayfly-testkit::poll` and sets it; until then no test code may sleep at all.
-pub const POLL_HELPER_REQUIRED: bool = false;
+/// Whether the poll helper's file must exist (`ARCH-missing-selector`): the exemption names a
+/// file, and a rename of it would otherwise leave an exemption for nothing and a helper that
+/// no rule watches.
+pub const POLL_HELPER_REQUIRED: bool = true;
 
 /// The hygiene rules over all packages: suppressions are matched against
 /// `[[exceptions.lints]]`, and entries that match nothing are reported by [`Hygiene::finish`].

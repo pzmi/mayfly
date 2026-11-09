@@ -91,10 +91,13 @@ Rules across levels:
    `SequentialIds` gives readable deterministic ids.
 4. **No sleeps.** No test sleeps (`ARCH-test-sleep`). Synchronisation is by channels, barriers,
    scripted fakes and fake time.
-5. **The poll helper.** `mayfly-testkit::poll::wait_until(deadline, reason, condition)` is the
+5. **The poll helper.** `mayfly_testkit_shared::poll::wait_until(deadline, reason, condition)` is the
    only sanctioned wait, for real-OS conditions in integration and e2e tests (a process exited, a
    socket appeared, fake-tart state changed). It is bounded, carries a reason shown on timeout,
    and is never a correctness oracle: what is asserted is the state reached, not the time taken.
+   It lives in the shared test kit `mayfly-testkit-shared`, which depends on no workspace crate,
+   so the control plane's and the data plane's tests both use it (ADR 0019); `try_wait_until`
+   returns the timeout for a caller that must clean up first.
 6. **Property seeds.** Failing proptest seeds are persisted under `crates/<c>/proptest-regressions/`
    and committed; case counts come from the gate stage (1024), never from code.
 7. **Race tests** are bounded by iteration count, never by time, and include a negative control
