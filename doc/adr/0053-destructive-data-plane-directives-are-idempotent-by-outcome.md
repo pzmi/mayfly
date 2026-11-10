@@ -4,7 +4,8 @@ Date: 2026-11-10
 
 ## Status
 
-Accepted (owner, 2026-11-10). Amends ADR 0026 (an absent delete target), marked there.
+Accepted (owner, 2026-11-10). Amends ADR 0026 (an absent delete target), marked there; amended
+by 0066 (a stop of an absent target).
 
 ## Context
 
@@ -29,7 +30,9 @@ same vm, we should say it's done, shouldn't we?"
    `VmStopped`, without `tart stop`.
 3. **Safety is unchanged.** A present target that differs in name, generation or instance id
    is refused `proof_mismatch` and never touched; a `StopVm` whose target is absent is still
-   `proof_mismatch` (an absent VM is not a stopped one; the inventory reports the absence). The
+   `proof_mismatch` (an absent VM is not a stopped one; the inventory reports the absence).
+   *(Amended 2026-11-10 by ADR 0066: it is refused `target_absent`, and the control plane
+   quarantines the attempt as a desync, `vm_vanished_externally`.)* The
    proof's own consistency, `protected_target`, safe mode and the deadline are checked first,
    as before.
 4. **An incomplete listing is never `Done` (I25).** A re-observation that fails, does not parse
@@ -61,7 +64,8 @@ same vm, we should say it's done, shouldn't we?"
   `should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`,
   `should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`,
   `should_answer_done_when_a_stop_finds_its_proven_target_stopped`,
-  `should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone`.
+  `should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone` (renamed
+  `should_refuse_target_absent_when_a_stop_finds_its_target_gone` by ADR 0066).
 
 ## Alternatives considered
 

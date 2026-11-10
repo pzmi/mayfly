@@ -147,6 +147,12 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   0053) and a listed VM's optional `guest`, `memory_bytes` and `disk_bytes`. A frame never uses
   more than the session's minor: a 1.0 session gets `insufficient_resources`, `deadline` and no
   new fields (`ObservationKind::written_in`).
+- **Protocol 1.2 (DEC-05).** The refusal `target_absent`: a `StopVm` or `StartVm` whose recorded
+  VM a complete listing shows absent, which the control plane quarantines as a desync
+  (`vm_vanished_externally`, ADR 0066); a 1.1 or older session gets `proof_mismatch`. The
+  `Welcome`'s optional `cp_clock`, the control plane's clock reading, from which the data plane
+  reads every deadline of the session by an offset to its monotonic clock (ADR 0020, amended
+  2026-11-10); without it, its wall clock at receipt.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly

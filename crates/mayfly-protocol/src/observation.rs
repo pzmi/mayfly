@@ -15,7 +15,7 @@ use mayfly_domain::{
 use serde::{Deserialize, Serialize};
 
 use crate::directive::{AttemptRef, BaseName};
-use crate::version::{ProtocolVersion, UNKNOWN_FACTS};
+use crate::version::{ProtocolVersion, UNKNOWN_FACTS, VANISHED_TARGET};
 
 /// One observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,35 +186,47 @@ impl ObservationKind {
     }
 
     /// The observation as a frame of a session at `version` may carry it: a frame never uses
-    /// more than the minor the session accepted (plan §3.2). Below [`UNKNOWN_FACTS`] (1.1) a
+    /// more than the minor the session accepted (plan §3.2). Below [`VANISHED_TARGET`] (1.2) a
+    /// `target_absent` refusal is written `proof_mismatch` (a definite refusal either way, which
+    /// a control plane of 1.1 or older quarantines for a stop; ADR 0066). Below
+    /// [`UNKNOWN_FACTS`] (1.1) a
     /// `capacity_unknown` refusal is written `insufficient_resources` of the same dimension (a
     /// definite refusal either way), a `listing_incomplete` unknown reason `deadline` (an
     /// unknown outcome either way), and a report's `unknown` dimensions and a listed VM's facts
     /// are left out; a report's `free` is still zero in every unknown dimension, though a
     /// control plane that admits from totals rather than `free` may propose there, and the
     /// data plane refuses it either way (ADR 0052, correction of 2026-11-10). Pinned by
-    /// `should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts`.
+    /// `should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts`
+    /// and `should_write_proof_mismatch_when_the_session_is_older_than_the_vanished_target`.
     #[must_use]
     pub fn written_in(self, version: ProtocolVersion) -> Self {
-        if version >= UNKNOWN_FACTS {
+        if version >= VANISHED_TARGET {
             return self;
         }
+        let before_facts = version < UNKNOWN_FACTS;
         match self {
             Self::DirectiveRefused {
-                reason: RefusalReason::CapacityUnknown { dimension },
+                reason: RefusalReason::TargetAbsent,
             } => Self::DirectiveRefused {
+                reason: RefusalReason::ProofMismatch,
+            },
+            Self::DirectiveRefused {
+                reason: RefusalReason::CapacityUnknown { dimension },
+            } if before_facts => Self::DirectiveRefused {
                 reason: RefusalReason::InsufficientResources { dimension },
             },
             Self::OutcomeUnknown {
                 reason: UnknownReason::ListingIncomplete,
-            } => Self::OutcomeUnknown {
+            } if before_facts => Self::OutcomeUnknown {
                 reason: UnknownReason::Deadline,
             },
-            Self::CapacityReported(report) => Self::CapacityReported(CapacityReport {
-                unknown: Vec::new(),
-                ..report
-            }),
-            Self::Inventory { vms } => Self::Inventory {
+            Self::CapacityReported(report) if before_facts => {
+                Self::CapacityReported(CapacityReport {
+                    unknown: Vec::new(),
+                    ..report
+                })
+            }
+            Self::Inventory { vms } if before_facts => Self::Inventory {
                 vms: vms
                     .into_iter()
                     .map(|vm| VmObservation {
@@ -244,7 +256,9 @@ impl ObservationKind {
             | Self::ImageMaterialised { .. }
             | Self::ImageEvicted { .. }
             | Self::DirectiveRefused { .. }
-            | Self::OutcomeUnknown { .. }) => other,
+            | Self::OutcomeUnknown { .. }
+            | Self::CapacityReported(..)
+            | Self::Inventory { .. }) => other,
         }
     }
 }
@@ -311,6 +325,12 @@ pub enum RefusalReason {
     },
     /// The re-observed VM does not match the ownership proof (ADR 0026).
     ProofMismatch,
+    /// The `StopVm` or `StartVm` target, a VM the control plane recorded cloning, is absent
+    /// from a complete listing: the data plane did not remove it, so the journal and the
+    /// provider have desynced, and the control plane quarantines the attempt for review
+    /// (ADR 0066). Never touched; a `DeleteVm` of an absent target is done instead (ADR 0053).
+    /// Written from protocol 1.2 ([`crate::VANISHED_TARGET`]), `proof_mismatch` before.
+    TargetAbsent,
     /// The session is in safe mode and the kind is held (I29).
     SafeMode,
     /// A destructive directive names an image base or a VM the proof cannot cover (ADR 0026).
@@ -522,6 +542,32 @@ mod tests {
                 None,
                 None,
             ]
+        );
+    }
+
+    #[test]
+    fn should_write_proof_mismatch_when_the_session_is_older_than_the_vanished_target() {
+        // given
+        let absent = ObservationKind::DirectiveRefused {
+            reason: RefusalReason::TargetAbsent,
+        };
+        let sessions = [
+            ProtocolVersion::new(1, 0),
+            UNKNOWN_FACTS,
+            VANISHED_TARGET,
+            ProtocolVersion::new(1, 3),
+        ];
+
+        // when
+        let written = sessions.map(|v| absent.clone().written_in(v));
+
+        // then
+        let mismatch = ObservationKind::DirectiveRefused {
+            reason: RefusalReason::ProofMismatch,
+        };
+        assert_eq!(
+            written,
+            [mismatch.clone(), mismatch, absent.clone(), absent.clone()]
         );
     }
 

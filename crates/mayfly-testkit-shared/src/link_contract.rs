@@ -722,6 +722,7 @@ const fn welcome(accepted_version: ProtocolVersion, epoch: Epoch) -> Welcome {
         epoch,
         mode: Mode::Normal,
         accepted_version,
+        cp_clock: None,
     }
 }
 

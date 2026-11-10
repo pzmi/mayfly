@@ -21,6 +21,8 @@ pub const NOW: Millis = Millis::new(1_000);
 pub const V1_0: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// The minor that carries what the data plane cannot determine (ADR 0052, ADR 0053).
 pub const V1_1: ProtocolVersion = ProtocolVersion::new(1, 1);
+/// The minor that carries the refusal `target_absent` (ADR 0066).
+pub const V1_2: ProtocolVersion = ProtocolVersion::new(1, 2);
 
 pub fn host() -> HostId {
     HostId::sample()
@@ -224,6 +226,7 @@ pub fn open_at(version: ProtocolVersion, mode: Mode, ledger: Ledger) -> DataPlan
         epoch: EPOCH,
         mode,
         accepted_version: version,
+        cp_clock: None,
     }));
     let entered = dp.link(LinkStimulus::FloorRaised(EPOCH));
     assert_eq!(entered, LinkOutcome::Entered(EPOCH));

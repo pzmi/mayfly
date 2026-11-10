@@ -14,7 +14,8 @@
 //!   wait in arrival order. Directives on one target (a VM, a base, an image) run one at a time.
 //!   Nothing is spawned: every in-flight future is polled on the executor's own task, also while
 //!   an observation waits for room in the sink.
-//! - **Deadlines** ([`admission_now`], [`local_due`]: the one place deadlines are read). A
+//! - **Deadlines** ([`admission_now`], [`local_due`]: the one place deadlines are read, in the
+//!   control plane's clock as the handshake's offset gives it, ADR 0020). A
 //!   directive whose deadline passed before a stage could start is refused `deadline_expired`.
 //!   An effect still running at its deadline is answered `Unknown{deadline}` then, never success
 //!   (I10), but it is not dropped: its target stays busy, it counts against the bound and taints
@@ -181,18 +182,58 @@ const fn changes_listing(kind: &DirectiveKind) -> bool {
     }
 }
 
-/// The clock reading a directive's deadline is compared with at admission: the wall clock the
-/// control plane wrote it in (ADR 0020, amendment proposed 2026-11-10). With [`local_due`], the
-/// one place deadlines are read: the handshake-offset option of that amendment changes only
-/// these two functions.
-fn admission_now<C: ProcessClock>(clock: &C) -> Millis {
-    clock.wall()
+/// How a session reads the control plane's clock, which its directive deadlines are written in
+/// (ADR 0020, amendment accepted by the owner 2026-11-10: the clock offset at the handshake).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadlineClock {
+    /// The control plane's clock read `cp` when this data plane's monotonic clock read
+    /// `monotonic`, both taken when the `Welcome` arrived: the control plane's clock now is `cp`
+    /// plus the monotonic time since, so no step of either wall clock after the handshake moves
+    /// a deadline. A reconnect takes it again.
+    Offset {
+        /// The `Welcome`'s `cp_clock`.
+        cp: Millis,
+        /// This data plane's monotonic reading at its receipt.
+        monotonic: Millis,
+    },
+    /// The `Welcome` carried no clock (a control plane older than protocol 1.2): the host's wall
+    /// clock, read when the directive is received. A wall-clock step between the control plane
+    /// writing a deadline and its receipt then lengthens or shortens that directive's time, and
+    /// it holds only while both planes read one host's clock.
+    WallAtReceipt,
+}
+
+impl DeadlineClock {
+    /// The clock for a session opened by a welcome carrying `cp_clock`, received when the
+    /// monotonic clock read `monotonic`.
+    fn of(cp_clock: Option<Millis>, monotonic: Millis) -> Self {
+        cp_clock.map_or(Self::WallAtReceipt, |cp| Self::Offset { cp, monotonic })
+    }
+}
+
+/// The control plane's clock now, as this session reads it ([`DeadlineClock`]): the reading a
+/// directive's deadline is compared with at admission. With [`local_due`], the one place
+/// deadlines are read. Pinned by
+/// `tests/executor/session.rs::should_decide_no_deadline_differently_when_the_wall_clock_steps_after_the_handshake`,
+/// `should_compare_deadlines_in_the_control_planes_clock_when_the_welcome_carries_it` and
+/// `should_compare_deadlines_by_the_wall_clock_at_receipt_when_an_older_control_plane_sends_no_clock`.
+fn admission_now<C: ProcessClock>(clock: &C, deadlines: DeadlineClock) -> Millis {
+    match deadlines {
+        DeadlineClock::Offset { cp, monotonic } => after(
+            cp,
+            Millis::new(clock.monotonic().get().saturating_sub(monotonic.get())),
+        ),
+        DeadlineClock::WallAtReceipt => clock.wall(),
+    }
 }
 
 /// `deadline` as an instant of the monotonic clock, fixed when the directive is received: every
 /// later wait and comparison is monotonic, so a step of the wall clock moves no timer after it.
-fn local_due<C: ProcessClock>(clock: &C, deadline: Deadline) -> Millis {
-    after(clock.monotonic(), deadline.remaining(admission_now(clock)))
+fn local_due<C: ProcessClock>(clock: &C, deadlines: DeadlineClock, deadline: Deadline) -> Millis {
+    after(
+        clock.monotonic(),
+        deadline.remaining(admission_now(clock, deadlines)),
+    )
 }
 
 /// One observer pass: the probe, the inventory and the image listing.
@@ -342,6 +383,7 @@ struct Core {
     gate: ListingGate,
     stats: Stats,
     last_report: Option<CapacityReport>,
+    deadlines: DeadlineClock,
 }
 
 impl<V, I, G, H, C, D> Executor<V, I, G, H, C, D>
@@ -390,6 +432,7 @@ where
                 gate: ListingGate::default(),
                 stats: Stats::default(),
                 last_report: None,
+                deadlines: DeadlineClock::WallAtReceipt,
             },
         })
     }
@@ -420,7 +463,9 @@ where
 
     /// Says hello over `link` (ending any open session, whose reservations are then held), and
     /// enters the welcome's session once `floor` made its epoch durable (ADR 0026, ADR 0042).
-    /// Pinned by `tests/executor/session.rs::should_raise_the_floor_before_entering_when_welcomed`
+    /// The session's deadlines are read in the control plane's clock from the welcome's
+    /// `cp_clock` and the monotonic reading at its receipt ([`DeadlineClock`]). Pinned by
+    /// `tests/executor/session.rs::should_raise_the_floor_before_entering_when_welcomed`
     /// and `should_enter_nothing_when_the_welcome_is_at_or_below_the_floor`.
     ///
     /// # Errors
@@ -441,6 +486,7 @@ where
             epoch_floor: plane.floor,
         };
         let welcome = link.hello(hello).await.map_err(EnterError::Link)?;
+        let deadlines = DeadlineClock::of(welcome.cp_clock, self.ports.clock.monotonic());
         let epoch = match plane.link(LinkStimulus::Welcome(welcome)) {
             LinkOutcome::RaiseFloor(epoch) => epoch,
             LinkOutcome::Ignored(why) => return Err(EnterError::Ignored(why)),
@@ -450,7 +496,10 @@ where
         };
         floor.raise(epoch).await.map_err(EnterError::Floor)?;
         match plane.link(LinkStimulus::FloorRaised(epoch)) {
-            LinkOutcome::Entered(entered) => Ok(entered),
+            LinkOutcome::Entered(entered) => {
+                self.core.deadlines = deadlines;
+                Ok(entered)
+            }
             LinkOutcome::Ignored(why) => Err(EnterError::Ignored(why)),
             LinkOutcome::SendHello | LinkOutcome::RaiseFloor(_) => {
                 Err(EnterError::Ignored(LinkIgnored::NotEntering))
@@ -711,8 +760,11 @@ impl Core {
     {
         let key = (run.epoch, directive.directive_id);
         let clock = &ports.clock;
-        let due = local_due(clock, directive.deadline);
-        match self.plane.receive(version, directive, admission_now(clock)) {
+        let due = local_due(clock, self.deadlines, directive.deadline);
+        match self
+            .plane
+            .receive(version, directive, admission_now(clock, self.deadlines))
+        {
             Receipt::Discard(_) => self.stats.discarded_frames += 1,
             Receipt::Reply(reply) => run.outbox.push(Out::reply(*reply)),
             Receipt::Pending => {}
@@ -935,7 +987,7 @@ impl Core {
         session.table.get(&key.1).map(|entry| Queued {
             key,
             stage: Stage::Effect,
-            due: local_due(&ports.clock, entry.directive.deadline),
+            due: local_due(&ports.clock, self.deadlines, entry.directive.deadline),
             kind: entry.directive.kind.clone(),
         })
     }

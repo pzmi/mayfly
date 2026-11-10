@@ -3,8 +3,8 @@
 
 use super::events::AttemptEvent;
 use super::state::{
-    AttemptState, Diagnostics, DirectiveTag, Identity, Jit, Outcome, Pending, Phase, Stage,
-    VmCondition,
+    AttemptState, Diagnostics, DirectiveTag, Identity, Jit, Outcome, Pending, Phase,
+    QuarantineReason, Stage, VmCondition,
 };
 
 /// Applies one event to the state.
@@ -175,6 +175,10 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
             };
             s.pending = None;
             s.retirement_requested = None;
+            // a VM that vanished is not running: no stop is issued for it (ADR 0066)
+            if e.reason == QuarantineReason::VmVanishedExternally {
+                s.vm_running = false;
+            }
             s.phase = Phase::Quarantined {
                 reason: e.reason,
                 vm: e.vm,

@@ -92,6 +92,9 @@ case start_attempt accepted
 case terminal refused terminal
 case unknown_left_by_inventory accepted
   vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
+case vanished_vm_quarantines accepted
+  directive_refused/v1 {"directive_id":"0000000000000000000000000000d002","reason":"target_absent"}
+  attempt_quarantined/v1 {"reason":"vm_vanished_externally","vm":"stopped"}
 case verification_prepares accepted
   guest_verified/v1 {"nonce_ref":"0000000000000000000000000000d003","facts":{"os":"macos","uptime":30000}}
   attempt_prepared/v1 {}

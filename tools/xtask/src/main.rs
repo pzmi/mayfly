@@ -58,7 +58,7 @@ fn main() -> ExitCode {
         Command::Doctor { json, all } => tools::doctor(*json, *all),
         Command::FormalTypecheck => formal::run_stage("formal-typecheck"),
         Command::FormalTest => formal::run_stage("formal-test"),
-        Command::FormalVerify => formal_verify::run(),
+        Command::FormalVerify { model } => formal_verify::run(model.as_deref()),
         Command::InstallTools { tools } => tools::install(tools),
         Command::Adr { action } => match action {
             AdrAction::New {

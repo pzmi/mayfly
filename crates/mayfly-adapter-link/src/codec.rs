@@ -68,6 +68,7 @@ mod tests {
                 epoch: Epoch::FIRST,
                 mode: Mode::Normal,
                 accepted_version: CURRENT,
+                cp_clock: None,
             }),
         }
     }

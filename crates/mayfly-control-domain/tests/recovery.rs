@@ -245,6 +245,7 @@ fn quarantine_code(reason: QuarantineReason) -> &'static str {
         QuarantineReason::RedactionViolation => "redaction_violation",
         QuarantineReason::ForensicRetention => "forensic_retention",
         QuarantineReason::OutcomeUnprovable => "outcome_unprovable",
+        QuarantineReason::VmVanishedExternally => "vm_vanished_externally",
     }
 }
 

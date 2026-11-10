@@ -28,13 +28,21 @@ impl ProtocolVersion {
 }
 
 /// The version this build writes when the session allows it.
-pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 1);
+pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 2);
 
 /// The minor that added what the data plane cannot determine (ADR 0052: the refusal
 /// `capacity_unknown`, a capacity report's `unknown` dimensions, a listed VM's facts) and
 /// idempotent destructive directives (ADR 0053: the unknown reason `listing_incomplete`). A
 /// session below it is written without them ([`crate::ObservationKind::written_in`]).
 pub const UNKNOWN_FACTS: ProtocolVersion = ProtocolVersion::new(1, 1);
+
+/// The minor that added the refusal `target_absent` (ADR 0066: a `StopVm` or `StartVm` whose
+/// recorded VM a complete listing shows absent, which the control plane quarantines as a desync)
+/// and the `Welcome`'s control-plane clock reading (ADR 0020, amendment accepted 2026-11-10). A
+/// session below it is written `proof_mismatch` instead, which a stop's older reader quarantines
+/// too ([`crate::ObservationKind::written_in`]); the clock reading is a handshake field an older
+/// reader ignores.
+pub const VANISHED_TARGET: ProtocolVersion = ProtocolVersion::new(1, 2);
 
 /// What this build speaks: the highest minor of each major, one entry per major.
 pub const SUPPORTED: &[ProtocolVersion] = &[CURRENT];

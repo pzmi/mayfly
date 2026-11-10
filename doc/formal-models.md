@@ -45,13 +45,21 @@ cargo xtask formal-typecheck           # quint typecheck of every formal/*.qnt
 cargo xtask formal-test                # quint test of every registered model, at least one test each
 cargo xtask check --only formal-typecheck,formal-test   # what the `formal` job of ci.yml runs
 cargo xtask formal-verify              # Apalache bounded check + long simulation (not in `check`)
+cargo xtask formal-verify --model lifecycle   # one model only: what each job of formal.yml runs
 QUINT_SEED=<seed> cargo xtask formal-verify   # repeat a simulation; the base seed is always printed
 cargo xtask doctor [--all]             # pinned tools; --all adds Java and Apalache
 ```
 
 `formal-typecheck` and `formal-test` are `check` stages (job `formal` in `ci.yml`).
-`formal-verify` is the weekly lane of `.github/workflows/formal.yml`, which also runs on every
-change under `formal/`, in `tools/versions.toml` and in the xtask files that drive it. Its logs,
+`formal-verify` is the weekly lane of `.github/workflows/formal.yml`, which runs only on its
+schedule and by hand (owner, 2026-11-10: "We want to run it on a weekly ci only"), never on a
+push or a pull request: a change to a model is verified by dispatching the workflow, or by
+running its model locally. The workflow runs one job per model of `MODELS`, in parallel, each
+`cargo xtask formal-verify --model <name>` with a timeout of about three times the model's
+measured time below (20 min for `smoke`; 45 for `lifecycle`, `link`, `registration`, `scaleset`;
+60 for `scheduling`; 90 for `recovery`; 300 for `event_store`, whose `storeOnlyStep` alone took
+about 78 min); an xtask test keeps the matrix equal to `MODELS` and the triggers to the schedule
+and dispatch. Its logs,
 Apalache's run directories (a counterexample as ITF and TLA+) and the ITF trace of a failing
 simulation are kept in `target/formal-verify/` and uploaded when a run fails.
 
@@ -86,7 +94,7 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
-| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s | KER-04, KER-04F, DEC-04 |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`) | KER-04, KER-04F, DEC-04, DEC-05 |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); simulation about 3 min per seed and relation | KER-05, DEC-04 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
@@ -159,6 +167,7 @@ then a guard the Rust code lacks is caught only if a Rust test exercises it.
 | `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
 | `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
 | `quarantineNeverAutoDeleted` | I28: no `DeleteVm` while quarantined and unresolved | the same |
+| `vanishedStaysQuarantined` | ADR 0066: an attempt quarantined because a stop or start found its recorded VM absent stays quarantined until an operator resolves it; the inventory's absence does not release it | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent`, `should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent`; `matrix/attempt.txt` (`quarantined/vanished`) |
 | `retryKeepsNameAndGeneration` | every `CloneVm`, first or retried, targets the name and generation fixed at start | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
 
 Tests (`quint test`, stage `formal-test`, all deterministic): `happyPathTest`,
@@ -173,7 +182,13 @@ review's counterexample, kept as a regression), `deleteRefusedRepeatedlyQuaranti
 is enabled when the provider holds no VM (the data plane answers a delete whose target a
 complete listing does not list `VmDeleted`), so a lost delete reply is resolved by the answer
 to its re-delivery as well as by the inventory (`inventoryAbsent` already read absence as
-`Deleted` for a pending delete; a stop of a stopped VM was already a success). Stops and deletes count against the
+`Deleted` for a pending delete; a stop of a stopped VM was already a success), and from DEC-05
+(ADR 0066) `stopOfVanishedVmQuarantinesTest` and `startOfVanishedVmQuarantinesTest`: a stop or
+start whose recorded VM the provider no longer holds is answered `target_absent`
+(`replyTargetAbsent`) and quarantines the attempt as a desync (the attempt's `vanished` flag,
+the VM not running), which `inventoryAbsent` no longer releases to `Lost`; and a start may be
+refused its proof too (`replyProofRefused`, an over-approximation for a start: the model's world
+has no listed-but-unproven VM). Stops and deletes count against the
 retry budget like the stage directives: a cleanup the data plane keeps refusing ends in
 quarantine (`delete_refused_repeatedly`), and inside quarantine the stops, a refused proof
 included, end. The Rust code asserts the model's invariants on every accepted transition two
@@ -185,7 +200,9 @@ Negative controls tried: removing the `jitLeaked` guard of `bindJob` (the KER-04
 guard of `recordJitHandle` makes simulation of `serveStep` report `[violation]` of
 `i22JitMintedOnceAfterGrantAndVerification`; letting `requestRetirement` run while a directive
 is pending (mutant 27) makes simulation of `step` report `[violation]` of
-`i10UnknownLeavesOnlyOnObservation`.
+`i10UnknownLeavesOnlyOnObservation`; letting `inventoryAbsent` release a vanished quarantine
+(DEC-05) makes simulation of `step` report `[violation]` of `vanishedStaysQuarantined` within a
+second.
 
 ### link
 

@@ -188,6 +188,11 @@ pub enum Stimulus {
     /// The target could not be re-observed (the listing failed, did not parse or did not
     /// finish): nothing was done now, and what an earlier delivery did is not known.
     ReObserveFailed,
+    /// A complete listing shows the target of a `StopVm` or `StartVm`, a VM the control plane
+    /// recorded cloning, absent: the data plane did not remove it, so the journal and the
+    /// provider have desynced (ADR 0066). Refused `target_absent`, never touched; a `DeleteVm`
+    /// of an absent target is [`Stimulus::Satisfied`] instead (ADR 0053).
+    TargetAbsent,
     /// The re-observation shows the directive's outcome already holds (ADR 0053): a `DeleteVm`
     /// whose target a complete listing shows absent (`VmDeleted`), a `StopVm` whose proven
     /// target is stopped (`VmStopped`). Answered as applied, without running the effect.
@@ -234,9 +239,10 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
         Phase::Received => match stimulus {
             Stimulus::Admit(stage) => Ok(Phase::Executing(stage)),
             Stimulus::Deny(reason) => Ok(Phase::Refused(reason)),
-            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed | Stimulus::Satisfied(_) => {
-                Err(Misfit::NotReObserving)
-            }
+            Stimulus::ReObserved { .. }
+            | Stimulus::ReObserveFailed
+            | Stimulus::TargetAbsent
+            | Stimulus::Satisfied(_) => Err(Misfit::NotReObserving),
             Stimulus::Applied(_)
             | Stimulus::Failed
             | Stimulus::Ambiguous(_)
@@ -247,6 +253,7 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             Stimulus::ReObserved { matches: false } => {
                 Ok(Phase::Refused(RefusalReason::ProofMismatch))
             }
+            Stimulus::TargetAbsent => Ok(Phase::Refused(RefusalReason::TargetAbsent)),
             Stimulus::ReObserveFailed => Ok(Phase::Unknown(UnknownReason::ListingIncomplete)),
             Stimulus::Satisfied(kind) => applied(kind),
             Stimulus::Expired => Ok(Phase::Refused(RefusalReason::DeadlineExpired)),
@@ -268,9 +275,10 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
                 }
             },
             Stimulus::Admit(_) | Stimulus::Deny(_) => Err(Misfit::NotReceived),
-            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed | Stimulus::Satisfied(_) => {
-                Err(Misfit::NotReObserving)
-            }
+            Stimulus::ReObserved { .. }
+            | Stimulus::ReObserveFailed
+            | Stimulus::TargetAbsent
+            | Stimulus::Satisfied(_) => Err(Misfit::NotReObserving),
         },
         Phase::Done(_) | Phase::Refused(_) | Phase::Unknown(_) => Err(Misfit::Settled),
     }
@@ -479,9 +487,10 @@ impl DataPlane {
     /// name ([`reobserve_name`]): a clone whose exact name is listed with an instance id is
     /// `Done(VmCloned)` with that id and a start of a listed running VM `Done(VmBooted)`, both
     /// without the effect (a re-delivery under a new epoch, ADR 0042 decision 4); a clone of an
-    /// absent name and a start of a listed stopped VM run the effect; a start of an absent VM,
-    /// and either of a name listed without an instance id or twice, is `ProofMismatch` and never
-    /// touched (as a stop of an absent VM is, ADR 0053). For a `StopVm` or `DeleteVm`,
+    /// absent name and a start of a listed stopped VM run the effect; a start of an absent VM
+    /// is `TargetAbsent` (ADR 0066: the VM the control plane recorded cloning vanished), and
+    /// either of a name listed without an instance id or twice is `ProofMismatch`, both never
+    /// touched. For a `StopVm` or `DeleteVm`,
     /// [`reobserve`] reads it, so a caller
     /// cannot turn "listed but not provable" into "absent". Only the proof's exact name,
     /// generation and instance id, all three, let the effect run (ADR 0026); anything listed
@@ -490,16 +499,18 @@ impl DataPlane {
     /// outcome (ADR 0053): a `DeleteVm` whose target a complete listing shows absent is
     /// `Done(VmDeleted)`, whether this directive, an earlier one or someone else removed it,
     /// and a `StopVm` whose proven target is stopped is `Done(VmStopped)`; a `StopVm` whose
-    /// target is absent is still `ProofMismatch` (absence is the inventory's fact, not a
-    /// stop's). Pinned by
+    /// target is absent is refused `TargetAbsent` (an absent VM is not a stopped one, and we
+    /// did not remove it: a desync the control plane quarantines, ADR 0066). Pinned by
     /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`,
     /// `should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id`,
     /// `should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed`,
     /// `should_refuse_proof_mismatch_when_the_target_name_is_listed_twice`,
     /// `should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent`,
     /// `should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`,
-    /// `should_answer_done_when_a_stop_finds_its_proven_target_stopped` and
-    /// `should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone`.
+    /// `should_answer_done_when_a_stop_finds_its_proven_target_stopped`,
+    /// `should_refuse_target_absent_when_a_stop_finds_its_target_gone`,
+    /// `should_refuse_target_absent_when_a_start_finds_its_target_gone` and
+    /// `should_write_proof_mismatch_for_a_vanished_target_when_the_session_is_older_than_1_2`.
     pub fn reobserved(&mut self, epoch: Epoch, id: DirectiveId, listing: &Inventory) -> Progress {
         self.advance(epoch, id, |entry| {
             let kind = &entry.directive.kind;
@@ -523,9 +534,8 @@ impl DataPlane {
                         Reobserved::Listed { running: false, .. } => {
                             Stimulus::ReObserved { matches: true }
                         }
-                        Reobserved::Absent | Reobserved::Unproven => {
-                            Stimulus::ReObserved { matches: false }
-                        }
+                        Reobserved::Absent => Stimulus::TargetAbsent,
+                        Reobserved::Unproven => Stimulus::ReObserved { matches: false },
                     });
                 }
                 DirectiveKind::PullImage { .. }
@@ -570,9 +580,8 @@ impl DataPlane {
                 Reobserved::Listed { instance_id, .. } => Stimulus::ReObserved {
                     matches: proven(proof, &instance_id),
                 },
-                Reobserved::Absent | Reobserved::Unproven => {
-                    Stimulus::ReObserved { matches: false }
-                }
+                Reobserved::Absent => Stimulus::TargetAbsent,
+                Reobserved::Unproven => Stimulus::ReObserved { matches: false },
             })
         })
     }
@@ -594,6 +603,7 @@ impl DataPlane {
             | Stimulus::Deny(_)
             | Stimulus::ReObserved { .. }
             | Stimulus::ReObserveFailed
+            | Stimulus::TargetAbsent
             | Stimulus::Failed
             | Stimulus::Ambiguous(_)
             | Stimulus::Expired => Ok(result),

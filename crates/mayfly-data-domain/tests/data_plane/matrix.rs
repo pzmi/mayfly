@@ -41,6 +41,7 @@ fn welcome(epoch: u64, major: u16, minor: u16) -> Welcome {
         epoch: Epoch::new(epoch),
         mode: Mode::Normal,
         accepted_version: ProtocolVersion::new(major, minor),
+        cp_clock: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn should_define_every_pair_when_each_session_state_meets_each_stimulus() {
         ("welcome_e6", LinkStimulus::Welcome(welcome(6, 1, 0))),
         ("welcome_e6_v1.1", LinkStimulus::Welcome(welcome(6, 1, 1))),
         ("welcome_e6_v1.2", LinkStimulus::Welcome(welcome(6, 1, 2))),
+        ("welcome_e6_v1.3", LinkStimulus::Welcome(welcome(6, 1, 3))),
         ("welcome_e6_v2.0", LinkStimulus::Welcome(welcome(6, 2, 0))),
         ("floor_raised_e5", LinkStimulus::FloorRaised(Epoch::new(5))),
         ("floor_raised_e6", LinkStimulus::FloorRaised(Epoch::new(6))),
@@ -123,6 +125,7 @@ fn should_define_every_pair_when_each_directive_phase_meets_each_stimulus() {
             Stimulus::ReObserved { matches: false },
         ),
         ("reobserve_failed", Stimulus::ReObserveFailed),
+        ("target_absent", Stimulus::TargetAbsent),
         (
             "satisfied_vm_deleted",
             Stimulus::Satisfied(ObservationKind::VmDeleted),

@@ -3,15 +3,15 @@
 
 use mayfly_control_domain::attempt::{
     AttemptCommand, AttemptEvent, AttemptRejection, DirectiveKind, Fact, Jit, Outcome, Phase,
-    QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage,
+    QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage, VmCondition,
 };
 use mayfly_control_domain::{Actor, Rejection};
 
 use super::support::{
     OPERATOR, SAGA, activating, apply, at, booting, busy, cloning, directive, doubted, event,
     facts, finished, handle, instance, issue, jit_issued, listening, observe, observe_in, prepared,
-    quarantined, reach, retiring, saga, stimuli, stopped, then, unknown_clone, verified_activation,
-    verifying,
+    quarantined, reach, retiring, saga, stimuli, stopped, then, unknown_clone, vanished,
+    verified_activation, verifying,
 };
 
 fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
@@ -472,6 +472,111 @@ fn should_quarantine_when_the_data_plane_refuses_the_proof_of_a_delete() {
         code(apply(&state, saga(issue(9)))),
         Some("nothing_to_issue")
     );
+}
+
+#[test]
+fn should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent() {
+    // given: a start of the cloned VM in flight, and a stop of the running one
+    let starting = reach(&then(booting(), [issue(2)])).0;
+    let stopping = reach(&then(
+        retiring(),
+        [
+            issue(6),
+            observe(Fact::DiagnosticsExported {
+                directive_id: directive(6),
+                bytes: 4_096,
+                sha256: [7; 32],
+            }),
+            issue(7),
+        ],
+    ))
+    .0;
+
+    // when
+    let refused: Vec<_> = [(starting, 2), (stopping, 7)]
+        .into_iter()
+        .map(|(state, n)| {
+            apply(
+                &state,
+                saga(observe(Fact::DirectiveRefused {
+                    directive_id: directive(n),
+                    reason: RefusalReason::TargetAbsent,
+                })),
+            )
+            .unwrap_or_else(|r| panic!("{r:?}"))
+        })
+        .collect();
+
+    // then: a desync kept for review, the VM not running, nothing more issued
+    for (state, events) in refused {
+        assert_eq!(
+            state.phase,
+            Phase::Quarantined {
+                reason: QuarantineReason::VmVanishedExternally,
+                vm: VmCondition::Stopped,
+            }
+        );
+        assert!(!state.vm_running);
+        assert!(matches!(
+            events.last(),
+            Some(AttemptEvent::AttemptQuarantined(_))
+        ));
+        assert_eq!(
+            code(apply(&state, saga(issue(9)))),
+            Some("nothing_to_issue")
+        );
+    }
+}
+
+#[test]
+fn should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent() {
+    // given
+    let (vanished, _) = reach(&vanished());
+
+    // when
+    let absent = apply(&vanished, saga(observe(Fact::VmAbsent)));
+    let resolved = apply(
+        &vanished,
+        at(1, OPERATOR, AttemptCommand::ResolveQuarantine),
+    )
+    .and_then(|(state, _)| apply(&state, saga(issue(9))));
+
+    // then
+    let (state, events) = absent.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(
+        events.is_empty(),
+        "absence is why it is quarantined: {events:?}"
+    );
+    assert_eq!(state.phase, vanished.phase);
+    assert!(matches!(
+        resolved.map(|(_, events)| issued_kind(&events)),
+        Ok(Some(DirectiveKind::DeleteVm { .. }))
+    ));
+}
+
+#[test]
+fn should_quarantine_when_the_data_plane_refuses_the_proof_of_a_start() {
+    // given: the start's name listed but unproven, or absent to a data plane older than 1.2
+    let (starting, _) = reach(&then(booting(), [issue(2)]));
+
+    // when
+    let refused = apply(
+        &starting,
+        saga(observe(Fact::DirectiveRefused {
+            directive_id: directive(2),
+            reason: RefusalReason::ProofMismatch,
+        })),
+    );
+
+    // then
+    let (state, _) = refused.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        state.phase,
+        Phase::Quarantined {
+            reason: QuarantineReason::ProviderIdentityMismatch,
+            ..
+        }
+    ));
 }
 
 #[test]

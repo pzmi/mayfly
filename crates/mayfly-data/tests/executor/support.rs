@@ -179,11 +179,22 @@ pub fn config(concurrency: usize) -> Config {
     }
 }
 
+/// A welcome of a control plane older than protocol 1.2: no clock reading, so deadlines are
+/// read by the wall clock at receipt.
 pub fn welcome(epoch: Epoch) -> Welcome {
     Welcome {
         epoch,
         mode: Mode::Normal,
         accepted_version: CURRENT,
+        cp_clock: None,
+    }
+}
+
+/// A welcome whose control plane's clock read `cp_clock` when it wrote it.
+pub fn welcome_at(epoch: Epoch, cp_clock: Millis) -> Welcome {
+    Welcome {
+        cp_clock: Some(cp_clock),
+        ..welcome(epoch)
     }
 }
 

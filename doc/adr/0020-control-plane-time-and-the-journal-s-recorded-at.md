@@ -4,7 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09); amendment proposed 2026-11-10
+Accepted (owner, 2026-11-09); amended 2026-11-10 (the data plane reads deadlines by a clock
+offset taken at the handshake; accepted by the owner, 2026-11-10)
 
 ## Context
 
@@ -30,8 +31,9 @@ caller); letting the journal read a clock itself (breaks "the journal reads no c
   `processed_at`.
 - The data plane's `ProcessClock` reads a monotonic clock; its readings never leave the process
   and never cross the link as instants (a directive carries a deadline the control plane
-  computed from its own `Clock`). *(Amendment proposed 2026-11-10: it reads the clock directive
-  deadlines are written in; see below.)*
+  computed from its own `Clock`). *(Amended 2026-11-10: it reads directive deadlines in the
+  control plane's clock, by an offset to its monotonic clock taken at the handshake; see
+  below.)*
 - The journal reads no clock: `UnitOfWork::recorded_at` is supplied by its writer
   (`AggregateStore`, from the `Clock` port) and becomes every event's `recorded_at` and the inbox
   entry's `processed_at`. Ordering never rests on these instants: a stream's order is its
@@ -52,7 +54,7 @@ The landed journal (ES-01F) keeps no `processed_at` either: the inbox records on
 consumed (`Journal::inbox_contains`). The decision stands: every persisted instant is a
 `Clock` reading, and `UnitOfWork::recorded_at` is supplied by its writer.
 
-## Amendment proposed 2026-11-10 (planner, DP-01): how the data plane reads a deadline
+## Amended 2026-11-10 (planner, DP-01): how the data plane reads a deadline (accepted by the owner 2026-11-10: option 2)
 
 A directive's deadline is a reading of the control plane's `Clock` (wall-clock milliseconds
 since the Unix epoch), and `DataPlane::receive` refuses a directive whose deadline `now` has
@@ -78,5 +80,24 @@ What does not depend on the choice, as built by DP-01: the observer's cadence, t
 `ReportInventory`'s deadline and every timer run on the monotonic clock (`ProcessClock`
 separates `wall()` from `monotonic()`), and deadlines are read in one place
 (`mayfly-data::executor::admission_now` and `local_due`), so switching is a change there.
-DP-01 builds option 1, the smaller step; the planner recommends option 2. Proposed; the owner
-decides.
+DP-01 builds option 1, the smaller step; the planner recommends option 2.
+
+**Decided (owner, 2026-11-10): option 2, the clock offset at the handshake.** As built (DEC-05):
+
+- `Welcome` carries `cp_clock`, the control plane's `Clock` reading when it wrote the welcome
+  (optional, left out when `None`; protocol 1.2, `mayfly_protocol::VANISHED_TARGET`). A data
+  plane of 1.1 or older ignores it, as it ignores any unknown field, and keeps option 1.
+- On entering the session the data plane records the pair (`cp_clock`, its monotonic reading at
+  the welcome's receipt), and reads the control plane's clock as `cp_clock` plus the monotonic
+  time since; `admission_now` and `local_due` in `mayfly-data`'s executor are still the only
+  place deadlines are read. A reconnect takes the offset again.
+- A welcome without `cp_clock` (a control plane older than 1.2) falls back to option 1: the
+  host's wall clock read at receipt, with that option's cost.
+- The control plane's side (writing `cp_clock` from its `Clock` port in the welcome it sends) is
+  CP-04's, with the handshake (note on its card).
+- Pinned by `crates/mayfly-data/tests/executor/session.rs`:
+  `should_decide_no_deadline_differently_when_the_wall_clock_steps_after_the_handshake`,
+  `should_compare_deadlines_in_the_control_planes_clock_when_the_welcome_carries_it` and
+  `should_compare_deadlines_by_the_wall_clock_at_receipt_when_an_older_control_plane_sends_no_clock`;
+  `crates/mayfly-protocol/src/handshake.rs::should_read_a_welcome_without_the_clock_when_an_older_control_plane_wrote_it`
+  and the golden `welcome/v1.cp-clock.json`.

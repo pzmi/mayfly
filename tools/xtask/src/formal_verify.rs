@@ -1,6 +1,8 @@
-//! `cargo xtask formal-verify`: the deep lane for the Quint models (verification.md section 6.3,
-//! foundation.md section 9). It is not part of `check`: Apalache is a JVM tool and its runs take
-//! minutes, so `.github/workflows/formal.yml` runs it on changes under `formal/` and weekly.
+//! `cargo xtask formal-verify [--model <name>]`: the deep lane for the Quint models
+//! (verification.md section 6.3, foundation.md section 9). It is not part of `check`: Apalache is
+//! a JVM tool and its runs take minutes to hours, so `.github/workflows/formal.yml` runs it
+//! weekly and by hand only (owner, 2026-11-10), one job per model (`--model`), each with a
+//! timeout sized to its relations.
 //!
 //! - `formal-verify-bounded`: `quint verify` (Apalache, symbolic bounded model checking) of
 //!   each model's `allInvariants` under each of its step relations, to the depth in
@@ -27,6 +29,7 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::formal::{
@@ -211,8 +214,50 @@ pub fn stages() -> Vec<Stage> {
     ]
 }
 
-/// Runs `formal-verify` and returns the exit code.
-pub fn run() -> i32 {
+/// The model file `--model` chose, set once by [`run`] before the stages run (an in-process
+/// stage is a plain function, as the simulation's seed is read through [`seed`]); unset, every
+/// model of [`MODELS`] runs.
+static ONLY: OnceLock<&'static str> = OnceLock::new();
+
+/// The file of the registered model `name` names, with or without `.qnt`. Pinned by
+/// `should_find_the_registered_model_when_one_is_named`.
+fn model_file(name: &str) -> Result<&'static str, String> {
+    let stem = name.strip_suffix(".qnt").unwrap_or(name);
+    MODELS
+        .iter()
+        .map(|m| m.file)
+        .find(|file| file.strip_suffix(".qnt") == Some(stem))
+        .ok_or_else(|| {
+            let names: Vec<&str> = MODELS
+                .iter()
+                .map(|m| m.file.trim_end_matches(".qnt"))
+                .collect();
+            format!(
+                "no registered model '{name}'; the models are {}",
+                names.join(", ")
+            )
+        })
+}
+
+/// Whether `file`'s runs are part of this invocation.
+fn selected(file: &str) -> bool {
+    ONLY.get().is_none_or(|only| *only == file)
+}
+
+/// Runs `formal-verify`, of every model or of the one `model` names, and returns the exit code
+/// (2 for a model that is not registered).
+pub fn run(model: Option<&str>) -> i32 {
+    if let Some(name) = model {
+        match model_file(name) {
+            Ok(file) => {
+                let _ = ONLY.set(file);
+            }
+            Err(err) => {
+                eprintln!("xtask: formal-verify: {err}");
+                return 2;
+            }
+        }
+    }
     finish(&run_report(&stages(), &tools::require))
 }
 
@@ -473,7 +518,7 @@ fn bounded() -> i32 {
         Err(err) => return fail(&err),
     };
     let mut jobs = Vec::new();
-    for bound in BOUNDED {
+    for bound in BOUNDED.iter().filter(|b| selected(b.file)) {
         match invariants_of(&ctx.formal, bound.file) {
             Ok(invariants) => jobs.push(Job { bound, invariants }),
             Err(err) => return fail(&err),
@@ -585,7 +630,7 @@ fn simulate() -> i32 {
         seed()
     );
     let mut runs = Vec::new();
-    for model in MODELS {
+    for model in MODELS.iter().filter(|m| selected(m.file)) {
         let invariants = match invariants_of(&formal, model.file) {
             Ok(invariants) => invariants,
             Err(err) => return fail(&err),
@@ -661,6 +706,106 @@ mod tests {
         // then
         assert_eq!(registered, bounded);
         assert!(BOUNDED.iter().all(|b| b.steps > 0));
+    }
+
+    #[test]
+    fn should_find_the_registered_model_when_one_is_named() {
+        // given
+        // when
+        let bare = model_file("lifecycle");
+        let with_extension = model_file("event_store.qnt");
+        let unknown = model_file("nope").unwrap_err();
+
+        // then
+        assert_eq!(bare, Ok("lifecycle.qnt"));
+        assert_eq!(with_extension, Ok("event_store.qnt"));
+        assert!(
+            unknown.contains("'nope'") && unknown.contains("lifecycle, link"),
+            "{unknown}"
+        );
+        assert!(
+            selected("lifecycle.qnt"),
+            "nothing chosen: every model runs"
+        );
+    }
+
+    /// `.github/workflows/formal.yml`, read with the YAML parser the other workflow checks use.
+    fn formal_workflow() -> yaml_rust2::Yaml {
+        let path = repo::root().join(".github/workflows/formal.yml");
+        let text = std::fs::read_to_string(&path).expect("formal.yml is readable");
+        yaml_rust2::YamlLoader::load_from_str(&text)
+            .expect("formal.yml parses")
+            .remove(0)
+    }
+
+    #[test]
+    fn should_run_weekly_and_by_hand_only_when_the_formal_workflow_is_read() {
+        // given
+        let workflow = formal_workflow();
+
+        // when
+        let triggers: Vec<String> = workflow["on"]
+            .as_hash()
+            .expect("an `on` mapping")
+            .keys()
+            .filter_map(|k| k.as_str().map(str::to_owned))
+            .collect();
+
+        // then: the owner's decision of 2026-11-10, "We want to run it on a weekly ci only"
+        assert_eq!(triggers, ["schedule", "workflow_dispatch"]);
+        let crons = workflow["on"]["schedule"].as_vec().expect("a schedule");
+        assert_eq!(crons.len(), 1);
+        let cron = crons[0]["cron"].as_str().expect("a cron");
+        let fields: Vec<&str> = cron.split_whitespace().collect();
+        assert!(
+            fields.len() == 5 && fields[2] == "*" && fields[3] == "*" && fields[4] != "*",
+            "weekly: {cron}"
+        );
+    }
+
+    #[test]
+    fn should_verify_every_model_in_its_own_job_when_the_formal_workflow_is_read() {
+        // given
+        let job = &formal_workflow()["jobs"]["verify"];
+
+        // when
+        let include = job["strategy"]["matrix"]["include"]
+            .as_vec()
+            .expect("a matrix of models");
+        let models: Vec<&str> = include
+            .iter()
+            .map(|row| row["model"].as_str().expect("a model"))
+            .collect();
+        let timeouts: Vec<i64> = include
+            .iter()
+            .map(|row| row["timeout"].as_i64().expect("a timeout in minutes"))
+            .collect();
+        let runs: Vec<&str> = job["steps"]
+            .as_vec()
+            .expect("steps")
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+
+        // then
+        let registered: Vec<&str> = MODELS
+            .iter()
+            .map(|m| m.file.trim_end_matches(".qnt"))
+            .collect();
+        assert_eq!(models, registered, "one job per registered model, in order");
+        assert!(
+            timeouts.iter().all(|t| (10..=360).contains(t)),
+            "{timeouts:?}"
+        );
+        assert_eq!(
+            job["timeout-minutes"].as_str(),
+            Some("${{ matrix.timeout }}")
+        );
+        assert_eq!(job["strategy"]["fail-fast"].as_bool(), Some(false));
+        assert!(
+            runs.contains(&"cargo xtask formal-verify --model ${{ matrix.model }}"),
+            "{runs:?}"
+        );
     }
 
     #[test]

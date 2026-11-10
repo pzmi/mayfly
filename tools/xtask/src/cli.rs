@@ -70,8 +70,13 @@ pub enum Command {
     /// Run the Quint tests of every registered model.
     FormalTest,
     /// Apalache bounded verification and a long multi-seed simulation of every registered
-    /// model (the scheduled lane; not part of `check`).
-    FormalVerify,
+    /// model (the weekly lane; not part of `check`).
+    FormalVerify {
+        /// Verify only this model of `MODELS` (`lifecycle` or `lifecycle.qnt`): each job of
+        /// `formal.yml` runs one. An unknown name exits 2 and lists the models.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+    },
     /// Install pinned dev tools.
     InstallTools {
         /// Tools to install; all when empty.
@@ -150,7 +155,7 @@ impl Command {
             Self::Doctor { .. } => "doctor",
             Self::FormalTypecheck => "formal-typecheck",
             Self::FormalTest => "formal-test",
-            Self::FormalVerify => "formal-verify",
+            Self::FormalVerify { .. } => "formal-verify",
             Self::InstallTools { .. } => "install-tools",
             Self::Adr { .. } => "adr",
             Self::Land { .. } => "land",
@@ -234,6 +239,24 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["xtask", "adr", "new", "T", "--number", "0"]).is_err());
+    }
+
+    #[test]
+    fn should_take_one_model_when_formal_verify_is_given_a_model() {
+        // given
+        let one = ["xtask", "formal-verify", "--model", "lifecycle"];
+        let all = ["xtask", "formal-verify"];
+
+        // when
+        let parsed =
+            [one.as_slice(), all.as_slice()].map(|args| Cli::try_parse_from(args).unwrap().command);
+
+        // then
+        assert!(matches!(
+            &parsed[0],
+            Command::FormalVerify { model: Some(m) } if m == "lifecycle"
+        ));
+        assert!(matches!(&parsed[1], Command::FormalVerify { model: None }));
     }
 
     #[test]

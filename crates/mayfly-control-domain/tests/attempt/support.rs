@@ -290,6 +290,20 @@ pub fn quarantined() -> Vec<Step> {
     )
 }
 
+/// Quarantined because the start found the cloned VM absent from a complete listing (ADR 0066).
+pub fn vanished() -> Vec<Step> {
+    then(
+        booting(),
+        [
+            issue(2),
+            observe(Fact::DirectiveRefused {
+                directive_id: directive(2),
+                reason: RefusalReason::TargetAbsent,
+            }),
+        ],
+    )
+}
+
 pub fn unknown_clone() -> Vec<Step> {
     then(
         cloning(),
@@ -424,6 +438,7 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
             unknown(then(quarantined(), [issue(10)]), 10),
         ),
         ("quarantined/doubted", doubted()),
+        ("quarantined/vanished", vanished()),
         ("closed", closed()),
     ];
     paths
@@ -545,6 +560,13 @@ pub fn stimuli(state: &AttemptState) -> Vec<(&'static str, Step)> {
             fact(Fact::DirectiveRefused {
                 directive_id: answered,
                 reason: RefusalReason::ProofMismatch,
+            }),
+        ),
+        (
+            "directive_refused_absent",
+            fact(Fact::DirectiveRefused {
+                directive_id: answered,
+                reason: RefusalReason::TargetAbsent,
             }),
         ),
         (

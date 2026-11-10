@@ -90,6 +90,9 @@ module lifecycle {
     // "none" | "exported" | "lost"
     diagnostics: str,
     runnerExited: bool,
+    // quarantined because a stop or start found its recorded VM absent on a complete listing:
+    // we know it was there and did not remove it, a desync kept for review (ADR 0066)
+    vanished: bool,
   }
 
   /// The provider's truth, and whether the pending directive has taken effect yet.
@@ -194,6 +197,11 @@ module lifecycle {
     { ...x, phase: QUARANTINED, pending: NO_DIRECTIVE, unknown: false, retireRequested: false,
       tries: if (x.phase == QUARANTINED) x.tries else 0 }
 
+  /// Quarantine because the recorded VM vanished (`vm_vanished_externally`, ADR 0066): it is
+  /// not running, so no stop is issued for it, and its absence is the reason, not a release.
+  pure def quarantineVanished(x: Attempt): Attempt =
+    { ...quarantine(x), vmRunning: false, vanished: true }
+
   /// A stage directive failed definitely (refused, or observed not applied).
   pure def stageFailed(x: Attempt): Attempt =
     if (x.tries < BUDGET)
@@ -284,7 +292,7 @@ module lifecycle {
         name: name, generation: generation, instance: NONE, vmRunning: false, epoch: 1,
         granted: false, freshEpoch: NONE, jit: "none", jitLeaked: false, job: NONE,
         retireRequested: false,
-        diagnostics: "none", runnerExited: false,
+        diagnostics: "none", runnerExited: false, vanished: false,
       },
       w' = { exists: false, instance: NONE, running: false, applied: false },
       g' = {
@@ -406,14 +414,30 @@ module lifecycle {
     commit("observation", notApplied(a), g),
   }
 
-  /// `DirectiveRefused{proof_mismatch}` for a stop, a delete or a launch whose target's
-  /// instance id differs from the recorded one: quarantine (ADR 0026, ADR 0038); inside
-  /// quarantine it is one more refused stop.
+  /// `DirectiveRefused{proof_mismatch}` for a stop, a delete, a launch or a start whose
+  /// target's instance id differs from the recorded one: quarantine (ADR 0026, ADR 0038); inside
+  /// quarantine it is one more refused stop. A start is refused so when its exact name is listed
+  /// but unproven, or, by a data plane older than protocol 1.2, when its VM is absent (ADR 0066);
+  /// the model's world has neither, so for a start this reply over-approximates the data plane.
   action replyProofRefused = all {
-    Set(STOP_VM, DELETE_VM, LAUNCH_RUNNER).contains(a.pending),
+    Set(STOP_VM, DELETE_VM, LAUNCH_RUNNER, START_VM).contains(a.pending),
     not(w.exists and w.instance == a.instance),
     w.exists,
     commit("observation", if (a.phase == QUARANTINED) notApplied(a) else quarantine(a), g),
+  }
+
+  /// `DirectiveRefused{target_absent}` for a stop or a start whose recorded VM a complete
+  /// listing shows absent: we know it was there and did not remove it, so the journal and the
+  /// provider have desynced, and the attempt is quarantined for review
+  /// (`vm_vanished_externally`, ADR 0066), never read as stopped or retried. A delete of an
+  /// absent VM is done instead (`replySucceededWith`, ADR 0053). Inside quarantine it is one
+  /// more refused stop.
+  action replyTargetAbsent = all {
+    Set(STOP_VM, START_VM).contains(a.pending),
+    a.instance != NONE,
+    not(w.exists),
+    commit("observation",
+      if (a.phase == QUARANTINED) notApplied(a) else quarantineVanished(a), g),
   }
 
   /// `GuestRejected`: the guest failed its identity challenge (U3).
@@ -493,6 +517,9 @@ module lifecycle {
       else if (x.pending == CLONE_VM) (if (x.unknown) notApplied(x) else x)
       // a quarantined VM of our name that we never recorded is released when it is gone
       else if (x.instance == NONE and x.phase != QUARANTINED) x
+      // a VM quarantined because it vanished stays quarantined for review: its absence is
+      // the reason, not a release (ADR 0066)
+      else if (x.phase == QUARANTINED and x.vanished) x
       else { ...x, phase: LOST, vmRunning: false, pending: NO_DIRECTIVE, unknown: false }
     all {
       not(w.exists),
@@ -638,6 +665,7 @@ module lifecycle {
     replySucceeded,
     replyRefused,
     replyProofRefused,
+    replyTargetAbsent,
     replyGuestRejected,
     replyLost,
     replyLaunchUnknown,
@@ -727,6 +755,7 @@ module lifecycle {
     replySucceeded,
     replyRefused,
     replyProofRefused,
+    replyTargetAbsent,
     replyLost,
     replyLaunchUnknown,
     inventoryPresent,
@@ -784,6 +813,12 @@ module lifecycle {
   /// quarantineNeverAutoDeleted: no delete directive while quarantined and unresolved (I28).
   val quarantineNeverAutoDeleted = not(g.autoDelete)
 
+  /// vanishedStaysQuarantined: an attempt quarantined because its recorded VM vanished stays
+  /// quarantined until an operator resolves it; no inventory, saga step or retry takes it out
+  /// (ADR 0066: a desync is reported, never absorbed).
+  val vanishedStaysQuarantined =
+    (a.vanished and not(g.operatorResolved)) implies a.phase == QUARANTINED
+
   /// retryKeepsNameAndGeneration: every clone, first or retried, targets the name and slot
   /// generation fixed at start.
   val retryKeepsNameAndGeneration =
@@ -800,6 +835,7 @@ module lifecycle {
     i30GuestNeverDecidesOwnership,
     quarantineTerminal,
     quarantineNeverAutoDeleted,
+    vanishedStaysQuarantined,
     retryKeepsNameAndGeneration,
   }
 
@@ -979,6 +1015,31 @@ module lifecycle {
       .then(ok)
       .expect(a.phase == DELETED and not(a.unknown) and i10UnknownLeavesOnlyOnObservation
         and allInvariants)
+  }
+
+  // ADR 0066: a stop whose recorded VM vanished is refused target_absent and quarantines the
+  // attempt for review; the inventory's absence does not release it, and only an operator's
+  // resolution ends it (with a delete that ADR 0053 answers done).
+  run stopOfVanishedVmQuarantinesTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).expect(a.pending == STOP_VM)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(replyTargetAbsent)
+      .expect(a.phase == QUARANTINED and a.vanished and not(a.vmRunning))
+      .expect(not(canIssueNext(a)))
+      .then(inventoryAbsent).expect(a.phase == QUARANTINED and vanishedStaysQuarantined)
+      .then(resolveQuarantine).expect(a.phase == RETIRING)
+      .then(issueNext).expect(a.pending == DELETE_VM)
+      .then(ok).expect(a.phase == DELETED and allInvariants)
+  }
+
+  // ADR 0066: a start whose cloned VM vanished is quarantined too, never a stage failure.
+  run startOfVanishedVmQuarantinesTest = {
+    initWith(1, 1).then(issueNext).then(ok).expect(a.phase == BOOTING)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(issueNext).expect(a.pending == START_VM)
+      .then(replyTargetAbsent)
+      .expect(a.phase == QUARANTINED and a.vanished and a.tries == 0 and allInvariants)
   }
 
   // The activation relation's shortcut lands where the preparation does.

@@ -6,6 +6,7 @@ received x deny_safe_mode -> refused safe_mode
 received x reobserved_match -> misfit not_re_observing
 received x reobserved_mismatch -> misfit not_re_observing
 received x reobserve_failed -> misfit not_re_observing
+received x target_absent -> misfit not_re_observing
 received x satisfied_vm_deleted -> misfit not_re_observing
 received x satisfied_a_refusal -> misfit not_re_observing
 received x applied_vm_cloned -> misfit not_running
@@ -25,6 +26,7 @@ reobserving x deny_safe_mode -> misfit not_received
 reobserving x reobserved_match -> executing effect
 reobserving x reobserved_mismatch -> refused proof_mismatch
 reobserving x reobserve_failed -> unknown listing_incomplete
+reobserving x target_absent -> refused target_absent
 reobserving x satisfied_vm_deleted -> done (applied vm_deleted)
 reobserving x satisfied_a_refusal -> misfit not_an_application
 reobserving x applied_vm_cloned -> misfit not_running
@@ -44,6 +46,7 @@ executing x deny_safe_mode -> misfit not_received
 executing x reobserved_match -> misfit not_re_observing
 executing x reobserved_mismatch -> misfit not_re_observing
 executing x reobserve_failed -> misfit not_re_observing
+executing x target_absent -> misfit not_re_observing
 executing x satisfied_vm_deleted -> misfit not_re_observing
 executing x satisfied_a_refusal -> misfit not_re_observing
 executing x applied_vm_cloned -> done (applied vm_cloned)
@@ -63,6 +66,7 @@ done x deny_safe_mode -> misfit settled
 done x reobserved_match -> misfit settled
 done x reobserved_mismatch -> misfit settled
 done x reobserve_failed -> misfit settled
+done x target_absent -> misfit settled
 done x satisfied_vm_deleted -> misfit settled
 done x satisfied_a_refusal -> misfit settled
 done x applied_vm_cloned -> misfit settled
@@ -82,6 +86,7 @@ refused x deny_safe_mode -> misfit settled
 refused x reobserved_match -> misfit settled
 refused x reobserved_mismatch -> misfit settled
 refused x reobserve_failed -> misfit settled
+refused x target_absent -> misfit settled
 refused x satisfied_vm_deleted -> misfit settled
 refused x satisfied_a_refusal -> misfit settled
 refused x applied_vm_cloned -> misfit settled
@@ -101,6 +106,7 @@ unknown x deny_safe_mode -> misfit settled
 unknown x reobserved_match -> misfit settled
 unknown x reobserved_mismatch -> misfit settled
 unknown x reobserve_failed -> misfit settled
+unknown x target_absent -> misfit settled
 unknown x satisfied_vm_deleted -> misfit settled
 unknown x satisfied_a_refusal -> misfit settled
 unknown x applied_vm_cloned -> misfit settled

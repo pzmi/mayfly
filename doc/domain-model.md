@@ -656,6 +656,12 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
     (a refused proof counts as one more refusal), and never deletes it. A VM quarantined for
     `ownership_doubt` has no recorded instance id, so no proof: it is neither stopped nor
     deleted, and a complete inventory without it releases it (`AttemptLost`).
+  - *A vanished VM* (ADR 0066). A `StopVm` or `StartVm` whose VM, one the attempt recorded
+    cloning, a complete listing shows absent is refused `target_absent`: mayfly did not remove
+    it, so the journal and the provider have desynced. The attempt is quarantined
+    `vm_vanished_externally` (VM not running, so nothing is stopped); the inventory's absence
+    does not release it, and only an operator resolves it (a delete, answered `VmDeleted`). A
+    start refused `proof_mismatch` quarantines `provider_identity_mismatch`.
   - *Actor.* Who issued each command (operator uid, policy, startup) is recorded in the event
     envelope, not the payload; `ResolveQuarantine` is refused unless the actor is an operator,
     so an `AttemptRetired{quarantine_resolved}` event's envelope names that operator.
@@ -792,7 +798,8 @@ Quarantined --case resolved--> Deleting | Lost
   retention deadline and no automatic deletion (OD9, ADR 0025).
 - **State:** `reason` (closed enum: `ownership_doubt`, `guest_identity_refused`,
   `jit_presumed_leaked`, `provider_identity_mismatch`, `delete_refused_repeatedly`,
-  `redaction_violation`, `forensic_retention`, `outcome_unprovable`), `holds {disk, memory?, macos_token?}`, `evidence`
+  `redaction_violation`, `forensic_retention`, `outcome_unprovable`, `vm_vanished_externally`:
+  ADR 0066), `holds {disk, memory?, macos_token?}`, `evidence`
   refs, `opened_at`, `escalation_level`, `phase ∈ {Open, Inspected, Resolving, Resolved{disposition,
   actor}}`; dispositions (operator only) `delete_with_proof` (the data plane re-checks the proof),
   `released_observed_absent` (only on a complete inventory without the VM), `keep`.

@@ -40,7 +40,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0017](adr/0017-serde-derive-in-the-shared-kernel.md) | `mayfly-domain` depends on `serde` with `derive` and on no format crate; encoding stays in `mayfly-protocol`, the journal adapter and the golden-fixture harness. | Accepted (owner, 2026-11-09) |
 | [ADR 0018](adr/0018-event-codec-and-aggregate-registry.md) | Events implement `DomainEvent`; an aggregate's events form one `event_set!` enum with a codec and a registry, so every kind has its schema version and golden fixture. | Accepted (owner, 2026-11-09) |
 | [ADR 0019](adr/0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane membership and the purity and independence roles are data in `architecture.toml` (`[planes]`, `[purity]`), pinned by a repository test, instead of dev-dependency closures. | Accepted (owner, 2026-11-09) |
-| [ADR 0020](adr/0020-control-plane-time-and-the-journal-s-recorded-at.md) | The control plane's `Clock` port reads wall-clock milliseconds since the Unix epoch; every persisted instant is such a reading, and the journal records `recorded_at`. | Accepted (owner, 2026-11-09) |
+| [ADR 0020](adr/0020-control-plane-time-and-the-journal-s-recorded-at.md) | The control plane's `Clock` port reads wall-clock milliseconds since the Unix epoch; every persisted instant is such a reading, and the journal records `recorded_at`. Amended 2026-11-10: the data plane reads directive deadlines in the control plane's clock by an offset to its monotonic clock taken at the handshake (`Welcome.cp_clock`), falling back to its wall clock at receipt without it. | Accepted (owner, 2026-11-09; amendment 2026-11-10) |
 | [ADR 0021](adr/0021-a-storage-neutral-stream-scoped-event-store.md) | The `Journal` port follows the stream-scoped event store design (`doc/event-store.md`): no global order, readers enumerate streams and read each after a revision. Amends ADR 0008; amended by 0034. | Accepted |
 | [ADR 0022](adr/0022-strategic-ddd-with-a-data-oriented-implementation.md) | DDD is strategic (contexts, language, consistency boundaries in `doc/domain-model.md`); code is data-oriented: plain data, free pure functions and tables. | Accepted |
 | [ADR 0023](adr/0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time (DP-03). | Accepted (owner, 2026-11-09) |
@@ -68,13 +68,16 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). | Accepted (owner, 2026-11-09) |
 | [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Amends 0028 (registration token as an auth-chain step only; accepted 2026-11-10). | Accepted (owner, 2026-11-10) |
 | [ADR 0052](adr/0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | The data plane assumes no fact it does not have: an unknown VM size or guest, or a listing not read yet, makes the dimension unknown; what needs it is refused `capacity_unknown`; `CapacityReported` lists the unknown dimensions with their causes and nothing free; protocol 1.1, compatible. Amends 0024. | Accepted (owner, 2026-11-10) |
-| [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026. | Accepted (owner, 2026-11-10) |
+| [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026; amended by 0066. | Accepted (owner, 2026-11-10) |
+| [ADR 0066](adr/0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A `StopVm` or `StartVm` whose recorded VM a complete listing shows absent is refused `target_absent` and the attempt quarantined `vm_vanished_externally` for review (a desync, never read as stopped or lost, not released by the inventory); status and the diagnostics bundle name it; a start refused `proof_mismatch` quarantines too; protocol 1.2, written `proof_mismatch` below. Amends 0053. | Accepted (owner, 2026-11-10) |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
 list (ADR 0045). Decided on 2026-11-10: inspect `actions/scaleset`, never port it (ADR 0048,
 DEC-03); at the KER-08 checkpoint, no defaults for unknown facts (ADR 0052), idempotent
-destructive directives (ADR 0053) and ADR 0048's amendment of ADR 0028 accepted (DEC-04). Still planner defaults: the remaining sub-items of **OD20** (socket
+destructive directives (ADR 0053) and ADR 0048's amendment of ADR 0028 accepted (DEC-04); a
+vanished VM quarantined as a desync (ADR 0066), deadlines by the handshake's clock offset (ADR
+0020's amendment) and the Apalache lane weekly only (DEC-05). Still planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
 GitHub capture (GH-00).
 
@@ -153,6 +156,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-11 | Image catalog: `Image`, `ImagePlacement` | KER-03, KER-02 | sonnet | |
 | KER-08 | Data-plane domain: executor, supervisor, resource ledger, fencing | KER-02, DEC-01 | opus | ⛳ |
 | DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
+| DEC-05 | Record and implement the owner decisions of 2026-11-10: ADR 0066, ADR 0020's amendment, a weekly formal lane | DEC-04, DP-01 | opus | |
 | ES-01 | Storage-neutral journal port, memory journal, journal contract (landed) | KER-03 | opus | |
 | ES-01F | Align the landed journal port with the owner's decisions and its review | ES-01, DEC-01 | opus | |
 | ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
@@ -404,7 +408,24 @@ an absent VM is done). `mayfly-protocol` 1.1 (`capacity_unknown`, `listing_incom
 `mayfly-data-domain`'s ledger and executor follow, and the KER-08 notes are removed.
 Accept: the named tests of ADRs 0052 and 0053; the regenerated `matrix/ledger.txt`,
 `directive.txt` and `link.txt`; the affected Apalache relations at their bounded depths.
-Owner decision pending: StopVm on a VM absent from a complete listing — proposal: distinct non-quarantining refusal target_absent.
+Owner decision (2026-11-10, DEC-05, ADR 0066): a `StopVm` (or `StartVm`) whose VM a complete
+listing shows absent is refused `target_absent` and quarantined as a desync
+(`vm_vanished_externally`), not the proposed non-quarantining refusal.
+
+#### DEC-05 Record and implement the owner decisions of 2026-11-10
+Cites: plan §3.2, §6, §8.4; ver §6; ADRs 0020, 0025, 0026, 0042, 0052, 0053. The owner decided on
+2026-11-10: (a) "If we know it was there and we didn't do it it should be quarantined for
+review- this is invalid state, we desynced somehow and we must inform user about it and us to
+ship eventual fix." (ADR 0066); (b) ADR 0020's amendment, option 2: the clock offset at the
+handshake; (c) "We want to run it on a weekly ci only": the Apalache lane. Model first:
+`formal/lifecycle.qnt` (`replyTargetAbsent`, `vanishedStaysQuarantined`). `mayfly-protocol` 1.2
+(`target_absent`, `Welcome.cp_clock`; a 1.1 session is written `proof_mismatch`);
+`mayfly-data-domain`, `mayfly-data` and the `Attempt` aggregate follow. `formal.yml` loses its
+push and pull-request triggers and runs one job per model (`cargo xtask formal-verify --model
+<name>`); the per-push typecheck and Quint tests stay in `ci.yml`.
+Accept: the named tests of ADR 0066 and of ADR 0020's amendment; the regenerated
+`matrix/directive.txt`, `link.txt`, `matrix/attempt.txt` and `decisions/attempt.txt`; the
+lifecycle relations at their bounded depths; `actionlint` and `action-pins` green.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
@@ -767,6 +788,9 @@ Note (DEC-04F, ADR 0052's correction): the unit that maps `CapacityReported` int
 foreign and base use, never `free`; until then the control plane may propose in an unknown
 dimension and be refused `capacity_unknown` by the data plane. Accept adds: a report with an
 unknown dimension admits nothing there (component test).
+Note (DEC-05): the handshake's `Welcome` carries `cp_clock`, the `Clock` port's reading when it
+is written (ADR 0020's amendment); the link's mapping of an answer reads `target_absent` as the
+`Attempt`'s `RefusalReason::TargetAbsent` (ADR 0066). Accept adds: a welcome carries the clock.
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
@@ -782,6 +806,8 @@ Cites: dm P15, P16, P19; ADR 0025. Breaker counting and trips per (pool, digest)
 (ERROR, metric, status), escalation levels T_q1/T_q2 that never act on the VM, no timer and no cap
 deleting anything (I28); `Unknown` re-observation at T_u1/T_u2 and the provider-limitation report.
 There is no operator assertion.
+Note (DEC-05, ADR 0066): a `vm_vanished_externally` case opens like any other (ERROR, metric,
+status) and says it is a desync to report; nothing resolves it but an operator.
 Accept: F36, F46, F47 component tests on the fake clock; mutant 26 (delete on a timer) and 27
 (resolve without observation) caught.
 
@@ -913,6 +939,8 @@ Accept: `assert_cmd` black-box tests; `--json` outputs are golden-tested.
 DEC-01 adds the CLI of plan §11: `host drain|resume`, `pool reset-breaker`, `quarantine
 list|inspect|resolve`, `safe-mode enter`, `events --follow` per event-store §5.6; peer-uid check;
 an actor on every mutating command. No `attempt assert` (ADR 0025).
+Note (DEC-05, ADR 0066): `status` and `quarantine list|inspect` name `vm_vanished_externally` in
+plain words (the VM vanished outside mayfly: a desync; send the diagnostics bundle).
 
 #### RT-04 Observability
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint
@@ -1060,7 +1088,8 @@ Accept: targets build; corpus seeded from golden fixtures.
 
 #### VER-07 Apalache verification lane
 Cites: ver §6. `quint verify` with Apalache for each model's invariants at bounded depth in
-`formal.yml` (scheduled + on model changes); depths and timings in `doc/formal-models.md`.
+`formal.yml` (weekly and by hand only, one job per model: owner, 2026-11-10, DEC-05); depths and
+timings in `doc/formal-models.md`.
 Accept: every invariant listed in ver §6.1 is checked; a seeded bad invariant fails.
 DEC-01: adds `registration` and `event_store` to the lane.
 
@@ -1125,6 +1154,8 @@ Cites: ADR 0036, philosophy §5.1. A local, redacted archive (version, config wi
 `doctor --json`, `status --json`, recent logs, event kinds and counts, projection summaries,
 provider and OS versions) and its listing; nothing sent anywhere.
 Accept: a canary-secret test over every bundle file; golden listing.
+Note (DEC-05, ADR 0066): the bundle carries every open quarantine case with its reason and
+evidence, `vm_vanished_externally` included (golden listing).
 
 #### OPS-08 `mayfly restore` and `mayfly uninstall --purge`
 Cites: ADR 0043, ADR 0044, plan §8.4, §10, §11. `mayfly restore <backup>` restores the automatic

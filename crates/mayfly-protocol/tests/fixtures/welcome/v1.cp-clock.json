@@ -1,0 +1,17 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 2
+  },
+  "message": {
+    "welcome": {
+      "epoch": 7,
+      "mode": "normal",
+      "accepted_version": {
+        "major": 1,
+        "minor": 2
+      },
+      "cp_clock": 1700000000000
+    }
+  }
+}

@@ -301,6 +301,9 @@ pub enum RefusalReason {
     SafeMode,
     /// The re-observed VM does not match the proof (ADR 0026).
     ProofMismatch,
+    /// A complete listing shows the stop's or start's target, the VM this attempt recorded
+    /// cloning, absent: a desync, quarantined `vm_vanished_externally` (ADR 0066).
+    TargetAbsent,
     /// The directive's epoch is not the current one (I09).
     StaleEpoch,
     /// The effect failed (the clone failed, the guest was not ready by the deadline).

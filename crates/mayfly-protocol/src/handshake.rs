@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use mayfly_domain::{Epoch, HostId};
+use mayfly_domain::{Epoch, HostId, Millis};
 use serde::{Deserialize, Serialize};
 
 use crate::version::ProtocolVersion;
@@ -51,6 +51,16 @@ pub struct Welcome {
     pub mode: Mode,
     /// The negotiated version ([`crate::negotiate`]): no frame of the session uses more.
     pub accepted_version: ProtocolVersion,
+    /// The control plane's `Clock` reading (wall-clock milliseconds since the Unix epoch, ADR
+    /// 0020) when it wrote this welcome: the clock every directive deadline of the session is
+    /// written in. The data plane records its offset to its own monotonic clock when it enters
+    /// the session and compares every deadline of the session in monotonic time, so a step of
+    /// either wall clock after the handshake moves no deadline (ADR 0020, amendment accepted
+    /// 2026-11-10). `None` from a control plane older than protocol 1.2, which leaves it out:
+    /// the data plane then reads its own wall clock at receipt, as before. A handshake field,
+    /// so an older data plane ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_clock: Option<Millis>,
 }
 
 /// Control plane → data plane: no session.
@@ -146,6 +156,35 @@ mod tests {
         // then
         let expected: Vec<Option<Epoch>> = cases.iter().map(|(_, want)| want.map(e)).collect();
         assert_eq!(minted, expected);
+    }
+
+    #[test]
+    fn should_read_a_welcome_without_the_clock_when_an_older_control_plane_wrote_it() {
+        // given
+        let older = r#"{"epoch":7,"mode":"normal","accepted_version":{"major":1,"minor":1}}"#;
+        let newer = Welcome {
+            epoch: e(7),
+            mode: Mode::Normal,
+            accepted_version: crate::CURRENT,
+            cp_clock: Some(Millis::new(1_700_000_000_000)),
+        };
+
+        // when
+        let read: Welcome = serde_json::from_str(older).expect("an older welcome decodes");
+        let written = serde_json::to_string(&Welcome {
+            cp_clock: None,
+            ..newer.clone()
+        })
+        .expect("encodes");
+
+        // then
+        assert_eq!(read.cp_clock, None);
+        assert!(!written.contains("cp_clock"), "{written}");
+        assert!(
+            serde_json::to_string(&newer)
+                .expect("encodes")
+                .contains("\"cp_clock\":1700000000000")
+        );
     }
 
     #[test]

@@ -55,6 +55,11 @@ pub enum QuarantineReason {
     ForensicRetention,
     /// An outcome cannot be proven by any observation the provider can give.
     OutcomeUnprovable,
+    /// A `StopVm` or `StartVm` found the VM this attempt recorded cloning absent from a complete
+    /// listing: mayfly did not remove it, so the journal and the provider have desynced. Kept
+    /// for review and reported (`mayfly status`, the diagnostics bundle), never read as stopped
+    /// or lost, and not released by the inventory's absence (ADR 0066).
+    VmVanishedExternally,
 }
 
 /// Why an attempt was retired (`AttemptRetired`, `RetirementRequested`).

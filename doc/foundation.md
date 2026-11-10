@@ -709,7 +709,7 @@ boundaries), not as an object model.
 | Workflow | Trigger | Content | Task |
 |:--|:--|:--|:--|
 | `ci.yml` | push to `main`, pull request, dispatch | the gate, split into jobs (7.2) | FND-04 |
-| `formal.yml` | weekly (VER-07 may move it to nightly), on changes under `formal/`, dispatch | Apalache verification (FND-06); fresh-seed conformance (VER-07) | FND-06, VER-07 |
+| `formal.yml` | weekly and dispatch only (owner, 2026-11-10), one job per model | Apalache verification (FND-06); fresh-seed conformance (VER-07) | FND-06, VER-07, DEC-05 |
 | `faultlab.yml` | weekly, dispatch | fault-lab core scenarios, then extended | VER-04 |
 | `mutation.yml` | nightly (curated + in-diff), weekly (full, sharded), dispatch | `mutants-curated`, `cargo-mutants` | VER-05 |
 | `fuzz.yml` | nightly, dispatch | each fuzz target for a time budget; crash inputs uploaded | VER-06 |
@@ -824,7 +824,7 @@ steers the build (`CLIPPY_CONF_DIR`, `RUSTC_WRAPPER`, `RUSTFLAGS` other than `-D
 | `cargo xtask coverage [--changed-since <rev>]` | llvm-cov over in-process suites vs `coverage-floor.toml`; changed-line gate | FND-05 |
 | `cargo xtask formal-typecheck` / `formal-test` | typecheck every `.qnt`; run Quint scenario tests | FND-06 |
 | `cargo xtask conformance [--typecheck]` | all formal and replay stages: typecheck, scenarios, simulate, freshness, generate, replay, negative controls | VER-01 |
-| `cargo xtask formal-verify` | Apalache bounded verification of every model's `allInvariants` plus long multi-seed simulation (FND-06); VER-07 adds the negative controls | FND-06, VER-07 |
+| `cargo xtask formal-verify [--model <name>]` | Apalache bounded verification of every model's `allInvariants` (or one model's) plus long multi-seed simulation (FND-06; `--model`, DEC-05); VER-07 adds the negative controls | FND-06, VER-07 |
 | `cargo xtask mutants-curated [--only <n>]` | apply each curated mutant in a scratch tree; require its named killer to fail | VER-05 |
 | `cargo xtask mutation [--in-diff <rev>] [--shard k/n]` | `cargo-mutants` over the configured scope | VER-05 |
 | `cargo xtask fuzz <target> [--time S] [--reproduce F]` | bounded fuzz run on the pinned nightly, or reproduce a crash | VER-06 |

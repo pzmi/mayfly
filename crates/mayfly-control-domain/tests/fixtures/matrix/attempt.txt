@@ -17,6 +17,7 @@ not_started x guest_verified -> refused not_started
 not_started x guest_rejected -> refused not_started
 not_started x directive_refused -> refused not_started
 not_started x directive_refused_proof -> refused not_started
+not_started x directive_refused_absent -> refused not_started
 not_started x outcome_unknown -> refused not_started
 not_started x runner_launched -> refused not_started
 not_started x runner_launch_unknown -> refused not_started
@@ -47,6 +48,7 @@ reserved x guest_verified -> accepted stale_observation_ignored/v1
 reserved x guest_rejected -> accepted stale_observation_ignored/v1
 reserved x directive_refused -> accepted stale_observation_ignored/v1
 reserved x directive_refused_proof -> accepted stale_observation_ignored/v1
+reserved x directive_refused_absent -> accepted stale_observation_ignored/v1
 reserved x outcome_unknown -> accepted stale_observation_ignored/v1
 reserved x runner_launched -> accepted stale_observation_ignored/v1
 reserved x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -77,6 +79,7 @@ cloning/in_flight x guest_verified -> refused observation_mismatch
 cloning/in_flight x guest_rejected -> refused observation_mismatch
 cloning/in_flight x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 cloning/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+cloning/in_flight x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 cloning/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 cloning/in_flight x runner_launched -> refused observation_mismatch
 cloning/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -107,6 +110,7 @@ cloning/unknown x guest_verified -> refused observation_mismatch
 cloning/unknown x guest_rejected -> refused observation_mismatch
 cloning/unknown x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 cloning/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+cloning/unknown x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 cloning/unknown x outcome_unknown -> accepted, no event
 cloning/unknown x runner_launched -> refused observation_mismatch
 cloning/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -137,6 +141,7 @@ booting x guest_verified -> accepted stale_observation_ignored/v1
 booting x guest_rejected -> accepted stale_observation_ignored/v1
 booting x directive_refused -> accepted stale_observation_ignored/v1
 booting x directive_refused_proof -> accepted stale_observation_ignored/v1
+booting x directive_refused_absent -> accepted stale_observation_ignored/v1
 booting x outcome_unknown -> accepted stale_observation_ignored/v1
 booting x runner_launched -> accepted stale_observation_ignored/v1
 booting x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -166,7 +171,8 @@ booting/in_flight x vm_booted -> accepted vm_booted/v1
 booting/in_flight x guest_verified -> refused observation_mismatch
 booting/in_flight x guest_rejected -> refused observation_mismatch
 booting/in_flight x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
-booting/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+booting/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+booting/in_flight x directive_refused_absent -> accepted directive_refused/v1 attempt_quarantined/v1
 booting/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 booting/in_flight x runner_launched -> refused observation_mismatch
 booting/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -196,7 +202,8 @@ booting/unknown x vm_booted -> accepted vm_booted/v1
 booting/unknown x guest_verified -> refused observation_mismatch
 booting/unknown x guest_rejected -> refused observation_mismatch
 booting/unknown x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
-booting/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+booting/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+booting/unknown x directive_refused_absent -> accepted directive_refused/v1 attempt_quarantined/v1
 booting/unknown x outcome_unknown -> accepted, no event
 booting/unknown x runner_launched -> refused observation_mismatch
 booting/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -227,6 +234,7 @@ verifying x guest_verified -> accepted stale_observation_ignored/v1
 verifying x guest_rejected -> accepted stale_observation_ignored/v1
 verifying x directive_refused -> accepted stale_observation_ignored/v1
 verifying x directive_refused_proof -> accepted stale_observation_ignored/v1
+verifying x directive_refused_absent -> accepted stale_observation_ignored/v1
 verifying x outcome_unknown -> accepted stale_observation_ignored/v1
 verifying x runner_launched -> accepted stale_observation_ignored/v1
 verifying x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -257,6 +265,7 @@ verifying/in_flight x guest_verified -> accepted guest_verified/v1 attempt_prepa
 verifying/in_flight x guest_rejected -> accepted guest_rejected/v1 attempt_quarantined/v1
 verifying/in_flight x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 verifying/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+verifying/in_flight x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 verifying/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 verifying/in_flight x runner_launched -> refused observation_mismatch
 verifying/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -287,6 +296,7 @@ verifying/unknown x guest_verified -> accepted guest_verified/v1 attempt_prepare
 verifying/unknown x guest_rejected -> accepted guest_rejected/v1 attempt_quarantined/v1
 verifying/unknown x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 verifying/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+verifying/unknown x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 verifying/unknown x outcome_unknown -> accepted, no event
 verifying/unknown x runner_launched -> refused observation_mismatch
 verifying/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -317,6 +327,7 @@ prepared x guest_verified -> accepted stale_observation_ignored/v1
 prepared x guest_rejected -> accepted stale_observation_ignored/v1
 prepared x directive_refused -> accepted stale_observation_ignored/v1
 prepared x directive_refused_proof -> accepted stale_observation_ignored/v1
+prepared x directive_refused_absent -> accepted stale_observation_ignored/v1
 prepared x outcome_unknown -> accepted stale_observation_ignored/v1
 prepared x runner_launched -> accepted stale_observation_ignored/v1
 prepared x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -347,6 +358,7 @@ activating x guest_verified -> accepted stale_observation_ignored/v1
 activating x guest_rejected -> accepted stale_observation_ignored/v1
 activating x directive_refused -> accepted stale_observation_ignored/v1
 activating x directive_refused_proof -> accepted stale_observation_ignored/v1
+activating x directive_refused_absent -> accepted stale_observation_ignored/v1
 activating x outcome_unknown -> accepted stale_observation_ignored/v1
 activating x runner_launched -> accepted stale_observation_ignored/v1
 activating x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -377,6 +389,7 @@ activating/in_flight x guest_verified -> accepted guest_verified/v1
 activating/in_flight x guest_rejected -> accepted guest_rejected/v1 attempt_quarantined/v1
 activating/in_flight x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 activating/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+activating/in_flight x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 activating/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 activating/in_flight x runner_launched -> refused observation_mismatch
 activating/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -407,6 +420,7 @@ activating/unknown x guest_verified -> accepted guest_verified/v1
 activating/unknown x guest_rejected -> accepted guest_rejected/v1 attempt_quarantined/v1
 activating/unknown x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
 activating/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+activating/unknown x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
 activating/unknown x outcome_unknown -> accepted, no event
 activating/unknown x runner_launched -> refused observation_mismatch
 activating/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -437,6 +451,7 @@ activating/launching x guest_verified -> refused observation_mismatch
 activating/launching x guest_rejected -> refused observation_mismatch
 activating/launching x directive_refused -> accepted directive_refused/v1 attempt_retired/v1
 activating/launching x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+activating/launching x directive_refused_absent -> accepted directive_refused/v1 attempt_retired/v1
 activating/launching x outcome_unknown -> accepted directive_outcome_unknown/v1
 activating/launching x runner_launched -> accepted jit_handle_taken/v1 runner_launched/v1
 activating/launching x runner_launch_unknown -> accepted runner_launch_unknown/v1
@@ -467,6 +482,7 @@ listening x guest_verified -> accepted stale_observation_ignored/v1
 listening x guest_rejected -> accepted stale_observation_ignored/v1
 listening x directive_refused -> accepted stale_observation_ignored/v1
 listening x directive_refused_proof -> accepted stale_observation_ignored/v1
+listening x directive_refused_absent -> accepted stale_observation_ignored/v1
 listening x outcome_unknown -> accepted stale_observation_ignored/v1
 listening x runner_launched -> accepted stale_observation_ignored/v1
 listening x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -497,6 +513,7 @@ listening/leaked x guest_verified -> accepted stale_observation_ignored/v1
 listening/leaked x guest_rejected -> accepted stale_observation_ignored/v1
 listening/leaked x directive_refused -> accepted stale_observation_ignored/v1
 listening/leaked x directive_refused_proof -> accepted stale_observation_ignored/v1
+listening/leaked x directive_refused_absent -> accepted stale_observation_ignored/v1
 listening/leaked x outcome_unknown -> accepted stale_observation_ignored/v1
 listening/leaked x runner_launched -> accepted stale_observation_ignored/v1
 listening/leaked x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -527,6 +544,7 @@ busy x guest_verified -> accepted stale_observation_ignored/v1
 busy x guest_rejected -> accepted stale_observation_ignored/v1
 busy x directive_refused -> accepted stale_observation_ignored/v1
 busy x directive_refused_proof -> accepted stale_observation_ignored/v1
+busy x directive_refused_absent -> accepted stale_observation_ignored/v1
 busy x outcome_unknown -> accepted stale_observation_ignored/v1
 busy x runner_launched -> accepted stale_observation_ignored/v1
 busy x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -557,6 +575,7 @@ finished x guest_verified -> accepted stale_observation_ignored/v1
 finished x guest_rejected -> accepted stale_observation_ignored/v1
 finished x directive_refused -> accepted stale_observation_ignored/v1
 finished x directive_refused_proof -> accepted stale_observation_ignored/v1
+finished x directive_refused_absent -> accepted stale_observation_ignored/v1
 finished x outcome_unknown -> accepted stale_observation_ignored/v1
 finished x runner_launched -> accepted stale_observation_ignored/v1
 finished x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -587,6 +606,7 @@ retiring x guest_verified -> accepted stale_observation_ignored/v1
 retiring x guest_rejected -> accepted stale_observation_ignored/v1
 retiring x directive_refused -> accepted stale_observation_ignored/v1
 retiring x directive_refused_proof -> accepted stale_observation_ignored/v1
+retiring x directive_refused_absent -> accepted stale_observation_ignored/v1
 retiring x outcome_unknown -> accepted stale_observation_ignored/v1
 retiring x runner_launched -> accepted stale_observation_ignored/v1
 retiring x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -617,6 +637,7 @@ retiring/in_flight x guest_verified -> refused observation_mismatch
 retiring/in_flight x guest_rejected -> refused observation_mismatch
 retiring/in_flight x directive_refused -> accepted directive_refused/v1 diagnostics_lost/v1
 retiring/in_flight x directive_refused_proof -> accepted directive_refused/v1 diagnostics_lost/v1
+retiring/in_flight x directive_refused_absent -> accepted directive_refused/v1 diagnostics_lost/v1
 retiring/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 retiring/in_flight x runner_launched -> refused observation_mismatch
 retiring/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -647,6 +668,7 @@ retiring/unknown x guest_verified -> refused observation_mismatch
 retiring/unknown x guest_rejected -> refused observation_mismatch
 retiring/unknown x directive_refused -> accepted directive_refused/v1
 retiring/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+retiring/unknown x directive_refused_absent -> accepted directive_refused/v1 attempt_quarantined/v1
 retiring/unknown x outcome_unknown -> accepted, no event
 retiring/unknown x runner_launched -> refused observation_mismatch
 retiring/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -677,6 +699,7 @@ deleting x guest_verified -> accepted stale_observation_ignored/v1
 deleting x guest_rejected -> accepted stale_observation_ignored/v1
 deleting x directive_refused -> accepted stale_observation_ignored/v1
 deleting x directive_refused_proof -> accepted stale_observation_ignored/v1
+deleting x directive_refused_absent -> accepted stale_observation_ignored/v1
 deleting x outcome_unknown -> accepted stale_observation_ignored/v1
 deleting x runner_launched -> accepted stale_observation_ignored/v1
 deleting x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -707,6 +730,7 @@ deleting/in_flight x guest_verified -> refused observation_mismatch
 deleting/in_flight x guest_rejected -> refused observation_mismatch
 deleting/in_flight x directive_refused -> accepted directive_refused/v1
 deleting/in_flight x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+deleting/in_flight x directive_refused_absent -> accepted directive_refused/v1
 deleting/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 deleting/in_flight x runner_launched -> refused observation_mismatch
 deleting/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -737,6 +761,7 @@ deleting/unknown x guest_verified -> refused observation_mismatch
 deleting/unknown x guest_rejected -> refused observation_mismatch
 deleting/unknown x directive_refused -> accepted directive_refused/v1
 deleting/unknown x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+deleting/unknown x directive_refused_absent -> accepted directive_refused/v1
 deleting/unknown x outcome_unknown -> accepted, no event
 deleting/unknown x runner_launched -> refused observation_mismatch
 deleting/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -767,6 +792,7 @@ deleted x guest_verified -> accepted stale_observation_ignored/v1
 deleted x guest_rejected -> accepted stale_observation_ignored/v1
 deleted x directive_refused -> accepted stale_observation_ignored/v1
 deleted x directive_refused_proof -> accepted stale_observation_ignored/v1
+deleted x directive_refused_absent -> accepted stale_observation_ignored/v1
 deleted x outcome_unknown -> accepted stale_observation_ignored/v1
 deleted x runner_launched -> accepted stale_observation_ignored/v1
 deleted x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -797,6 +823,7 @@ lost x guest_verified -> accepted stale_observation_ignored/v1
 lost x guest_rejected -> accepted stale_observation_ignored/v1
 lost x directive_refused -> accepted stale_observation_ignored/v1
 lost x directive_refused_proof -> accepted stale_observation_ignored/v1
+lost x directive_refused_absent -> accepted stale_observation_ignored/v1
 lost x outcome_unknown -> accepted stale_observation_ignored/v1
 lost x runner_launched -> accepted stale_observation_ignored/v1
 lost x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -827,6 +854,7 @@ backoff x guest_verified -> accepted stale_observation_ignored/v1
 backoff x guest_rejected -> accepted stale_observation_ignored/v1
 backoff x directive_refused -> accepted stale_observation_ignored/v1
 backoff x directive_refused_proof -> accepted stale_observation_ignored/v1
+backoff x directive_refused_absent -> accepted stale_observation_ignored/v1
 backoff x outcome_unknown -> accepted stale_observation_ignored/v1
 backoff x runner_launched -> accepted stale_observation_ignored/v1
 backoff x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -857,6 +885,7 @@ quarantined x guest_verified -> accepted stale_observation_ignored/v1
 quarantined x guest_rejected -> accepted stale_observation_ignored/v1
 quarantined x directive_refused -> accepted stale_observation_ignored/v1
 quarantined x directive_refused_proof -> accepted stale_observation_ignored/v1
+quarantined x directive_refused_absent -> accepted stale_observation_ignored/v1
 quarantined x outcome_unknown -> accepted stale_observation_ignored/v1
 quarantined x runner_launched -> accepted stale_observation_ignored/v1
 quarantined x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -887,6 +916,7 @@ quarantined/in_flight x guest_verified -> refused observation_mismatch
 quarantined/in_flight x guest_rejected -> refused observation_mismatch
 quarantined/in_flight x directive_refused -> accepted directive_refused/v1
 quarantined/in_flight x directive_refused_proof -> accepted directive_refused/v1
+quarantined/in_flight x directive_refused_absent -> accepted directive_refused/v1
 quarantined/in_flight x outcome_unknown -> accepted directive_outcome_unknown/v1
 quarantined/in_flight x runner_launched -> refused observation_mismatch
 quarantined/in_flight x runner_launch_unknown -> refused observation_mismatch
@@ -917,6 +947,7 @@ quarantined/unknown x guest_verified -> refused observation_mismatch
 quarantined/unknown x guest_rejected -> refused observation_mismatch
 quarantined/unknown x directive_refused -> accepted directive_refused/v1
 quarantined/unknown x directive_refused_proof -> accepted directive_refused/v1
+quarantined/unknown x directive_refused_absent -> accepted directive_refused/v1
 quarantined/unknown x outcome_unknown -> accepted, no event
 quarantined/unknown x runner_launched -> refused observation_mismatch
 quarantined/unknown x runner_launch_unknown -> refused observation_mismatch
@@ -947,6 +978,7 @@ quarantined/doubted x guest_verified -> accepted stale_observation_ignored/v1
 quarantined/doubted x guest_rejected -> accepted stale_observation_ignored/v1
 quarantined/doubted x directive_refused -> accepted stale_observation_ignored/v1
 quarantined/doubted x directive_refused_proof -> accepted stale_observation_ignored/v1
+quarantined/doubted x directive_refused_absent -> accepted stale_observation_ignored/v1
 quarantined/doubted x outcome_unknown -> accepted stale_observation_ignored/v1
 quarantined/doubted x runner_launched -> accepted stale_observation_ignored/v1
 quarantined/doubted x runner_launch_unknown -> accepted stale_observation_ignored/v1
@@ -959,6 +991,37 @@ quarantined/doubted x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined/doubted x vm_present -> accepted, no event
 quarantined/doubted x vm_present_replaced -> accepted, no event
 quarantined/doubted x vm_absent -> accepted attempt_lost/v1
+quarantined/vanished x start_attempt -> refused already_started
+quarantined/vanished x issue_next -> refused nothing_to_issue
+quarantined/vanished x begin_activation -> refused not_prepared
+quarantined/vanished x record_jit_handle -> refused not_activating
+quarantined/vanished x bind_job -> refused not_listening
+quarantined/vanished x request_retirement -> refused quarantined
+quarantined/vanished x confirm_retirement -> refused no_retirement_requested
+quarantined/vanished x withdraw_retirement -> refused no_retirement_requested
+quarantined/vanished x quarantine -> refused already_quarantined
+quarantined/vanished x adopt -> accepted attempt_adopted/v1
+quarantined/vanished x resolve_quarantine -> accepted attempt_retired/v1
+quarantined/vanished x close -> refused not_terminal
+quarantined/vanished x vm_cloned -> accepted stale_observation_ignored/v1
+quarantined/vanished x vm_booted -> accepted stale_observation_ignored/v1
+quarantined/vanished x guest_verified -> accepted stale_observation_ignored/v1
+quarantined/vanished x guest_rejected -> accepted stale_observation_ignored/v1
+quarantined/vanished x directive_refused -> accepted stale_observation_ignored/v1
+quarantined/vanished x directive_refused_proof -> accepted stale_observation_ignored/v1
+quarantined/vanished x directive_refused_absent -> accepted stale_observation_ignored/v1
+quarantined/vanished x outcome_unknown -> accepted stale_observation_ignored/v1
+quarantined/vanished x runner_launched -> accepted stale_observation_ignored/v1
+quarantined/vanished x runner_launch_unknown -> accepted stale_observation_ignored/v1
+quarantined/vanished x diagnostics_exported -> accepted stale_observation_ignored/v1
+quarantined/vanished x diagnostics_lost -> accepted stale_observation_ignored/v1
+quarantined/vanished x vm_stopped -> accepted stale_observation_ignored/v1
+quarantined/vanished x vm_deleted -> accepted stale_observation_ignored/v1
+quarantined/vanished x runner_exited -> accepted runner_exited/v1
+quarantined/vanished x vm_observed_stopped -> accepted vm_observed_stopped/v1
+quarantined/vanished x vm_present -> accepted, no event
+quarantined/vanished x vm_present_replaced -> accepted, no event
+quarantined/vanished x vm_absent -> accepted, no event
 closed x start_attempt -> refused closed
 closed x issue_next -> refused closed
 closed x begin_activation -> refused closed
@@ -977,6 +1040,7 @@ closed x guest_verified -> refused closed
 closed x guest_rejected -> refused closed
 closed x directive_refused -> refused closed
 closed x directive_refused_proof -> refused closed
+closed x directive_refused_absent -> refused closed
 closed x outcome_unknown -> refused closed
 closed x runner_launched -> refused closed
 closed x runner_launch_unknown -> refused closed

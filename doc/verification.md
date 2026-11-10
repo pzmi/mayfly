@@ -50,7 +50,7 @@ points here.
 | **Integration** | `crates/mayfly-adapter-*/tests/`, `crates/mayfly-composition/tests/` | real SQLite files, real processes (fake-tart, fake-github), tempdirs, port 0, `poll` | < 5 min | `integration-tests` | the reason is an OS or library fact: SQL, fsync, process groups, signals, sockets, JSON from a binary |
 | **E2E** | `crates/mayfly-cli/tests/e2e_*.rs` | built `mayflyd` and `mayfly`, fake-tart, fake-github, `assert_cmd` | < 5 min | `e2e-tests` | the promise is a process boundary: CLI, exit codes, startup, restart, the walking skeleton |
 | **Conformance** | `formal/` + `crates/mayfly-conformance` (§6) | Quint (pinned), ITF traces, real code behind drivers | < 10 min per push | `formal-*`, `conformance-*` | a model step must equal what production does |
-| **Formal verify** | `formal/` via `cargo xtask formal-verify` (§6.3) | Apalache (pinned) | ≤ 60 min | nightly / on model change | an invariant must hold for every behaviour to a bound |
+| **Formal verify** | `formal/` via `cargo xtask formal-verify [--model <name>]` (§6.3) | Apalache (pinned) | per model, its `formal.yml` job's timeout (up to 300 min for `event_store`) | weekly / by hand | an invariant must hold for every behaviour to a bound |
 | **Fault lab** | `tools/faultlab` (§8) | the binaries, fake-tart, fake-github, signals | ≤ 5 min per scenario | weekly, release | a claim is about what clients observed under crashes and lost replies |
 | **Architecture** | `tools/xtask` + fixtures (fnd §3) | `cargo metadata`, `syn` | < 60 s | `architecture` | the rule is structural: edges, purity, naming, single append path |
 | **Mutation / fuzz** | `cargo xtask mutants-curated`, `mutation`, `fuzz` (§9, §10) | source patches, `cargo-mutants`, `cargo-fuzz` on the pinned nightly | per lane | nightly, weekly | the question is whether the tests can fail, or a parser survives hostile input |
@@ -230,7 +230,7 @@ I14 reads "image revision" for "image generation".
 
 | Model | File | Governs | Invariants | Model-local invariants | Task |
 |:--|:--|:--|:--|:--|:--|
-| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and saga (plan §6, dm §6.4) | I06, I10, I13, I14, I22 (attempt half), I30 | `busyNeverWarm`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | KER-04 |
+| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and saga (plan §6, dm §6.4) | I06, I10, I13, I14, I22 (attempt half), I30 | `busyNeverWarm`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined` (ADR 0066), `retryKeepsNameAndGeneration` | KER-04, DEC-05 |
 | scheduling | `formal/scheduling.qnt` | `Host`/`Pool` aggregates, capacity policy, the data plane's resource ledger (plan §9) | I01, I02, I03, I07, I08, I13, I24, I26, I27, I28, I33 | `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `noGrantWhileClosed`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | KER-05 |
 | recovery | `formal/recovery.qnt` | startup use case and decision table (plan §10), crash at every await | I04, I05, I09, I10, I11, I12, I17, I25, I29, I31 | `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | KER-07 |
 | scaleset | `formal/scaleset.qnt` | `ScaleSet` aggregate, listener, demand (plan §7.2) | I07, I12, I13, I23, I32 | `noDoubleReservationPerRequest`, `desiredFromLatestStatistics` | KER-06 |
@@ -289,7 +289,12 @@ depth per model (start at 4–8 steps, recorded with timings in `doc/formal-mode
 long multi-seed simulation (three seeds derived from one printed base). A run counts as a
 counterexample only when Quint reports a violation; any other failure (JVM, timeout, tool error)
 is `HARNESS_ERROR`, never a pass. A seeded false invariant per model is a negative control that
-must be reported as violated. The lane runs nightly and on any change under `formal/` (VER-07).
+must be reported as violated. The lane runs **weekly and by hand only** (owner, 2026-11-10: "We
+want to run it on a weekly ci only"), never on a push or a pull request: `formal.yml` runs one
+job per model (`cargo xtask formal-verify --model <name>`), in parallel, each with a timeout
+sized to its relations' bounded depths in `doc/formal-models.md`. The per-push part of §6 stays
+in `ci.yml`'s `formal` job (`formal-typecheck`, `formal-test`). A change to a model is verified
+by running its job by hand (`workflow_dispatch`) or the same command locally.
 
 ---
 
@@ -567,8 +572,8 @@ triaged before the next ⛳ checkpoint.
 |:--|:--|:--|:--|
 | **quick** | while working | fmt-check, architecture, clippy, unit tests | < 3 min |
 | **check / per push** | every commit to `main`, every pull request, `land` | static, architecture, unit, golden, property (1024 cases), contract (memory, SQLite in its five modes, PostgreSQL in Docker (`contract-postgres`, ADR 0035); link inproc/uds; VmProvider fake and fake-tart; ScaleSetApi fake-github and recordings), component, integration, e2e, conformance (committed traces + 30 generated per model, negative controls, field sensitivity), coverage, changed lines, security; `macos` native job; `cross` | < 25 min wall clock in CI |
-| **nightly** | schedule | fresh-seed conformance (more traces, longer), Apalache `formal-verify`, `mutants-curated`, `cargo-mutants` in-diff, fuzz per target (time-boxed) | < 3 h |
-| **weekly** | schedule | fault lab core then extended suite, `cargo-mutants` full (sharded), security over full history | < 6 h |
+| **nightly** | schedule | fresh-seed conformance (more traces, longer), `mutants-curated`, `cargo-mutants` in-diff, fuzz per target (time-boxed) | < 3 h |
+| **weekly** | schedule | Apalache `formal-verify`, one job per model (owner, 2026-11-10); fault lab core then extended suite, `cargo-mutants` full (sharded), security over full history | < 6 h |
 | **release** | tag | full `check`, fault lab core, `mutants-curated`, `formal-verify`, `release-check` per target, SBOM | must be green on the tagged commit |
 | **hardware** (owner) | manual dispatch on the owner's Mac | VmProvider and GuestTransport contracts on real Tart, one-job smoke with a tiny Linux image, live scale-set contract and listener on a disposable repository | owner's time |
 

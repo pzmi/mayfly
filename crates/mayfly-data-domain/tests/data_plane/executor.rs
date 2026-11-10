@@ -13,9 +13,9 @@ use mayfly_protocol::{
 };
 
 use super::support::{
-    EPOCH, NOW, V1_0, V1_1, applied, base, capacity, directive, every_kind, host, instance, ledger,
-    listed_vm, listing, open, open_at, open_with, other_host, proof, receive_through, roomy, seen,
-    seen_as_proved, unlisted, vm, vm_on,
+    EPOCH, NOW, V1_0, V1_1, V1_2, applied, base, capacity, directive, every_kind, host, instance,
+    ledger, listed_vm, listing, open, open_at, open_with, other_host, proof, receive_through,
+    roomy, seen, seen_as_proved, unlisted, vm, vm_on,
 };
 
 fn reply_kind(receipt: &Receipt) -> ObservationKind {
@@ -57,6 +57,7 @@ fn reconnect(dp: &mut DataPlane, epoch: u64) {
         epoch: Epoch::new(epoch),
         mode: Mode::Normal,
         accepted_version: V1_0,
+        cp_clock: None,
     }));
     dp.link(LinkStimulus::FloorRaised(Epoch::new(epoch)));
 }
@@ -486,20 +487,93 @@ fn stop(n: u128) -> DirectiveKind {
 }
 
 #[test]
-fn should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone() {
-    // given
-    let mut dp = open();
+fn should_refuse_target_absent_when_a_stop_finds_its_target_gone() {
+    // given: a stop of the VM attempt 1 recorded cloning; a complete listing without it
+    let mut dp = open_at(V1_2, Mode::Normal, ledger(roomy()));
     let d = directive(1, EPOCH, stop(1));
-    dp.receive(V1_0, &d, NOW);
+    dp.receive(V1_2, &d, NOW);
 
     // when
-    let got = dp.reobserved(EPOCH, d.directive_id, &listing(vec![]));
+    let got = dp.reobserved(EPOCH, d.directive_id, &unrelated_but_complete());
 
     // then
     assert_eq!(
         progress_kind(&got),
-        refused(RefusalReason::ProofMismatch),
-        "an absent VM is not a stopped one: the inventory reports the absence"
+        refused(RefusalReason::TargetAbsent),
+        "an absent VM is not a stopped one, and we did not remove it: a desync (ADR 0066)"
+    );
+}
+
+#[test]
+fn should_refuse_target_absent_when_a_start_finds_its_target_gone() {
+    // given: a start of the VM attempt 1 recorded cloning, against a complete listing without
+    // it, and against one listing its name without an instance id
+    let start = DirectiveKind::StartVm {
+        vm_name: vm(1),
+        run_options: super::support::run_options(),
+    };
+    let listings = [
+        unrelated_but_complete(),
+        listing(vec![listed_vm(&vm(1).to_string(), None, false)]),
+    ];
+
+    // when
+    let got: Vec<ObservationKind> = listings
+        .iter()
+        .map(|observed| {
+            let mut dp = open_at(V1_2, Mode::Normal, ledger(roomy()));
+            dp.ledger.vms.insert(
+                vm(1),
+                mayfly_data_domain::VmUse {
+                    guest: Some(mayfly_protocol::GuestOs::Linux),
+                    running: false,
+                    memory_bytes: None,
+                    disk_bytes: Some(0),
+                },
+            );
+            let d = directive(1, EPOCH, start.clone());
+            dp.receive(V1_2, &d, NOW);
+            progress_kind(&dp.reobserved(EPOCH, d.directive_id, observed))
+        })
+        .collect();
+
+    // then
+    assert_eq!(
+        got,
+        [
+            refused(RefusalReason::TargetAbsent),
+            refused(RefusalReason::ProofMismatch),
+        ],
+        "absent is a desync; listed but unproven is a proof refused"
+    );
+}
+
+#[test]
+fn should_write_proof_mismatch_for_a_vanished_target_when_the_session_is_older_than_1_2() {
+    // given
+    let sessions = [V1_0, V1_1];
+
+    // when
+    let got: Vec<(ObservationKind, ObservationKind)> = sessions
+        .iter()
+        .map(|version| {
+            let mut dp = open_at(*version, Mode::Normal, ledger(roomy()));
+            let d = directive(1, EPOCH, stop(1));
+            dp.receive(*version, &d, NOW);
+            let first = progress_kind(&dp.reobserved(EPOCH, d.directive_id, &listing(vec![])));
+            let repeat = reply_kind(&dp.receive(*version, &d, NOW));
+            (first, repeat)
+        })
+        .collect();
+
+    // then: a control plane of 1.1 or older reads a refused proof, which quarantines a stop
+    let mismatch = refused(RefusalReason::ProofMismatch);
+    assert_eq!(
+        got,
+        vec![
+            (mismatch.clone(), mismatch.clone()),
+            (mismatch.clone(), mismatch)
+        ]
     );
 }
 
@@ -1090,6 +1164,7 @@ fn should_never_reenter_a_session_when_its_welcome_is_duplicated_after_a_restart
         epoch: EPOCH,
         mode: Mode::Normal,
         accepted_version: V1_0,
+        cp_clock: None,
     }));
 
     // then

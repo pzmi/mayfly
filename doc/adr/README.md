@@ -69,7 +69,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Accepted |
 | [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Accepted. Amended 2026-11-09 |
 | [0019](0019-plane-separation-over-dev-closures-and-policy-driven-planes.md) | Plane separation over dev closures and policy-driven planes | Accepted |
-| [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Accepted |
+| [0020](0020-control-plane-time-and-the-journal-s-recorded-at.md) | Control-plane time and the journal's recorded_at | Accepted. Amended 2026-11-10 |
 | [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Accepted. Amended by 0034 |
 | [0022](0022-strategic-ddd-with-a-data-oriented-implementation.md) | Strategic DDD with a data-oriented implementation | Accepted |
 | [0023](0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time | Accepted |
@@ -98,6 +98,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0046](0046-config-schema-v1-reads-raw-toml-secret-references-live-in-the-kernel-exit-codes.md) | Config schema v1 reads raw TOML, secret references live in the kernel, exit codes | Accepted |
 | [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted |
 | [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted |
-| [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted |
+| [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted. Amended by 0066 |
 | [0058](0058-the-secrets-adapter-runs-its-own-commands-the-keychain-through-the-security-cli.md) | The secrets adapter runs its own commands; the Keychain through the security CLI | Proposed |
 | [0064](0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | GitHub client crypto and TLS: aws-lc-rs and rustls, no JWT crate | Proposed |
+| [0066](0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A vanished VM is quarantined as a desync | Accepted |

@@ -2,12 +2,13 @@
 
 use mayfly_data::{EnterError, FloorFailed, ProbeFailed, SessionEnd, StartError, Stats};
 use mayfly_data_domain::LinkIgnored;
-use mayfly_domain::{DirectiveId, Epoch};
-use mayfly_protocol::{DirectiveKind, LinkError, ObservationKind, UnknownReason};
+use mayfly_domain::{DirectiveId, Epoch, Millis};
+use mayfly_protocol::{DirectiveKind, LinkError, ObservationKind, RefusalReason, UnknownReason};
 use mayfly_testkit_data::{Op, StaticWelcome, directives, observations};
 
 use crate::support::{
-    EPOCH, Fakes, answers, answers_to, clone, config, directive, host, probe, run, session, welcome,
+    EPOCH, Fakes, START, answers, answers_to, clone, config, directive, due, host, probe, run,
+    session, welcome, welcome_at,
 };
 
 #[test]
@@ -335,7 +336,8 @@ fn should_keep_effects_running_when_the_sink_is_full() {
 }
 
 #[test]
-fn should_keep_the_observer_cadence_and_compare_deadlines_by_the_wall_clock_when_it_steps() {
+fn should_compare_deadlines_by_the_wall_clock_at_receipt_when_an_older_control_plane_sends_no_clock()
+ {
     run(async {
         // given
         let fakes = Fakes::new(probe(4));
@@ -370,7 +372,97 @@ fn should_keep_the_observer_cadence_and_compare_deadlines_by_the_wall_clock_when
             [ObservationKind::DirectiveRefused {
                 reason: mayfly_protocol::RefusalReason::DeadlineExpired
             }],
-            "a deadline is read in the wall clock the control plane wrote it in"
+            "without the welcome's clock a deadline is read by the host's wall clock at receipt"
+        );
+    });
+}
+
+#[test]
+fn should_decide_no_deadline_differently_when_the_wall_clock_steps_after_the_handshake() {
+    run(async {
+        // given: the control plane's clock read the data plane's wall clock at the handshake
+        let fakes = Fakes::new(probe(4));
+        let mut exec = fakes.start(2).await;
+        let mut link = StaticWelcome::new(Ok(welcome_at(EPOCH, START)));
+        assert_eq!(exec.enter(&mut link, &fakes.floor).await, Ok(EPOCH));
+        let clock = fakes.clock.clone();
+        let deadline = Millis::new(START.get() + 5_000);
+        let in_time = due(1, DirectiveKind::ReportHostFacts, deadline);
+        let late = due(2, DirectiveKind::ReportHostFacts, deadline);
+
+        // when: the wall clock steps past the deadline and back to zero, then monotonic time
+        // passes the deadline
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            tap.wait_for(|o| matches!(o.kind, ObservationKind::CapacityReported(_)))
+                .await;
+            clock.set_wall(Millis::new(START.get() + 9_000));
+            feed.send(in_time.clone()).await;
+            tap.wait_for(answers(1)).await;
+            clock.set_wall(Millis::new(0));
+            clock.advance(Millis::new(6_000));
+            feed.send(late).await;
+            tap.wait_for(answers(2)).await;
+            tap
+        })
+        .await;
+
+        // then: only monotonic time since the handshake moved the control plane's clock
+        assert!(
+            matches!(answers_to(&seen, 1)[..], [ObservationKind::HostFacts(_)]),
+            "a wall step forward expires nothing: {seen:?}"
+        );
+        assert_eq!(
+            answers_to(&seen, 2),
+            [ObservationKind::DirectiveRefused {
+                reason: RefusalReason::DeadlineExpired
+            }],
+            "a wall step back keeps nothing alive"
+        );
+    });
+}
+
+#[test]
+fn should_compare_deadlines_in_the_control_planes_clock_when_the_welcome_carries_it() {
+    run(async {
+        // given: the control plane's clock is 100 s ahead of this host's wall clock
+        let fakes = Fakes::new(probe(4));
+        let mut exec = fakes.start(2).await;
+        let cp = Millis::new(START.get() + 100_000);
+        let mut link = StaticWelcome::new(Ok(welcome_at(EPOCH, cp)));
+        assert_eq!(exec.enter(&mut link, &fakes.floor).await, Ok(EPOCH));
+        let past = due(
+            1,
+            DirectiveKind::ReportHostFacts,
+            Millis::new(START.get() + 50_000),
+        );
+        let ahead = due(
+            2,
+            DirectiveKind::ReportHostFacts,
+            Millis::new(cp.get() + 5_000),
+        );
+
+        // when
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            tap.wait_for(|o| matches!(o.kind, ObservationKind::CapacityReported(_)))
+                .await;
+            feed.send(past).await;
+            feed.send(ahead).await;
+            tap.wait_for(answers(2)).await;
+            tap
+        })
+        .await;
+
+        // then
+        assert_eq!(
+            answers_to(&seen, 1),
+            [ObservationKind::DirectiveRefused {
+                reason: RefusalReason::DeadlineExpired
+            }],
+            "a deadline the control plane's clock has passed is expired, whatever this host reads"
+        );
+        assert!(
+            matches!(answers_to(&seen, 2)[..], [ObservationKind::HostFacts(_)]),
+            "{seen:?}"
         );
     });
 }
