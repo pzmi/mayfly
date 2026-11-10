@@ -37,11 +37,17 @@ fn should_say_listed_or_absent_when_the_inventory_is_complete() {
             name: vm(1).to_string(),
             instance_id: None,
             running: true,
+            guest: None,
+            memory_bytes: None,
+            disk_bytes: None,
         },
         VmObservation {
             name: vm(2).to_string(),
             instance_id: None,
             running: false,
+            guest: None,
+            memory_bytes: None,
+            disk_bytes: None,
         },
     ];
     let complete = Inventory::Complete { vms: vms.clone() };

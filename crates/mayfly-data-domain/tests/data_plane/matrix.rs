@@ -64,6 +64,7 @@ fn should_define_every_pair_when_each_session_state_meets_each_stimulus() {
         ("welcome_e5", LinkStimulus::Welcome(welcome(5, 1, 0))),
         ("welcome_e6", LinkStimulus::Welcome(welcome(6, 1, 0))),
         ("welcome_e6_v1.1", LinkStimulus::Welcome(welcome(6, 1, 1))),
+        ("welcome_e6_v1.2", LinkStimulus::Welcome(welcome(6, 1, 2))),
         ("welcome_e6_v2.0", LinkStimulus::Welcome(welcome(6, 2, 0))),
         ("floor_raised_e5", LinkStimulus::FloorRaised(Epoch::new(5))),
         ("floor_raised_e6", LinkStimulus::FloorRaised(Epoch::new(6))),
@@ -123,6 +124,16 @@ fn should_define_every_pair_when_each_directive_phase_meets_each_stimulus() {
         ),
         ("reobserve_failed", Stimulus::ReObserveFailed),
         (
+            "satisfied_vm_deleted",
+            Stimulus::Satisfied(ObservationKind::VmDeleted),
+        ),
+        (
+            "satisfied_a_refusal",
+            Stimulus::Satisfied(ObservationKind::DirectiveRefused {
+                reason: RefusalReason::ProofMismatch,
+            }),
+        ),
+        (
             "applied_vm_cloned",
             Stimulus::Applied(ObservationKind::VmCloned {
                 instance_id: mayfly_domain::Sample::sample(),
@@ -158,6 +169,10 @@ fn should_define_every_pair_when_each_directive_phase_meets_each_stimulus() {
         (
             "ambiguous_stale_epoch",
             Stimulus::Ambiguous(UnknownReason::StaleEpoch),
+        ),
+        (
+            "ambiguous_listing_incomplete",
+            Stimulus::Ambiguous(UnknownReason::ListingIncomplete),
         ),
     ];
     let mut text = String::from(
@@ -331,10 +346,10 @@ fn admission_case(
         ledger.vms.insert(
             vm(1),
             mayfly_data_domain::VmUse {
-                guest: GuestOs::Macos,
+                guest: Some(GuestOs::Macos),
                 running: false,
-                memory_bytes: 0,
-                disk_bytes: 0,
+                memory_bytes: None,
+                disk_bytes: Some(0),
             },
         );
     }
@@ -406,11 +421,20 @@ fn should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_hos
         "disk_low_water",
         "all_reserved",
         "target_already_there",
+        "nothing_listed_yet",
+        "images_not_listed_yet",
+        "a_running_vm_of_unknown_memory",
+        "a_running_vm_of_unknown_guest",
+        "a_vm_of_unknown_disk",
+        "target_of_unknown_guest",
+        "foreign_memory_unsized",
     ];
     let mut text = String::from(
         "# ledger: each kind that needs a fit against each host: its demand (slots, macOS \
          guests, memory GiB, disk GiB) and the fit.\n# Attempt 1's VM is cloned and stopped \
-         (macOS); a clone targets attempt 2's new VM unless the target is already there.\n",
+         (macOS); a clone targets attempt 2's new VM unless the target is already there.\n# \
+         ADR 0052: a host that does not know a fact refuses what needs it capacity_unknown; \
+         the VM of unknown facts is attempt 9's, listed by a complete inventory.\n",
     );
 
     // when
@@ -427,16 +451,60 @@ fn should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_hos
                 "no_disk" => probe.totals.resources.disk_bytes = super::support::GIB,
                 "disk_low_water" => probe.disk_low_water = true,
                 "all_reserved" => probe.reserve = probe.totals,
+                "foreign_memory_unsized" => {
+                    probe
+                        .foreign_unsized
+                        .insert(mayfly_protocol::ResourceDimension::Memory);
+                }
                 _ => {}
             }
-            let mut ledger = ledger(probe);
+            let mut ledger = match host_name {
+                "nothing_listed_yet" => super::support::unlisted(probe),
+                "images_not_listed_yet" => {
+                    let mut l = super::support::unlisted(probe);
+                    l.apply_inventory(&mayfly_data_domain::Inventory::Complete { vms: Vec::new() });
+                    l
+                }
+                _ => ledger(probe),
+            };
+            let unknown_vm = |running: bool,
+                              guest: Option<GuestOs>,
+                              memory_bytes: Option<u64>,
+                              disk_bytes: Option<u64>| {
+                mayfly_data_domain::VmUse {
+                    guest,
+                    running,
+                    memory_bytes,
+                    disk_bytes,
+                }
+            };
+            let gib = super::support::GIB;
+            match host_name {
+                "a_running_vm_of_unknown_memory" => {
+                    ledger.vms.insert(
+                        vm(9),
+                        unknown_vm(true, Some(GuestOs::Linux), None, Some(80 * gib)),
+                    );
+                }
+                "a_running_vm_of_unknown_guest" => {
+                    ledger
+                        .vms
+                        .insert(vm(9), unknown_vm(true, None, Some(8 * gib), Some(80 * gib)));
+                }
+                "a_vm_of_unknown_disk" => {
+                    ledger
+                        .vms
+                        .insert(vm(9), unknown_vm(false, Some(GuestOs::Linux), None, None));
+                }
+                _ => {}
+            }
             ledger.vms.insert(
                 vm(1),
                 mayfly_data_domain::VmUse {
-                    guest: GuestOs::Macos,
+                    guest: Some(GuestOs::Macos),
                     running: false,
-                    memory_bytes: 0,
-                    disk_bytes: 0,
+                    memory_bytes: None,
+                    disk_bytes: Some(0),
                 },
             );
             let mut kind = kind.clone();
@@ -452,7 +520,7 @@ fn should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_hos
                         ledger.bases.insert(
                             base_name.clone(),
                             mayfly_data_domain::BaseUse {
-                                guest: GuestOs::Linux,
+                                guest: Some(GuestOs::Linux),
                                 disk_bytes: 1,
                             },
                         );
@@ -466,20 +534,36 @@ fn should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_hos
                     _ => {}
                 }
             }
-            let demand = ledger.demand(&kind);
-            let fit = match ledger.fits(demand) {
-                Ok(()) => "fits".to_owned(),
-                Err(dimension) => format!("short of {}", variant(&format!("{dimension:?}"))),
+            if host_name == "target_of_unknown_guest"
+                && let Some(vm) = ledger.vms.get_mut(&vm(1))
+            {
+                vm.guest = None;
+            }
+            let line = match ledger.demand(&kind) {
+                Ok(demand) => {
+                    let fit = match ledger.fits(demand) {
+                        Ok(()) => "fits".to_owned(),
+                        Err(RefusalReason::InsufficientResources { dimension }) => {
+                            format!("short of {}", variant(&format!("{dimension:?}")))
+                        }
+                        Err(other) => format!("refused {}", refusal(&other)),
+                    };
+                    format!(
+                        "demand ({}, {}, {}, {}) {fit}",
+                        demand.vm_slots,
+                        demand.macos_guests,
+                        demand.resources.memory_bytes / gib,
+                        demand.resources.disk_bytes / gib,
+                    )
+                }
+                Err(dimension) => {
+                    format!("demand unknown in {}", variant(&format!("{dimension:?}")))
+                }
             };
-            let gib = super::support::GIB;
             let _ = writeln!(
                 text,
-                "{} x {host_name} -> demand ({}, {}, {}, {}) {fit}",
+                "{} x {host_name} -> {line}",
                 variant(&format!("{:?}", kind.tag())),
-                demand.vm_slots,
-                demand.macos_guests,
-                demand.resources.memory_bytes / gib,
-                demand.resources.disk_bytes / gib,
             );
         }
     }
@@ -585,6 +669,17 @@ fn should_answer_every_effect_when_it_is_applied_in_its_session() {
     // when
     for kind in every_kind() {
         let mut dp = super::support::open();
+        if kind.tag() != DirectiveTag::CloneVm {
+            dp.ledger.vms.insert(
+                vm(1),
+                mayfly_data_domain::VmUse {
+                    guest: Some(GuestOs::Macos),
+                    running: false,
+                    memory_bytes: None,
+                    disk_bytes: Some(0),
+                },
+            );
+        }
         let d = directive(1, EPOCH, kind.clone());
         let first = dp.receive(V1_0, &d, NOW);
         if first == mayfly_data_domain::Receipt::ReObserve {

@@ -30,8 +30,9 @@ pub use link::{
 pub use observation::{
     Capacity, CapacityConstraint, CapacityReport, DiagnosticsLoss, DirectiveOutcome, DirectiveRef,
     GuestFacts, GuestOs, GuestRejection, HostFacts, InventoryGap, Observation, ObservationKind,
-    RefusalReason, ResourceDimension, UnknownReason, VmObservation,
+    RefusalReason, ResourceDimension, UnknownCapacity, UnknownCause, UnknownReason, VmObservation,
 };
 pub use version::{
-    CURRENT, ProtocolVersion, SUPPORTED, VersionRefusal, admit_frame, handshake_version, negotiate,
+    CURRENT, ProtocolVersion, SUPPORTED, UNKNOWN_FACTS, VersionRefusal, admit_frame,
+    handshake_version, negotiate,
 };

@@ -1,0 +1,40 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 1
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": {
+        "directive_id": "000000000000000000000000000000d1",
+        "attempt": {
+          "attempt_id": "0000000000000000000000000a11ce01",
+          "generation": 1
+        }
+      },
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "inventory": {
+          "vms": [
+            {
+              "name": "mf-pool0-host0-s1-g1-0a11ce01",
+              "instance_id": "0a:1b:2c:3d:4e:5f",
+              "running": true,
+              "guest": "macos",
+              "memory_bytes": 8589934592,
+              "disk_bytes": 85899345920
+            },
+            {
+              "name": "macos-sequoia-dev",
+              "instance_id": null,
+              "running": false,
+              "guest": "linux"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

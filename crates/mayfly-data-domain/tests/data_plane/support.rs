@@ -19,6 +19,8 @@ pub const EPOCH: Epoch = Epoch::new(5);
 /// The clock reading every directive is received at, well before its deadline.
 pub const NOW: Millis = Millis::new(1_000);
 pub const V1_0: ProtocolVersion = ProtocolVersion::new(1, 0);
+/// The minor that carries what the data plane cannot determine (ADR 0052, ADR 0053).
+pub const V1_1: ProtocolVersion = ProtocolVersion::new(1, 1);
 
 pub fn host() -> HostId {
     HostId::sample()
@@ -63,11 +65,12 @@ pub fn proof(n: u128) -> OwnershipProof {
     }
 }
 
-/// A re-observation of `name` with `instance_id`.
+/// A re-observation of `name` with `instance_id`, running.
 pub fn seen(name: OwnedVmName, instance_id: ProviderInstanceId) -> Reobservation {
     Reobservation {
         vm_name: name,
         instance_id,
+        running: true,
     }
 }
 
@@ -167,24 +170,43 @@ pub fn roomy() -> HostProbe {
         totals: capacity(4, 2, 64, 1000),
         reserve: Capacity::default(),
         foreign: Capacity::default(),
+        foreign_unsized: std::collections::BTreeSet::new(),
         disk_low_water: false,
         memory_pressure: false,
         hypervisor_limit: false,
     }
 }
 
+/// A ledger over `probe` that has read a complete inventory and the image store, both empty:
+/// everything it counts is known.
 pub fn ledger(probe: HostProbe) -> Ledger {
+    let mut ledger = unlisted(probe);
+    ledger.apply_inventory(&mayfly_data_domain::Inventory::Complete { vms: Vec::new() });
+    ledger.apply_images(
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeMap::new(),
+    );
+    ledger
+}
+
+/// A ledger over `probe` as a start leaves it: nothing listed yet (ADR 0052).
+pub fn unlisted(probe: HostProbe) -> Ledger {
     Ledger::new(sizing(), probe)
 }
 
-/// A data plane whose session is open at [`EPOCH`] in `mode` over `ledger`.
+/// A data plane whose session is open at [`EPOCH`] in `mode` over `ledger`, at v1.0.
 pub fn open_with(mode: Mode, ledger: Ledger) -> DataPlane {
+    open_at(V1_0, mode, ledger)
+}
+
+/// A data plane whose session is open at [`EPOCH`] and `version` in `mode` over `ledger`.
+pub fn open_at(version: ProtocolVersion, mode: Mode, ledger: Ledger) -> DataPlane {
     let mut dp = DataPlane::start(host(), Epoch::new(4), ledger);
     dp.link(LinkStimulus::Hello);
     dp.link(LinkStimulus::Welcome(Welcome {
         epoch: EPOCH,
         mode,
-        accepted_version: V1_0,
+        accepted_version: version,
     }));
     let entered = dp.link(LinkStimulus::FloorRaised(EPOCH));
     assert_eq!(entered, LinkOutcome::Entered(EPOCH));
@@ -227,6 +249,9 @@ pub fn refusal(reason: &RefusalReason) -> String {
                 "insufficient_resources({})",
                 variant(&format!("{dimension:?}"))
             )
+        }
+        RefusalReason::CapacityUnknown { dimension } => {
+            format!("capacity_unknown({})", variant(&format!("{dimension:?}")))
         }
         other => variant(&format!("{other:?}")),
     }
@@ -296,6 +321,7 @@ pub fn applied(kind: &DirectiveKind) -> ObservationKind {
                 free: Capacity::default(),
                 foreign: Capacity::default(),
                 reasons: std::collections::BTreeSet::new(),
+                unknown: Vec::new(),
             })
         }
         DirectiveKind::ReportHostFacts => ObservationKind::HostFacts(mayfly_protocol::HostFacts {

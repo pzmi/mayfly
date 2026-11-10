@@ -15,6 +15,7 @@ use mayfly_domain::{
 use serde::{Deserialize, Serialize};
 
 use crate::directive::{AttemptRef, BaseName};
+use crate::version::{ProtocolVersion, UNKNOWN_FACTS};
 
 /// One observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +184,68 @@ impl ObservationKind {
             | Self::HypervisorLimitHit => None,
         }
     }
+
+    /// The observation as a frame of a session at `version` may carry it: a frame never uses
+    /// more than the minor the session accepted (plan §3.2). Below [`UNKNOWN_FACTS`] (1.1) a
+    /// `capacity_unknown` refusal is written `insufficient_resources` of the same dimension (a
+    /// definite refusal either way), a `listing_incomplete` unknown reason `deadline` (an
+    /// unknown outcome either way), and a report's `unknown` dimensions and a listed VM's facts
+    /// are left out; a report's `free` is already zero in every unknown dimension, so a reader
+    /// of 1.0 allocates nothing there (ADR 0052). Pinned by
+    /// `should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts`.
+    #[must_use]
+    pub fn written_in(self, version: ProtocolVersion) -> Self {
+        if version >= UNKNOWN_FACTS {
+            return self;
+        }
+        match self {
+            Self::DirectiveRefused {
+                reason: RefusalReason::CapacityUnknown { dimension },
+            } => Self::DirectiveRefused {
+                reason: RefusalReason::InsufficientResources { dimension },
+            },
+            Self::OutcomeUnknown {
+                reason: UnknownReason::ListingIncomplete,
+            } => Self::OutcomeUnknown {
+                reason: UnknownReason::Deadline,
+            },
+            Self::CapacityReported(report) => Self::CapacityReported(CapacityReport {
+                unknown: Vec::new(),
+                ..report
+            }),
+            Self::Inventory { vms } => Self::Inventory {
+                vms: vms
+                    .into_iter()
+                    .map(|vm| VmObservation {
+                        guest: None,
+                        memory_bytes: None,
+                        disk_bytes: None,
+                        ..vm
+                    })
+                    .collect(),
+            },
+            other @ (Self::VmCloned { .. }
+            | Self::VmBooted
+            | Self::GuestVerified { .. }
+            | Self::GuestRejected { .. }
+            | Self::RunnerLaunched
+            | Self::RunnerLaunchUnknown
+            | Self::RunnerExited { .. }
+            | Self::DiagnosticsExported { .. }
+            | Self::DiagnosticsLost { .. }
+            | Self::VmStopped
+            | Self::VmDeleted
+            | Self::VmObservedStopped { .. }
+            | Self::InventoryIncomplete { .. }
+            | Self::HostFacts(..)
+            | Self::HypervisorLimitHit
+            | Self::ImagePulled { .. }
+            | Self::ImageMaterialised { .. }
+            | Self::ImageEvicted { .. }
+            | Self::DirectiveRefused { .. }
+            | Self::OutcomeUnknown { .. }) => other,
+        }
+    }
 }
 
 /// The guest's claims after a successful challenge.
@@ -237,6 +300,14 @@ pub enum RefusalReason {
         /// The first dimension that does not fit.
         dimension: ResourceDimension,
     },
+    /// It needs a dimension whose free amount the data plane cannot determine: a VM's size or
+    /// guest is not known, or no listing has been read since the start (ADR 0052). Nothing is
+    /// assumed in its place; the dimension comes back when a listing describes it. Written
+    /// from protocol 1.1 ([`crate::UNKNOWN_FACTS`]).
+    CapacityUnknown {
+        /// The first dimension that is not known.
+        dimension: ResourceDimension,
+    },
     /// The re-observed VM does not match the ownership proof (ADR 0026).
     ProofMismatch,
     /// The session is in safe mode and the kind is held (I29).
@@ -263,6 +334,11 @@ pub enum ResourceDimension {
     Disk,
 }
 
+impl ResourceDimension {
+    /// Every dimension, in the order the ledger checks them.
+    pub const ALL: [Self; 4] = [Self::VmSlots, Self::MacosGuests, Self::Memory, Self::Disk];
+}
+
 /// Why an outcome is not known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,6 +352,10 @@ pub enum UnknownReason {
     /// The frame was of an older session (I09): it was not executed now, and an earlier
     /// delivery of the same directive may have taken effect (ADR 0042).
     StaleEpoch,
+    /// The target of a `StopVm` or `DeleteVm` could not be re-observed: the listing failed, did
+    /// not parse or did not finish, so it says nothing about the target (I25), and an earlier
+    /// delivery may have taken effect; never `Done` (ADR 0053). Written from protocol 1.1.
+    ListingIncomplete,
 }
 
 /// One VM the provider lists.
@@ -288,6 +368,16 @@ pub struct VmObservation {
     pub instance_id: Option<ProviderInstanceId>,
     /// Whether it runs.
     pub running: bool,
+    /// Its guest operating system, when the provider describes it; `None` is not known, never
+    /// a default (ADR 0052). From protocol 1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestOs>,
+    /// The memory it runs with, when the provider describes it. From protocol 1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    /// Its disk ceiling, when the provider describes it. From protocol 1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 /// Why an inventory is incomplete.
@@ -317,6 +407,39 @@ pub struct CapacityReport {
     pub foreign: Capacity,
     /// What currently constrains the host.
     pub reasons: BTreeSet<CapacityConstraint>,
+    /// The dimensions whose free amount the data plane cannot determine, each with why (ADR
+    /// 0052). In each, `used` counts only what is known and `free` is zero, so nothing is
+    /// allocated there until a listing describes it. Empty (and left out) when everything is
+    /// known; from protocol 1.1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<UnknownCapacity>,
+}
+
+/// One dimension the data plane cannot determine, and why (ADR 0052).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownCapacity {
+    /// The dimension.
+    pub dimension: ResourceDimension,
+    /// Every cause, so `mayfly status` and `doctor` can name what to fix.
+    pub causes: BTreeSet<UnknownCause>,
+}
+
+/// Why a dimension is not known (ADR 0052).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownCause {
+    /// No complete inventory has been read since the data plane started: our VMs are not known.
+    InventoryNotRead,
+    /// No image-store listing has been read since the data plane started.
+    ImagesNotRead,
+    /// The host probe could not size a VM that is not ours.
+    ForeignVmUnsized,
+    /// A listed VM with the `mf-` prefix whose fact for this dimension is not known (its guest,
+    /// its memory while it runs, or its disk).
+    VmFactUnknown {
+        /// The VM's name as listed.
+        vm_name: String,
+    },
 }
 
 /// One amount per ledger dimension.
@@ -398,5 +521,94 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    fn report_with_unknown_memory() -> CapacityReport {
+        CapacityReport {
+            report_id: 1,
+            totals: Capacity::default(),
+            used: Capacity::default(),
+            free: Capacity::default(),
+            foreign: Capacity::default(),
+            reasons: BTreeSet::new(),
+            unknown: vec![UnknownCapacity {
+                dimension: ResourceDimension::Memory,
+                causes: BTreeSet::from([UnknownCause::VmFactUnknown {
+                    vm_name: "mf-x".to_owned(),
+                }]),
+            }],
+        }
+    }
+
+    #[test]
+    fn should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts() {
+        // given
+        let v1_0 = ProtocolVersion::new(1, 0);
+        let described = VmObservation {
+            name: "mf-x".to_owned(),
+            instance_id: None,
+            running: true,
+            guest: Some(GuestOs::Linux),
+            memory_bytes: Some(1),
+            disk_bytes: Some(2),
+        };
+        let kinds = [
+            ObservationKind::DirectiveRefused {
+                reason: RefusalReason::CapacityUnknown {
+                    dimension: ResourceDimension::Disk,
+                },
+            },
+            ObservationKind::OutcomeUnknown {
+                reason: UnknownReason::ListingIncomplete,
+            },
+            ObservationKind::CapacityReported(report_with_unknown_memory()),
+            ObservationKind::Inventory {
+                vms: vec![described.clone()],
+            },
+            ObservationKind::VmDeleted,
+        ];
+
+        // when
+        let old = kinds.clone().map(|k| k.written_in(v1_0));
+        let current = kinds.clone().map(|k| k.written_in(UNKNOWN_FACTS));
+
+        // then
+        assert_eq!(current, kinds, "a 1.1 session carries everything");
+        assert_eq!(
+            old,
+            [
+                ObservationKind::DirectiveRefused {
+                    reason: RefusalReason::InsufficientResources {
+                        dimension: ResourceDimension::Disk,
+                    },
+                },
+                ObservationKind::OutcomeUnknown {
+                    reason: UnknownReason::Deadline,
+                },
+                ObservationKind::CapacityReported(CapacityReport {
+                    unknown: Vec::new(),
+                    ..report_with_unknown_memory()
+                }),
+                ObservationKind::Inventory {
+                    vms: vec![VmObservation {
+                        guest: None,
+                        memory_bytes: None,
+                        disk_bytes: None,
+                        ..described
+                    }],
+                },
+                ObservationKind::VmDeleted,
+            ]
+        );
+        for kind in &old {
+            let text = serde_json::to_string(kind).expect("encodes");
+            assert!(
+                !text.contains("capacity_unknown")
+                    && !text.contains("listing_incomplete")
+                    && !text.contains("\"unknown\":")
+                    && !text.contains("\"guest\":"),
+                "{text}"
+            );
+        }
     }
 }

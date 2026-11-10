@@ -1,0 +1,84 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 1
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": {
+        "directive_id": "000000000000000000000000000000d1",
+        "attempt": {
+          "attempt_id": "0000000000000000000000000a11ce01",
+          "generation": 1
+        }
+      },
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "capacity_reported": {
+          "report_id": 3,
+          "totals": {
+            "vm_slots": 4,
+            "macos_guests": 2,
+            "resources": {
+              "memory_bytes": 68719476736,
+              "disk_bytes": 536870912000
+            }
+          },
+          "used": {
+            "vm_slots": 2,
+            "macos_guests": 1,
+            "resources": {
+              "memory_bytes": 25769803776,
+              "disk_bytes": 193273528320
+            }
+          },
+          "free": {
+            "vm_slots": 2,
+            "macos_guests": 0,
+            "resources": {
+              "memory_bytes": 0,
+              "disk_bytes": 343597383680
+            }
+          },
+          "foreign": {
+            "vm_slots": 1,
+            "macos_guests": 1,
+            "resources": {
+              "memory_bytes": 8589934592,
+              "disk_bytes": 64424509440
+            }
+          },
+          "reasons": [
+            "foreign_guests",
+            "operator_reserve"
+          ],
+          "unknown": [
+            {
+              "dimension": "macos_guests",
+              "causes": [
+                {
+                  "vm_fact_unknown": {
+                    "vm_name": "mf-pool0-host0-s1-g1-0a11ce01"
+                  }
+                }
+              ]
+            },
+            {
+              "dimension": "memory",
+              "causes": [
+                "foreign_vm_unsized",
+                {
+                  "vm_fact_unknown": {
+                    "vm_name": "mf-pool0-host0-s1-g1-0a11ce01"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

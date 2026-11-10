@@ -1,5 +1,6 @@
 # ledger: each kind that needs a fit against each host: its demand (slots, macOS guests, memory GiB, disk GiB) and the fit.
 # Attempt 1's VM is cloned and stopped (macOS); a clone targets attempt 2's new VM unless the target is already there.
+# ADR 0052: a host that does not know a fact refuses what needs it capacity_unknown; the VM of unknown facts is attempt 9's, listed by a complete inventory.
 pull_image x roomy -> demand (0, 0, 0, 50) fits
 pull_image x no_slot -> demand (0, 0, 0, 50) fits
 pull_image x slots_taken_by_foreign_vms -> demand (0, 0, 0, 50) fits
@@ -11,6 +12,13 @@ pull_image x no_disk -> demand (0, 0, 0, 50) short of disk
 pull_image x disk_low_water -> demand (0, 0, 0, 50) short of disk
 pull_image x all_reserved -> demand (0, 0, 0, 50) short of disk
 pull_image x target_already_there -> demand (0, 0, 0, 0) fits
+pull_image x nothing_listed_yet -> demand (0, 0, 0, 50) refused capacity_unknown(disk)
+pull_image x images_not_listed_yet -> demand (0, 0, 0, 50) refused capacity_unknown(disk)
+pull_image x a_running_vm_of_unknown_memory -> demand (0, 0, 0, 50) fits
+pull_image x a_running_vm_of_unknown_guest -> demand (0, 0, 0, 50) fits
+pull_image x a_vm_of_unknown_disk -> demand (0, 0, 0, 50) refused capacity_unknown(disk)
+pull_image x target_of_unknown_guest -> demand (0, 0, 0, 50) fits
+pull_image x foreign_memory_unsized -> demand (0, 0, 0, 50) fits
 materialise_image x roomy -> demand (0, 0, 0, 60) fits
 materialise_image x no_slot -> demand (0, 0, 0, 60) fits
 materialise_image x slots_taken_by_foreign_vms -> demand (0, 0, 0, 60) fits
@@ -22,6 +30,13 @@ materialise_image x no_disk -> demand (0, 0, 0, 60) short of disk
 materialise_image x disk_low_water -> demand (0, 0, 0, 60) short of disk
 materialise_image x all_reserved -> demand (0, 0, 0, 60) short of disk
 materialise_image x target_already_there -> demand (0, 0, 0, 0) fits
+materialise_image x nothing_listed_yet -> demand (0, 0, 0, 60) refused capacity_unknown(disk)
+materialise_image x images_not_listed_yet -> demand (0, 0, 0, 60) refused capacity_unknown(disk)
+materialise_image x a_running_vm_of_unknown_memory -> demand (0, 0, 0, 60) fits
+materialise_image x a_running_vm_of_unknown_guest -> demand (0, 0, 0, 60) fits
+materialise_image x a_vm_of_unknown_disk -> demand (0, 0, 0, 60) refused capacity_unknown(disk)
+materialise_image x target_of_unknown_guest -> demand (0, 0, 0, 60) fits
+materialise_image x foreign_memory_unsized -> demand (0, 0, 0, 60) fits
 clone_vm x roomy -> demand (1, 0, 0, 80) fits
 clone_vm x no_slot -> demand (1, 0, 0, 80) short of vm_slots
 clone_vm x slots_taken_by_foreign_vms -> demand (1, 0, 0, 80) short of vm_slots
@@ -33,6 +48,13 @@ clone_vm x no_disk -> demand (1, 0, 0, 80) short of disk
 clone_vm x disk_low_water -> demand (1, 0, 0, 80) short of disk
 clone_vm x all_reserved -> demand (1, 0, 0, 80) short of vm_slots
 clone_vm x target_already_there -> demand (0, 0, 0, 0) fits
+clone_vm x nothing_listed_yet -> demand (1, 0, 0, 80) refused capacity_unknown(vm_slots)
+clone_vm x images_not_listed_yet -> demand (1, 0, 0, 80) refused capacity_unknown(disk)
+clone_vm x a_running_vm_of_unknown_memory -> demand (1, 0, 0, 80) fits
+clone_vm x a_running_vm_of_unknown_guest -> demand (1, 0, 0, 80) fits
+clone_vm x a_vm_of_unknown_disk -> demand (1, 0, 0, 80) refused capacity_unknown(disk)
+clone_vm x target_of_unknown_guest -> demand (1, 0, 0, 80) fits
+clone_vm x foreign_memory_unsized -> demand (1, 0, 0, 80) fits
 start_vm x roomy -> demand (0, 1, 8, 80) fits
 start_vm x no_slot -> demand (0, 1, 8, 80) fits
 start_vm x slots_taken_by_foreign_vms -> demand (0, 1, 8, 80) fits
@@ -44,3 +66,10 @@ start_vm x no_disk -> demand (0, 1, 8, 80) short of disk
 start_vm x disk_low_water -> demand (0, 1, 8, 80) short of disk
 start_vm x all_reserved -> demand (0, 1, 8, 80) short of macos_guests
 start_vm x target_already_there -> demand (0, 0, 0, 0) fits
+start_vm x nothing_listed_yet -> demand (0, 1, 8, 80) refused capacity_unknown(macos_guests)
+start_vm x images_not_listed_yet -> demand (0, 1, 8, 80) refused capacity_unknown(disk)
+start_vm x a_running_vm_of_unknown_memory -> demand (0, 1, 8, 80) refused capacity_unknown(memory)
+start_vm x a_running_vm_of_unknown_guest -> demand (0, 1, 8, 80) refused capacity_unknown(macos_guests)
+start_vm x a_vm_of_unknown_disk -> demand (0, 1, 8, 80) refused capacity_unknown(disk)
+start_vm x target_of_unknown_guest -> demand unknown in macos_guests
+start_vm x foreign_memory_unsized -> demand (0, 1, 8, 80) refused capacity_unknown(memory)

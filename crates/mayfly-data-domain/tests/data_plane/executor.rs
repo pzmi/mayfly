@@ -1,9 +1,10 @@
 //! The executor's rules, one test per `Accept:` clause of KER-08 and per curated mutant it
-//! kills (ver §9: 13 old epoch, 17 duplicate id, 24 no fit, 25 instance id not re-read).
+//! kills (ver §9: 13 old epoch, 17 duplicate id, 24 no fit, 25 instance id not re-read), and
+//! the idempotent destructive directives of ADR 0053.
 
 use mayfly_data_domain::{
-    DataPlane, LinkIgnored, LinkOutcome, LinkStimulus, Misfit, Progress, Receipt, Stimulus,
-    answered_kind, proof_of,
+    DataPlane, LinkIgnored, LinkOutcome, LinkStimulus, Misfit, Progress, Receipt, Reobservation,
+    Stimulus, answered_kind, proof_of,
 };
 use mayfly_domain::{Deadline, DirectiveId, Epoch, Generation, Millis, Sample};
 use mayfly_protocol::{
@@ -12,8 +13,8 @@ use mayfly_protocol::{
 };
 
 use super::support::{
-    EPOCH, NOW, V1_0, applied, base, capacity, directive, every_kind, host, instance, ledger, open,
-    open_with, proof, roomy, seen, seen_as_proved, vm,
+    EPOCH, NOW, V1_0, V1_1, applied, base, capacity, directive, every_kind, host, instance, ledger,
+    open, open_at, open_with, proof, roomy, seen, seen_as_proved, unlisted, vm,
 };
 
 fn reply_kind(receipt: &Receipt) -> ObservationKind {
@@ -329,32 +330,170 @@ fn should_check_the_proof_against_its_name_only_when_the_directive_has_no_attemp
     );
 }
 
+fn stop(n: u128) -> DirectiveKind {
+    DirectiveKind::StopVm {
+        grace: Millis::new(1),
+        proof: proof(n),
+    }
+}
+
 #[test]
-fn should_refuse_proof_mismatch_when_the_vm_is_gone_at_reobservation() {
+fn should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone() {
     // given
     let mut dp = open();
-    let d = directive(1, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
+    let d = directive(1, EPOCH, stop(1));
     dp.receive(V1_0, &d, NOW);
 
     // when
     let got = dp.reobserved(EPOCH, d.directive_id, None);
 
     // then
-    assert_eq!(progress_kind(&got), refused(RefusalReason::ProofMismatch));
+    assert_eq!(
+        progress_kind(&got),
+        refused(RefusalReason::ProofMismatch),
+        "an absent VM is not a stopped one: the inventory reports the absence"
+    );
 }
 
 #[test]
-fn should_refuse_effect_failed_when_the_target_cannot_be_reobserved() {
-    // given
+fn should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent() {
+    // given: attempt 1's VM cloned and deleted in session 5
     let mut dp = open();
-    let d = directive(1, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
-    dp.receive(V1_0, &d, NOW);
+    let clone = directive(1, EPOCH, clone(1));
+    dp.receive(V1_0, &clone, NOW);
+    dp.finish(
+        EPOCH,
+        clone.directive_id,
+        Stimulus::Applied(applied(&clone.kind)),
+    );
+    let first = directive(2, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
+    dp.receive(V1_0, &first, NOW);
+    dp.reobserved(EPOCH, first.directive_id, Some(&seen_as_proved(1)));
+    dp.finish(
+        EPOCH,
+        first.directive_id,
+        Stimulus::Applied(ObservationKind::VmDeleted),
+    );
+    reconnect(&mut dp, 6);
+    let resent = directive(
+        3,
+        Epoch::new(6),
+        DirectiveKind::DeleteVm { proof: proof(1) },
+    );
 
     // when
-    let got = dp.reobserve_failed(EPOCH, d.directive_id);
+    let receipt = dp.receive(V1_0, &resent, NOW);
+    let got = dp.reobserved(Epoch::new(6), resent.directive_id, None);
+    let repeat = dp.receive(V1_0, &resent, NOW);
 
     // then
-    assert_eq!(progress_kind(&got), refused(RefusalReason::EffectFailed));
+    assert_eq!(
+        receipt,
+        Receipt::ReObserve,
+        "the target is re-observed first"
+    );
+    assert_eq!(
+        progress_kind(&got),
+        ObservationKind::VmDeleted,
+        "absent on a complete listing: done, whoever deleted it (ADR 0053)"
+    );
+    assert_eq!(
+        reply_kind(&repeat),
+        ObservationKind::VmDeleted,
+        "same id, first outcome"
+    );
+    assert!(dp.ledger.vms.is_empty());
+}
+
+#[test]
+fn should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete() {
+    // given
+    let delete = directive(1, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
+    let mut current = open_at(V1_1, Mode::Normal, ledger(roomy()));
+    let mut older = open();
+    current.receive(V1_0, &delete, NOW);
+    older.receive(V1_0, &delete, NOW);
+
+    // when
+    let got = current.reobserve_failed(EPOCH, delete.directive_id);
+    let got_in_1_0 = older.reobserve_failed(EPOCH, delete.directive_id);
+
+    // then
+    assert_eq!(
+        progress_kind(&got),
+        ObservationKind::OutcomeUnknown {
+            reason: UnknownReason::ListingIncomplete,
+        },
+        "an incomplete listing says nothing about the target (I25)"
+    );
+    assert_eq!(
+        progress_kind(&got_in_1_0),
+        ObservationKind::OutcomeUnknown {
+            reason: UnknownReason::Deadline,
+        },
+        "a 1.0 session reads it as an unknown outcome too"
+    );
+}
+
+#[test]
+fn should_answer_done_when_a_stop_finds_its_proven_target_stopped() {
+    // given
+    let mut dp = open();
+    let d = directive(1, EPOCH, stop(1));
+    dp.receive(V1_0, &d, NOW);
+    let stopped = Reobservation {
+        running: false,
+        ..seen_as_proved(1)
+    };
+    let mut other = open();
+    let replaced = directive(1, EPOCH, stop(1));
+    other.receive(V1_0, &replaced, NOW);
+
+    // when
+    let got = dp.reobserved(EPOCH, d.directive_id, Some(&stopped));
+    let stopped_but_replaced = other.reobserved(
+        EPOCH,
+        replaced.directive_id,
+        Some(&Reobservation {
+            running: false,
+            ..seen(vm(1), instance("0a:00:00:00:00:02"))
+        }),
+    );
+
+    // then
+    assert_eq!(progress_kind(&got), ObservationKind::VmStopped);
+    assert_eq!(
+        progress_kind(&stopped_but_replaced),
+        refused(RefusalReason::ProofMismatch),
+        "stopped is not enough: the proof is checked first"
+    );
+}
+
+#[test]
+fn should_refuse_insufficient_resources_in_a_1_0_session_when_capacity_is_unknown() {
+    // given: nothing listed since the start
+    let d = directive(1, EPOCH, clone(1));
+    let mut current = open_at(V1_1, Mode::Normal, unlisted(roomy()));
+    let mut older = open_with(Mode::Normal, unlisted(roomy()));
+
+    // when
+    let got = current.receive(V1_0, &d, NOW);
+    let got_in_1_0 = older.receive(V1_0, &d, NOW);
+
+    // then
+    assert_eq!(
+        reply_kind(&got),
+        refused(RefusalReason::CapacityUnknown {
+            dimension: ResourceDimension::VmSlots,
+        })
+    );
+    assert_eq!(
+        reply_kind(&got_in_1_0),
+        refused(RefusalReason::InsufficientResources {
+            dimension: ResourceDimension::VmSlots,
+        }),
+        "a frame never uses more than the session's minor; refused either way"
+    );
 }
 
 #[test]

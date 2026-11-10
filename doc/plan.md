@@ -142,6 +142,11 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   `dp_version`; handshake frames are written in the oldest major the writer speaks, so the peer
   can always read and refuse them; a capacity report is ordered by `(epoch, report_id)`. The
   golden fixtures of `crates/mayfly-protocol/tests/fixtures/` show every kind and reason.
+- **Protocol 1.1 (DEC-04).** The refusal `capacity_unknown{dimension}` and a report's
+  `unknown: [{dimension, causes}]` (ADR 0052), the unknown reason `listing_incomplete` (ADR
+  0053) and a listed VM's optional `guest`, `memory_bytes` and `disk_bytes`. A frame never uses
+  more than the session's minor: a 1.0 session gets `insufficient_resources`, `deadline` and no
+  new fields (`ObservationKind::written_in`).
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly
@@ -366,7 +371,10 @@ Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → S
 `exit.json` rather than remembered. As built (KER-08): the state is a pure function of the last
 complete inventory's word and the shim's files, `Unobserved` until a complete inventory speaks
 (I25); a destructive directive is re-observed in `Executing` before its effect; a repeat of a
-directive still executing is answered when it settles.
+directive still executing is answered when it settles. Destructive directives are idempotent by
+outcome (ADR 0053): a `DeleteVm` whose target a complete re-observation does not list is `Done`
+(`VmDeleted`), a `StopVm` of a proven stopped VM is `Done` (`VmStopped`), and a re-observation
+that fails is `Unknown{listing_incomplete}`, never `Done`.
 
 ## 7. GitHub integration
 
@@ -491,7 +499,9 @@ observed name equals its `OwnedVmName` **and** the slot generation matches **and
 provider instance id equals the recorded one (ADR 0026). The control plane attaches an
 `OwnershipProof {attempt_id, host_id, run_epoch, slot, generation, vm_name, provider_instance_id}`
 to every destructive directive; the data plane re-observes right before acting and refuses on any
-mismatch, and refuses any name in its image-base set. A `mf-*` VM unknown to the journal is
+mismatch, and refuses any name in its image-base set. A present target that differs is never
+touched; an absent one, on a complete listing, answers a `DeleteVm` as done (ADR 0053), an
+incomplete listing never does (I25). A `mf-*` VM unknown to the journal is
 reported, never deleted (I04, F24); a VM whose ownership or outcome cannot be proven is quarantined
 and kept (ADR 0025).
 
@@ -502,7 +512,12 @@ and kept (ADR 0025).
 **The data plane accounts and enforces; the control plane allocates (ADR 0024).** Each host's data
 plane keeps a resource ledger (VM slots, memory, disk ceilings of live clones and bases, the two
 macOS-guest slots, operator reserves; ours and foreign VMs) rebuilt from observation, refuses any
-directive that does not fit (I33) and reports `CapacityReported`. The control plane's `Host`
+directive that does not fit (I33) and reports `CapacityReported`. It assumes no fact it does not
+have (ADR 0052): a VM whose size or guest is not described, our VMs before the first complete
+inventory, images before the first image listing and a foreign VM the probe cannot size make
+their dimensions unknown; what needs one is refused `capacity_unknown`, and the report lists
+the unknown dimensions with their causes and nothing free in them until a listing describes
+them. The control plane's `Host`
 applies the latest report and allocates leases within it; the pure capacity policy computes a
 `CapacityReport` per host and scale set: reported, allocated, admissible (reported minus reserves,
 closed terms and quarantined holds), deliverable per scale set (a carve-out so that Σ reported max

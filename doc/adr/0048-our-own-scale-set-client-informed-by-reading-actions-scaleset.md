@@ -4,8 +4,8 @@ Date: 2026-11-10
 
 ## Status
 
-Accepted (owner, 2026-11-10). Proposes an amendment of ADR 0028 (the registration token as an
-auth-chain step only), marked there.
+Accepted (owner, 2026-11-10). Amends ADR 0028 (the registration token as an auth-chain step
+only), marked there; the amendment accepted by the owner, 2026-11-10.
 
 ## Context
 
@@ -46,8 +46,8 @@ required in this case let's add it".
 5. **Registration token, refined.** The auth chain needs a runner registration token as the
    input of the Actions-service admin exchange (`doc/github-scaleset.md` §1). mayfly requests it
    for that purpose only and never registers a runner with it; ADR 0028's "no registration-token
-   client" means no classic registration path. This refinement is proposed as an amendment of
-   ADR 0028.
+   client" means no classic registration path. This refinement amends ADR 0028 (accepted by
+   the owner, 2026-11-10).
 
 ## Consequences
 

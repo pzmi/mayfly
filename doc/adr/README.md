@@ -73,11 +73,11 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0021](0021-a-storage-neutral-stream-scoped-event-store.md) | A storage-neutral, stream-scoped event store | Accepted. Amended by 0034 |
 | [0022](0022-strategic-ddd-with-a-data-oriented-implementation.md) | Strategic DDD with a data-oriented implementation | Accepted |
 | [0023](0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time | Accepted |
-| [0024](0024-the-data-plane-owns-host-resource-accounting.md) | The data plane owns host resource accounting | Accepted |
+| [0024](0024-the-data-plane-owns-host-resource-accounting.md) | The data plane owns host resource accounting | Accepted. Amended by 0052 |
 | [0025](0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine keeps evidence and Unknown resolves only by observation | Accepted |
-| [0026](0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Provider instance identity in the ownership proof and an external epoch floor | Accepted |
+| [0026](0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Provider instance identity in the ownership proof and an external epoch floor | Accepted. Amended by 0053 |
 | [0027](0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only trust tier in v0.x | Accepted |
-| [0028](0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only with prepared unregistered VMs | Accepted |
+| [0028](0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only with prepared unregistered VMs | Accepted. Amended by 0048 |
 | [0029](0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration reaper and the wire behaviour of pause, drain and safe mode | Accepted |
 | [0030](0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked into the image with refresh tooling | Accepted |
 | [0031](0031-service-modes-and-the-internal-watchdog.md) | Service modes and the internal watchdog | Accepted |
@@ -97,3 +97,5 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted |
 | [0046](0046-config-schema-v1-reads-raw-toml-secret-references-live-in-the-kernel-exit-codes.md) | Config schema v1 reads raw TOML, secret references live in the kernel, exit codes | Accepted |
 | [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted |
+| [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted |
+| [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted |

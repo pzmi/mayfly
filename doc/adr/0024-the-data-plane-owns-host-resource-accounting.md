@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09)
+Accepted (owner, 2026-11-09); amended by 0052
 
 ## Context
 
@@ -46,6 +46,10 @@ resources: "we must manage capacity; the data plane should manage resources".
 - A stale report can make the control plane over-reserve; the cost is a definite refusal and a
   retry on the next pass, never an overcommitted host.
 - Two ledgers must be kept honest; the conformance driver for scheduling compares them.
+
+Amended by ADR 0052 (2026-11-10): the ledger assumes nothing it does not know; a dimension it
+cannot determine refuses what needs it (`capacity_unknown`) and is reported with its causes and
+nothing free.
 
 ## Alternatives considered
 

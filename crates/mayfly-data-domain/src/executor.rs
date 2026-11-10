@@ -3,7 +3,9 @@
 //!
 //! Each directive of the open session moves `Received → Executing → Done | Refused | Unknown`
 //! ([`step`]); `Executing` re-observes the target first for a proof-carrying `StopVm` or
-//! `DeleteVm`. [`DataPlane::receive`] takes a frame and checks, in this order, the frame's
+//! `DeleteVm`, which are idempotent by outcome (ADR 0053): a delete whose target a complete
+//! listing shows absent, and a stop whose proven target is stopped, are `Done` without an
+//! effect; a re-observation that fails is `Unknown{listing_incomplete}`, never `Done` (I25). [`DataPlane::receive`] takes a frame and checks, in this order, the frame's
 //! version ([`mayfly_protocol::admit_frame`]), its epoch ([`mayfly_protocol::check_epoch`]: a
 //! frame of a session not entered is discarded, one of an older session answered
 //! `OutcomeUnknown{stale_epoch}` and never executed), the outcome table (a repeated id answers
@@ -27,13 +29,16 @@ use crate::link::{self, Link, LinkOutcome, LinkStimulus};
 pub const MAX_RUNNER_VERSION: usize = 64;
 
 /// What a re-observation found at a destructive directive's target, right before its effect
-/// (ADR 0026): the listed VM's parsed name (its generation included) and its instance id.
+/// (ADR 0026): the listed VM's parsed name (its generation included), its instance id and
+/// whether it runs (ADR 0053: a proven target already stopped answers a `StopVm` `Done`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reobservation {
     /// The listed name, parsed.
     pub vm_name: OwnedVmName,
     /// The provider's instance id of that VM.
     pub instance_id: ProviderInstanceId,
+    /// Whether the listing shows it running.
+    pub running: bool,
 }
 
 /// What `Executing` waits for.
@@ -72,8 +77,13 @@ pub enum Stimulus {
         /// Present with the proof's instance id.
         matches: bool,
     },
-    /// The target could not be re-observed: nothing was done.
+    /// The target could not be re-observed (the listing failed, did not parse or did not
+    /// finish): nothing was done now, and what an earlier delivery did is not known.
     ReObserveFailed,
+    /// The re-observation shows the directive's outcome already holds (ADR 0053): a `DeleteVm`
+    /// whose target a complete listing shows absent (`VmDeleted`), a `StopVm` whose proven
+    /// target is stopped (`VmStopped`). Answered as applied, without running the effect.
+    Satisfied(ObservationKind),
     /// The effect was applied; the observation says what was observed.
     Applied(ObservationKind),
     /// The effect failed definitely (`VmError::Definite`): nothing happened.
@@ -93,10 +103,11 @@ pub enum Misfit {
     NotRunning,
     /// The directive's outcome is recorded; nothing changes it in this session.
     Settled,
-    /// An `Applied` whose observation is a refusal, an unknown outcome, a fact that answers
-    /// nothing or an answer to another kind.
+    /// An `Applied` or `Satisfied` whose observation is a refusal, an unknown outcome, a fact
+    /// that answers nothing or an answer to another kind.
     NotAnApplication,
-    /// An effect cannot end `Unknown{stale_epoch}`: only fencing answers that.
+    /// An effect cannot end `Unknown{stale_epoch}` or `Unknown{listing_incomplete}`: only
+    /// fencing and a failed re-observation answer those.
     NotAnEffectOutcome,
 }
 
@@ -111,7 +122,9 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
         Phase::Received => match stimulus {
             Stimulus::Admit(stage) => Ok(Phase::Executing(stage)),
             Stimulus::Deny(reason) => Ok(Phase::Refused(reason)),
-            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed => Err(Misfit::NotReObserving),
+            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed | Stimulus::Satisfied(_) => {
+                Err(Misfit::NotReObserving)
+            }
             Stimulus::Applied(_) | Stimulus::Failed | Stimulus::Ambiguous(_) => {
                 Err(Misfit::NotRunning)
             }
@@ -121,30 +134,40 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             Stimulus::ReObserved { matches: false } => {
                 Ok(Phase::Refused(RefusalReason::ProofMismatch))
             }
-            Stimulus::ReObserveFailed => Ok(Phase::Refused(RefusalReason::EffectFailed)),
+            Stimulus::ReObserveFailed => Ok(Phase::Unknown(UnknownReason::ListingIncomplete)),
+            Stimulus::Satisfied(kind) => applied(kind),
             Stimulus::Admit(_) | Stimulus::Deny(_) => Err(Misfit::NotReceived),
             Stimulus::Applied(_) | Stimulus::Failed | Stimulus::Ambiguous(_) => {
                 Err(Misfit::NotRunning)
             }
         },
         Phase::Executing(Stage::Effect) => match stimulus {
-            Stimulus::Applied(kind) => match kind.outcome() {
-                Some(DirectiveOutcome::Applied) => Ok(Phase::Done(kind)),
-                Some(DirectiveOutcome::Refused(_) | DirectiveOutcome::Unknown) | None => {
-                    Err(Misfit::NotAnApplication)
-                }
-            },
+            Stimulus::Applied(kind) => applied(kind),
             Stimulus::Failed => Ok(Phase::Refused(RefusalReason::EffectFailed)),
             Stimulus::Ambiguous(reason) => match reason {
                 UnknownReason::Deadline | UnknownReason::ProcessLost | UnknownReason::HostSlept => {
                     Ok(Phase::Unknown(reason))
                 }
-                UnknownReason::StaleEpoch => Err(Misfit::NotAnEffectOutcome),
+                UnknownReason::StaleEpoch | UnknownReason::ListingIncomplete => {
+                    Err(Misfit::NotAnEffectOutcome)
+                }
             },
             Stimulus::Admit(_) | Stimulus::Deny(_) => Err(Misfit::NotReceived),
-            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed => Err(Misfit::NotReObserving),
+            Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed | Stimulus::Satisfied(_) => {
+                Err(Misfit::NotReObserving)
+            }
         },
         Phase::Done(_) | Phase::Refused(_) | Phase::Unknown(_) => Err(Misfit::Settled),
+    }
+}
+
+/// `Done` with an observation that says the effect was applied; anything else is a misfit.
+fn applied(kind: ObservationKind) -> Result<Phase, Misfit> {
+    match kind.outcome() {
+        Some(DirectiveOutcome::Applied) => Ok(Phase::Done(kind)),
+        Some(DirectiveOutcome::Refused(_) | DirectiveOutcome::Unknown) | None => {
+            Err(Misfit::NotAnApplication)
+        }
     }
 }
 
@@ -294,7 +317,7 @@ impl DataPlane {
                 directive_id: entry.directive.directive_id,
                 attempt: entry.directive.attempt,
             };
-            return match answer(&entry.directive, &entry.phase) {
+            return match answer(&entry.directive, &entry.phase, session.version) {
                 Some(kind) => Receipt::Reply(Box::new(Reply {
                     epoch: session.epoch,
                     answers: first,
@@ -307,9 +330,7 @@ impl DataPlane {
         let admitted = admission(session.mode, &self.host_id, &self.ledger, directive, now)
             .and_then(|stage| {
                 if directive.kind.needs_resource_fit() {
-                    self.ledger
-                        .reserve(key, &directive.kind)
-                        .map_err(|dimension| RefusalReason::InsufficientResources { dimension })?;
+                    self.ledger.reserve(key, &directive.kind)?;
                 }
                 Ok(stage)
             });
@@ -319,7 +340,7 @@ impl DataPlane {
         };
         let phase =
             step(&Phase::Received, stimulus).unwrap_or(Phase::Refused(RefusalReason::EffectFailed));
-        let receipt = match answer(directive, &phase) {
+        let receipt = match answer(directive, &phase, session.version) {
             Some(kind) => Receipt::Reply(Box::new(Reply {
                 epoch: session.epoch,
                 answers,
@@ -338,16 +359,19 @@ impl DataPlane {
         receipt
     }
 
-    /// The target of the directive `id` admitted under `epoch` was re-observed as `observed`
-    /// (`None`: not there). Only the proof's exact name, generation and instance id, all three,
-    /// let the effect run (ADR 0026); anything else is `ProofMismatch`. Pinned by
-    /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`
-    /// and `should_refuse_proof_mismatch_when_the_vm_is_gone_at_reobservation`.
-    ///
-    /// Owner decision pending: a `DeleteVm` re-sent under a new id or session after its delete
-    /// succeeded finds the target absent and is answered `Refused(ProofMismatch)` (proposal:
-    /// answer `VmDeleted` when a complete listing shows the target absent); see
-    /// "Owner decisions pending (KER-08 review)" on the KER-08 card in `doc/tasks.md`.
+    /// The target of the directive `id` admitted under `epoch` was re-observed by a **complete**
+    /// listing as `observed` (`None`: the complete listing does not list it; an incomplete
+    /// listing is [`DataPlane::reobserve_failed`], never `None`, I25). Only the proof's exact
+    /// name, generation and instance id, all three, let the effect run (ADR 0026); a present
+    /// target that differs in any is `ProofMismatch` and is never touched. Idempotent by
+    /// outcome (ADR 0053): a `DeleteVm` whose target is absent is `Done(VmDeleted)`, whether
+    /// this directive, an earlier one or someone else removed it, and a `StopVm` whose proven
+    /// target is stopped is `Done(VmStopped)`; a `StopVm` whose target is absent is still
+    /// `ProofMismatch` (absence is the inventory's fact, not a stop's). Pinned by
+    /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`,
+    /// `should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent`,
+    /// `should_answer_done_when_a_stop_finds_its_proven_target_stopped` and
+    /// `should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone`.
     pub fn reobserved(
         &mut self,
         epoch: Epoch,
@@ -355,15 +379,39 @@ impl DataPlane {
         observed: Option<&Reobservation>,
     ) -> Progress {
         self.advance(epoch, id, |entry| {
-            Ok(Stimulus::ReObserved {
-                matches: proof_of(&entry.directive.kind)
-                    .zip(observed)
-                    .is_some_and(|(proof, seen)| proven(proof, seen)),
+            let kind = &entry.directive.kind;
+            let matches = proof_of(kind)
+                .zip(observed)
+                .is_some_and(|(proof, seen)| proven(proof, seen));
+            let stopped = observed.is_some_and(|seen| !seen.running);
+            Ok(match kind {
+                DirectiveKind::DeleteVm { .. } if observed.is_none() => {
+                    Stimulus::Satisfied(ObservationKind::VmDeleted)
+                }
+                DirectiveKind::StopVm { .. } if matches && stopped => {
+                    Stimulus::Satisfied(ObservationKind::VmStopped)
+                }
+                DirectiveKind::DeleteVm { .. }
+                | DirectiveKind::StopVm { .. }
+                | DirectiveKind::PullImage { .. }
+                | DirectiveKind::MaterialiseImage { .. }
+                | DirectiveKind::EvictImage { .. }
+                | DirectiveKind::CloneVm { .. }
+                | DirectiveKind::StartVm { .. }
+                | DirectiveKind::VerifyGuest { .. }
+                | DirectiveKind::LaunchRunner { .. }
+                | DirectiveKind::ExportDiagnostics { .. }
+                | DirectiveKind::ReportInventory
+                | DirectiveKind::ReportCapacity
+                | DirectiveKind::ReportHostFacts => Stimulus::ReObserved { matches },
             })
         })
     }
 
-    /// The target of `id` could not be re-observed: nothing was done.
+    /// The target of `id` could not be re-observed (the listing was incomplete): nothing was
+    /// done now, and whether an earlier delivery took effect is not known, so the outcome is
+    /// `Unknown{listing_incomplete}`, never `Done` (I25, ADR 0053). Pinned by
+    /// `tests/data_plane/executor.rs::should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`.
     pub fn reobserve_failed(&mut self, epoch: Epoch, id: DirectiveId) -> Progress {
         self.advance(epoch, id, |_| Ok(Stimulus::ReObserveFailed))
     }
@@ -374,10 +422,13 @@ impl DataPlane {
     /// answer the directive's kind.
     pub fn finish(&mut self, epoch: Epoch, id: DirectiveId, result: Stimulus) -> Progress {
         self.advance(epoch, id, |entry| match &result {
-            Stimulus::Applied(kind) if !answered_by(entry.directive.kind.tag(), kind) => {
+            Stimulus::Applied(kind) | Stimulus::Satisfied(kind)
+                if !answered_by(entry.directive.kind.tag(), kind) =>
+            {
                 Err(Misfit::NotAnApplication)
             }
             Stimulus::Applied(_)
+            | Stimulus::Satisfied(_)
             | Stimulus::Admit(_)
             | Stimulus::Deny(_)
             | Stimulus::ReObserved { .. }
@@ -399,6 +450,7 @@ impl DataPlane {
                 return Progress::Orphaned;
             }
         };
+        let version = session.version;
         let Some(entry) = session.table.get_mut(&id) else {
             return Progress::Orphaned;
         };
@@ -418,7 +470,7 @@ impl DataPlane {
             directive_id: entry.directive.directive_id,
             attempt: entry.directive.attempt,
         };
-        match answer(&entry.directive, &entry.phase) {
+        match answer(&entry.directive, &entry.phase, version) {
             Some(kind) => Progress::Reply(Box::new(Reply {
                 epoch,
                 answers,
@@ -434,7 +486,7 @@ impl DataPlane {
 /// malformed runner version is refused `effect_failed`); a VM directive names a VM of this
 /// host, else `protected_target` (ADR 0026; an image base it cannot name, see the module doc);
 /// a proof is consistent with its own name and the directive's attempt; and the ledger has
-/// room (I33). Pure: the ledger is read, not changed. Pinned by
+/// room and knows it has (I33, ADR 0052). Pure: the ledger is read, not changed. Pinned by
 /// `tests/data_plane/matrix.rs::should_admit_or_refuse_every_kind_when_it_meets_each_condition`.
 ///
 /// # Errors
@@ -472,9 +524,7 @@ pub fn admission(
         return Ok(Stage::ReObserve);
     }
     if kind.needs_resource_fit() {
-        ledger
-            .fits(ledger.demand(kind))
-            .map_err(|dimension| RefusalReason::InsufficientResources { dimension })?;
+        ledger.admits(kind)?;
     }
     Ok(Stage::Effect)
 }
@@ -587,10 +637,15 @@ fn answered_by(tag: DirectiveTag, kind: &ObservationKind) -> bool {
     answered_kind(kind) == Some(tag)
 }
 
-/// The answer a settled phase gives; `None` while it is not settled. An unknown launch is
+/// The answer a settled phase gives, as a frame of the session's `version` may carry it
+/// ([`ObservationKind::written_in`]); `None` while it is not settled. An unknown launch is
 /// `RunnerLaunchUnknown` (the JIT config is then presumed leaked, I22).
-fn answer(directive: &Directive, phase: &Phase) -> Option<ObservationKind> {
-    match phase {
+fn answer(
+    directive: &Directive,
+    phase: &Phase,
+    version: ProtocolVersion,
+) -> Option<ObservationKind> {
+    let kind = match phase {
         Phase::Done(kind) => Some(kind.clone()),
         Phase::Refused(reason) => Some(ObservationKind::DirectiveRefused { reason: *reason }),
         Phase::Unknown(reason) => Some(match directive.kind.tag() {
@@ -609,5 +664,6 @@ fn answer(directive: &Directive, phase: &Phase) -> Option<ObservationKind> {
             | DirectiveTag::ReportHostFacts => ObservationKind::OutcomeUnknown { reason: *reason },
         }),
         Phase::Received | Phase::Executing(_) => None,
-    }
+    };
+    kind.map(|kind| kind.written_in(version))
 }

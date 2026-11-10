@@ -4,7 +4,7 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09)
+Accepted (owner, 2026-11-09); amended by 0053
 
 ## Context
 
@@ -39,6 +39,9 @@ epochs that were already used, and nothing outside the journal remembers the hig
 - KER-01 (`OwnershipProof`, `ProviderInstanceId`), KER-02 (`Hello` carries the floor), KER-08,
   DP-03 (fake-tart `set --random-mac`, `get`), DP-04, CP-04 implement it; F35, F39 and mutant 25
   pin it. HW-01 verifies `--random-mac` and MAC read-back on the pinned Tart versions.
+
+Amended by ADR 0053 (2026-11-10): a `DeleteVm` whose target a complete re-observation shows
+absent is done (`VmDeleted`), not refused; a present target that differs is still refused.
 
 ## Alternatives considered
 

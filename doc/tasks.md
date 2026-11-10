@@ -44,11 +44,11 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0021](adr/0021-a-storage-neutral-stream-scoped-event-store.md) | The `Journal` port follows the stream-scoped event store design (`doc/event-store.md`): no global order, readers enumerate streams and read each after a revision. Amends ADR 0008; amended by 0034. | Accepted |
 | [ADR 0022](adr/0022-strategic-ddd-with-a-data-oriented-implementation.md) | DDD is strategic (contexts, language, consistency boundaries in `doc/domain-model.md`); code is data-oriented: plain data, free pure functions and tables. | Accepted |
 | [ADR 0023](adr/0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time (DP-03). | Accepted (owner, 2026-11-09) |
-| [ADR 0024](adr/0024-the-data-plane-owns-host-resource-accounting.md) | The data plane accounts for and enforces host resources (memory, disk, macOS-guest slots incl. foreign VMs), refuses directives that do not fit and reports capacity; the control plane allocates only within reported capacity (OD4). | Accepted |
+| [ADR 0024](adr/0024-the-data-plane-owns-host-resource-accounting.md) | The data plane accounts for and enforces host resources (memory, disk, macOS-guest slots incl. foreign VMs), refuses directives that do not fit and reports capacity; the control plane allocates only within reported capacity (OD4). Amended by 0052. | Accepted |
 | [ADR 0025](adr/0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine whenever ownership or an outcome cannot be proven; never auto-delete a quarantined VM; capacity loss accepted; `Unknown` resolves only by re-observation, no operator assertion (OD9, OD10). | Accepted |
-| [ADR 0026](adr/0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Ownership proof includes the provider instance id (random MAC per clone, re-observed before delete); external epoch floor in `TART_HOME` (OD6, OD7). | Accepted |
+| [ADR 0026](adr/0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Ownership proof includes the provider instance id (random MAC per clone, re-observed before delete); external epoch floor in `TART_HOME` (OD6, OD7). Amended by 0053. | Accepted |
 | [ADR 0027](adr/0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only tier in v0.x; untrusted offers declined before acquire; `allow_untrusted_prs` refused (OD3). | Accepted |
-| [ADR 0028](adr/0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only, no classic mode; only prepared, unregistered VMs ahead of demand, no registered standby (OD18, OD8). | Accepted |
+| [ADR 0028](adr/0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only, no classic mode; only prepared, unregistered VMs ahead of demand, no registered standby (OD18, OD8). Amended by 0048 (registration token as an auth-chain step only; accepted by the owner, 2026-11-10). | Accepted |
 | [ADR 0029](adr/0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration aggregate and reaper; `maxCapacity` and acquisition under pause, drain and safe mode (OD11, OD15). | Accepted |
 | [ADR 0030](adr/0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked in, self-update off, breaker on expiry, `mayfly image refresh` (OD12). | Accepted |
 | [ADR 0031](adr/0031-service-modes-and-the-internal-watchdog.md) | `mayflyd` in the foreground by hand or under launchd; internal watchdog plus `KeepAlive` (OD16, OD17). | Accepted |
@@ -66,12 +66,15 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0043](adr/0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Forward upgrades of any distance (upgrade matrix from every release); rollback one release; deeper rollback restores the pre-migration backup (`mayfly restore`); older build refuses writes on newer streams; deep-rollback recovery quarantines what it cannot prove (OD2). | Accepted (owner, 2026-11-09) |
 | [ADR 0044](adr/0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates; no self-update; `brew uninstall` removes the program; `mayfly uninstall --purge` removes what mayfly created, with ownership proof (P1, P3). | Accepted (owner, 2026-11-09) |
 | [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). | Accepted (owner, 2026-11-09) |
-| [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Proposes an amendment of 0028 (registration token as an auth-chain step only). | Accepted (owner, 2026-11-10) |
+| [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Amends 0028 (registration token as an auth-chain step only; accepted 2026-11-10). | Accepted (owner, 2026-11-10) |
+| [ADR 0052](adr/0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | The data plane assumes no fact it does not have: an unknown VM size or guest, or a listing not read yet, makes the dimension unknown; what needs it is refused `capacity_unknown`; `CapacityReported` lists the unknown dimensions with their causes and nothing free; protocol 1.1, compatible. Amends 0024. | Accepted (owner, 2026-11-10) |
+| [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026. | Accepted (owner, 2026-11-10) |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
 list (ADR 0045). Decided on 2026-11-10: inspect `actions/scaleset`, never port it (ADR 0048,
-DEC-03). Still planner defaults: the remaining sub-items of **OD20** (socket
+DEC-03); at the KER-08 checkpoint, no defaults for unknown facts (ADR 0052), idempotent
+destructive directives (ADR 0053) and ADR 0048's amendment of ADR 0028 accepted (DEC-04). Still planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
 GitHub capture (GH-00).
 
@@ -149,6 +152,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-10 | Operations aggregates: `HostRun`, `RecoveryPlan`, `QuarantineCase`, effective mode | KER-03, KER-07 | opus | |
 | KER-11 | Image catalog: `Image`, `ImagePlacement` | KER-03, KER-02 | sonnet | |
 | KER-08 | Data-plane domain: executor, supervisor, resource ledger, fencing | KER-02, DEC-01 | opus | ⛳ |
+| DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
 | ES-01 | Storage-neutral journal port, memory journal, journal contract (landed) | KER-03 | opus | |
 | ES-01F | Align the landed journal port with the owner's decisions and its review | ES-01, DEC-01 | opus | |
 | ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
@@ -390,6 +394,17 @@ or is marked unverified. ADR 0028 carries a proposed amendment (registration tok
 auth-chain step only); GH-00..GH-04, plan §7 and ver §7.3 follow. Docs only.
 Accept: `cargo xtask check --only docs` green; no upstream code or test in the repository.
 
+#### DEC-04 Record and implement the KER-08 checkpoint's owner decisions
+Cites: plan §3.2, §6, §8.4, §9; ADRs 0024, 0025, 0026, 0028, 0048. The owner decided on
+2026-11-10: no defaults for unknown facts (ADR 0052), destructive directives idempotent by
+outcome (ADR 0053), and ADR 0048's amendment of ADR 0028 accepted. Model first:
+`formal/scheduling.qnt` (`noStartWhileCapacityUnknown`) and `formal/lifecycle.qnt` (a delete of
+an absent VM is done). `mayfly-protocol` 1.1 (`capacity_unknown`, `listing_incomplete`,
+`CapacityReport::unknown`, the `VmObservation` facts; a 1.0 session is written without them);
+`mayfly-data-domain`'s ledger and executor follow, and the KER-08 notes are removed.
+Accept: the named tests of ADRs 0052 and 0053; the regenerated `matrix/ledger.txt`,
+`directive.txt` and `link.txt`; the affected Apalache relations at their bounded depths.
+
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
 reordering, epoch fencing; invariant: no directive from an older epoch executes; every directive
@@ -485,12 +500,11 @@ content) with refusal `insufficient_resources` (I33).
 Accept: exhaustive matrices; stale epoch never executed (answered `Unknown{stale_epoch}`,
 ADR 0042); delete without matching proof or with a changed instance id refused; a directive that
 does not fit is refused whatever the CP sent (mutant 24).
-Owner decisions pending (KER-08 review): (a) unknown sizes: an adopted VM of unknown memory is
-counted at `Sizing::vm_memory_bytes` and one of unknown guest as macOS; proposal: count unknown
-memory as the pool maximum and record it, with unknown guest = macOS, in an ADR; (b) a `DeleteVm`
-re-sent (new id or session) after its delete succeeded finds the target absent and is answered
-`Refused(ProofMismatch)`; proposal: the data plane answers `VmDeleted` when a complete listing
-shows the target absent. Both are marked `Owner decision pending:` in `mayfly-data-domain`.
+Owner decisions of the KER-08 review, decided 2026-11-10 and implemented by DEC-04: (a) unknown
+sizes are not assumed: an unknown VM size or guest makes the dimension unknown and what needs it
+is refused `capacity_unknown` (ADR 0052); (b) a `DeleteVm` whose target a complete listing shows
+absent answers `VmDeleted`, a `StopVm` of a proven stopped VM `VmStopped`, an incomplete
+re-observation `Unknown{listing_incomplete}` (ADR 0053).
 
 #### KER-09 Registration model and `RunnerRegistration` aggregate
 Cites: dm §6.5, P10–P14, ADRs 0028, 0029, 0038. Model first: `formal/registration.qnt` (I19, I20,

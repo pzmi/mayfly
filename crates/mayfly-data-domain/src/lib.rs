@@ -20,6 +20,6 @@ pub use executor::{
     Reply, Stage, Stimulus, admission, answered_kind, proof_of,
 };
 pub use inventory::Inventory;
-pub use ledger::{BaseUse, HostProbe, Ledger, Reservation, Settles, Sizing, VmUse};
+pub use ledger::{BaseUse, HostProbe, Ledger, Reservation, Settles, Sizing, VmUse, gaps};
 pub use link::{Link, LinkIgnored, LinkOutcome, LinkStimulus, Session};
 pub use supervisor::{Seen, Shim, Signal, VmFact, VmFacts, VmState};

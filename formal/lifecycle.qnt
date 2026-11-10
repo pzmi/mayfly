@@ -374,8 +374,10 @@ module lifecycle {
     val world = applyEffect(a, w, fresh)
     all {
       not(idle(a)),
-      // a stop or delete whose target is gone or replaced is refused by the proof check
-      not(Set(STOP_VM, DELETE_VM).contains(a.pending)) or (w.exists and w.instance == a.instance),
+      // a stop or delete whose target is replaced is refused by the proof check; a delete
+      // whose target a complete listing shows absent is done, whoever removed it (ADR 0053)
+      not(Set(STOP_VM, DELETE_VM).contains(a.pending)) or (w.exists and w.instance == a.instance)
+        or (a.pending == DELETE_VM and not(w.exists)),
       // the guest answers only a running VM
       not(Set(VERIFY_GUEST, LAUNCH_RUNNER, EXPORT_DIAGNOSTICS).contains(a.pending)) or w.running,
       a.pending != START_VM or w.exists,
@@ -956,6 +958,27 @@ module lifecycle {
       .then(vmReplacedOrRemovedWith(2, false))
       .then(issueNext).then(replyProofRefused)
       .expect(a.phase == QUARANTINED and a.tries == 2 and not(canIssueNext(a)))
+  }
+
+  // ADR 0053: a delete whose target is already gone is answered deleted, never refused.
+  run deleteOfAbsentVmIsDoneTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).then(ok)
+      .then(issueNext).expect(a.pending == DELETE_VM)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(ok).expect(a.phase == DELETED and not(w.exists) and allInvariants)
+  }
+
+  // ADR 0053: a delete whose reply was lost leaves Unknown; the answer to its re-delivery,
+  // the target absent on a complete listing, is the observation that resolves it (I10).
+  run deleteLostThenAnsweredDeletedTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).then(ok)
+      .then(issueNext).then(replyLostWith(1, true))
+      .expect(a.unknown and a.pending == DELETE_VM and not(w.exists))
+      .then(ok)
+      .expect(a.phase == DELETED and not(a.unknown) and i10UnknownLeavesOnlyOnObservation
+        and allInvariants)
   }
 
   // The activation relation's shortcut lands where the preparation does.

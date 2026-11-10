@@ -4,8 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09); amendment proposed 2026-11-10 by ADR 0048 (the registration
-token as an auth-chain step only).
+Accepted (owner, 2026-11-09); amended by 0048 (the registration token as an auth-chain step
+only; accepted by the owner, 2026-11-10: "Ok").
 
 ## Context
 
@@ -20,7 +20,7 @@ given a job that was then cancelled ("poisoned idle"); one prepared macOS VM hal
 
 1. **Scale sets only.** Demand comes only from GitHub Runner Scale Sets with JIT runners. There
    is no classic or `--ephemeral` registration mode in any form, not even as a smoke test: no
-   `[github] mode` key, no registration-token client *(ADR 0048 proposes: the token is still
+   `[github] mode` key, no registration-token client *(amended by ADR 0048: the token is still
    requested, only as the input of the Actions-service admin exchange, never to register a
    runner)*. The `RunnerRegistry` port keeps only what
    the reaper needs (list, get and delete a runner by recorded id).
@@ -34,7 +34,7 @@ given a job that was then cancelled ("poisoned idle"); one prepared macOS VM hal
 
 - GH-05 is removed; plan §7.3 is gone; F07 is redefined for JIT registrations; the
   `RunnerRegistry` contract row loses its classic adapter; fake-github drops the
-  registration-token endpoint *(ADR 0048 proposes: it keeps it as an auth-chain step)*. KER-06 and CP-03 implement the demand formula.
+  registration-token endpoint *(amended by ADR 0048: it keeps it as an auth-chain step)*. KER-06 and CP-03 implement the demand formula.
 - Latency for the first job on a cold pool is a clone and boot; operators who want less set
   `min_prepared`.
 

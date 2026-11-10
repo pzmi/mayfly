@@ -83,8 +83,10 @@ module scheduling {
 
   type Pool = { rev: int, active: bool, failures: int, tripped: bool }
 
-  /// The data plane's truth outside our VMs.
-  type Dp = { foreignMem: int, foreignMacos: int, nextId: int }
+  /// The data plane's truth outside our VMs. `memUnknown`: a listed VM's memory is not known
+  /// (an adopted or malformed VM the provider did not describe, or a foreign VM the probe could
+  /// not size), so the free memory is indeterminate (ADR 0052).
+  type Dp = { foreignMem: int, foreignMacos: int, nextId: int, memUnknown: bool }
 
   type Ghost = {
     lastKind: str,
@@ -108,6 +110,8 @@ module scheduling {
     drainedWithLeases: bool,
     // the data plane started a VM that did not fit its own ledger
     dpOvercommit: bool,
+    // the data plane started a VM while the memory it needs was not known (ADR 0052)
+    dpStartedUnknown: bool,
     // the data plane created a second VM for one lease
     doubleCreate: bool,
     // a quarantined lease released while its VM exists
@@ -249,6 +253,8 @@ module scheduling {
   def dpFits(a: int): bool = {
     val pool = leases.get(a).pool
     and {
+      // every VM needs memory: none starts while the free memory is not known (ADR 0052)
+      not(dp.memUnknown),
       oursRunningMem + dp.foreignMem + vmMem(pool) <= TOTAL_MEM - RESERVE_MEM,
       (oursExisting + 1) * VM_DISK <= TOTAL_DISK,
       oursExisting + dp.foreignMacos + 1 <= SLOTS.size(),
@@ -281,14 +287,15 @@ module scheduling {
     slotGen' = SLOTS.mapBy(_ => 0),
     terms' = POOLS.mapBy(_ => { rev: 0, open: false }),
     pools' = POOLS.mapBy(_ => { rev: 1, active: true, failures: 0, tripped: false }),
-    dp' = { foreignMem: foreignMem, foreignMacos: foreignMacos, nextId: 1 },
+    dp' = { foreignMem: foreignMem, foreignMacos: foreignMacos, nextId: 1, memUnknown: false },
     vms' = ATTEMPTS.mapBy(_ => ABSENT),
     created' = ATTEMPTS.mapBy(_ => false),
     sent' = Set(),
     g' = {
       lastKind: "init", issued: Set(), reissue: false, genNotIncreasing: false,
       overAllocated: false, macosOver: false, reservedClosed: false, grantedClosed: false,
-      afterDrain: false, drainedWithLeases: false, dpOvercommit: false, doubleCreate: false,
+      afterDrain: false, drainedWithLeases: false, dpOvercommit: false, dpStartedUnknown: false,
+      doubleCreate: false,
       quarantineReleasedEarly: false, autoDeleteQuarantined: false, staleApplied: false,
       trippedAdmitted: false,
     },
@@ -302,11 +309,13 @@ module scheduling {
 
   // ---- the data plane ----------------------------------------------------------------------
 
-  /// `CapacityReported`: the ledger's truth now, sent to the control plane.
+  /// `CapacityReported`: the ledger's truth now, sent to the control plane. Memory that is not
+  /// known is reported with nothing deliverable (ADR 0052: free zero in that dimension).
   action dpReport = all {
     dp.nextId <= MAX_REPORTS,
     sent' = sent.union(Set({
-      id: dp.nextId, mem: TOTAL_MEM, disk: TOTAL_DISK, slots: SLOTS.size(), macos: MACOS_GUESTS,
+      id: dp.nextId, mem: if (dp.memUnknown) 0 else TOTAL_MEM, disk: TOTAL_DISK,
+      slots: SLOTS.size(), macos: MACOS_GUESTS,
       foreignMem: dp.foreignMem, foreignVms: dp.foreignMacos, foreignMacos: dp.foreignMacos,
     })),
     dp' = { ...dp, nextId: dp.nextId + 1 },
@@ -327,6 +336,7 @@ module scheduling {
     host' = host, leases' = leases, slotGen' = slotGen, terms' = terms, pools' = pools, dp' = dp,
     sent' = sent,
     g' = { ...g, lastKind: "dp", dpOvercommit: g.dpOvercommit or not(dpFits(a)),
+      dpStartedUnknown: g.dpStartedUnknown or dp.memUnknown,
       doubleCreate: g.doubleCreate or created.get(a) },
   }
 
@@ -358,6 +368,20 @@ module scheduling {
     nondet fm = Set(dp.foreignMem - 1, dp.foreignMem + 1).oneOf()
     nondet fmac = Set(dp.foreignMacos - 1, dp.foreignMacos, dp.foreignMacos + 1).oneOf()
     worldWith(fm, fmac)
+  }
+
+  /// A listed VM's memory stops or starts being known: a VM the provider does not describe is
+  /// listed, or a complete listing describes every VM again (ADR 0052).
+  action vmFactsChangeWith(unknown: bool): bool = all {
+    dp' = { ...dp, memUnknown: unknown },
+    host' = host, leases' = leases, slotGen' = slotGen, terms' = terms, pools' = pools,
+    vms' = vms, created' = created, sent' = sent,
+    g' = { ...g, lastKind: "world" },
+  }
+
+  action vmFactsChange = {
+    nondet unknown = Set(true, false).oneOf()
+    vmFactsChangeWith(unknown)
   }
 
   /// Our VM disappears without our delete (a complete inventory will observe it absent).
@@ -557,6 +581,7 @@ module scheduling {
       dpCreate(a),
       dpDelete(a),
       foreignChanges,
+      vmFactsChange,
       vmVanishes(a),
       recordReport,
       reserve(a, pool),
@@ -598,6 +623,7 @@ module scheduling {
       operatorResolve(a),
       dpDelete(a),
       release(a),
+      vmFactsChange,
     }
   }
 
@@ -667,6 +693,10 @@ module scheduling {
   /// I33: the data plane never starts a VM that does not fit its own ledger.
   val i33DataPlaneNeverOvercommits = not(g.dpOvercommit)
 
+  /// noStartWhileCapacityUnknown: the data plane never starts a VM while the memory it needs
+  /// is not known; nothing unknown is assumed (ADR 0052).
+  val noStartWhileCapacityUnknown = not(g.dpStartedUnknown)
+
   /// generationsMonotonic: a slot's generation only grows, and every lease's generation is at
   /// most its slot's.
   val generationsMonotonic = not(g.genNotIncreasing) and ATTEMPTS.forall(a =>
@@ -720,6 +750,7 @@ module scheduling {
     i27BreakerBounded,
     i28QuarantineNeverAutoDeleted,
     i33DataPlaneNeverOvercommits,
+    noStartWhileCapacityUnknown,
     generationsMonotonic,
     macosGuestsAtMostTwo,
     externalConsumptionShrinksAdmissible,
@@ -837,6 +868,21 @@ module scheduling {
       .expect(reportedMaxOf(host, plan, leases, terms, LINUX) == 1 and plan.carveLinux == 0)
       .then(closeGate)
       .expect(not(canReserve(host, leases, terms, 2, MACOS)) and plan.carveMacos == 0)
+  }
+
+  // ADR 0052: while a VM's memory is not known the data plane starts nothing and reports no
+  // deliverable memory, so the host reserves nothing; a complete description brings it back.
+  run unknownMemoryStartsNothingTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX))
+      .then(vmFactsChangeWith(true))
+      .expect(not(dpFits(1)))
+      .then(dpReport).then(applyReport({ ...reportOf(2, 0, 0), mem: 0 }))
+      .expect(not(canReserve(host, leases, terms, 2, LINUX)) and plan.carveLinux == 0)
+      .then(vmFactsChangeWith(false))
+      .expect(dpFits(1))
+      .then(dpCreate(1))
+      .expect(vms.get(1) == RUNNING and allInvariants)
   }
 
   // The data plane refuses a start that does not fit its ledger, whatever the host allocated:
