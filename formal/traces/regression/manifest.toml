@@ -1,0 +1,318 @@
+# The committed regression traces and how each one is regenerated (ver §6.2; ES-06 exports the
+# event store's, VER-01's `formal-freshness` stage checks them).
+#
+# Every trace listed here is regenerated with the locked Quint, from the repository root:
+#
+#   npx --prefix formal --no -- quint run --backend typescript --main <main> --init <init>
+#     --step <step> --max-steps <max_steps> --mbt --seed <seed> --invariant <invariant>
+#     --out-itf formal/traces/regression/<file> formal/<model>
+#
+# and must equal the committed file byte for byte, `#meta.description` and `#meta.timestamp`
+# (the creation time Quint writes) excepted. The scripts are deterministic
+# (`event_store_traces` in `formal/event_store.qnt`): `max_steps` is the length of the
+# scenario's `List[Stim]`, one step per stimulus, and the seed is recorded only so that a
+# regeneration is byte for byte. Each
+# script takes exactly the stimuli of the `run` of the same name (`<step>Test`), so a scenario
+# and its trace cannot drift; `mbt::actionTaken` is the model action and `last.stimulus` names
+# it too. Every `*.itf.json` here has exactly one entry.
+
+[[trace]]
+file = "event_store-lostRace.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "lostRace"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-noStreamVersusEmpty.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "noStreamVersusEmpty"
+max_steps = 6
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-independentStreams.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "independentStreams"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-independentHeldWriters.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "independentHeldWriters"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-batchFailsAfterSecondEvent.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "batchFailsAfterSecondEvent"
+max_steps = 5
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-rollback.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "rollback"
+max_steps = 11
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-duplicateAcrossStreams.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "duplicateAcrossStreams"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-repeatedWithinBatch.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "repeatedWithinBatch"
+max_steps = 2
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-epochRaise.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "epochRaise"
+max_steps = 9
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-refusedAboveEpoch.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "refusedAboveEpoch"
+max_steps = 2
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-receiptReplay.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "receiptReplay"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-racingCommands.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "racingCommands"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-refusedThenAccepted.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "refusedThenAccepted"
+max_steps = 8
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-refusalReplayedAtSameRevision.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "refusalReplayedAtSameRevision"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-inboxRedelivery.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "inboxRedelivery"
+max_steps = 8
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-multiStreamConflict.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "multiStreamConflict"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-readSetInvalidated.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "readSetInvalidated"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-headQueue.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "headQueue"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-idWait.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "idWait"
+max_steps = 11
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-oppositeOrderUnits.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "oppositeOrderUnits"
+max_steps = 12
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-crashBeforeReactors.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "crashBeforeReactors"
+max_steps = 11
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-directiveInUnit.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "directiveInUnit"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-bootstrapAfterWrites.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "bootstrapAfterWrites"
+max_steps = 13
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-commitBetweenFetchAndApply.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "commitBetweenFetchAndApply"
+max_steps = 12
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-markDuringProcessing.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "markDuringProcessing"
+max_steps = 8
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-staleWorkerFenced.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "staleWorkerFenced"
+max_steps = 9
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-workerCrashRedelivers.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "workerCrashRedelivers"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-failingConsumerNoSkip.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "failingConsumerNoSkip"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-shadowRebuildDualWrite.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "shadowRebuildDualWrite"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-cutoverFence.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "cutoverFence"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+

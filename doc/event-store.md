@@ -894,6 +894,16 @@ It states the store's mechanisms of §2 that a model can state, the online rebui
 - Every invariant is shown to catch a scratch mutation of the model by `quint run` and by the
   scenario it guards; Apalache checks `allInvariants` to a bounded depth in the nightly lane
   (VER-07).
+- **As built (ES-06).** The biased relation is `relayStep` (the directive path and every consumer
+  stimulus). `command` carries the inbox key (there is no separate `deliverInbox`) and
+  `noteMessage` is a unit that only records one; `fetch` is part of `claim` (the claim fixes the
+  revision it reads through) and `fail` is `failHandle`; `timeout` (`Busy`), `kick` (the
+  after-commit notification), `crashWorker` and ES-12's `startRebuild`, `rebuildStream` and
+  `cutover` are added; reads are the driver's observations, not actions. Scenarios added beyond
+  the list above: `refusalReplayedAtSameRevision`, `crashBeforeReactors`, `directiveInUnit`,
+  `shadowRebuildDualWrite`, `cutoverFence`. Each scenario is one `List[Stim]` read by its `run`
+  and by its script in `event_store_traces`, exported to `formal/traces/regression/`
+  (`doc/formal-models.md`, "event_store").
 
 ### 7.4 What the lower levels already prove, and what they cannot
 
