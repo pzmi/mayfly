@@ -259,7 +259,8 @@ and `applyTerms` (policy P4, only at a newer revision) are its other commands. T
 (`pools`) pause, resume, count failures and trip (I27), and reset by an operator. `dpCreate`
 starts a lease's VM only if it fits the data plane's own ledger (I33); `foreignChanges` and
 `vmVanishes` are the world. `planOf` is `capacity::plan`: free capacity after every live
-lease, carved greedily in pool-name order up to each pool's headroom, and `reportedMaxOf`
+lease, carved in pool-name order up to each pool's headroom within what the open pools before
+it keep (`max_running` minus their live runners, whatever they were carved), and `reportedMaxOf`
 (only live runners while closed). `step` offers every stimulus; `admitStep` is the biased
 relation of verification §6: reports, terms, reservations, creates, quarantine and releases
 under changing foreign consumption, without the gate, drain and pool modes that close
@@ -286,6 +287,7 @@ one (model and code now check only the dimensions a VM uses).
 | `i07NeverAdvertiseMore` | I07: a pool's `reported_max` is within what it can deliver | `tests/capacity.rs::should_fit_every_carve_out_together_when_inputs_are_random` |
 | `i24CarveOutsFitTheHost` | I24: the carve-outs fit the host's free capacity together | the same |
 | `externalConsumptionShrinksAdmissible` | more foreign consumption never frees capacity or carves more | `tests/capacity.rs::should_never_admit_more_when_foreign_consumption_grows` |
+| `carveMonotone` (pure, `carveMonotoneTest`) | the carve's total never grows when the free capacity shrinks or an earlier pool's quarantine is released, in either order of a larger and a smaller VM (KER-05H: the state space carves the smaller Linux VM first only, where handing a later pool the leftover is monotone, so the greedy carve's fault was out of its reach) | `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`, `should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`, `should_never_admit_more_when_foreign_consumption_grows`, `should_hold_quarantined_capacity_when_inputs_are_random` |
 | `i08NothingAfterDrain` | I08: no reservation and no grant after drain start; the drain completes with no lease | `tests/host/rules.rs::should_admit_nothing_when_the_host_drains`, `tests/capacity.rs::should_admit_nothing_and_report_live_runners_when_admission_is_closed` |
 | `i26NoAdmissionWhileClosed`, `noGrantWhileClosed` | I26: no reservation and no grant with the gate or the pool's terms closed | `tests/host/rules.rs::should_refuse_a_grant_when_any_term_or_cause_is_closed` |
 | `i27BreakerBounded` | I27: failures bounded by the threshold, a tripped breaker published closed, nothing reserved under terms that show it | `tests/pool/rules.rs::should_trip_at_the_threshold_and_count_nothing_more_when_failures_repeat`, `should_close_the_terms_when_the_breaker_of_the_pin_trips` |
@@ -298,7 +300,8 @@ Tests (`quint test`, stage `formal-test`, all deterministic so each runs once):
 `staleReportIgnoredTest`, `drainAdmitsNothingTest`, `quarantineHoldsCapacityTest`,
 `quarantineConsumesPoolTest`, `breakerTripsTest`, `pauseReportsLiveOnlyTest`,
 `dataPlaneRefusesWhatDoesNotFitTest`, and from DEC-04 (ADR 0052)
-`unknownMemoryStartsNothingTest`. `dp.memUnknown` abstracts every fact the ledger lacks
+`unknownMemoryStartsNothingTest`, and from KER-05H `carveMonotoneTest`.
+`dp.memUnknown` abstracts every fact the ledger lacks
 (`vmFactsChange` toggles it in both relations): `dpFits` is false and `dpReport` delivers no
 memory while it holds, and the invariant `noStartWhileCapacityUnknown` (pinned by
 `crates/mayfly-data-domain/tests/data_plane/ledger.rs::should_refuse_capacity_unknown_and_never_undercount_when_a_running_vm_has_unknown_memory`

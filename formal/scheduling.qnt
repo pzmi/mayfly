@@ -185,10 +185,41 @@ module scheduling {
 
   // ---- the capacity policy (`capacity::plan`) ------------------------------------------------
 
-  /// How many VMs of `pool` fit the free capacity, on every dimension.
-  pure def fitCount(mem: int, disk: int, nvms: int, mac: int, pool: str): int = {
-    val n = min2(min2(max0(mem) / vmMem(pool), max0(disk) / VM_DISK), max0(nvms))
-    if (pool == MACOS) min2(n, max0(mac)) else n
+  /// The free capacity the policy carves, on the four dimensions admission counts.
+  type Free = { mem: int, disk: int, vms: int, mac: int }
+
+  /// One pool as the carve sees it: its VM's memory, whether it takes a macOS-guest slot, its
+  /// `max_running` headroom (live and quarantined leases count against it), the places it
+  /// keeps ahead of the pools after it (`max_running` minus its live runners: its headroom and
+  /// its quarantined places), and whether its admission is open.
+  type Shape = { mem: int, macos: bool, head: int, room: int, open: bool }
+
+  /// How many VMs of `s` fit `f`, on every dimension it uses.
+  pure def fitShape(f: Free, s: Shape): int = {
+    val n = min2(min2(max0(f.mem) / s.mem, max0(f.disk) / VM_DISK), max0(f.vms))
+    if (s.macos) min2(n, max0(f.mac)) else n
+  }
+
+  /// `f` less `n` VMs of `s`.
+  pure def minus(f: Free, s: Shape, n: int): Free = {
+    mem: f.mem - n * s.mem, disk: f.disk - n * VM_DISK, vms: f.vms - n,
+    mac: if (s.macos) f.mac - n else f.mac,
+  }
+
+  /// The places an open pool keeps ahead of the pools after it. KER-05H: its whole `room`,
+  /// never what it was carved, so a later pool's share does not depend on how much of the
+  /// free capacity the earlier pool could use; carving the leftover of a smaller free capacity
+  /// let a later pool of smaller VMs take more of them (`carveMonotoneTest`).
+  pure def keeps(s: Shape, carved: int): int = if (s.open) s.room else 0
+
+  /// The carve of two pools in order: the first up to its headroom within `f`, the second up
+  /// to its headroom within what the first keeps ahead of it.
+  pure def carveTwo(f: Free, first: Shape, second: Shape): (int, int) = {
+    val c1 = if (first.open) min2(first.head, fitShape(f, first)) else 0
+    val c2 =
+      if (second.open) min2(second.head, fitShape(minus(f, first, keeps(first, c1)), second))
+      else 0
+    (c1, c2)
   }
 
   type Plan = {
@@ -196,25 +227,29 @@ module scheduling {
     carveLinux: int, carveMacos: int,
   }
 
+  /// One pool's shape under the leases `ls`, open when the host's gate and its terms are.
+  pure def shapeOf(h: Host, ls: int -> Lease, ts: str -> Terms, pool: str): Shape = {
+    mem: vmMem(pool),
+    macos: pool == MACOS,
+    head: max0(MAX_RUNNING - countOf(ls, pool, live)),
+    room: max0(MAX_RUNNING - countOf(ls, pool, runner)),
+    open: gateOpen(h) and ts.get(pool).open,
+  }
+
   /// The pure policy: the free capacity after every live lease (quarantined included), carved
-  /// greedily in pool-name order among pools whose admission is open, each up to its
-  /// `max_running` headroom (live and quarantined leases count against it).
+  /// in pool-name order among pools whose admission is open, each up to its `max_running`
+  /// headroom (live and quarantined leases count against it) within what the pools before it
+  /// keep ahead of it (`keeps`).
   pure def planOf(h: Host, ls: int -> Lease, ts: str -> Terms): Plan = {
     val r = h.report
-    val fm = max0(limMem(r) - allocMemOf(ls))
-    val fd = max0(limDisk(r) - allocVmsOf(ls) * VM_DISK)
-    val fv = max0(limVms(r) - allocVmsOf(ls))
-    val fmac = max0(limMacos(r) - allocMacosOf(ls))
-    val open = gateOpen(h)
-    val headLinux = max0(MAX_RUNNING - countOf(ls, LINUX, live))
-    val headMacos = max0(MAX_RUNNING - countOf(ls, MACOS, live))
-    val cl =
-      if (open and ts.get(LINUX).open) min2(headLinux, fitCount(fm, fd, fv, fmac, LINUX)) else 0
-    val cm =
-      if (open and ts.get(MACOS).open)
-        min2(headMacos, fitCount(fm - cl * vmMem(LINUX), fd - cl * VM_DISK, fv - cl, fmac, MACOS))
-      else 0
-    { freeMem: fm, freeDisk: fd, freeVms: fv, freeMacos: fmac, carveLinux: cl, carveMacos: cm }
+    val f = {
+      mem: max0(limMem(r) - allocMemOf(ls)),
+      disk: max0(limDisk(r) - allocVmsOf(ls) * VM_DISK),
+      vms: max0(limVms(r) - allocVmsOf(ls)),
+      mac: max0(limMacos(r) - allocMacosOf(ls)),
+    }
+    val c = carveTwo(f, shapeOf(h, ls, ts, LINUX), shapeOf(h, ls, ts, MACOS))
+    { freeMem: f.mem, freeDisk: f.disk, freeVms: f.vms, freeMacos: f.mac, carveLinux: c._1, carveMacos: c._2 }
   }
 
   pure def carveOf(p: Plan, pool: str): int = if (pool == MACOS) p.carveMacos else p.carveLinux
@@ -710,11 +745,47 @@ module scheduling {
   /// gives more free capacity or more carve-out.
   val externalConsumptionShrinksAdmissible = {
     val r = host.report
-    val more = { ...host, report: { ...r, foreignMem: r.foreignMem + 1 } }
+    val more = { ...host, report: { ...r, foreignMem: r.foreignMem + 1, foreignVms: r.foreignVms + 1 } }
     val p = plan
     val p2 = planOf(more, leases, terms)
-    p2.freeMem <= p.freeMem and p2.carveLinux + p2.carveMacos <= p.carveLinux + p.carveMacos
+    and {
+      p2.freeMem <= p.freeMem,
+      p2.freeVms <= p.freeVms,
+      p2.carveLinux + p2.carveMacos <= p.carveLinux + p.carveMacos,
+    }
   }
+
+  /// carveMonotone (KER-05H): the carve's total never grows when the free capacity shrinks on
+  /// any dimension, nor when an earlier pool's headroom grows within its room (a quarantine
+  /// released), whichever of the two shapes comes first. The state space above carves the
+  /// small Linux VM before the larger macOS one only, where carving the leftover is monotone;
+  /// this checks the carve over every free capacity of a small host and both orders, so the
+  /// larger-first order the Rust code meets with arbitrary pool names is covered too.
+  pure def shape(pool: str, headroom: int, places: int): Shape =
+    { mem: vmMem(pool), macos: pool == MACOS, head: headroom, room: places, open: true }
+  pure def carveTotal(f: Free, first: Shape, second: Shape): int = {
+    val c = carveTwo(f, first, second)
+    c._1 + c._2
+  }
+  pure val FREES: Set[Free] = tuples(0.to(4), 0.to(3), 0.to(3), 0.to(2))
+    .map(t => { mem: t._1, disk: t._2, vms: t._3, mac: t._4 })
+  pure val ORDERS: Set[(str, str)] = Set((LINUX, MACOS), (MACOS, LINUX))
+  pure def shrunk(f: Free): Set[Free] = Set(
+    { ...f, mem: max0(f.mem - 1) }, { ...f, disk: max0(f.disk - 1) },
+    { ...f, vms: max0(f.vms - 1) }, { ...f, mac: max0(f.mac - 1) },
+  )
+  pure val carveMonotone = FREES.forall(f => ORDERS.forall(o =>
+    tuples(0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING)).forall(t => {
+      val first = shape(o._1, t._1, max0(MAX_RUNNING - t._2))
+      val second = shape(o._2, t._3, t._3)
+      and {
+        first.head > first.room or and {
+          shrunk(f).forall(g2 => carveTotal(g2, first, second) <= carveTotal(f, first, second)),
+          first.head == first.room
+            or carveTotal(f, first, second) <= carveTotal(f, { ...first, head: first.head + 1 }, second),
+        },
+      }
+    })))
 
   /// quarantineHoldsCapacity: a quarantined lease keeps its slot (no free slot is one of
   /// theirs) and its disk, and its memory while its VM runs.
@@ -760,6 +831,11 @@ module scheduling {
   }
 
   // ---- scenarios ----------------------------------------------------------------------------
+
+  // KER-05H: the carve never gives more when the free capacity shrinks or a quarantine is
+  // released, in either pool order (the larger-first order is the one that broke it).
+  run carveMonotoneTest = initWith(0, 0).expect(carveMonotone)
+
 
   /// The report the data plane sends as its `id`-th, with this foreign consumption.
   pure def reportOf(id: int, fm: int, fmac: int): Report = {

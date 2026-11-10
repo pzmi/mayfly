@@ -391,12 +391,28 @@ fn times(vm: Footprint, n: u32) -> Footprint {
 /// carve-out, deliverable and `reported_max`, and the reservations to ask for.
 ///
 /// Pools are served in name order (duplicates after the first are ignored): each is carved as
-/// many VMs as fit what the pools before it left, up to its `max_running` headroom, where live
-/// and quarantined leases both count. Admission order is a deliberate v0.x simplicity (the same
-/// order as `formal/scheduling.qnt`'s `planOf`); an operator balances pools with `max_running`.
-/// A pool whose terms or host gate are closed is carved nothing and reports only its runners.
-/// A reservation decision is never more than the carve-out, so the `Host` admits every one of
-/// them (`formal/scheduling.qnt`'s `carveOutAdmissible`).
+/// many VMs as fit the free capacity less what the open pools before it keep, up to its
+/// `max_running` headroom, where live and quarantined leases both count. An open pool keeps
+/// ahead of the pools after it room for `max_running` minus its live runners of its VMs (its
+/// headroom and its quarantined places), whatever it was carved. Admission order is a
+/// deliberate v0.x simplicity (the same order as `formal/scheduling.qnt`'s `planOf`); an
+/// operator balances pools with `max_running`.
+///
+/// Keeping a fixed share, not handing a later pool what an earlier one could not use, is what
+/// makes the carve monotone (KER-05H): with the leftover, a smaller free capacity that no
+/// longer fit one large VM of the first pool let a later pool of small VMs take several, so
+/// more foreign consumption carved more in total (pinned by
+/// `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`), and
+/// releasing a quarantine carved less (pinned by
+/// `tests/capacity.rs::should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`).
+/// Its price is that a later pool may stay empty beside room the earlier pool cannot use; the
+/// model checks the carve over both orders of a larger and a smaller VM
+/// (`formal/scheduling.qnt`'s `carveMonotone`). A pool's quarantined places stay kept, so
+/// releasing one never shrinks what is kept for a later pool.
+///
+/// A pool whose terms or host gate are closed is carved nothing, keeps nothing and reports only
+/// its runners. A reservation decision is never more than the carve-out, so the `Host` admits
+/// every one of them (`formal/scheduling.qnt`'s `carveOutAdmissible`).
 #[must_use]
 pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
     let admissible_now = inputs
@@ -418,7 +434,7 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
     pools.sort_by(|a, b| a.pool.cmp(&b.pool));
     pools.dedup_by(|a, b| a.pool == b.pool);
 
-    let mut remaining = free;
+    let mut kept_ahead = Footprint::ZERO;
     let mut lines = Vec::with_capacity(pools.len());
     let mut decisions = Vec::new();
     for pool in pools {
@@ -429,12 +445,17 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
             .saturating_sub(runners.saturating_add(held));
         let vm = Footprint::vm(pool.os, pool.vm);
         let open = inputs.report.is_some() && inputs.admission_open && pool.open;
+        let available = free.saturating_sub(kept_ahead);
         let carve_out = if open {
-            fit_count(remaining, vm, headroom)
+            fit_count(available, vm, headroom)
         } else {
             0
         };
-        remaining = remaining.saturating_sub(times(vm, carve_out));
+        if open {
+            kept_ahead =
+                kept_ahead.saturating_add(times(vm, pool.max_running.saturating_sub(runners)));
+        }
+        let remaining = available.saturating_sub(times(vm, carve_out));
         let next = hold_reason(
             inputs,
             pool,

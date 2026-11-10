@@ -385,3 +385,107 @@ fn should_hold_everything_when_no_report_was_applied() {
         }]
     );
 }
+
+/// The carve-outs of `report`'s pools, in name order.
+fn carve_outs(report: &CapacityReport) -> Vec<(&str, u32)> {
+    report
+        .pools
+        .iter()
+        .map(|p| (p.pool.as_str(), p.carve_out))
+        .collect()
+}
+
+#[test]
+fn should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit() {
+    // given: KER-05H's shrunk counterexample (seed `cc 9b7106b4…` in
+    // `capacity.proptest-regressions`): 28 GiB admissible, 10 GiB held by p0's lease; p0 has
+    // room for one more 15 GiB VM, p1 for three 2 GiB VMs
+    let inputs = PlanInputs {
+        report: Some(ReportedCapacity {
+            total: Resources::new(41 * GIB, 145 * GIB),
+            foreign: Resources::new(12 * GIB, 0),
+            base: Resources::new(0, 0),
+            vm_slots: 5,
+            foreign_vms: 0,
+            macos_guests: 0,
+            foreign_macos_guests: 0,
+        }),
+        reserves: Resources::new(GIB, 0),
+        admission_open: true,
+        leases: vec![LeaseInput {
+            pool: pool("p0"),
+            holds: Footprint {
+                resources: Resources::new(10 * GIB, 0),
+                vms: 1,
+                macos_guests: 1,
+            },
+            quarantined: false,
+        }],
+        pools: vec![
+            PoolInput {
+                pool: pool("p1"),
+                os: GuestOs::Linux,
+                vm: Resources::new(2 * GIB, 0),
+                open: true,
+                max_running: 3,
+                wanted: 0,
+            },
+            PoolInput {
+                pool: pool("p0"),
+                os: GuestOs::Linux,
+                vm: Resources::new(15 * GIB, 0),
+                open: true,
+                max_running: 2,
+                wanted: 0,
+            },
+        ],
+    };
+    let mut grown = inputs.clone();
+    if let Some(r) = grown.report.as_mut() {
+        r.foreign.memory_bytes += 4 * GIB;
+        r.foreign_vms += 1;
+    }
+
+    // when
+    let (before, _) = capacity::plan(&inputs);
+    let (after, _) = capacity::plan(&grown);
+
+    // then: 4 GiB more foreign use no longer fits p0's 15 GiB VM; p0 still keeps its room ahead
+    // of p1, so p1 is not handed the 14 GiB left (the greedy leftover carved it three VMs)
+    assert_eq!(carve_outs(&before), [("p0", 1), ("p1", 1)]);
+    assert_eq!(carve_outs(&after), [("p0", 0), ("p1", 0)]);
+}
+
+#[test]
+fn should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released() {
+    // given: p0 (one 16 GiB VM at most) holds a stopped quarantined lease; p1 runs 2 GiB VMs
+    let inputs = PlanInputs {
+        report: Some(host(32, 20)),
+        reserves: Resources::new(0, 0),
+        admission_open: true,
+        leases: vec![LeaseInput {
+            pool: pool("p0"),
+            holds: Footprint {
+                resources: Resources::new(0, 20 * GIB),
+                vms: 1,
+                macos_guests: 0,
+            },
+            quarantined: true,
+        }],
+        pools: vec![
+            demand("p0", GuestOs::Linux, 16, 1, 1),
+            demand("p1", GuestOs::Linux, 2, 16, 16),
+        ],
+    };
+    let mut released = inputs.clone();
+    released.leases.clear();
+
+    // when
+    let (held, _) = capacity::plan(&inputs);
+    let (freed, _) = capacity::plan(&released);
+
+    // then: p0's quarantined place stays kept ahead of p1, so releasing it gives p0 its VM and
+    // takes nothing from p1 (the greedy leftover carved p1 sixteen VMs, then eight)
+    assert_eq!(carve_outs(&held), [("p0", 0), ("p1", 8)]);
+    assert_eq!(carve_outs(&freed), [("p0", 1), ("p1", 8)]);
+}
