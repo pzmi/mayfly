@@ -151,9 +151,10 @@ Rules:
 
 ## 5. Contract suites
 
-A port with more than one implementation has **one suite**, written once in
-`mayfly-testkit::contracts` as functions over a factory, and run from each implementation's
-crate. Each suite has a `check_*` form returning a report of failed cases, used by its own tests
+A port with more than one implementation has **one suite**, written once in its plane's test
+kit (`mayfly-testkit::contracts`; the link's in the plane-neutral
+`mayfly-testkit-shared::link_contract`, ADR 0019) as functions over a factory, and run from
+each implementation's crate. Each suite has a `check_*` form returning a report of failed cases, used by its own tests
 to show a **deliberately broken implementation fails** named cases. A fake that passes less than
 production is a bug in the fake.
 
@@ -163,7 +164,7 @@ production is a bug in the fake.
 | Projections | memory, SQLite, PostgreSQL | `ClockReadingProjection`, `OrderDependentProjection` | PC-01..PC-09: rebuild by stream enumeration equals live (I16); version bump (either direction) rebuilds; inline rows commit with their events; stream locality; online rebuild with dual writes and the cutover fence (E9) | ES-04, ES-12 |
 | `DeliveryLedger` | memory, SQLite (all modes), PostgreSQL | `UnfencedLedger`, `ClearAllMarksLedger`, `HeadTrustingWorker`, `SkippingLedger` | DC-01..DC-25: marks per registered consumer, revision-ordered delivery, fenced leases, no skip, redelivery after a crash | ES-05, ES-09 |
 | `SnapshotStore` | memory, SQLite, PostgreSQL | `BlindSnapshotUpsert`, `ResealingSnapshots` | SC-01..SC-11: snapshot plus tail equals whole fold; stale, corrupt or foreign snapshots ignored | ES-08, ES-09 |
-| Link (`DirectiveSink`/`ObservationSink` pairs) | `inproc`; `uds` | `SilentDropLink` (loses a message and reports success), `NoVersionCheckLink` | handshake; unsupported major refused; at-least-once; no ordering assumed; bounded backpressure; close semantics; every message survives a serde round trip | DP-02, LNK-01 |
+| Link (`DirectiveSink`/`ObservationSink` pairs; `mayfly-testkit-shared::link_contract`, ADR 0019) | `inproc`; `uds`; `ReorderingLink` (reorders and duplicates; must pass) | `SilentDropLink` (loses a message and reports success), `NoVersionCheckLink` (admits frames of any version), `DeafCloseLink` (a close the peer never sees, reported as nothing discarded), `CorruptingLink` (an encoding only its own kind reads) | LK-01..LK-15: handshake, 1.0 and 1.1 peers agree on 1.0 and observations are written down to it; refusal reaches the data plane; unknown majors and frames above the session's version never handed up; a welcome outside the offer opens nothing; handshake written in the oldest major; every message survives a serde round trip, stamped with the session's version; malformed bytes discarded; at-least-once past the capacity (an accepted frame is delivered while the link is open); no ordering assumed; bounded backpressure; close seen both ways and its discards reported; directives of any epoch handed up (fencing is the data plane's, ADR 0042) | DP-02, LNK-01 |
 | `VmProvider` | `FakeVmProvider` (data-plane kit); Tart adapter over `mayfly-fake-tart`; Tart adapter over real Tart (hardware lane) | `PrefixDeleteProvider` (deletes by prefix), `AmbiguousAsDefiniteProvider` (timeout reported as definite), `MacBlindProvider` (deletes without re-reading the instance id), `EmptyInventoryProvider` (reads a failed listing as empty) | clone/start/stop/delete idempotent by name; clone sets a random MAC and reports it; delete of a base image, a foreign name or a mismatched instance id refused; hang → deadline → `Ambiguous`, then re-inspect; inventory reports exactly what exists or `Incomplete`; start goes through the shim and a daemon restart re-adopts it; stop only by `tart stop` | DP-01, DP-04, HW-01 |
 | `ImageStore` | fake; Tart adapter over fake-tart; real Tart (hardware lane) | `TagPullStore` (pulls by tag), `BaseEvictingStore` (evicts a referenced base) | pull by digest only, re-hash; materialise a base named by digest and runner version; evict only unreferenced bases; base set listed | DP-07 |
 | `GuestTransport` | fake; `tart exec` over fake-tart; `tart exec` on real Tart (hardware lane) | `ArgvSecretTransport` (passes the JIT config in argv), `UncheckedLockTransport` (skips the lock-PID check) | nonce verification; launcher receives the secret on stdin only (`tart exec -i`), after the lock-PID = shim-child and instance-id checks; bounded, redacted diagnostics; no SSH (ADR 0038) | DP-05 |

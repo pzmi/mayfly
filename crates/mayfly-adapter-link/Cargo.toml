@@ -10,3 +10,12 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-testkit-shared = { version = "0.1.0", path = "../mayfly-testkit-shared" }

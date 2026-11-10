@@ -119,8 +119,8 @@ Rules over the table:
    a shared crate's tests use only the shared kit and other shared crates.
    Test support is therefore split per plane: `mayfly-testkit` is the control plane's kit; the
    shared kit `mayfly-testkit-shared` (the poll helper, FND-05; the link contract suite,
-   DP-02) depends on no workspace crate, so every plane's tests, and the shared crates', may
-   use it; the data plane's kit (fake provider, `VmProvider` contract suite) is created, with
+   DP-02) depends on the shared crates only (`mayfly-domain`, `mayfly-protocol`), so every
+   plane's tests, and the shared crates', may use it; the data plane's kit (fake provider, `VmProvider` contract suite) is created, with
    its policy entry, by the first task that needs it (DP-01).
 4. **Production closure.** No production crate reaches a test_only or tool_only crate by a
    normal or build edge, directly or through any package (`ARCH-production-closure`).
@@ -243,6 +243,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-composition` | `tokio` (`rt-multi-thread`, `signal`, `net`, `time`, `process`), `tokio-util`, `tracing`, `tracing-subscriber` (`json`, `env-filter`), `toml`, `serde`, `thiserror` |
 | `mayfly-cli` | `clap` (`derive`), `serde_json`, `anyhow` |
 | `mayfly-testkit` | `serde_json` (golden fixtures) |
+| `mayfly-testkit-shared` | `serde_json` (raw link frames), `tokio` (`rt`, `time`, `test-util`: the link suite's paused-clock runtime) |
 | `mayfly-fake-tart` | `serde`, `serde_json`, `anyhow` |
 | `mayfly-fake-github` | `axum`, `tokio`, `serde`, `serde_json`, `anyhow` |
 | `xtask` | `cargo_metadata`, `clap`, `syn`, `proc-macro2`, `serde`, `toml`, `tempfile`, a YAML parser, `anyhow` |
@@ -258,8 +259,9 @@ Dev ceilings: `proptest` (pure and application crates), `tempfile`, `tokio` (`rt
    fakes (verification §3, §5, §7). It depends on no adapter, so an adapter's own tests can
    run the suites against it without a cycle, and on no data-plane crate (ADR 0019). The
    data-plane kit of §2.2 rule 3 follows the same shape. `mayfly-testkit-shared` holds what
-   both planes' tests need and depends on no workspace crate: the bounded `poll` helper
-   (verification §2.5) and, from DP-02, the link contract suite.
+   both planes' tests need and depends on the shared crates only: the bounded `poll` helper
+   (verification §2.5, with `poll::within` for a bounded async wait) and, from DP-02, the link
+   contract suite (`link_contract`, verification §5).
 2. `mayfly-conformance` holds ITF decoding, replay and per-model drivers (verification §6). It
    sees both planes, so no plane crate dev-depends on it.
 3. `fuzz/` is its own workspace with its own `Cargo.lock` and `deny.toml`; its crate is

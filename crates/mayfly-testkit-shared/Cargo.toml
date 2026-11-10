@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-testkit-shared"
-description = "Test-only: plane-neutral test support (the bounded poll helper, the fixture tree reader) both planes' kits and tests may use."
+description = "Test-only: plane-neutral test support (the bounded poll helper, the fixture tree reader, the link contract suite) both planes' kits and tests may use."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "time", "test-util"] }

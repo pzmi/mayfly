@@ -107,10 +107,10 @@ mayfly-testkit = [
   "mayfly-control-domain", "mayfly-control",
   "mayfly-testkit-shared",
 ]
-# The shared test kit (ADR 0019): plane-neutral test support, today the poll helper. Its closure
-# is the shared crates only (none yet), so control and data crates, and both planes' kits, may
-# dev-depend on it.
-mayfly-testkit-shared = []
+# The shared test kit (ADR 0019): plane-neutral test support, the poll helper and the link
+# contract suite (DP-02), which speaks the protocol's types. Its closure is the shared crates
+# only, so control and data crates, both planes' kits and the shared crates may dev-depend on it.
+mayfly-testkit-shared = ["mayfly-domain", "mayfly-protocol"]
 # Conformance drives the production crates the Quint models govern, over the testkit, the
 # Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
 # dev-depend on it.
@@ -146,6 +146,12 @@ mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["defa
 # AggregateStore encodes events and refusals and hashes intent digests (ADR 0041).
 mayfly-control = { serde_json = ["default"], sha2 = ["default"] }
 mayfly-testkit = { serde_json = ["default"] }
+# The link transports (plan section 3.3): bounded Tokio channels for inproc, JSON frames
+# (ADR 0010) encoded and decoded on every send, in process too.
+mayfly-adapter-link = { serde_json = ["default"], tokio = ["sync"] }
+# The link contract suite (DP-02) runs each case on its own current-thread runtime with a paused
+# clock (rt, time, test-util), and reads and writes raw JSON frames (ADR 0010).
+mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test-util"] }
 # The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
 # process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
 # of the file and executable checks, through Tokio.

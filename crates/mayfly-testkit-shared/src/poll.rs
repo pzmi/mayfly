@@ -6,10 +6,16 @@
 //! reason on timeout, and is never a correctness oracle: a test asserts the state reached,
 //! never how long it took.
 //!
+//! An async test bounds a wait on a future with [`within`] instead: under Tokio's paused clock
+//! (the link contract suite's runtime) the bound elapses as soon as nothing else can run, so a
+//! future that would hang is reported at once and deterministically; under a real clock it
+//! waits at most the bound.
+//!
 //! This file is the single exemption of `ARCH-test-sleep`; its behaviour is pinned by the tests
 //! below.
 
 use std::fmt;
+use std::future::Future;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -92,6 +98,29 @@ pub fn wait_until(deadline: Duration, reason: &str, condition: impl FnMut() -> b
     if let Err(timed_out) = try_wait_until(deadline, reason, condition) {
         panic!("{timed_out}");
     }
+}
+
+/// Awaits `future` for at most `deadline` of the runtime's clock. Needs a Tokio runtime with
+/// time enabled; under a paused clock the deadline is reached as soon as every task waits, so a
+/// hang is seen without a real wait.
+///
+/// # Errors
+///
+/// [`TimedOut`] carrying `reason` when `future` did not complete within `deadline`; the future
+/// is dropped. Pinned by
+/// `should_report_the_reason_when_a_future_does_not_complete_within_the_bound` and
+/// `should_return_the_output_when_a_future_completes_within_the_bound`.
+pub async fn within<F: Future>(
+    deadline: Duration,
+    reason: &str,
+    future: F,
+) -> Result<F::Output, TimedOut> {
+    tokio::time::timeout(deadline, future)
+        .await
+        .map_err(|_| TimedOut {
+            reason: reason.to_owned(),
+            deadline,
+        })
 }
 
 #[cfg(test)]
@@ -199,5 +228,43 @@ mod tests {
 
         // then
         assert_eq!(checks.get(), 2);
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("a current-thread runtime builds")
+    }
+
+    #[test]
+    fn should_report_the_reason_when_a_future_does_not_complete_within_the_bound() {
+        // given
+        let runtime = paused_runtime();
+
+        // when
+        let result = runtime.block_on(within(
+            LONG,
+            "a frame that never comes",
+            std::future::pending::<()>(),
+        ));
+
+        // then
+        let timed_out = result.expect_err("a pending future must time out");
+        assert_eq!(timed_out.reason(), "a frame that never comes");
+        assert_eq!(timed_out.deadline(), LONG);
+    }
+
+    #[test]
+    fn should_return_the_output_when_a_future_completes_within_the_bound() {
+        // given
+        let runtime = paused_runtime();
+
+        // when
+        let result = runtime.block_on(within(LONG, "a ready value", async { 7 }));
+
+        // then
+        assert_eq!(result, Ok(7));
     }
 }

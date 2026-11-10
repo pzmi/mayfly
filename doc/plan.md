@@ -165,6 +165,16 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
 
 One **link contract suite** (verification §5) runs against every transport.
 
+**As built (DP-02).** A transport is a *wire* (`mayfly_adapter_link::wire::Wire`: one encoded
+frame per send, bounded, the peer's close observable) under shared *endpoints* that implement
+the link ports: they write the handshake in the oldest major they speak, stamp session frames
+with the negotiated version and write observations down to it (`written_in`), admit each frame
+by its header before decoding it, and discard and count what they may not hand up. Epochs are
+not judged there: a directive of any epoch is handed up and the executor fences it (ADR 0042).
+A send's `Ok` means accepted; an accepted frame is delivered while the link is open, a full
+wire makes the send wait, and a close reports the frames it discarded unread. `uds` (LNK-01) is
+a second wire under the same endpoints.
+
 ### 3.4 Enforcement
 
 `architecture.toml` makes the split structural: no `mayfly-control*` crate depends on a
