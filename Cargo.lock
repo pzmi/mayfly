@@ -1041,6 +1041,14 @@ dependencies = [
 [[package]]
 name = "mayfly-conformance"
 version = "0.1.0"
+dependencies = [
+ "mayfly-control",
+ "mayfly-control-domain",
+ "mayfly-domain",
+ "mayfly-testkit",
+ "serde_json",
+ "toml",
+]
 
 [[package]]
 name = "mayfly-control"

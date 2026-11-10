@@ -160,6 +160,8 @@ mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["defa
 # delivery worker's ERROR on a stream whose journal read falls short of its mark (ES-05F).
 mayfly-control = { serde_json = ["default"], sha2 = ["default"], tracing = ["std"] }
 mayfly-testkit = { serde_json = ["default"] }
+# ITF traces are JSON and the trace manifests TOML (ver section 6.2, VER-01).
+mayfly-conformance = { serde_json = ["default"], toml = ["default"] }
 # The link transports (plan section 3.3): bounded Tokio channels for inproc, JSON frames
 # (ADR 0010) encoded and decoded on every send, in process too.
 mayfly-adapter-link = { serde_json = ["default"], tokio = ["sync"] }

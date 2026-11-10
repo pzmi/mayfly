@@ -276,7 +276,18 @@ lab checks it after the healthy tail (§8.5).
 8. **Per-field sensitivity.** For every observed field, a test edits one model variable at one
    state of a passing trace and requires a mismatch exactly there. This catches a constant
    `observe` or a projection that drops a field.
-9. **Promoting a counterexample.** Reproduce with the seed; decide which side is wrong (model
+9. **Implementation (VER-01).** `mayfly-conformance` holds the decoder (`itf`), the manifests,
+   the `Driver` contract and comparison (`replay`) and the lifecycle driver; its binary replays a
+   manifest for `cargo xtask conformance` and the `conformance-replay` stage, and its tests
+   replay the committed traces, run the negative controls and the per-field sensitivity cases
+   without Node. The seed is passed as `--seed` (`QUINT_SEED`, as for `formal-verify`, also sets
+   it). Generation and replay are one stage; the controls run in `integration-tests`. A
+   generated trace may be shorter than `max_steps + 1` when no action is enabled (the lifecycle
+   ends at `Closed`); only a longer one is a trace error, and the committed ones are pinned
+   byte for byte by `formal-freshness`. A divergence whose cause is left to a follow-up is listed
+   in the driver's known divergences, each reproduced by a committed trace and required to
+   reproduce, and is reported `KNOWN` rather than failed (`doc/formal-models.md`, lifecycle).
+10. **Promoting a counterexample.** Reproduce with the seed; decide which side is wrong (model
    first if the model is wrong); reduce to a named run in the scenarios module; add its manifest
    entry and export the trace; add it to the driver test's named set. A fault-lab `FAIL` follows
    the same path when the model can express it.

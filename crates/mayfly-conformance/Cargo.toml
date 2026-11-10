@@ -10,3 +10,11 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
+mayfly-control-domain = { version = "0.1.0", path = "../mayfly-control-domain" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-testkit = { version = "0.1.0", path = "../mayfly-testkit" }
+serde_json = "1.0.154"
+toml = "1.2.1"

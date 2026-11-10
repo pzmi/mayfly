@@ -1049,3 +1049,184 @@ module lifecycle {
       .then(beginActivation).then(issueNext).expect(a.pending == VERIFY_GUEST)
   }
 }
+
+/**
+ * Named runs of `lifecycle` as scripted step relations, so `quint run --mbt` exports each as an
+ * ITF regression trace carrying the action and picks of every step (ver §6.2; the pattern of
+ * `event_store_traces`). The conformance driver (VER-01) replays them against the `Attempt`
+ * aggregate in `mayfly-conformance`'s tests, without Node. A script is a `List[Stim]`, one step
+ * per stimulus; `recorded` turns each stimulus' arguments into picks named as the model's own
+ * relations name them (`fresh`, `claim`, `applied`, `job`, `other`, `removed`, `instance`,
+ * `activated`), and its `any` makes the model action taken `mbt::actionTaken`.
+ *
+ * The scripts follow the `run`s of `lifecycle` of the same name, and four reproduce the
+ * divergences the first replays found between the model and the aggregate (the `divergence`
+ * scripts; `mayfly-conformance`'s `KNOWN_DIVERGENCES` names each and its follow-up).
+ *
+ * Each trace is regenerated into `formal/traces/regression/` from the repository root (the
+ * scripts are deterministic; the seed is recorded for byte-for-byte freshness, VER-01):
+ *
+ *   npx --prefix formal --no -- quint run --backend typescript --main lifecycle_traces \
+ *     --init tinit --step <script> --max-steps <its length> --mbt --seed 0x5ce1 \
+ *     --invariant allInvariants --out-itf formal/traces/regression/lifecycle-<script>.itf.json \
+ *     formal/lifecycle.qnt
+ */
+module lifecycle_traces {
+  import lifecycle as L
+
+  /// The `allInvariants` of the model, checked on every exported state.
+  val allInvariants = L::allInvariants
+
+  /// The script's position: the stimulus it takes next.
+  var pc: int
+
+  /// One stimulus: the action's name in `step` and every argument any action takes.
+  type Stim = {
+    kind: str, fresh: int, claim: int, applied: bool, job: int, other: int, removed: bool,
+    instance: int, activated: bool,
+  }
+
+  pure val S0: Stim = {
+    kind: "", fresh: 1, claim: 3, applied: true, job: 1, other: 1, removed: false, instance: 1,
+    activated: false,
+  }
+
+  pure def s(kind: str): Stim = { ...S0, kind: kind }
+
+  pure val ISSUE = s("issueNext")
+  /// The success reply of the scenarios (`ok`: instance 1, a guest claiming 3).
+  pure val OK = s("replySucceeded")
+  pure def lost(applied: bool): Stim = { ...S0, kind: "replyLost", applied: applied }
+  pure def replaced(other: int, removed: bool): Stim =
+    { ...S0, kind: "vmReplacedOrRemoved", other: other, removed: removed }
+  pure def prepare(activated: bool): Stim = { ...S0, kind: "prepareAtOnce", activated: activated }
+
+  pure val TO_PREPARED = [ISSUE, OK, ISSUE, OK, ISSUE, OK]
+  pure val TO_LISTENING = [s("beginActivation"), ISSUE, OK, s("recordJitHandle"), ISSUE, OK]
+  /// Prepared, then retired: diagnostics exported, and the stop issued.
+  pure val TO_STOPPING = TO_PREPARED.concat([s("requestRetirement"), ISSUE, OK, ISSUE])
+
+  pure val HAPPY_PATH = TO_PREPARED.concat(TO_LISTENING).concat([
+    s("bindJob"), s("runnerExited"), s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, OK,
+    s("close"),
+  ])
+  pure val UNKNOWN_CLONE_RESOLVED_BY_INVENTORY =
+    [ISSUE, lost(true), s("adopt"), s("inventoryPresent")]
+  pure val STAGE_FAILURE_BACKS_OFF_THEN_RETIRES =
+    [ISSUE, s("replyRefused"), ISSUE, s("replyRefused")]
+  pure val GUEST_REJECTED_IS_QUARANTINED = [
+    ISSUE, OK, ISSUE, OK, ISSUE, s("replyGuestRejected"), ISSUE, OK, s("resolveQuarantine"),
+    ISSUE,
+  ]
+  pure val LAUNCH_UNKNOWN_NEVER_SERVES = TO_PREPARED.concat([
+    s("beginActivation"), ISSUE, OK, s("recordJitHandle"), ISSUE, s("replyLaunchUnknown"),
+    s("requestRetirement"), s("confirmRetirement"),
+  ])
+  pure val RETIREMENT_WAITS_FOR_DEREGISTRATION = TO_PREPARED.concat(TO_LISTENING).concat([
+    s("requestRetirement"), s("withdrawRetirement"), s("requestRetirement"), s("bindJob"),
+  ])
+  pure val REPLACED_VM_QUARANTINES_ON_DELETE = TO_PREPARED.concat([
+    s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, replaced(2, false),
+    s("replyProofRefused"),
+  ])
+  pure val ADOPT_DURING_LAUNCH_NEVER_SERVES = TO_PREPARED.concat([
+    s("beginActivation"), ISSUE, OK, s("recordJitHandle"), ISSUE, s("adopt"), OK,
+    s("requestRetirement"), s("confirmRetirement"),
+  ])
+  pure val DELETE_REFUSED_REPEATEDLY_QUARANTINES = TO_PREPARED.concat([
+    s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, s("replyRefused"), ISSUE,
+    s("replyRefused"),
+  ])
+  pure val DELETE_LOST_THEN_ANSWERED_DELETED = TO_PREPARED.concat([
+    s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, lost(true), OK, s("close"),
+  ])
+  pure val STOP_OF_VANISHED_VM_QUARANTINES = TO_STOPPING.concat([
+    replaced(1, true), s("replyTargetAbsent"), s("inventoryAbsent"), s("resolveQuarantine"),
+    ISSUE, OK, s("close"),
+  ])
+  pure val ACTIVATION_AT_ONCE = [
+    prepare(true), s("recordJitHandle"), ISSUE, OK, s("bindJob"), s("vmObservedStopped"),
+  ]
+
+  // The divergences (see the module docs).
+  /// A stop whose reply was lost, resolved by a listing showing the VM stopped.
+  pure val DIVERGENCE_UNKNOWN_STOP_RESOLVED_BY_LISTING =
+    TO_STOPPING.concat([lost(true), s("inventoryPresent")])
+  /// A retirement requested while activating, confirmed after the fresh verification failed.
+  pure val DIVERGENCE_CONFIRM_RETIREMENT_IN_BACKOFF = [
+    prepare(true), s("recordJitHandle"), s("adopt"), s("requestRetirement"), ISSUE,
+    s("replyRefused"), s("confirmRetirement"),
+  ]
+  /// A clone whose reply was lost and whose VM was then removed, answered by a re-delivery.
+  pure val DIVERGENCE_CLONE_ANSWERED_AFTER_REMOVAL =
+    [ISSUE, lost(true), replaced(1, true), OK]
+  /// A vanished quarantine resolved by an operator, then quarantined again by a policy.
+  pure val DIVERGENCE_REQUARANTINE_AFTER_VANISHED = TO_STOPPING.concat([
+    replaced(1, true), s("replyTargetAbsent"), s("resolveQuarantine"), s("quarantineCommand"),
+  ])
+
+  action tinit = {
+    nondet name = Set(1).oneOf()
+    nondet generation = Set(1).oneOf()
+    all { L::initWith(name, generation), pc' = 0 }
+  }
+
+  /// One stimulus, its arguments recorded as the picks of `step`.
+  action recorded(x: Stim): bool = {
+    nondet fresh = Set(x.fresh).oneOf()
+    nondet claim = Set(x.claim).oneOf()
+    nondet applied = Set(x.applied).oneOf()
+    nondet job = Set(x.job).oneOf()
+    nondet other = Set(x.other).oneOf()
+    nondet removed = Set(x.removed).oneOf()
+    nondet instance = Set(x.instance).oneOf()
+    nondet activated = Set(x.activated).oneOf()
+    any {
+      all { x.kind == "issueNext", L::issueNext },
+      all { x.kind == "replySucceeded", L::replySucceededWith(fresh, claim) },
+      all { x.kind == "replyRefused", L::replyRefused },
+      all { x.kind == "replyProofRefused", L::replyProofRefused },
+      all { x.kind == "replyTargetAbsent", L::replyTargetAbsent },
+      all { x.kind == "replyGuestRejected", L::replyGuestRejected },
+      all { x.kind == "replyLost", L::replyLostWith(fresh, applied) },
+      all { x.kind == "replyLaunchUnknown", L::replyLaunchUnknown },
+      all { x.kind == "inventoryPresent", L::inventoryPresent },
+      all { x.kind == "inventoryAbsent", L::inventoryAbsent },
+      all { x.kind == "vmObservedStopped", L::vmObservedStopped },
+      all { x.kind == "runnerExited", L::runnerExited },
+      all { x.kind == "vmReplacedOrRemoved", L::vmReplacedOrRemovedWith(other, removed) },
+      all { x.kind == "beginActivation", L::beginActivation },
+      all { x.kind == "recordJitHandle", L::recordJitHandle },
+      all { x.kind == "bindJob", L::bindJobWith(job) },
+      all { x.kind == "requestRetirement", L::requestRetirement },
+      all { x.kind == "confirmRetirement", L::confirmRetirement },
+      all { x.kind == "withdrawRetirement", L::withdrawRetirement },
+      all { x.kind == "quarantineCommand", L::quarantineCommand },
+      all { x.kind == "adopt", L::adopt },
+      all { x.kind == "resolveQuarantine", L::resolveQuarantine },
+      all { x.kind == "close", L::close },
+      all { x.kind == "prepareAtOnce", L::prepareAtOnceWith(instance, activated) },
+    }
+  }
+
+  action script(S: List[Stim]): bool = all { pc < S.length(), recorded(S[pc]), pc' = pc + 1 }
+
+  action happyPath = script(HAPPY_PATH)
+  action unknownCloneResolvedByInventory = script(UNKNOWN_CLONE_RESOLVED_BY_INVENTORY)
+  action stageFailureBacksOffThenRetires = script(STAGE_FAILURE_BACKS_OFF_THEN_RETIRES)
+  action guestRejectedIsQuarantined = script(GUEST_REJECTED_IS_QUARANTINED)
+  action launchUnknownNeverServes = script(LAUNCH_UNKNOWN_NEVER_SERVES)
+  action retirementWaitsForDeregistration = script(RETIREMENT_WAITS_FOR_DEREGISTRATION)
+  action replacedVmQuarantinesOnDelete = script(REPLACED_VM_QUARANTINES_ON_DELETE)
+  action adoptDuringLaunchNeverServes = script(ADOPT_DURING_LAUNCH_NEVER_SERVES)
+  action deleteRefusedRepeatedlyQuarantines = script(DELETE_REFUSED_REPEATEDLY_QUARANTINES)
+  action deleteLostThenAnsweredDeleted = script(DELETE_LOST_THEN_ANSWERED_DELETED)
+  action stopOfVanishedVmQuarantines = script(STOP_OF_VANISHED_VM_QUARANTINES)
+  action activationAtOnce = script(ACTIVATION_AT_ONCE)
+  action divergenceUnknownStopResolvedByListing =
+    script(DIVERGENCE_UNKNOWN_STOP_RESOLVED_BY_LISTING)
+  action divergenceConfirmRetirementInBackoff = script(DIVERGENCE_CONFIRM_RETIREMENT_IN_BACKOFF)
+  action divergenceCloneAnsweredAfterRemoval = script(DIVERGENCE_CLONE_ANSWERED_AFTER_REMOVAL)
+  action divergenceRequarantineAfterVanished = script(DIVERGENCE_REQUARANTINE_AFTER_VANISHED)
+
+}

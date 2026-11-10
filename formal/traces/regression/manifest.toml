@@ -1,5 +1,7 @@
 # The committed regression traces and how each one is regenerated (ver §6.2; ES-06 exports the
-# event store's, VER-01's `formal-freshness` stage checks them).
+# event store's, VER-01 the lifecycle's; VER-01's `formal-freshness` stage checks them all, and
+# `mayfly-conformance` replays every trace whose model has a driver: the lifecycle's now, the
+# event store's from ES-07).
 #
 # Every trace listed here is regenerated with the locked Quint, from the repository root:
 #
@@ -14,7 +16,10 @@
 # regeneration is byte for byte. Each
 # script takes exactly the stimuli of the `run` of the same name (`<step>Test`), so a scenario
 # and its trace cannot drift; `mbt::actionTaken` is the model action and `last.stimulus` names
-# it too. Every `*.itf.json` here has exactly one entry.
+# it too. The lifecycle scripts are `lifecycle_traces` in `formal/lifecycle.qnt` (`main =
+# "lifecycle_traces"`, `init = "tinit"`), built the same way; the four `divergence*` scripts
+# reproduce the known divergences of `mayfly-conformance`'s `KNOWN_DIVERGENCES`. Every
+# `*.itf.json` here has exactly one entry.
 
 [[trace]]
 file = "event_store-lostRace.itf.json"
@@ -364,5 +369,165 @@ main = "event_store_traces"
 init = "tinit"
 step = "retireThenRegister"
 max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-happyPath.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "happyPath"
+max_steps = 22
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-unknownCloneResolvedByInventory.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "unknownCloneResolvedByInventory"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-stageFailureBacksOffThenRetires.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "stageFailureBacksOffThenRetires"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-guestRejectedIsQuarantined.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "guestRejectedIsQuarantined"
+max_steps = 10
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-launchUnknownNeverServes.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "launchUnknownNeverServes"
+max_steps = 14
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-retirementWaitsForDeregistration.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "retirementWaitsForDeregistration"
+max_steps = 16
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-replacedVmQuarantinesOnDelete.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "replacedVmQuarantinesOnDelete"
+max_steps = 14
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-adoptDuringLaunchNeverServes.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "adoptDuringLaunchNeverServes"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-deleteRefusedRepeatedlyQuarantines.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "deleteRefusedRepeatedlyQuarantines"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-deleteLostThenAnsweredDeleted.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "deleteLostThenAnsweredDeleted"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-stopOfVanishedVmQuarantines.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "stopOfVanishedVmQuarantines"
+max_steps = 17
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-activationAtOnce.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "activationAtOnce"
+max_steps = 6
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-divergenceUnknownStopResolvedByListing.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "divergenceUnknownStopResolvedByListing"
+max_steps = 12
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-divergenceConfirmRetirementInBackoff.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "divergenceConfirmRetirementInBackoff"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-divergenceCloneAnsweredAfterRemoval.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "divergenceCloneAnsweredAfterRemoval"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-divergenceRequarantineAfterVanished.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "divergenceRequarantineAfterVanished"
+max_steps = 14
 seed = "0x5ce1"
 invariant = "allInvariants"

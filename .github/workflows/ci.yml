@@ -98,9 +98,11 @@ jobs:
           key: ${{ steps.rust.outputs.cache-key }}
           hit: ${{ steps.rust.outputs.cache-hit }}
 
-  # The Quint models (verification.md section 6, D10): typecheck every formal/*.qnt and run each
-  # model's tests. Quint is locked by formal/package-lock.json; npx never fetches it, and a
-  # missing Node or Quint fails the stage (D15). The Apalache lane is formal.yml's.
+  # The Quint models (verification.md section 6, D10): typecheck every formal/*.qnt, run each
+  # model's tests, check the committed regression traces are fresh and replay them with seeded
+  # generated traces through the conformance drivers (VER-01; the seed is printed). Quint is
+  # locked by formal/package-lock.json; npx never fetches it, and a missing Node or Quint fails
+  # the stage (D15). The Apalache lane and the weekly conformance budget are formal.yml's.
   formal:
     name: Formal models (Quint)
     runs-on: ubuntu-24.04
@@ -126,7 +128,7 @@ jobs:
         run: npm ci --prefix formal
 
       - name: Formal models
-        run: cargo xtask check --only formal-typecheck,formal-test
+        run: cargo xtask check --only formal-typecheck,formal-test,formal-freshness,conformance-replay
 
       - name: Save caches (main only)
         uses: ./.github/actions/save-rust-cache

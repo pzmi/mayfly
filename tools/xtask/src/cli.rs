@@ -77,6 +77,24 @@ pub enum Command {
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
     },
+    /// Generate seeded model-based traces with `quint run --mbt` and replay them, with the
+    /// committed regression traces, through the conformance drivers (verification.md section
+    /// 6.2). The `conformance-replay` stage of `check` is this with the gate's budget; a failed
+    /// run prints the command that repeats it.
+    Conformance {
+        /// Only this driven model (`lifecycle` or `lifecycle.qnt`). An unknown name exits 2.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// The seed (decimal or 0x hex, as printed by an earlier run); a fresh one by default.
+        #[arg(long, value_name = "SEED")]
+        seed: Option<String>,
+        /// Traces per step relation.
+        #[arg(long, value_name = "K", default_value_t = crate::conformance::GATE_TRACES, value_parser = clap::value_parser!(u32).range(1..))]
+        traces: u32,
+        /// Steps per trace.
+        #[arg(long, value_name = "N", default_value_t = crate::conformance::GATE_STEPS, value_parser = clap::value_parser!(u32).range(1..))]
+        steps: u32,
+    },
     /// Install pinned dev tools.
     InstallTools {
         /// Tools to install; all when empty.
@@ -156,6 +174,7 @@ impl Command {
             Self::FormalTypecheck => "formal-typecheck",
             Self::FormalTest => "formal-test",
             Self::FormalVerify { .. } => "formal-verify",
+            Self::Conformance { .. } => "conformance",
             Self::InstallTools { .. } => "install-tools",
             Self::Adr { .. } => "adr",
             Self::Land { .. } => "land",

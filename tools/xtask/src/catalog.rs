@@ -36,7 +36,7 @@ const fn row(
 /// All rows. `quick` runs the stage rows `fmt-check`, `architecture`, `clippy`, `unit-tests`
 /// and `doctests`. `platform-tests` is a stage of `test` that `check` leaves out (the macOS CI
 /// job runs it). `formal-verify` and its two stages are the scheduled Apalache lane, outside
-/// `check`. Stages that later tasks bring (conformance, fuzz, mutation, release) are absent
+/// `check`. Stages that later tasks bring (fuzz, mutation, release) are absent
 /// until those tasks register them.
 pub const CATALOG: &[Check] = &[
     row(
@@ -112,6 +112,27 @@ pub const CATALOG: &[Check] = &[
         "npx --prefix formal --no -- quint test --backend typescript <every model of MODELS>",
         "FND-06",
         true,
+    ),
+    row(
+        "formal-freshness",
+        "formal",
+        "regenerate every trace of formal/traces/regression/manifest.toml with the locked Quint and compare it with the committed file",
+        "VER-01",
+        true,
+    ),
+    row(
+        "conformance-replay",
+        "conformance",
+        "quint run --mbt: 10 traces of 25 steps per relation of each driven model under a printed seed, then cargo run -p mayfly-conformance over them and the regression manifest",
+        "VER-01",
+        true,
+    ),
+    row(
+        "conformance",
+        "conformance",
+        "cargo xtask conformance [--model M] [--seed S] [--traces K] [--steps N]",
+        "VER-01",
+        false,
     ),
     row(
         "formal-verify",

@@ -823,7 +823,7 @@ steers the build (`CLIPPY_CONF_DIR`, `RUSTC_WRAPPER`, `RUSTFLAGS` other than `-D
 | `cargo xtask test [--only <stage>]` | test stages alone (unit and integration under nextest's `ci` profile, doctests, e2e, platform-tests) | FND-02, FND-05 |
 | `cargo xtask coverage [--changed-since <rev>]` | llvm-cov over in-process suites vs `coverage-floor.toml`; changed-line gate | FND-05 |
 | `cargo xtask formal-typecheck` / `formal-test` | typecheck every `.qnt`; run Quint scenario tests | FND-06 |
-| `cargo xtask conformance [--typecheck]` | all formal and replay stages: typecheck, scenarios, simulate, freshness, generate, replay, negative controls | VER-01 |
+| `cargo xtask conformance [--model M] [--seed S] [--traces K] [--steps N]` | generate seeded traces with `quint run --mbt` and replay them, with the regression traces, through the drivers; `conformance-replay` is this at the gate's budget | VER-01 |
 | `cargo xtask formal-verify [--model <name>]` | Apalache bounded verification of every model's `allInvariants` (or one model's) plus long multi-seed simulation (FND-06; `--model`, DEC-05); VER-07 adds the negative controls | FND-06, VER-07 |
 | `cargo xtask mutants-curated [--only <n>]` | apply each curated mutant in a scratch tree; require its named killer to fail | VER-05 |
 | `cargo xtask mutation [--in-diff <rev>] [--shard k/n]` | `cargo-mutants` over the configured scope | VER-05 |
@@ -838,9 +838,9 @@ Stages of `check` in order (each a catalog row): `fmt-check`, `architecture`, `c
 `cross-check` (Clippy for `aarch64-apple-darwin`, every target, warnings denied), `docs` (the
 ADR index matches the ADR files, the same code as `cargo xtask adr index`), `unit-tests`,
 `integration-tests`, `doctests`, `e2e-tests`, `formal-typecheck`, `formal-test`,
-`formal-scenarios`, `formal-simulate`, `formal-freshness`, `formal-generate`,
-`conformance-replay`, `conformance-controls`, `coverage`, `changed-lines`, `deny`, `deny-fuzz`,
-`secrets`, `workflows`, `action-pins`. A stage enters `check` in the commit of the task that
+`formal-freshness`, `conformance-replay` (VER-01: generation is part of the replay stage, and
+the negative controls and field sensitivity run in `integration-tests`), `coverage`,
+`changed-lines`, `deny`, `deny-fuzz`, `secrets`, `workflows`, `action-pins`. A stage enters `check` in the commit of the task that
 introduces it, together with its `ci.yml` job entry.
 
 ---

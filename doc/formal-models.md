@@ -43,25 +43,29 @@ there). Everything is development-only: the shipped binaries never need Node or 
 npm ci --prefix formal                 # install the locked Quint (once, and after a lockfile change)
 cargo xtask formal-typecheck           # quint typecheck of every formal/*.qnt
 cargo xtask formal-test                # quint test of every registered model, at least one test each
-cargo xtask check --only formal-typecheck,formal-test   # what the `formal` job of ci.yml runs
+cargo xtask check --only formal-typecheck,formal-test,formal-freshness,conformance-replay   # what the `formal` job of ci.yml runs
 cargo xtask formal-verify              # Apalache bounded check + long simulation (not in `check`)
 cargo xtask formal-verify --model lifecycle   # one model only: what each job of formal.yml runs
 QUINT_SEED=<seed> cargo xtask formal-verify   # repeat a simulation; the base seed is always printed
+cargo xtask conformance [--model lifecycle] [--seed S] [--traces K] [--steps N]   # generate and replay (VER-01)
 cargo xtask doctor [--all]             # pinned tools; --all adds Java and Apalache
 ```
 
-`formal-typecheck` and `formal-test` are `check` stages (job `formal` in `ci.yml`).
-`formal-verify` is the weekly lane of `.github/workflows/formal.yml`, which runs only on its
-schedule and by hand (owner, 2026-11-10: "We want to run it on a weekly ci only"), never on a
-push or a pull request: a change to a model is verified by dispatching the workflow, or by
-running its model locally. The workflow runs one job per model of `MODELS`, in parallel, each
-`cargo xtask formal-verify --model <name>` with a timeout of about three times the model's
-measured time below (20 min for `smoke`; 45 for `lifecycle`, `link`, `registration`, `scaleset`;
-60 for `scheduling`; 90 for `recovery`; 300 for `event_store`, whose `storeOnlyStep` alone took
-about 78 min); an xtask test keeps the matrix equal to `MODELS` and the triggers to the schedule
-and dispatch. Its logs,
-Apalache's run directories (a counterexample as ITF and TLA+) and the ITF trace of a failing
-simulation are kept in `target/formal-verify/` and uploaded when a run fails.
+`formal-typecheck`, `formal-test`, `formal-freshness` and `conformance-replay` are `check` stages
+(job `formal` in `ci.yml`); the last two are VER-01's (verification §6.2): freshness regenerates
+every committed regression trace and compares it byte for byte, and the replay generates 10 traces
+of 25 steps per step relation of every driven model under a printed seed and replays them with the
+regression traces. `formal.yml`'s weekly `conformance` job runs `cargo xtask conformance --traces
+1000 --steps 50`. `formal-verify` is the weekly lane of `.github/workflows/formal.yml`, which runs
+only on its schedule and by hand (owner, 2026-11-10: "We want to run it on a weekly ci only"),
+never on a push or a pull request: a change to a model is verified by dispatching the workflow, or
+by running its model locally. The workflow runs one job per model of `MODELS`, in parallel, each
+`cargo xtask formal-verify --model <name>` with a timeout of about three times the model's measured
+time below (20 min for `smoke`; 45 for `lifecycle`, `link`, `registration`, `scaleset`; 60 for
+`scheduling`; 90 for `recovery`; 300 for `event_store`, whose `storeOnlyStep` alone took about 78
+min); an xtask test keeps the matrix equal to `MODELS` and the triggers to the schedule and
+dispatch. Its logs, Apalache's run directories (a counterexample as ITF and TLA+) and the ITF trace
+of a failing simulation are kept in `target/formal-verify/` and uploaded when a run fails.
 
 ## How a model is registered
 
@@ -152,9 +156,31 @@ enforce them (`recordJitHandle` needs the grant and the fresh verification, so
 `illegalMint` stays false): checking them proves that the guards and the transitions of the
 model, taken together, cannot reach a violating state, including through interleavings nobody
 wrote down, which is how the review's counterexample was a real defect of the model. They are
-evidence about the Rust code only through the matrix golden and the Rust tests named below,
-and fully once VER-01's conformance replay drives the aggregate with the model's traces; until
-then a guard the Rust code lacks is caught only if a Rust test exercises it.
+evidence about the Rust code through the matrix golden, the Rust tests named below and,
+since VER-01, the conformance replay: `mayfly-conformance`'s lifecycle driver runs every action
+of a trace as a stimulus of the `Attempt` aggregate through `AggregateStore` over
+`MemoryJournal` and compares the folded state with the model's `a` at every step, the initial
+one included (`crates/mayfly-conformance/src/lifecycle.rs` names each compared field and what is
+abstracted). The replay checks only what the model does: a guard the Rust code lacks is caught
+when a trace takes the model's path past it, not when the model disables an action (the driver
+never tries an action the model did not take). The committed traces are the scripts of
+`lifecycle_traces` (the named runs above as `List[Stim]`, exported to
+`formal/traces/regression/`); generated ones come from `step`, `serveStep` and `activationStep`
+under a printed seed (`cargo xtask conformance`, ver §6.2).
+
+**Known divergences (VER-01).** The first replays found four disagreements between the model
+and the aggregate, each reproduced by a `divergence*` script and listed with its follow-up in
+`KNOWN_DIVERGENCES` (`crates/mayfly-conformance/src/lifecycle.rs`); a replay that ends in one is
+reported `KNOWN` and not failed, and a test fails as soon as one no longer reproduces
+(`should_reproduce_each_known_divergence_when_its_regression_trace_is_replayed`). Neither side
+was changed: which side is wrong is the follow-up's decision (ver §6.2 item 9).
+
+| Id | Model | Aggregate |
+|:--|:--|:--|
+| `unknown-stop-resolved-by-listing-keeps-tries` | an Unknown `StopVm` resolved by a listing showing the VM stopped keeps the stop counted in `tries` | records `VmStopped` and resets `tries`, as a stop's success reply does in both |
+| `confirm-retirement-refused-outside-activating-or-listening` | a retirement requested while activating can be confirmed from `Backoff` (a failed fresh verification) or `Finished` (the runner exited after a launch of unknown outcome) | refuses `ConfirmRetirement` there (`no_retirement_requested`) and keeps `retirement_requested` set |
+| `clone-answered-after-removal-records-no-instance` | a clone whose lost reply took effect, then whose VM was removed, is answered success with the world's instance `NONE`: `Booting` with no instance id | a `VmCloned` always carries an instance id (the model allows a reply the data plane cannot give) |
+| `requarantine-after-resolved-vanished-keeps-the-flag` | `vanished` is never cleared: after an operator resolves a vanished quarantine, any later quarantine reads as vanished again | records the new quarantine's reason |
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|

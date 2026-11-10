@@ -9,7 +9,7 @@
 use std::process::Command;
 
 use crate::process::{Stage, finish, run_report};
-use crate::{adr, coverage, formal, quick, repo, security, test, tools};
+use crate::{adr, conformance, coverage, formal, quick, repo, security, test, tools};
 
 /// The product's target (D2): linted from Linux so a macOS-only compile error or warning is
 /// caught before the native `macos` job.
@@ -116,6 +116,7 @@ pub fn stages() -> Vec<Stage> {
     stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
     stages.extend(test::stages());
     stages.extend(formal::stages());
+    stages.extend(conformance::stages());
     stages.push(coverage::coverage_stage());
     stages.push(coverage::changed_lines_stage());
     stages.extend(security::stages());
@@ -217,6 +218,8 @@ mod tests {
             "doctests",
             "formal-typecheck",
             "formal-test",
+            "formal-freshness",
+            "conformance-replay",
             "coverage",
             "changed-lines",
             "deny",

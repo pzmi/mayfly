@@ -29,7 +29,7 @@ pull requests and by hand. A test in `tools/xtask/src/check.rs`
 | `static` | Static quality | `check --only fmt-check,clippy,docs` (docs: the ADR index matches the ADR files), after `doctor` has asserted every pinned tool a `check` stage needs (Node 22 and the locked Quint included) |
 | `cross` | Cross check (aarch64-apple-darwin) | `check --only cross-check` (Clippy over every target for the macOS target, warnings denied) |
 | `tests` | Tests | `check --only unit-tests,integration-tests,doctests` (nextest under the `ci` profile; doctests on `cargo test --doc`) |
-| `formal` | Formal models (Quint) | `check --only formal-typecheck,formal-test` (typecheck every `formal/*.qnt`, run each registered model's Quint tests; Node 22 and `npm ci --prefix formal` first) |
+| `formal` | Formal models (Quint) | `check --only formal-typecheck,formal-test,formal-freshness,conformance-replay` (typecheck every `formal/*.qnt`, run each registered model's Quint tests, check the committed regression traces are fresh and replay them with seeded generated traces through the conformance drivers; Node 22 and `npm ci --prefix formal` first) |
 | `macos` | macOS (arm64) | `cargo build --workspace --locked`, then `test --only platform-tests` on `macos-latest`, with `RUSTFLAGS=-D warnings` |
 | `coverage` | Coverage | `check --only coverage,changed-lines` (the instrumented nextest run against `coverage-floor.toml`, then the changed lines against the merge base; full history) |
 | `security` | Security | `check --only deny,secrets,workflows,action-pins` |

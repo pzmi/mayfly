@@ -568,8 +568,24 @@ mod tests {
         for want in ["actionlint", "cargo-deny", "gitleaks", "node", "shellcheck"] {
             assert!(needs.contains_key(want), "{want} missing from {needs:?}");
         }
-        assert_eq!(needs["node"], ["formal-typecheck", "formal-test"]);
-        assert_eq!(needs["quint"], ["formal-typecheck", "formal-test"]);
+        assert_eq!(
+            needs["node"],
+            [
+                "formal-typecheck",
+                "formal-test",
+                "formal-freshness",
+                "conformance-replay"
+            ]
+        );
+        assert_eq!(
+            needs["quint"],
+            [
+                "formal-typecheck",
+                "formal-test",
+                "formal-freshness",
+                "conformance-replay"
+            ]
+        );
         assert_eq!(needs["gitleaks"], ["secrets"]);
         assert_eq!(needs["actionlint"], ["workflows"]);
         assert_eq!(needs["shellcheck"], ["workflows"]);

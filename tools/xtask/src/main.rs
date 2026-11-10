@@ -4,7 +4,7 @@
 //! Apache-2.0; mayfly D3) and cut to the foundation: the gate (`quick`, `check`), the
 //! architecture checker, the pinned-tool doctor, ADRs, `land` and the supply-chain stages.
 //! The formal toolchain (FND-06) is in `formal`, `apalache` and `formal_verify`. Later tasks
-//! register their own stages (conformance, fuzz, mutation, release); a stage that does not exist yet is absent from the
+//! register their own stages (fuzz, mutation, release; conformance is in `conformance`, VER-01); a stage that does not exist yet is absent from the
 //! catalog, never a skipped row.
 
 mod action_pins;
@@ -15,6 +15,7 @@ mod architecture;
 mod catalog;
 mod check;
 mod cli;
+mod conformance;
 mod coverage;
 mod formal;
 mod formal_verify;
@@ -59,6 +60,12 @@ fn main() -> ExitCode {
         Command::FormalTypecheck => formal::run_stage("formal-typecheck"),
         Command::FormalTest => formal::run_stage("formal-test"),
         Command::FormalVerify { model } => formal_verify::run(model.as_deref()),
+        Command::Conformance {
+            model,
+            seed,
+            traces,
+            steps,
+        } => conformance::run(model.as_deref(), seed.as_deref(), *traces, *steps),
         Command::InstallTools { tools } => tools::install(tools),
         Command::Adr { action } => match action {
             AdrAction::New {
