@@ -410,17 +410,20 @@ VMs serve it first and do not count in it.
 Scale sets only: there is no classic or `--ephemeral` mode (ADR 0028). A registration is its own
 aggregate (`RunnerRegistration`, dm §6.5): the runner name is the VM name, issued at most once
 (I19); a JIT config is minted once per registration; a registered-idle runner is deregistered
-before its VM is stopped, and a 422 (busy) cancels that retirement (I21); a lost mint or delivery
-is presumed leaked and deregistered by its journaled id. The reaper (ADR 0029) runs at run start,
+before its VM is stopped, and a busy answer (409 `JobStillRunningException` on the Actions-service
+path mayfly uses; 422 on the REST path) cancels that retirement (I21); a lost mint or delivery is
+presumed leaked and deregistered by its journaled id. The reaper (ADR 0029) runs at run start,
 after long outages and daily, deletes only journaled ids and reports unrecognised ones.
 
 ### 7.4 Protocol fidelity
 
-The Scale Set API is in public preview. The adapter is versioned; recorded request/response
-fixtures (redacted) are the contract; `mayfly-fake-github` implements the wire behaviour
-independently (redelivery, 50-message cap, session expiry, 401/403/409/429 + Retry-After), built
-from the GH-00 capture, and a gated live test runs against a disposable organisation
-(owner-provisioned).
+The Scale Set API is in public preview. mayfly specifies it in its own words in
+[`github-scaleset.md`](github-scaleset.md) and implements its own client, informed by reading
+GitHub's `actions/scaleset` but copying none of it (ADR 0048). The adapter is versioned; recorded
+request/response fixtures (redacted) are the contract; `mayfly-fake-github` implements the wire
+behaviour independently (redelivery, 50-message cap, session expiry, 401/403/409/429 +
+Retry-After), built from that specification and the GH-00 capture, and a gated live test runs
+against a disposable organisation (owner-provisioned).
 
 ---
 

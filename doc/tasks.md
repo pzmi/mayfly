@@ -66,10 +66,12 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0043](adr/0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Forward upgrades of any distance (upgrade matrix from every release); rollback one release; deeper rollback restores the pre-migration backup (`mayfly restore`); older build refuses writes on newer streams; deep-rollback recovery quarantines what it cannot prove (OD2). | Accepted (owner, 2026-11-09) |
 | [ADR 0044](adr/0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates; no self-update; `brew uninstall` removes the program; `mayfly uninstall --purge` removes what mayfly created, with ownership proof (P1, P3). | Accepted (owner, 2026-11-09) |
 | [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). | Accepted (owner, 2026-11-09) |
+| [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Proposes an amendment of 0028 (registration token as an auth-chain step only). | Accepted (owner, 2026-11-10) |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
-list (ADR 0045). Still planner defaults: the remaining sub-items of **OD20** (socket
+list (ADR 0045). Decided on 2026-11-10: inspect `actions/scaleset`, never port it (ADR 0048,
+DEC-03). Still planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
 GitHub capture (GH-00).
 
@@ -136,6 +138,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | DEC-01 | Record the owner's decisions as ADRs and apply them to the documents | DDD-01 | opus | |
 | DEC-02 | Record the owner's upgrade, distribution and ADR decisions (ADRs 0043-0045, batch acceptance) | DEC-01 | opus | |
+| DEC-03 | Specify the Scale Set protocol (`doc/github-scaleset.md`); ADR 0048, our own client | DEC-02 | opus | |
 | KER-02 | CP↔DP protocol messages, versions, SecretHandle, link ports | KER-01, FND-06, DEC-01 | opus | |
 | KER-03 | Event-sourcing kernel: aggregate, event registry, goldens, determinism | KER-01 | opus | |
 | KER-04 | Lifecycle model and `Attempt` aggregate | KER-03, FND-06, DEC-01 | opus | |
@@ -182,8 +185,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05 | opus | ⛳ |
 | GH-00 | (owner) Capture a live scale-set session in a disposable organisation | — | sonnet | |
-| GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00 | opus | |
-| GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02 | sonnet | |
+| GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00, DEC-03 | opus | |
+| GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02, DEC-03 | sonnet | |
 | GH-03 | Scale Set client and recorded-fixture contract | GH-01, GH-02 | opus | |
 | GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06, CP-04 | opus | |
 | E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, CP-05, E2E-01 | sonnet | ⛳ |
@@ -375,6 +378,17 @@ Cites: ADR 0001, dm §10.1 OD2, philosophy P1/P3/P4. New ADRs 0043 (upgrades and
 batch 0003, 0004, 0006-0020, 0023 Accepted (owner, 2026-11-09), with the amendments marked
 proposed inside them; dm OD2, event-store §6, plan, philosophy and this file follow. Docs only.
 Accept: `cargo xtask check --only docs` green; no open owner item left in philosophy.
+
+#### DEC-03 Specify the Scale Set protocol; our own client
+Cites: plan §7, ADRs 0028, 0029, 0033, 0038, 0040, 0045. The owner decided to inspect
+`actions/scaleset`, not port it (ADR 0048, Accepted (owner, 2026-11-10)). New
+`doc/github-scaleset.md`: mayfly's specification of the auth chain, endpoints, session, long
+poll, messages and ack, statistics and capacity, acquire, JIT and the guest side, runner removal,
+retry and rate limits, mayfly's differences from the reference listener, attribution, and the
+open questions GH-00 answers; each fact cites the upstream file and function at a pinned commit
+or is marked unverified. ADR 0028 carries a proposed amendment (registration token as an
+auth-chain step only); GH-00..GH-04, plan §7 and ver §7.3 follow. Docs only.
+Accept: `cargo xtask check --only docs` green; no upstream code or test in the repository.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
@@ -838,43 +852,67 @@ never exceeds 2; then kill -9 mid-clone and restart converges without duplicates
 Accept: these tests in the e2e level (the `e2e-tests` stage, registered here), green in CI on Linux.
 
 #### GH-00 (owner) Capture a live scale-set session
-Cites: dm §9.1, §10 [VERIFY] items, ADR 0040. In a disposable organisation: redacted traces of
-session open, poll, acquire, JIT generation, job start and completion, cancel, 409, session expiry,
-offer fields usable for trust classification, how long an unclaimed JIT registration lingers, and
-whether `maxCapacity` is read as a total. Agents prepare the capture tool and redaction; (owner)
-runs it.
-Accept: the traces and answers committed (redacted); GH-01 cites them; the minimal GitHub App
-permission list, verified, is committed for ADR 0045. Pending owner item (the owner will address it later).
+Cites: `doc/github-scaleset.md` §12, dm §9.1, §10 [VERIFY] items, ADRs 0040, 0045, 0048. In a
+disposable organisation, a redacted capture of the whole chain (App JWT to message-queue token),
+session open, poll and 202, acquire, JIT generation, job start, completion and cancel, a second
+session (409), session and token expiry, runner removal (busy and gone), and capacity changes,
+answering every open question of `doc/github-scaleset.md` §12. Agents prepare the capture tool
+and its redaction (synthetic names, no token, no JIT config); (owner) runs it.
+Accept: the traces committed as redacted fixtures under `tests/fixtures/github-scaleset/`; each
+answered question replaces its [unverified: GH-00] mark in `doc/github-scaleset.md` and cites
+its fixture; the minimal GitHub App permission list, verified, is committed for ADR 0045.
+Pending owner item (the owner will address it later).
 
 ### Phase 4 — GitHub
 
 #### GH-01 `mayfly-fake-github`
-Cites: plan §7, ver §7, D11. Axum-based fake of the Scale Set endpoints (scale set CRUD, session,
-long-poll messages with redelivery until delete, 50-message cap, statistics, acquire, JIT) and the
-REST runner endpoints (registration token, list/delete runners), plus fault knobs (401, 403, 429
-with Retry-After, dropped response after effect). Wire shapes from the `actions/scaleset` Go source
-and GitHub docs, cited in comments; no production crate imported.
-Accept: its own tests; a scripted job queue API for e2e.
-DEC-01: depends on GH-00; built from its capture; no registration-token endpoint (ADR 0028);
-fault knobs add 409 and 422.
+Cites: `doc/github-scaleset.md`, ver §7.3, ADRs 0012, 0028, 0040, 0048. An Axum fake built from
+the spec and the GH-00 capture, never from upstream's tests, test server or fixtures (ADR 0048),
+importing no production crate: the auth chain (installation token, registration token as an
+auth step only, runner-registration with short-lived admin JWTs signed by a key generated at
+test time), scale-set lookup and create, one live session per scale set (409 on a second),
+refresh and delete, the long poll with a 202 hold and redelivery until delete, the 50-message
+cap, statistics, acquire, JIT, runner get/list/remove, and a scripted job-queue control API for
+e2e. Fault knobs: 401, 403, 409, 422, 429 with `Retry-After`, a rate-limited 403, a response
+dropped after its effect, a stalled poll, session expiry. Every [unverified: GH-00] behaviour is
+a named knob or assumption until GH-00 settles it. A contract suite for the `ScaleSetApi` and
+`RunnerRegistry` wire behaviour runs against the fake and, owner-gated, against a live
+disposable organisation (HW-02).
+Accept: its own tests; the contract suite green against the fake, and its own tests prove a
+deliberately broken fake fails it (ver §5); the live run listed as pending (owner).
 
 #### GH-02 GitHub App auth and HTTP client
-Cites: plan §7.1, D13. RS256 JWT, installation token cache with refresh-before-expiry, reqwest +
-rustls, retry policy honouring Retry-After, request metrics.
-Accept: tests against fake-github; token never in Debug output.
+Cites: `doc/github-scaleset.md` §1, §2, §8, plan §7.1, ADRs 0014, 0033, 0045, 0048. The App JWT
+(RS256, backdated issue, ≤ 10 min) from a `SecretProvider` key, the installation token, the
+registration token and the runner-registration exchange to the admin token and service URL,
+with lazy single-flight refresh 60 s before expiry; reqwest + rustls; the retry policy of spec
+§8 as plain values (transport errors, 429, 5xx except 501; exponential backoff with jitter from
+the randomness port; `Retry-After` honoured; rate-limit classification of 403 and 429), every
+request with a deadline; request metrics with bounded labels; error text without query strings
+or bodies.
+Accept: tests against fake-github under `tokio::time::pause`; no token in Debug output or errors;
+admin-token refresh exercised by a short-lived token.
 ADR 0045: the client reads the installation's granted permissions so `mayfly doctor` can warn when
 they exceed the published minimal list (the list is filled in by GH-00/HW-02, to be verified).
 
 #### GH-03 Scale Set client
-Cites: plan §7.2, §7.4. `ScaleSetApi` port implementation; recorded redacted fixtures as the
-contract (`tests/fixtures/github-scaleset/`), run against fake-github and the fixture replayer.
-Accept: session expiry, 429, ack-after-lost-response cases.
+Cites: `doc/github-scaleset.md` §2-§7, plan §7.2, §7.4, ADRs 0040, 0048. The `ScaleSetApi` and
+`RunnerRegistry` port implementations in `mayfly-adapter-github` on GH-02's client: scale set
+lookup and create (never delete, ADR 0040), session create, refresh on 401 and delete, the long
+poll with `lastMessageId` and `X-ScaleSetMaxCapacity`, message decoding in arrival order with
+unknown types kept as protocol drift, ack, acquire returning the observed acquired set, JIT
+generation, runner get/list/remove by id. Recorded, redacted fixtures
+(`tests/fixtures/github-scaleset/`) are the contract: synthetic and labelled so until GH-00's
+capture replaces them, replayed by a fixture replayer and run against fake-github.
+Accept: session expiry, 409 on open, 429, ack after a lost response, partial acquire, JIT name
+collision and busy-runner removal cases.
 DEC-01: organisation scope (repository scope for tests); scale sets never deleted by the client
 (ADR 0040); runner list/get/delete by id for CP-05.
 
 #### GH-04 Listener use case
-Cites: plan §7.2, KER-06. Poll → acquire → record (inbox + statistics + desired) → ack; empty poll
-still reconciles; never blocks on VM work.
+Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §9 (ADR 0048). Poll → acquire →
+record (inbox + statistics + desired) → ack; empty poll still reconciles; never blocks on VM
+work; the session id and the last acked message id are journaled for crash recovery.
 Accept: component tests F08, F09, F10, F11, F25, F27 (ver §8.4) on fakes.
 DEC-01: the record step is one unit with `InboxKey { github, message_id }`; ack after commit;
 `DuplicateMessage` acked without a write; `PlanAcquire` before `AcquireJobs` (I23, I32); wire

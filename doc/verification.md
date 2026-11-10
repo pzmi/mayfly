@@ -327,15 +327,17 @@ chooses. Its output formats follow the real Tart versions pinned in the Tart JSO
 
 ### 7.3 `mayfly-fake-github`
 
-An HTTP server implementing the scale-set endpoints (scale set CRUD, session create, refresh and
+An HTTP server implementing [`doc/github-scaleset.md`](github-scaleset.md): the auth chain
+(installation token, registration token as an auth step only, runner-registration; ADRs 0028
+and 0048), the scale-set endpoints (scale set CRUD, session create, refresh and
 delete, long-poll messages with redelivery until delete, the 50-message cap, statistics, acquire,
-JIT config) and the REST runner endpoints (list, get and delete runners; no registration token,
-ADR 0028), built from the GH-00 capture. Fault
+JIT config) and the runner endpoints (list, get and delete runners), built from that spec and the
+GH-00 capture. Fault
 knobs per endpoint: status override (401, 403, 429 with `Retry-After`, 5xx), dropped response
 after the effect, session expiry, latency. A control API under a reserved prefix scripts the job
 queue (queue, cancel, reassign) and dumps its state as JSON for the fault lab's observer. Wire
-shapes are taken from public documentation and the open-source scale-set client, cited in
-comments.
+shapes come from the spec, which cites where each was verified; nothing is taken from the
+reference client's tests or test server (ADR 0048).
 
 ### 7.4 Independence (D11)
 
