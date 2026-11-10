@@ -250,7 +250,7 @@ fn should_fail_with_process_authority_when_the_positive_data_plane_spawns_a_proc
     fs::write(
         &lib,
         format!(
-            "{source}\npub fn spawn() {{\n    let _ = std::process::Command::new(\"tart\");\n}}\n"
+            "{source}\npub fn spawn() {{\n    let _ = std::process::Command::new(\"tart\").env_clear();\n}}\n"
         ),
     )
     .unwrap();

@@ -1,0 +1,4 @@
+rule: ARCH-child-environment
+at: crates/mayfly-adapter-tart/src/lib.rs:5
+contains: mayfly-adapter-tart builds a child with `std::process::Command::new`
+only: true

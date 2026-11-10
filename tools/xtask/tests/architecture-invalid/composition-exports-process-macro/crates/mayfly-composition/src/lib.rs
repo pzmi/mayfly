@@ -3,6 +3,6 @@
 #[macro_export]
 macro_rules! shell {
     () => {
-        std::process::Command::new("sh").status()
+        std::process::Command::new("sh").env_clear().status()
     };
 }

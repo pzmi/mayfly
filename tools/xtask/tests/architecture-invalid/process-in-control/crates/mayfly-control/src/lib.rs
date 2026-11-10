@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 pub fn clone_vm() -> ExitCode {
-    let _ = std::process::Command::new("tart").arg("clone").status();
+    let _ = std::process::Command::new("tart").env_clear().arg("clone").status();
     ExitCode::SUCCESS
 }
 

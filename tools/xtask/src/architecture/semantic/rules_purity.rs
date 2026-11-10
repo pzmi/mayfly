@@ -6,6 +6,8 @@
 //! build temporary state. Layer isolation and plane vocabulary apply to test code too, so a
 //! data-plane test cannot name the SQLite adapter. `unsafe` is rejected everywhere.
 
+use std::collections::BTreeMap;
+
 use super::super::policy::Policy;
 use super::super::report::{Diagnostic, Rule};
 use super::{Context, Facts, Reference, first_hit};
@@ -158,6 +160,21 @@ const PROCESS_AUTHORITY: &[&[&str]] = &[
     &["nix", "unistd"],
     &["nix", "sys", "signal"],
     &["duct"],
+];
+
+/// Modules of a production crate outside `[purity] process_authority` that hold process
+/// authority all the same, by package and module path prefix: the secrets adapter's one
+/// runner for `exec:` and the Keychain tool (ADR 0058). The rest of that crate is held to the
+/// rule. Pinned by `should_report_process_authority_when_a_module_outside_the_granted_one_spawns` and the
+/// `secrets-process-outside-command` fixture.
+pub const PROCESS_MODULES: &[(&str, &[&str])] = &[("mayfly-adapter-secrets", &["command"])];
+
+/// The constructors of a child process: each is followed by `.env_clear()` in the same file
+/// (`ARCH-child-environment`), so no child inherits the daemon's environment and an `env:`
+/// secret in it (ADR 0058).
+const CHILD_CONSTRUCTORS: &[&[&str]] = &[
+    &["std", "process", "Command", "new"],
+    &["tokio", "process", "Command", "new"],
 ];
 
 /// Items under [`PROCESS_AUTHORITY`] that grant none: a `main` may still return an exit code.
@@ -369,6 +386,14 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
     let pure = policy.purity.pure.contains(&facts.package);
     let allowed = &policy.purity.process_authority;
     let process_checked = production && !pure && !allowed.contains(&facts.package);
+    let process_modules: Vec<Vec<String>> = PROCESS_MODULES
+        .iter()
+        .filter(|(package, _)| *package == facts.package)
+        .map(|(_, module)| module.iter().map(|m| (*m).to_owned()).collect())
+        .collect();
+    if production && !pure {
+        out.extend(child_environment(facts));
+    }
     let test_only: Vec<String> = policy
         .workspace
         .test_only
@@ -424,6 +449,9 @@ pub fn check(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
             ));
         }
         if process_checked
+            && !process_modules
+                .iter()
+                .any(|module| reference.module.starts_with(module))
             && let Some(hit) = first_hit(reference, PROCESS_AUTHORITY)
             && !harmless(reference)
         {
@@ -577,6 +605,54 @@ fn vocabulary(facts: &Facts, policy: &Policy) -> Vec<Diagnostic> {
 
 /// Whether every candidate of a closed path lies under [`PROCESS_HARMLESS`]: `ExitCode` grants
 /// no authority, `std::process` itself does.
+/// `ARCH-child-environment`: in each file of production code, every child constructor is
+/// matched by an `.env_clear()` call. Name-based and counted per file (the checker sees no
+/// builder chains); the review covers a clear on another command of the same file.
+fn child_environment(facts: &Facts) -> Vec<Diagnostic> {
+    let mut clears: BTreeMap<&str, usize> = BTreeMap::new();
+    for call in &facts.method_calls {
+        if call.site.context == Context::Production && call.name == "env_clear" {
+            *clears.entry(call.site.file.as_str()).or_default() += 1;
+        }
+    }
+    let mut spawns: BTreeMap<&str, Vec<&Reference>> = BTreeMap::new();
+    for reference in &facts.references {
+        let constructs = reference.resolved.iter().any(|candidate| {
+            CHILD_CONSTRUCTORS.iter().any(|path| {
+                candidate
+                    .iter()
+                    .map(String::as_str)
+                    .eq(path.iter().copied())
+            })
+        });
+        if reference.site.context == Context::Production && constructs {
+            spawns
+                .entry(reference.site.file.as_str())
+                .or_default()
+                .push(reference);
+        }
+    }
+    let mut out = Vec::new();
+    for (file, sites) in spawns {
+        let cleared = clears.get(file).copied().unwrap_or(0);
+        let built = sites.len();
+        if cleared >= built {
+            continue;
+        }
+        for reference in sites {
+            out.push(Diagnostic::new(
+                Rule::ChildEnvironment,
+                format!(
+                    "{} builds a child with `{}` and the file has {cleared} `.env_clear()` call(s) for {built} constructor(s): a child gets a cleared environment plus an explicit allowlist, never the daemon's (ADR 0058)",
+                    facts.package, reference.written,
+                ),
+                reference.site.at(),
+            ));
+        }
+    }
+    out
+}
+
 fn harmless(reference: &Reference) -> bool {
     !reference.open_tail
         && !reference.open_head
@@ -932,6 +1008,58 @@ mod tests {
     }
 
     #[test]
+    fn should_report_process_authority_when_a_module_outside_the_granted_one_spawns() {
+        // given
+        let runner =
+            "pub fn run() {\n    let _ = std::process::Command::new(\"x\").env_clear();\n}\n";
+        let file = "pub fn uid() -> u32 {\n    std::process::id()\n}\n";
+        let lib = "mod command;\nmod file;\n";
+
+        // when
+        let got = diagnostics(
+            "mayfly-adapter-secrets",
+            &[
+                ("src/lib.rs", lib),
+                ("src/command.rs", runner),
+                ("src/file.rs", file),
+            ],
+        );
+
+        // then
+        let sites: Vec<&str> = got
+            .iter()
+            .filter(|d| d.starts_with("ARCH-process-authority"))
+            .map(|d| d.rsplit(' ').next().unwrap_or(""))
+            .collect();
+        assert_eq!(sites.len(), 1, "{got:?}");
+        assert!(sites[0].contains("src/file.rs:2"), "{got:?}");
+    }
+
+    #[test]
+    fn should_report_child_environment_when_a_file_builds_more_children_than_it_clears() {
+        // given
+        let cleared =
+            "pub fn f() {\n    let _ = std::process::Command::new(\"a\").env_clear();\n}\n";
+        let uncleared = "use tokio::process::Command;\npub fn f() {\n    let _ = std::process::Command::new(\"a\").env_clear();\n    let _ = Command::new(\"b\");\n}\n#[cfg(test)]\nmod tests {\n    fn g() {\n        let _ = std::process::Command::new(\"c\");\n    }\n}\n";
+
+        // when
+        let ok = diagnostics("mayfly-adapter-tart", &[("src/lib.rs", cleared)]);
+        let bad = diagnostics("mayfly-adapter-tart", &[("src/lib.rs", uncleared)]);
+
+        // then
+        assert!(
+            ok.iter().all(|d| !d.starts_with("ARCH-child-environment")),
+            "{ok:?}"
+        );
+        let lines: Vec<&str> = bad
+            .iter()
+            .filter(|d| d.starts_with("ARCH-child-environment"))
+            .map(|d| d.rsplit(':').next().unwrap_or(""))
+            .collect();
+        assert_eq!(lines, ["3)", "4)"], "{bad:?}");
+    }
+
+    #[test]
     fn should_report_process_authority_when_std_process_itself_is_imported() {
         // given
         let source = "use std::process;\npub fn f() -> process::ExitCode {\n    process::ExitCode::SUCCESS\n}\n";
@@ -993,7 +1121,7 @@ mod tests {
         // given
         let files = [(
             "src/lib.rs",
-            "pub fn start() {\n    let _ = mayfly_control::Bus::new();\n    let _ = mayfly_data::Executor::new();\n    let _ = std::process::Command::new(\"tart\");\n}\n",
+            "pub fn start() {\n    let _ = mayfly_control::Bus::new();\n    let _ = mayfly_data::Executor::new();\n    let _ = std::process::Command::new(\"tart\").env_clear();\n}\n",
         )];
 
         // when

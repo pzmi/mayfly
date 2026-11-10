@@ -18,7 +18,7 @@ pub fn start_data_plane(current: &mayfly_domain::Revision) -> bool {
     let directive = mayfly_protocol::Directive {
         revision: mayfly_domain::Revision(current.0),
     };
-    let spawned = std::process::Command::new("true").status().is_ok();
+    let spawned = std::process::Command::new("true").env_clear().status().is_ok();
     spawned
         && mayfly_data::accept(current, &directive)
         && mayfly_adapter_tart::clone_vm("runner-1").unwrap_or(false)

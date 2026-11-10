@@ -1,0 +1,4 @@
+rule: ARCH-process-authority
+at: crates/mayfly-adapter-secrets/src/file.rs:4
+contains: mayfly-adapter-secrets names `std::process::Command::new`
+only: true

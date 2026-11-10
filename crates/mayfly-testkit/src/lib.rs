@@ -9,7 +9,8 @@
 //! - [`journal`]: `MemoryJournal`, the in-memory `Journal` (ver §7.1).
 //! - [`clock`]: `FakeClock`, `SeededRng` and `RecordingNotifier`, fakes for `AggregateStore`'s
 //!   ports (ver §3.2, §3.3).
-//! - [`contracts`]: the port contract suites, starting with the journal's (ver §5).
+//! - [`secrets`]: `MemorySecretProvider`, the in-memory `SecretProvider` (ver §7.1).
+//! - [`contracts`]: the port contract suites: the journal's and the secret providers' (ver §5).
 //! - [`block_on`](block_on()): drives an async port from a synchronous test.
 //!
 //! The golden and determinism harnesses walk an `AggregateRegistry`, so an aggregate that joins
@@ -27,5 +28,6 @@ pub mod contracts;
 pub mod determinism;
 pub mod golden;
 pub mod journal;
+pub mod secrets;
 
 pub use block_on::block_on;

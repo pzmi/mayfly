@@ -4,5 +4,5 @@
 use std::process::Command;
 
 pub fn clone_vm(name: &str) -> std::io::Result<bool> {
-    Ok(Command::new("tart").args(["clone", "base", name]).status()?.success())
+    Ok(Command::new("tart").env_clear().args(["clone", "base", name]).status()?.success())
 }

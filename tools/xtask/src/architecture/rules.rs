@@ -115,8 +115,11 @@ rules! {
         "A [purity] pure crate has no clippy.toml, has one shadowed by a .clippy.toml, lacks a required disallowed-methods, disallowed-types or disallowed-macros entry or sets allow-invalid on one, or a .cargo/config.toml [env] sets CLIPPY_CONF_DIR: the semantic layer of the purity rules would be off.",
         ["pure-clippy-config-missing-entry", "pure-crate-without-clippy-config"];
     ProcessAuthority => "ARCH-process-authority", "FND-02",
-        "Production code of a production crate outside [purity] process_authority names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export or type alias.",
-        ["cli-uses-composition-type-alias", "cli-uses-reexported-command", "process-in-control"];
+        "Production code of a production crate outside [purity] process_authority, and outside the modules PROCESS_MODULES grants (mayfly-adapter-secrets::command, ADR 0058), names a process API (std::process beyond ExitCode, tokio::process, ..), also through another workspace crate's re-export or type alias.",
+        ["cli-uses-composition-type-alias", "cli-uses-reexported-command", "process-in-control", "secrets-process-outside-command"];
+    ChildEnvironment => "ARCH-child-environment", "SEC-02",
+        "A file of production code builds a child process (std::process or tokio::process Command::new) more times than it calls .env_clear(): every child gets a cleared environment plus an explicit allowlist (ADR 0058).",
+        ["spawn-without-env-clear"];
     LayerIsolation => "ARCH-layer-isolation", "FND-02",
         "A crate names a crate it must not reach, in production or test code (test code may name test-only crates): the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI.",
         ["adapter-names-sibling-adapter", "cli-names-adapter-through-alias", "data-names-journal", "data-test-names-sqlite-adapter"];

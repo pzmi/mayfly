@@ -92,7 +92,7 @@ workspace crates (`[dependencies.normal]`). They are plan §4's diagram written 
 | `mayfly-adapter-link` | `mayfly-domain`, `mayfly-protocol` |
 | `mayfly-composition` | every production crate except `mayfly-cli` |
 | `mayfly-cli` | `mayfly-composition` |
-| `mayfly-testkit` | `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`, `mayfly-control` (ADR 0019) |
+| `mayfly-testkit` | `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`, `mayfly-control`, `mayfly-testkit-shared` (ADR 0019; the child-environment probe, ADR 0058) |
 | `mayfly-testkit-shared` | — (no workspace crate; ADR 0019) |
 | `mayfly-conformance` | `mayfly-testkit`, pure and application crates, `mayfly-adapter-sqlite`, `mayfly-adapter-tart`, `mayfly-adapter-link`, `mayfly-composition` |
 | `mayfly-fake-tart`, `mayfly-fake-github`, `xtask`, `mayfly-faultlab` | — (no workspace crate) |
@@ -200,10 +200,16 @@ journal shapes); `mayfly-domain` may derive it too, validating types only throug
 
 **Process authority** (`ARCH-process-authority`): only the production crates in
 `[purity] process_authority` — `mayfly-adapter-tart`, `mayfly-adapter-guest` and
-`mayfly-composition` — name `std::process` (beyond `ExitCode` and `Termination`),
+`mayfly-composition` — and one module beyond them, `mayfly-adapter-secrets::command` (the
+`exec:` and Keychain runner; the checker's `PROCESS_MODULES`, ADR 0058), name `std::process` (beyond `ExitCode` and `Termination`),
 `std::os::{unix,linux}::process`, `tokio::process`, `async_process`, `rustix::process`,
 `nix::{unistd, sys::signal}` or `duct`, also through another crate's re-export. Test-only and
 tool-only crates and test code are exempt.
+
+**Child environment** (`ARCH-child-environment`, ADR 0058): wherever process authority is
+held, a child is built with a cleared environment plus an explicit allowlist, so no child
+inherits the daemon's environment or an `env:` secret in it. The checker counts, per file of
+production code, `std::process`/`tokio::process` `Command::new` against `.env_clear()` calls.
 
 **Application crates** (`mayfly-control`, `mayfly-data`) may use `tokio` with the `sync`
 feature, `tokio-util` (cancellation, task tracking), `tracing` and `thiserror`. They reach time
@@ -230,7 +236,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-control`, `mayfly-data` | `tokio` (`sync`), `tokio-util`, `tracing`, `thiserror`, `serde_json` (control only: event and receipt payloads) |
 | `mayfly-adapter-sqlite` | `rusqlite` (`bundled`), `serde_json`, `tokio` (`sync`, `rt`), `tracing`, `thiserror` |
 | `mayfly-adapter-github` | `reqwest` (`rustls-tls`, `json`), a JWT crate (RS256), `serde`, `serde_json`, `tokio`, `url`, `tracing`, `thiserror` |
-| `mayfly-adapter-secrets` | `rustix` (`fs`); macOS-only Keychain binding chosen by its task with an ADR |
+| `mayfly-adapter-secrets` | `rustix` (`fs`, `process`), `tokio` (`rt`, `process`, `io-util`, `time`); the Keychain through `/usr/bin/security`, no binding crate (ADR 0058) |
 | `mayfly-adapter-tart`, `mayfly-adapter-guest` | `tokio` (`process`, `io-util`, `time`), `rustix` (`process`), `serde`, `serde_json`, `tracing`, `thiserror` |
 | `mayfly-adapter-host` | `rustix` or `sysinfo` (DP-06 decides), `thiserror` |
 | `mayfly-adapter-link` | `tokio` (`net`, `io-util`, `sync`), `serde_json`, `tracing`, `thiserror` |
@@ -389,7 +395,8 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-plane-vocabulary` | a crate naming or declaring (struct, enum, union, trait, type, fn, mod, const, static, macro, associated item) a word another plane owns (`[planes.vocabulary]`): a CP word in a data or shared crate, a DP word in a control or shared crate; production and test code, through any crate | ARCH-01 (declarations from ARCH-02) |
 | `ARCH-domain-purity` | §2.3 in a `[purity] pure` crate; in its test code, an `env!`/`option_env!` other than `env!("CARGO_MANIFEST_DIR")`/`env!("CARGO_PKG_*")` | FND-02 (widened by ARCH-01, ARCH-02, ARCH-03) |
 | `ARCH-pure-clippy-config` | a pure crate without its `clippy.toml`, with a `.clippy.toml` shadowing it, missing a required `disallowed-methods`/`disallowed-types`/`disallowed-macros` entry or setting `allow-invalid`; a Cargo configuration's `[env]` setting `CLIPPY_CONF_DIR` (§2.3, the semantic layer) | ARCH-02 (macros from ARCH-03) |
-| `ARCH-process-authority` | §2.3 process authority outside `[purity] process_authority`, also through another crate's `pub type` alias | FND-02 (aliases from ARCH-02) |
+| `ARCH-process-authority` | §2.3 process authority outside `[purity] process_authority` and the `PROCESS_MODULES` grant (`mayfly-adapter-secrets::command`), also through another crate's `pub type` alias | FND-02 (aliases from ARCH-02) |
+| `ARCH-child-environment` | §2.3 a production file building more children (`Command::new`) than it calls `.env_clear()` | SEC-02 |
 | `ARCH-layer-isolation` | a crate naming a crate it must not reach (the other plane's crates, a sibling adapter, composition or the CLI from an adapter, adapter technology from an application, anything but composition from the CLI), also through another crate's re-export or `pub type` alias; production **and** test code, test code may name test-only crates | FND-02 (test code from ARCH-01, aliases from ARCH-02) |
 | `ARCH-unsafe-code` | `unsafe` blocks, fns, impls, traits, extern blocks or `#[unsafe(..)]`, anywhere | FND-02 |
 | `ARCH-missing-selector` | a crate named by a code selector that is not a member and not in `[semantic] absent`, or a stale `absent` entry | FND-02 |
@@ -405,7 +412,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-hidden-seam` | a crate other than composition and conformance naming a `#[doc(hidden)]` item of composition | FND-02 |
 | `ARCH-anyhow-in-library` | `anyhow` named by a library target's production code | ARCH-01 |
 | `ARCH-unbounded-channel` | an unbounded channel or queue in a production crate (`tokio::sync::mpsc::unbounded_channel` and its halves, `std::sync::mpsc::channel`, crossbeam, flume, async-channel, futures unbounded, `SegQueue`) | ARCH-01 |
-| `ARCH-detached-spawn` | `tokio::spawn`, `tokio::task::{spawn, spawn_blocking, spawn_local, block_in_place}`, `std::thread::{spawn, Builder}` in a production crate outside `mayfly-composition::supervision`, `mayfly-adapter-sqlite::writer`, `mayfly-adapter-link::transport`, `mayfly-adapter-{tart,guest}::process` (tasks are spawned on a tracker handed down) | ARCH-01 |
+| `ARCH-detached-spawn` | `tokio::spawn`, `tokio::task::{spawn, spawn_blocking, spawn_local, block_in_place}`, `std::thread::{spawn, Builder}` in a production crate outside `mayfly-composition::supervision`, `mayfly-adapter-sqlite::writer`, `mayfly-adapter-link::transport`, `mayfly-adapter-{tart,guest}::process`, `mayfly-adapter-secrets::command` (ADR 0058; tasks are spawned on a tracker handed down) | ARCH-01 |
 | `ARCH-secret-serialize` | a type that is or transitively holds `Secret` deriving or implementing `Serialize`; `Secret` deriving `Debug`/`Display`; `Debug`/`Display` for `Secret` implemented outside the file that defines it | ARCH-01 (exercised from KER-02, RT-01) |
 | `ARCH-aggregate-registered` | an `impl Aggregate for X` in `mayfly-control-domain` production code without `visitor.visit::<X>()` in `ControlAggregates::accept` (the harnesses would skip it) | ARCH-01 |
 | `ARCH-event-payload-serde` | in `mayfly-control-domain` or `mayfly-domain` production code, a `#[serde(..)]` (container, field or variant, through `cfg_attr` and in macro tokens) with `try_from`, `from`, `into`, `with`, `deserialize_with`, `serialize_with`, `alias`, `other`, `untagged`, `tag`, `content`, `flatten` or arguments that do not parse, or a hand-written `Serialize`/`Deserialize` impl: the event shape tracer would pass a coded or catch-all enum as a plain leaf (ADR 0018); the one exception is a `mayfly-domain` **struct** that converts (`try_from`, `from`, `into`), a validated value type held by the next rule; an enum there may not convert | ARCH-04 |

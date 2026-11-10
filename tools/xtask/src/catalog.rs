@@ -321,7 +321,7 @@ mod tests {
             let line = format!("\"id\": \"{}\"", rule.id());
             assert!(json.contains(&line), "{line} missing from {json}");
             assert!(
-                ["FND-", "ARCH-", "KER-", "CP-", "ES-"]
+                ["FND-", "ARCH-", "KER-", "CP-", "ES-", "SEC-"]
                     .iter()
                     .any(|task| rule.owner().starts_with(task)),
                 "{}",

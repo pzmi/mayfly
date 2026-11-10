@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-control"
-description = "Control-plane application: command bus, AggregateStore, projections, queries, reactors, reconciler, listener and durable consumers (directive relay, attempt saga), with the ports Journal, Clock, Ids, ScaleSetApi, RunnerRegistry and SecretStore."
+description = "Control-plane application: command bus, AggregateStore, projections, queries, reactors, reconciler, listener and durable consumers (directive relay, attempt saga), with the ports Journal, Clock, Ids, ScaleSetApi, RunnerRegistry and SecretProvider."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

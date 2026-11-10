@@ -2,5 +2,5 @@
 //! re-export follower did not resolve (second checkpoint review M2).
 
 pub fn shell() {
-    let _ = mayfly_composition::Cmd::new("sh").status();
+    let _ = mayfly_composition::Cmd::new("sh").env_clear().status();
 }

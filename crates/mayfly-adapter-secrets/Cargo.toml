@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-adapter-secrets"
-description = "Control-plane adapter: file (mode 0600) and macOS Keychain secret stores."
+description = "Control-plane adapter: the SecretProvider backends by reference URI (file, env, exec, macOS Keychain; ADR 0033)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,15 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "io-util", "time"] }
+
+[dev-dependencies]
+mayfly-testkit = { path = "../mayfly-testkit" }
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "io-util", "time", "sync"] }

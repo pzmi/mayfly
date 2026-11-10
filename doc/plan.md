@@ -171,7 +171,11 @@ One **link contract suite** (verification §5) runs against every transport.
 `mayfly-data*` crate or a data-plane adapter, and vice versa; both depend only on
 `mayfly-domain` (shared kernel) and `mayfly-protocol`. Only `mayfly-composition` sees both. The
 data plane names no journal type; the control plane names no process API (`std::process` is
-allowed only in the Tart/guest adapters, composition and test tools).
+allowed only in the Tart/guest adapters, composition and test tools), with one exception
+(ADR 0058, proposed): the `command` module of `mayfly-adapter-secrets`, the shell-free runner of
+`exec:` secret commands and the Keychain tool, which spawns nothing else and talks to no data-plane
+crate. Every child, in either plane, gets a cleared environment plus an explicit allowlist
+(`ARCH-child-environment`).
 
 ---
 

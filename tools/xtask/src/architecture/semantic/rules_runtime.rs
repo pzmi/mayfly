@@ -46,13 +46,15 @@ const DETACHED: &[&[&str]] = &[
 
 /// The modules that own long-lived tasks, by package and module path prefix: composition's
 /// supervision tree, the SQLite writer thread, the link transports and the process runners
-/// (foundation.md section 3.3). Everywhere else a task is spawned on a tracker handed down.
+/// (foundation.md section 3.3), and the secrets adapter's runner. Everywhere else a task is spawned on a tracker handed down.
 pub const SPAWN_MODULES: &[(&str, &[&str])] = &[
     ("mayfly-composition", &["supervision"]),
     ("mayfly-adapter-sqlite", &["writer"]),
     ("mayfly-adapter-link", &["transport"]),
     ("mayfly-adapter-tart", &["process"]),
     ("mayfly-adapter-guest", &["process"]),
+    // The secrets adapter's blocking hand-off for its file and executable checks (ADR 0058).
+    ("mayfly-adapter-secrets", &["command"]),
 ];
 
 /// The diagnostics of these rules for one package.

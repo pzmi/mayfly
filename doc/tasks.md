@@ -818,6 +818,9 @@ fake-tart binary, and (gated by `MAYFLY_REAL_TART_HOME`, macOS only, used by HW-
 Accept: contract green on both fakes; hang → deadline → `Ambiguous` + re-inspect; a daemon killed
 and restarted re-adopts a running VM through its shim (F48 at integration level); no signal is ever
 sent to `tart run`.
+SEC-02 (ADR 0058): every child is built with a cleared environment plus an explicit allowlist
+(`ARCH-child-environment`), so no `env:` secret of the daemon reaches `tart` or the shim; the
+`VmProvider` contract reuses `mayfly-testkit-shared::child_env` for an EX-04-style case.
 
 #### DP-05 Guest transport and runner launcher
 Cites: plan §8.3, D13; ADR 0038. `tart exec` transport only (no SSH): nonce verification
@@ -827,6 +830,8 @@ for runner exit after a restart, diagnostics export bounded and redacted. fake-t
 a guest whose runner "runs a job" per its fault file.
 Accept: secret never appears in argv/env/log (the fake's recorded invocations); a foreign lock PID
 or a changed MAC refuses delivery (F39); `UncheckedLockTransport` fails the contract.
+SEC-02 (ADR 0058): `tart exec` children get a cleared environment plus an explicit allowlist
+(`ARCH-child-environment`); the `GuestTransport` contract adds the `child_env` probe.
 
 #### DP-06 Host resource probes
 Cites: plan §9; ADR 0024. Disk free for the provider's home, available memory, boot id, clock gap
@@ -874,6 +879,10 @@ Accept: integration test starts `mayflyd` against fake-tart and a static demand,
 DEC-01: registers the store's consumers, takes the owner lease, runs event-store §6.3 then
 `catch_up`, owns the kick wiring and timer; secrets through SEC-02; foreground mode with
 Ctrl-C → P24 (ADR 0031).
+SEC-02: build the secrets with `UriSecretProvider::from_process(references, deadline)` (it
+captures `env:` names and withholds them from every child it runs); any child composition
+spawns clears its environment (ADR 0058, `ARCH-child-environment`); `doctor` calls
+`mayfly_control::secrets::check_references`.
 
 #### RT-03 Operator socket API and `mayfly` CLI
 Cites: plan §11. Unix socket `0600`, JSON request/response, commands of plan §11 that exist so far
@@ -1114,6 +1123,10 @@ Tart in a dedicated `TART_HOME`, one-job run with a tiny Linux image. Agents wri
 docs; (owner) registers the self-hosted runner and runs it.
 DEC-01: also verifies `tart set --random-mac` and MAC read-back, `tart exec -i`, the run lock and
 its PID, shim survival across a daemon kill and `tart stop` semantics.
+SEC-02: also runs the generic `SecretProvider` contract (SP-01..SP-08) on the real Keychain
+(`KeychainProvider::system`, a disposable item in a test keychain), and confirms what ADR 0058
+assumes of `security -w`: its trailing line break, exit 44 for an absent item, 36/51 for a locked
+keychain, and hex output for a non-printable password.
 
 #### HW-02 (owner) Live GitHub scale set
 Disposable repository and GitHub App with the permissions of ADR 0045's list (verified here, with the reason for each); gated live test of GH-03/GH-04;

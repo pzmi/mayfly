@@ -54,6 +54,8 @@ data = ["VmProvider", "GuestTransport", "HostProbe", "ProcessRunner", "TartCli"]
 # The crates the semantic rules select by role (foundation.md section 2.3).
 [purity]
 pure = ["mayfly-domain", "mayfly-protocol", "mayfly-control-domain", "mayfly-data-domain"]
+# Crates with process authority. One module beyond them holds it too, by the checker's
+# PROCESS_MODULES: mayfly-adapter-secrets::command, the `exec:` and Keychain runner (ADR 0058).
 process_authority = ["mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-composition"]
 independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
 
@@ -98,10 +100,12 @@ mayfly-cli = ["mayfly-composition"]
 
 # The control plane's test kit (ADR 0019): its closure stays in the control plane and the
 # shared crates, so control and shared crates may dev-depend on it and data crates may not.
-# Data-plane test support goes to its own kit when DP-01 needs one.
+# Data-plane test support goes to its own kit when DP-01 needs one. It uses the shared kit
+# (the child-environment probe of the secrets contract, ADR 0058).
 mayfly-testkit = [
   "mayfly-domain", "mayfly-protocol",
   "mayfly-control-domain", "mayfly-control",
+  "mayfly-testkit-shared",
 ]
 # The shared test kit (ADR 0019): plane-neutral test support, today the poll helper. Its closure
 # is the shared crates only (none yet), so control and data crates, and both planes' kits, may
@@ -142,6 +146,10 @@ mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["defa
 # AggregateStore encodes events and refusals and hashes intent digests (ADR 0041).
 mayfly-control = { serde_json = ["default"], sha2 = ["default"] }
 mayfly-testkit = { serde_json = ["default"] }
+# The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
+# process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
+# of the file and executable checks, through Tokio.
+mayfly-adapter-secrets = { rustix = ["default", "fs", "process"], tokio = ["rt", "process", "io-util", "time"] }
 # The configuration is TOML read as a raw table (plan section 11); the state-dir lock is flock(2)
 # through rustix, safe, with no libc (plan section 13).
 mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
@@ -155,6 +163,9 @@ mayfly-protocol = { serde_json = ["default"] }
 # Properties of the capacity policy and the Host aggregate over generated inputs (KER-05).
 mayfly-control-domain = { proptest = ["std"] }
 mayfly-adapter-sqlite = { tempfile = ["default"] }
+# The secret-provider contract runs on a current-thread runtime over tempdir sources; a oneshot
+# cancels a call from another thread (SEC-02).
+mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io-util", "time", "sync"] }
 mayfly-composition = { tempfile = ["default"] }
 mayfly-control = { serde = ["default", "derive"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
