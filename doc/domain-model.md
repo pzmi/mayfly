@@ -614,6 +614,113 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `ForeignVmReported` is left to the data-plane observer (KER-08, CP-03): the report already
   carries foreign consumption, which is all admission reads.
 
+### 6.3.1 The capacity carve: properties and policy (KER-05D, ADR 0069)
+
+`capacity::plan` carves a host's free capacity `F` (memory, disk, VM slots, macOS-guest slots)
+into per-pool carve-outs `c_i`, which become each scale set's `reported_max` (`maxCapacity`).
+Pools are served in name order, the **priority** order: pool `i` has a VM footprint `v_i`, a
+headroom `h_i` (`max_running` minus live and quarantined leases), a room `ρ_i` (`max_running`
+minus live runners: its headroom and its quarantined places) and `o_i`, what its quarantined
+leases fall short of one VM each (a stopped one owes its memory, a running one nothing). `⊖` is
+subtraction floored at zero on every dimension; `∨` the larger on every dimension.
+
+**Properties.**
+
+- **S (safety, I24, I07):** `Σ c_i·v_i ≤ F` on every dimension and `c_i ≤ h_i`; a reservation
+  never exceeds its pool's carve-out and the `Host` admits it (`carveOutAdmissible`), within the
+  data plane's report (I03), which the data plane enforces again (I33). Pinned by
+  `tests/capacity.rs::should_fit_every_carve_out_together_when_inputs_are_random`,
+  `should_admit_within_every_reported_limit_when_inputs_are_random`.
+- **M1 (monotone in free capacity, pool by pool):** less free capacity on any dimension (more
+  foreign use, base, reserves) never carves **any pool** more, so never more in total. Pinned
+  by `should_carve_no_pool_more_when_foreign_consumption_grows_and_inputs_are_random`,
+  `should_never_admit_more_when_foreign_consumption_grows`,
+  `should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`; model `carveMonotone`.
+- **M2 (release monotone):** releasing a quarantined lease, or its VM stopping, never carves any
+  pool less. Pinned by
+  `should_carve_no_pool_less_when_a_quarantined_lease_is_released_and_inputs_are_random`,
+  `should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`; model
+  `carveMonotone`.
+- **U (usefulness):** (U1) *no starvation*: a pool with a waiting job, headroom and a VM the
+  host can hold is admitted once the later pools' VMs in its room finish, however busy the
+  later pools stay (model `sustainedLoadTest`); (U2) *nothing kept that M1 and M2 do not
+  need*: within S, M1, M2 and the priority order, every later pool is carved the most any such
+  policy can carve it (the bound below).
+
+**Why pool by pool, not only in total.** Monotone in total lets a later pool gain exactly when
+an earlier one loses, that is, take room the earlier pool cannot use right now. Each plan round
+turns that into leases, so the earlier pool's room is eaten one small VM at a time and its large
+VM never starts: `ENVELOPE` below is monotone in total and starves the macOS job for ever under
+sustained Linux load. Pool by pool, with the priority order, the later pool stays out of the
+earlier pool's room, which is what U1 rests on; and a scale set's `maxCapacity` never rises
+because the host got busier.
+
+**What no policy can do.** (1) No policy is safe, monotone even in total, serves the earlier
+pool first and hands a later pool every VM that fits what the earlier one left (work
+conserving): KER-05H's counterexample (18 GiB free, a 15 GiB VM first, 2 GiB VMs second: one
+plus one; 14 GiB: work conservation carves three) breaks any of them. (2) Any policy with S, M1
+and the priority order carves a later pool `B` at most `fit_B(F ⊖ v_A·h_A)`: at `F' = F ∨
+v_A·h_A ≥ F` the earlier pool `A` is carved `h_A`, so S leaves `B` at most `F' ⊖ v_A·h_A = F ⊖
+v_A·h_A`, and M1 gives `c_B(F) ≤ c_B(F')`. M2 adds, per quarantined place, the part of a VM its lease
+does not hold (its release gives `A` a whole VM of headroom but frees only what it held): `A`
+keeps `v_A·h_A + min(v_A·(ρ_A − h_A), o_A)`. That is the policy
+below (`EXACT`), so it carves every later pool the most S, M1, M2 and the order allow. The
+owner's example (13 GiB free beside an idle macOS pool, Linux jobs waiting) is therefore out of
+reach of every policy with these properties unless the macOS pool's `h_A` shrinks to its real
+demand (`DEMAND`).
+
+**Candidates** (`formal/scheduling.qnt`, section "KER-05D"; `carvePoliciesTest` checks each
+over every free capacity of a small host, three VM kinds in both orders, with and without a
+running or stopped quarantined lease):
+
+| Policy | What the earlier pool keeps ahead of the later | S | M1 pool | M1 total | M2 |
+|:--|:--|:--|:--|:--|:--|
+| `ROOM` (KER-05H) | a whole VM per place in `ρ_A`, quarantined places included | yes | yes | yes | yes |
+| `EXACT` (KER-05D) | `v_A·h_A` + what its quarantined leases owe, at most a VM per place | yes | yes | yes | yes |
+| `LEFTOVER` (before KER-05H) | only what it was carved | yes | no | no | no |
+| `ENVELOPE` | the leftover, clipped to the least total over every larger free capacity | yes | no | yes | no |
+| `DEMAND` | `EXACT` with `h_A` cut to the waiting jobs it is told of | yes | yes¹ | yes¹ | yes¹ |
+| `SMALL_FIRST` | `LEFTOVER`, the smaller VM served first when one is smaller on every dimension | yes | no | yes² | no |
+
+¹ For a fixed number of waiting jobs; what that number can be is the question (below).
+² On the checked host; with VMs of no size order it falls back to `LEFTOVER`.
+
+**Usefulness** (`carveScenariosTest`: macOS VM 15 GiB / 60 GiB, Linux VM 4 GiB / 20 GiB, macOS
+pool first; carve-outs as (macOS, Linux)):
+
+| Scenario | `ROOM` | `EXACT` | `LEFTOVER` | `ENVELOPE` | `DEMAND` | `SMALL_FIRST` |
+|:--|:--|:--|:--|:--|:--|:--|
+| S1: 13 GiB free, no macOS job | (0, 0) | (0, 0) | (0, 3) | (0, 1) | (0, 3) | (0, 3) |
+| S2: 13 GiB free, a macOS job waits | (0, 0) | (0, 0) | (0, 3) | (0, 1) | (0, 0) | (0, 3) |
+| S3: KER-05H after +4 GiB foreign | (0, 0) | (0, 0) | (0, 3) | (0, 1) | (0, 0) | (0, 3) |
+| S4: a running quarantined macOS VM, 49 GiB free | (1, 4) | (1, 8) | (1, 8) | (1, 8) | (1, 8) | (0, 9) |
+| S5: a stopped quarantined macOS VM, 3 slots free | (1, 1) | (1, 2) | (1, 2) | (1, 2) | (1, 2) | (0, 3) |
+| S6: `max_running` 2 macOS on 24 GiB | (1, 0) | (1, 0) | (1, 2) | (1, 1) | (1, 0) | (0, 6) |
+| Sustained Linux load: round the macOS job starts | 4 | 4 | never | never | 4³ | never |
+
+³ When it is told every waiting job; `never` when it sees only the jobs GitHub assigned under
+the `maxCapacity` it was sent (`sustainedLoadTest`).
+
+**Recommendation and what is built.** `EXACT` is built (KER-05D): it carves every pool at
+least what `ROOM` did, in every state (pinned by
+`should_carve_every_pool_at_least_the_whole_place_keep_when_inputs_are_random`), more whenever
+an earlier pool has a quarantined lease (S4, S5: pinned by
+`should_keep_only_what_a_quarantined_lease_does_not_hold_when_an_earlier_pool_has_one`,
+`should_keep_the_memory_a_stopped_quarantined_lease_owes_when_slots_bind`), and keeps S, M1,
+M2 and U1. A quarantined VM, kept until an operator resolves it (ADR 0025), now costs its pool
+one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0069:
+
+- **`DEMAND`** fixes S1 (Linux runs beside an idle macOS pool) and keeps every property, **if**
+  the demand it reads does not depend on the `maxCapacity` it sends. Our demand is `desired =
+  min(deliverable, totalAssignedJobs)` (plan §7.2), and whether `X-ScaleSetMaxCapacity` caps
+  `totalAssignedJobs` is unverified (`doc/github-scaleset.md` §12 item 6). If it caps it, a pool
+  carved nothing is never assigned its job, never keeps room for it and starves (the `never`
+  of footnote 3). Decide after GH-00 answers item 6.
+- **Cap the keep at what the host can hold** (S6: a macOS `max_running` the host cannot run
+  keeps room it can never use) would carve S6's Linux pool two VMs, but makes the keep depend
+  on the report's totals: a host whose totals shrink would carve a later pool more. Refusing or
+  explaining such a `max_running` at configuration is the safer remedy.
+
 ### 6.4 `Attempt` [Attempt]
 
 - **Stream:** `attempt-<attempt_id>`. Lifetime: from `AttemptStarted` to `AttemptClosed`

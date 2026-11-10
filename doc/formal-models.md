@@ -313,7 +313,7 @@ one (model and code now check only the dimensions a VM uses).
 | `i07NeverAdvertiseMore` | I07: a pool's `reported_max` is within what it can deliver | `tests/capacity.rs::should_fit_every_carve_out_together_when_inputs_are_random` |
 | `i24CarveOutsFitTheHost` | I24: the carve-outs fit the host's free capacity together | the same |
 | `externalConsumptionShrinksAdmissible` | more foreign consumption never frees capacity or carves more | `tests/capacity.rs::should_never_admit_more_when_foreign_consumption_grows` |
-| `carveMonotone` (pure, `carveMonotoneTest`) | the carve's total never grows when the free capacity shrinks or an earlier pool's quarantine is released, in either order of a larger and a smaller VM (KER-05H: the state space carves the smaller Linux VM first only, where handing a later pool the leftover is monotone, so the greedy carve's fault was out of its reach) | `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`, `should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`, `should_never_admit_more_when_foreign_consumption_grows`, `should_hold_quarantined_capacity_when_inputs_are_random` |
+| `carveMonotone` (pure, `carveMonotoneTest`) | no pool's carve grows when the free capacity shrinks or shrinks when an earlier pool's running or stopped quarantined lease is released, in either order of a larger and a smaller VM; the carve-outs fit together; each pool is carved at least what KER-05H's keep carved (KER-05H: the state space carves the smaller Linux VM first only, where handing a later pool the leftover is monotone, so the greedy carve's fault was out of its reach; KER-05D: pool by pool, and the quarantine keep of ADR 0069) | `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`, `should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`, `should_never_admit_more_when_foreign_consumption_grows`, `should_carve_no_pool_more_when_foreign_consumption_grows_and_inputs_are_random`, `should_carve_no_pool_less_when_a_quarantined_lease_is_released_and_inputs_are_random`, `should_carve_every_pool_at_least_the_whole_place_keep_when_inputs_are_random`, `should_hold_quarantined_capacity_when_inputs_are_random` |
 | `i08NothingAfterDrain` | I08: no reservation and no grant after drain start; the drain completes with no lease | `tests/host/rules.rs::should_admit_nothing_when_the_host_drains`, `tests/capacity.rs::should_admit_nothing_and_report_live_runners_when_admission_is_closed` |
 | `i26NoAdmissionWhileClosed`, `noGrantWhileClosed` | I26: no reservation and no grant with the gate or the pool's terms closed | `tests/host/rules.rs::should_refuse_a_grant_when_any_term_or_cause_is_closed` |
 | `i27BreakerBounded` | I27: failures bounded by the threshold, a tripped breaker published closed, nothing reserved under terms that show it | `tests/pool/rules.rs::should_trip_at_the_threshold_and_count_nothing_more_when_failures_repeat`, `should_close_the_terms_when_the_breaker_of_the_pin_trips` |
@@ -326,7 +326,12 @@ Tests (`quint test`, stage `formal-test`, all deterministic so each runs once):
 `staleReportIgnoredTest`, `drainAdmitsNothingTest`, `quarantineHoldsCapacityTest`,
 `quarantineConsumesPoolTest`, `breakerTripsTest`, `pauseReportsLiveOnlyTest`,
 `dataPlaneRefusesWhatDoesNotFitTest`, and from DEC-04 (ADR 0052)
-`unknownMemoryStartsNothingTest`, and from KER-05H `carveMonotoneTest`.
+`unknownMemoryStartsNothingTest`, from KER-05H `carveMonotoneTest`, and from KER-05D the
+candidate carve policies of `doc/domain-model.md` §6.3.1 (ADR 0069): `carvePoliciesTest` (each
+candidate against safety, monotonicity pool by pool and in total, and release monotonicity, over
+a small host), `carveScenariosTest` (the usefulness table) and `sustainedLoadTest` (which
+candidates starve a waiting macOS job under sustained Linux load). The candidates are pure
+functions beside `planOf`; only `EXACT` (`carveTwo`) is what `capacity::plan` implements.
 `dp.memUnknown` abstracts every fact the ledger lacks
 (`vmFactsChange` toggles it in both relations): `dpFits` is false and `dpReport` delivers no
 memory while it holds, and the invariant `noStartWhileCapacityUnknown` (pinned by

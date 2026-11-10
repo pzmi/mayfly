@@ -149,6 +149,59 @@ fn carved(inputs: &PlanInputs, report: &CapacityReport) -> Footprint {
     })
 }
 
+/// Each pool's carve-out, by name.
+fn carve_by_pool(report: &CapacityReport) -> Vec<(PoolName, u32)> {
+    report
+        .pools
+        .iter()
+        .map(|p| (p.pool.clone(), p.carve_out))
+        .collect()
+}
+
+/// Pool by pool (the same pools in the same order), `less` carves no pool more than `more`.
+fn no_pool_more(less: &CapacityReport, more: &CapacityReport) -> bool {
+    carve_by_pool(less)
+        .iter()
+        .zip(carve_by_pool(more).iter())
+        .all(|((a, x), (b, y))| a == b && x <= y)
+}
+
+/// The oracle of KER-05H's keep (`formal/scheduling.qnt`'s `keepsRoom`): each open pool keeps a
+/// whole VM per place in `max_running` minus its live runners, quarantined places included.
+fn whole_place_carves(inputs: &PlanInputs, free: Footprint) -> Vec<(PoolName, u32)> {
+    let mut pools: Vec<&PoolInput> = inputs.pools.iter().collect();
+    pools.sort_by(|a, b| a.pool.cmp(&b.pool));
+    pools.dedup_by(|a, b| a.pool == b.pool);
+    let count = |pool: &PoolName, quarantined: bool| {
+        inputs
+            .leases
+            .iter()
+            .filter(|l| &l.pool == pool && l.quarantined == quarantined)
+            .count() as u32
+    };
+    let times = |vm: Footprint, n: u32| (0..n).fold(Footprint::ZERO, |s, _| s.saturating_add(vm));
+    let mut kept = Footprint::ZERO;
+    let mut carves = Vec::new();
+    for pool in pools {
+        let runners = count(&pool.pool, false);
+        let headroom = pool
+            .max_running
+            .saturating_sub(runners + count(&pool.pool, true));
+        let vm = Footprint::vm(pool.os, pool.vm);
+        let open = inputs.report.is_some() && inputs.admission_open && pool.open;
+        let available = free.saturating_sub(kept);
+        let mut carve = 0;
+        while open && carve < headroom && capacity::fit(available, times(vm, carve), vm).is_ok() {
+            carve += 1;
+        }
+        if open {
+            kept = kept.saturating_add(times(vm, pool.max_running.saturating_sub(runners)));
+        }
+        carves.push((pool.pool.clone(), carve));
+    }
+    carves
+}
+
 proptest! {
     #[test]
     fn should_admit_within_every_reported_limit_when_inputs_are_random(inputs in inputs()) {
@@ -235,6 +288,65 @@ proptest! {
         prop_assert!(after.free.fits_within(before.free));
         let total = |r: &CapacityReport| r.pools.iter().map(|p| p.carve_out).sum::<u32>();
         prop_assert!(total(&after) <= total(&before));
+    }
+
+    #[test]
+    fn should_carve_no_pool_more_when_foreign_consumption_grows_and_inputs_are_random(
+        inputs in inputs(),
+        more in 1_u64..8,
+    ) {
+        // given
+        let mut grown = inputs.clone();
+        if let Some(r) = grown.report.as_mut() {
+            r.foreign.memory_bytes += more * GIB;
+            r.foreign.disk_bytes += more * GIB;
+            r.foreign_vms += 1;
+            r.foreign_macos_guests += 1;
+        }
+        // when
+        let (before, _) = capacity::plan(&inputs);
+        let (after, _) = capacity::plan(&grown);
+        // then: KER-05D, monotone pool by pool, not only in total
+        prop_assert!(no_pool_more(&after, &before), "{:?} then {:?}", carve_by_pool(&before), carve_by_pool(&after));
+    }
+
+    #[test]
+    fn should_carve_no_pool_less_when_a_quarantined_lease_is_released_and_inputs_are_random(
+        generated in inputs(),
+        extra in lease(),
+        which in any::<prop::sample::Index>(),
+    ) {
+        // given: one of the quarantined leases (at least `extra`) released
+        let mut inputs = generated;
+        inputs.leases.push(LeaseInput { quarantined: true, ..extra });
+        let quarantined: Vec<usize> = inputs
+            .leases
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.quarantined.then_some(i))
+            .collect();
+        let mut released = inputs.clone();
+        released.leases.remove(quarantined[which.index(quarantined.len())]);
+        // when
+        let (held, _) = capacity::plan(&inputs);
+        let (freed, _) = capacity::plan(&released);
+        // then: what it held comes back and its pool keeps at most that much more
+        prop_assert!(no_pool_more(&held, &freed), "{:?} then {:?}", carve_by_pool(&held), carve_by_pool(&freed));
+    }
+
+    #[test]
+    fn should_carve_every_pool_at_least_the_whole_place_keep_when_inputs_are_random(
+        inputs in inputs(),
+    ) {
+        // given: `inputs`, generated
+        // when
+        let (report, _) = capacity::plan(&inputs);
+        // then: KER-05D never carves a pool less than KER-05H's keep did
+        let oracle = whole_place_carves(&inputs, report.free);
+        for ((pool, carve), (oracle_pool, oracle_carve)) in carve_by_pool(&report).iter().zip(&oracle) {
+            prop_assert_eq!(pool, oracle_pool);
+            prop_assert!(carve >= oracle_carve, "{pool}: {carve} < {oracle_carve}");
+        }
     }
 
     #[test]
@@ -488,4 +600,74 @@ fn should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released() {
     // takes nothing from p1 (the greedy leftover carved p1 sixteen VMs, then eight)
     assert_eq!(carve_outs(&held), [("p0", 0), ("p1", 8)]);
     assert_eq!(carve_outs(&freed), [("p0", 1), ("p1", 8)]);
+}
+
+/// KER-05D's hosts: a macOS pool `p0` (15 GiB, 60 GiB of disk, `max_running` 2) before a Linux
+/// pool `p1` (4 GiB, 20 GiB, `max_running` 12), with one quarantined macOS lease holding `holds`.
+fn quarantined_mac(total_gib: u64, slots: u32, holds: Footprint) -> PlanInputs {
+    let mac = Resources::new(15 * GIB, 60 * GIB);
+    PlanInputs {
+        report: Some(host(total_gib, slots)),
+        reserves: Resources::new(0, 0),
+        admission_open: true,
+        leases: vec![LeaseInput {
+            pool: pool("p0"),
+            holds,
+            quarantined: true,
+        }],
+        pools: vec![
+            PoolInput {
+                pool: pool("p0"),
+                os: GuestOs::Macos,
+                vm: mac,
+                open: true,
+                max_running: 2,
+                wanted: 1,
+            },
+            demand("p1", GuestOs::Linux, 4, 12, 12),
+        ],
+    }
+}
+
+#[test]
+fn should_keep_only_what_a_quarantined_lease_does_not_hold_when_an_earlier_pool_has_one() {
+    // given: 64 GiB; a running quarantined macOS VM holds 15 of them (ADR 0025 keeps it until
+    // an operator resolves it), so 49 GiB are free and p0 has room for one more VM
+    let running = Footprint::vm(GuestOs::Macos, Resources::new(15 * GIB, 60 * GIB));
+    let inputs = quarantined_mac(64, 12, running);
+    let mut released = inputs.clone();
+    released.leases.clear();
+
+    // when
+    let (held, _) = capacity::plan(&inputs);
+    let (freed, _) = capacity::plan(&released);
+
+    // then: p0 keeps one VM (34 GiB left: eight Linux VMs), not two (KER-05H kept the
+    // quarantined VM's 15 GiB a second time: four); releasing it gives p0 its second VM and
+    // leaves p1 as it was
+    assert_eq!(carve_outs(&held), [("p0", 1), ("p1", 8)]);
+    assert_eq!(whole_place_carves(&inputs, held.free)[1].1, 4);
+    assert_eq!(carve_outs(&freed), [("p0", 2), ("p1", 8)]);
+}
+
+#[test]
+fn should_keep_the_memory_a_stopped_quarantined_lease_owes_when_slots_bind() {
+    // given: a stopped quarantined macOS VM holds its disk and slots only; 3 slots are free
+    let stopped = Footprint {
+        resources: Resources::new(0, 60 * GIB),
+        ..Footprint::vm(GuestOs::Macos, Resources::new(15 * GIB, 60 * GIB))
+    };
+    let inputs = quarantined_mac(64, 4, stopped);
+    let mut released = inputs.clone();
+    released.leases.clear();
+
+    // when
+    let (held, _) = capacity::plan(&inputs);
+    let (freed, _) = capacity::plan(&released);
+
+    // then: p0 keeps one slot for its headroom and the quarantined place's memory, not a second
+    // slot (KER-05H: one Linux VM); releasing it gives p0 its second VM and takes nothing from p1
+    assert_eq!(carve_outs(&held), [("p0", 1), ("p1", 2)]);
+    assert_eq!(whole_place_carves(&inputs, held.free)[1].1, 1);
+    assert_eq!(carve_outs(&freed), [("p0", 2), ("p1", 2)]);
 }

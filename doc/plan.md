@@ -568,7 +568,8 @@ closed terms and quarantined holds), deliverable per scale set (a carve-out so t
 dimension (I03); a stopped quarantined lease shrinks to disk + slot but is never released by
 policy. `min_prepared` defaults to 0 (and 0 for macOS unless overridden per pool). Low disk →
 admission stops and `reported_max` drops (F17); a pool whose capacity quarantined leases consume
-admits nothing, and `AdmissionExplain` says why.
+admits nothing, and `AdmissionExplain` says why. The carve's properties (safe, monotone pool by pool, no
+starvation) and the policy that meets them are `doc/domain-model.md` §6.3.1 (ADR 0069).
 
 ---
 

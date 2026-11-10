@@ -20,8 +20,9 @@
 //! `should_admit_nothing_and_report_live_runners_when_admission_is_closed`), quarantined leases
 //! held (I28, `should_hold_quarantined_capacity_when_inputs_are_random`), the carve-outs fit the
 //! host together (I07, I24, `should_fit_every_carve_out_together_when_inputs_are_random`) and
-//! more foreign consumption never admits more
-//! (`should_never_admit_more_when_foreign_consumption_grows`).
+//! more foreign consumption never admits more, in total or to any pool
+//! (`should_never_admit_more_when_foreign_consumption_grows`,
+//! `should_carve_no_pool_more_when_foreign_consumption_grows_and_inputs_are_random`).
 
 use mayfly_domain::{PoolName, Resources};
 use serde::{Deserialize, Serialize};
@@ -392,23 +393,31 @@ fn times(vm: Footprint, n: u32) -> Footprint {
 ///
 /// Pools are served in name order (duplicates after the first are ignored): each is carved as
 /// many VMs as fit the free capacity less what the open pools before it keep, up to its
-/// `max_running` headroom, where live and quarantined leases both count. An open pool keeps
-/// ahead of the pools after it room for `max_running` minus its live runners of its VMs (its
-/// headroom and its quarantined places), whatever it was carved. Admission order is a
+/// `max_running` headroom, where live and quarantined leases both count. Admission order is a
 /// deliberate v0.x simplicity (the same order as `formal/scheduling.qnt`'s `planOf`); an
 /// operator balances pools with `max_running`.
 ///
-/// Keeping a fixed share, not handing a later pool what an earlier one could not use, is what
-/// makes the carve monotone (KER-05H): with the leftover, a smaller free capacity that no
-/// longer fit one large VM of the first pool let a later pool of small VMs take several, so
-/// more foreign consumption carved more in total (pinned by
-/// `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`), and
-/// releasing a quarantine carved less (pinned by
-/// `tests/capacity.rs::should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released`).
-/// Its price is that a later pool may stay empty beside room the earlier pool cannot use; the
-/// model checks the carve over both orders of a larger and a smaller VM
-/// (`formal/scheduling.qnt`'s `carveMonotone`). A pool's quarantined places stay kept, so
-/// releasing one never shrinks what is kept for a later pool.
+/// An open pool keeps ahead of the pools after it room for its headroom of its VMs, whatever it
+/// was carved, and for each of its quarantined places only what its quarantined leases do not
+/// already hold ([`kept_ahead_of`], KER-05D, ADR 0069). The keep never depends on the free
+/// capacity: handing a later pool what an earlier one could not use made the carve
+/// non-monotone (KER-05H): a smaller free capacity that no longer fit one large VM of the first
+/// pool let a later pool of small VMs take several, so more foreign consumption carved more
+/// (pinned by `tests/capacity.rs::should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit`
+/// and, pool by pool,
+/// `should_carve_no_pool_more_when_foreign_consumption_grows_and_inputs_are_random`). Its price
+/// is that a later pool may stay empty beside room the earlier pool cannot use; no policy that
+/// carves the earlier pool first, fits the carve-outs together and never carves a pool more
+/// for less free capacity can carve the later pool more (doc/domain-model.md §6.3.1, checked by
+/// `formal/scheduling.qnt`'s `carvePoliciesTest`). Releasing a quarantined lease frees what it
+/// holds and grows its pool's keep by at most that, so it never carves any pool less (pinned by
+/// `should_carve_no_less_when_a_quarantine_of_an_earlier_pool_is_released` and
+/// `should_carve_no_pool_less_when_a_quarantined_lease_is_released_and_inputs_are_random`).
+/// KER-05H kept a whole VM per quarantined place, the quarantined lease's own holds a second
+/// time; every pool is carved at least what that keep carved (pinned by
+/// `should_carve_every_pool_at_least_the_whole_place_keep_when_inputs_are_random`). The model
+/// checks the carve over both orders of a larger and a smaller VM (`formal/scheduling.qnt`'s
+/// `carveMonotone`).
 ///
 /// A pool whose terms or host gate are closed is carved nothing, keeps nothing and reports only
 /// its runners. A reservation decision is never more than the carve-out, so the `Host` admits
@@ -452,8 +461,9 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
             0
         };
         if open {
-            kept_ahead =
-                kept_ahead.saturating_add(times(vm, pool.max_running.saturating_sub(runners)));
+            let room = pool.max_running.saturating_sub(runners);
+            let owed = owed_by_quarantine(&inputs.leases, &pool.pool, vm);
+            kept_ahead = kept_ahead.saturating_add(kept_ahead_of(vm, headroom, room, owed));
         }
         let remaining = available.saturating_sub(times(vm, carve_out));
         let next = hold_reason(
@@ -501,6 +511,39 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
         },
         decisions,
     )
+}
+
+/// What an open pool keeps ahead of the pools after it (KER-05D, ADR 0069): `headroom` of its
+/// VMs, and for its `room − headroom` quarantined places at most what its quarantined leases
+/// `owe` (one VM less what each holds: a stopped one owes its memory, a running one nothing).
+///
+/// Releasing a quarantined lease frees its holds and grows this by `vm − owed` of it, at most
+/// those holds, so no later pool loses; a whole VM per place (KER-05H) kept the holds twice.
+/// The model is `formal/scheduling.qnt`'s `keeps`; pinned by
+/// `tests/capacity.rs::should_keep_only_what_a_quarantined_lease_does_not_hold_when_an_earlier_pool_has_one`.
+fn kept_ahead_of(vm: Footprint, headroom: u32, room: u32, owed: Footprint) -> Footprint {
+    let places = times(vm, room.saturating_sub(headroom));
+    times(vm, headroom).saturating_add(Footprint {
+        resources: Resources::new(
+            places
+                .resources
+                .memory_bytes
+                .min(owed.resources.memory_bytes),
+            places.resources.disk_bytes.min(owed.resources.disk_bytes),
+        ),
+        vms: places.vms.min(owed.vms),
+        macos_guests: places.macos_guests.min(owed.macos_guests),
+    })
+}
+
+/// What `pool`'s quarantined leases fall short of one `vm` each, summed.
+fn owed_by_quarantine(leases: &[LeaseInput], pool: &PoolName, vm: Footprint) -> Footprint {
+    leases
+        .iter()
+        .filter(|l| &l.pool == pool && l.quarantined)
+        .fold(Footprint::ZERO, |sum, l| {
+            sum.saturating_add(vm.saturating_sub(l.holds))
+        })
 }
 
 /// Live leases of `pool` that are (or are not) quarantined.
