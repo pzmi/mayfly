@@ -13,6 +13,8 @@
 //!   ports (ver §3.2, §3.3).
 //! - [`secrets`]: `MemorySecretProvider`, the in-memory `SecretProvider` (ver §7.1).
 //! - [`contracts`]: the port contract suites: the journal's, the delivery ledger's and the secret providers' (ver §5).
+//! - [`attempts`]: attempts in a real `AggregateStore` and fixed directive details, for the
+//!   saga's and the directive relay's component tests.
 //! - [`block_on`](block_on()): drives an async port from a synchronous test.
 //!
 //! The golden and determinism harnesses walk an `AggregateRegistry`, so an aggregate that joins
@@ -24,6 +26,7 @@
 //! `src/` would be compiled against a second copy of the crate whose types the testkit does not
 //! accept.
 
+pub mod attempts;
 mod block_on;
 pub mod clock;
 pub mod contracts;

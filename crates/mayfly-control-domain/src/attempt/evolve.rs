@@ -33,6 +33,7 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
                 tag,
                 outcome: Outcome::InFlight,
                 deadline: e.deadline,
+                sent: false,
             });
             let counted = match tag {
                 DirectiveTag::CloneVm
@@ -46,6 +47,19 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
                 s.tries = s.tries.saturating_add(1);
             }
             s.phase = evolve_issued_phase(s.phase, tag);
+        }
+        AttemptEvent::DirectiveSent(e) => {
+            s.pending = s.pending.map(|pending| {
+                if pending.directive_id == e.directive_id {
+                    Pending {
+                        sent: true,
+                        deadline: e.deadline,
+                        ..pending
+                    }
+                } else {
+                    pending
+                }
+            });
         }
         AttemptEvent::DirectiveRefused(..) | AttemptEvent::DirectiveObservedNotApplied(..) => {
             s.pending = None;

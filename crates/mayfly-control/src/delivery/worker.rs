@@ -271,7 +271,10 @@ enum Ended {
 /// `work`, unless `deadline` comes first (`None`). `work` is polled first, so one that is ready
 /// is never cut, and a cut drops it: a consumer's effect may stop half way, which its
 /// idempotency by `Delivery::key` already covers (DC-15).
-async fn within<W: Future>(deadline: impl Future<Output = ()>, work: W) -> Option<W::Output> {
+pub(crate) async fn within<W: Future>(
+    deadline: impl Future<Output = ()>,
+    work: W,
+) -> Option<W::Output> {
     let mut work = pin!(work);
     let mut deadline = pin!(deadline);
     poll_fn(|cx| {

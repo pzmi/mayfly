@@ -794,10 +794,17 @@ resend; a relay killed between send and advance resends the same `directive_id`.
 Note (ES-05F): the relay's sends are at least once and **not ordered** across a takeover: a stale
 relay worker whose lease ran out mid-send can put directive 5 on the link after the new holder sent
 5 and 6 (the checkpoint stays fenced; the link is not). The `DirectiveSink` and the data plane
-therefore dedupe by `directive_id` (the event id) and judge each directive on its own (generation,
+therefore dedupe by `directive_id` (derived from the `IssueNext` command's id,
+`saga::directive_of`) and judge each directive on its own (generation,
 host epoch, the attempt's state), never by per-stream order or "the one after the last seen"; a
 component test sends 6 before a late 5 and shows 5 neither undoes 6 nor runs twice. `send` puts
 its own deadline below the relay's `handle_budget` (DC-26).
+As built: `mayfly_control::saga::AttemptSaga` (the pure table `attempt::next_step`),
+`Attempt`'s new `RecordDirectiveSent` (event `DirectiveSent`, recorded by the sink once the link
+took the frame: a deadline runs only from the send, so a held directive never times out) and
+`RecordDirectiveTimeout`, `delivery::LinkSink` with the `DirectiveDetails` port, and
+`sessions::HostSessions`; `doc/event-store.md` §5.2 "As built (CP-02)". The cross-plane
+component tests are `crates/mayfly-composition/tests/directive_loop/` (one also on SQLite).
 
 #### CP-03 Reconciler
 Cites: plan §9, §10; dm P5, P22, P23; ADRs 0024, 0028. Level-triggered pass (≤ 1/min plus events):
@@ -825,6 +832,15 @@ unknown dimension admits nothing there (component test).
 Note (DEC-05): the handshake's `Welcome` carries `cp_clock`, the `Clock` port's reading when it
 is written (ADR 0020's amendment); the link's mapping of an answer reads `target_absent` as the
 `Attempt`'s `RefusalReason::TargetAbsent` (ADR 0066). Accept adds: a welcome carries the clock.
+Note (CP-02): the handshake records each session in `mayfly_control::sessions::HostSessions`
+(`open` with the welcome's epoch and mode, `set_mode` on entering or leaving safe mode): the saga
+issues no command and the relay's sink sends nothing for a host without one. The saga's deadline
+timers are memory: after adopting the attempts, recovery calls `AttemptSaga::reconsider` for each
+so a directive still in flight gets its timeout again. The sink holds a directive decided under
+an older epoch (`attempt_not_adopted`) until the attempt is adopted; recovery decides what an
+adopted attempt's pending directive becomes (inventory first, plan §10) before that redelivery
+sends it. The inbox's mapping of an answer to a `Fact` replaces the test stand-in `Cp::record`
+of `crates/mayfly-composition/tests/directive_loop/support.rs`.
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
@@ -964,6 +980,12 @@ SEC-02: build the secrets with `UriSecretProvider::from_process(references, dead
 captures `env:` names and withholds them from every child it runs); any child composition
 spawns clears its environment (ADR 0058, `ARCH-child-environment`); `doctor` calls
 `mayfly_control::secrets::check_references`.
+CP-02: run `AttemptSaga` and `DirectiveRelay<LinkSink<..>>` as consumers (`catch_up` and kicks
+each), a timer loop sleeping until `AttemptSaga::next_due` then calling `expire_due`, the
+`DirectiveDetails` from the pool config and image placement (a nonce per directive id, the same
+on every resend), the relay's `send` deadline through `delivery::send_deadline`, and one
+`HostSessions` shared by the handshake, the saga and the sink. The per-kind deadlines are
+`SagaConfig` (defaults; P6's per-guest-OS deadlines are config to add).
 
 #### RT-03 Operator socket API and `mayfly` CLI
 Cites: plan §11. Unix socket `0600`, JSON request/response, commands of plan §11 that exist so far

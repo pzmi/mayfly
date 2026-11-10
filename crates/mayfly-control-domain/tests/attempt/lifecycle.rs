@@ -18,6 +18,7 @@ fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
     events.iter().find_map(|e| match e {
         AttemptEvent::DirectiveIssued(issued) => Some(issued.kind.clone()),
         AttemptEvent::AttemptStarted(..)
+        | AttemptEvent::DirectiveSent(..)
         | AttemptEvent::DirectiveRefused(..)
         | AttemptEvent::DirectiveOutcomeUnknown(..)
         | AttemptEvent::DirectiveObservedNotApplied(..)
@@ -152,7 +153,7 @@ fn should_leave_unknown_only_on_an_observation_when_every_command_is_tried() {
         })),
     );
     // then
-    assert_eq!(after_commands.len(), 12);
+    assert_eq!(after_commands.len(), 14);
     assert!(
         after_commands.iter().all(|(_, unknown)| *unknown),
         "{after_commands:?}"
@@ -926,4 +927,106 @@ fn should_release_a_doubted_quarantine_when_the_vm_is_gone() {
     // then
     assert_eq!(code(stop), Some("nothing_to_issue"));
     assert_eq!(gone.map(|(s, _)| s.phase), Ok(Phase::Lost));
+}
+
+fn timeout_at(at_ms: u64, n: u128) -> mayfly_control_domain::Command<AttemptCommand> {
+    mayfly_control_domain::Command::new(
+        mayfly_domain::CommandId::from_u128(0xC1),
+        mayfly_domain::Millis::new(at_ms),
+        mayfly_domain::Epoch::new(1),
+        SAGA,
+        AttemptCommand::RecordDirectiveTimeout {
+            directive_id: directive(n),
+        },
+    )
+}
+
+fn sent(n: u128, deadline_ms: u64) -> AttemptCommand {
+    AttemptCommand::RecordDirectiveSent {
+        directive_id: directive(n),
+        deadline: mayfly_domain::Deadline::at(mayfly_domain::Millis::new(deadline_ms)),
+    }
+}
+
+#[test]
+fn should_make_the_outcome_unknown_never_success_when_a_deadline_passes() {
+    // given: the clone was sent with its deadline at 60 s
+    let (cloning, _) = reach(&then(cloning(), [sent(1, 60_000)]));
+
+    // when
+    let early = apply(&cloning, timeout_at(59_999, 1));
+    let other = apply(&cloning, timeout_at(60_000, 9));
+    let (unknown, events) =
+        apply(&cloning, timeout_at(60_000, 1)).unwrap_or_else(|r| panic!("{r:?}"));
+    let again = apply(&unknown, timeout_at(61_000, 1));
+    let reissued = apply(&unknown, saga(issue(2)));
+
+    // then
+    assert_eq!(early.err(), Some(AttemptRejection::DeadlineNotReached));
+    assert_eq!(other.err(), Some(AttemptRejection::DirectiveNotPending));
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::DirectiveOutcomeUnknown(..)]
+    ));
+    assert_eq!(unknown.phase, Phase::Cloning);
+    assert_eq!(unknown.instance_id, None);
+    assert!(matches!(
+        unknown.pending.map(|p| p.outcome),
+        Some(Outcome::Unknown { .. })
+    ));
+    assert!(again.is_ok_and(|(state, events)| events.is_empty() && state == unknown));
+    assert_eq!(reissued.err(), Some(AttemptRejection::OutcomeUnknown));
+}
+
+#[test]
+fn should_time_out_only_a_sent_directive_when_its_deadline_passes() {
+    // given: the clone issued with its deadline at 60 s, held unsent long past it
+    let (held, _) = reach(&cloning());
+
+    // when: timed out while held; then sent at 3,600 s with a fresh deadline
+    let while_held = apply(&held, timeout_at(3_600_000, 1));
+    let (sent_late, events) =
+        apply(&held, saga(sent(1, 3_660_000))).unwrap_or_else(|r| panic!("{r:?}"));
+    let repeat = apply(&sent_late, saga(sent(1, 3_700_000)));
+    let before_new = apply(&sent_late, timeout_at(3_659_999, 1));
+    let after_new = apply(&sent_late, timeout_at(3_660_000, 1));
+    let answered = apply(&reach(&booting()).0, saga(sent(1, 60_000)));
+
+    // then: never Unknown while held; the deadline runs from the send; tries unchanged
+    assert_eq!(while_held.err(), Some(AttemptRejection::DirectiveNotSent));
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::DirectiveSent(..)]
+    ));
+    assert_eq!(sent_late.tries, held.tries);
+    assert!(sent_late.pending.is_some_and(|p| p.sent
+        && p.deadline == mayfly_domain::Deadline::at(mayfly_domain::Millis::new(3_660_000))));
+    assert!(repeat.is_ok_and(|(state, events)| events.is_empty() && state == sent_late));
+    assert_eq!(before_new.err(), Some(AttemptRejection::DeadlineNotReached));
+    assert!(after_new.is_ok_and(|(_, events)| matches!(
+        events.as_slice(),
+        [AttemptEvent::DirectiveOutcomeUnknown(..)]
+    )));
+    assert_eq!(answered.err(), Some(AttemptRejection::DirectiveNotPending));
+}
+
+#[test]
+fn should_wait_for_adoption_when_a_timeout_comes_from_a_newer_run() {
+    // given
+    let (cloning, _) = reach(&cloning());
+    let newer = mayfly_control_domain::Command::new(
+        mayfly_domain::CommandId::from_u128(0xC2),
+        mayfly_domain::Millis::new(60_000),
+        mayfly_domain::Epoch::new(2),
+        SAGA,
+        AttemptCommand::RecordDirectiveTimeout {
+            directive_id: directive(1),
+        },
+    );
+
+    // when
+    let decided = apply(&cloning, newer);
+
+    // then
+    assert_eq!(decided.err(), Some(AttemptRejection::NotAdopted));
 }

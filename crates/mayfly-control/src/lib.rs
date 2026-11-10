@@ -5,11 +5,17 @@
 //! - [`store`]: `AggregateStore`, the one write path over the journal, with its `Clock`, `Rng`
 //!   and `StoreNotifier` ports (`doc/event-store.md` §3.7).
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
-//!   `DeliveryWorker` with `catch_up` and kicks, and the `directive_relay` consumer
-//!   (`doc/event-store.md` §3.4, §5).
+//!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
+//!   over the link (`doc/event-store.md` §3.4, §5).
+//! - [`saga`]: the `attempt_saga` durable consumer: the next command per attempt (P6) and the
+//!   deadline timeouts that make an unanswered directive `Unknown` (P7).
+//! - [`sessions`]: the data-plane sessions by host: the epoch the relay stamps and the saga
+//!   issues under, and the mode that holds effects (I29).
 //! - [`secrets`]: the `SecretProvider` port, its refusals and the `doctor` check (ADR 0033).
 
 pub mod delivery;
 pub mod journal;
+pub mod saga;
 pub mod secrets;
+pub mod sessions;
 pub mod store;

@@ -10,7 +10,8 @@
 //!   and a retired attempt never activates
 //!   (`tests/attempt/lifecycle.rs::should_never_return_to_prepared_when_a_runner_has_served`).
 //! - **I10**: an `Unknown` outcome leaves only on an observation; no command, timeout or
-//!   assertion clears it
+//!   assertion clears it, and a deadline (`RecordDirectiveTimeout`, the saga's timer) only
+//!   enters it, never as a success
 //!   (`tests/attempt/lifecycle.rs::should_leave_unknown_only_on_an_observation_when_every_command_is_tried`).
 //! - **I13, retryKeepsNameAndGeneration**: one directive in flight per attempt, and a retry
 //!   reuses the stream's VM name and generation
@@ -45,24 +46,27 @@ mod decide;
 mod events;
 mod evolve;
 mod rejection;
+mod saga;
 mod state;
 
 pub use command::{
     AttemptCommand, DiagnosticsLoss, Fact, GuestFacts, GuestOs, GuestRejection, Observation,
     RefusalReason, StartAttempt,
 };
-pub use decide::{Decision, decide};
+pub use decide::{Decision, decide, issuable};
 pub use events::{
     ActivationStarted, AttemptAdopted, AttemptBackedOff, AttemptClosed, AttemptEvent, AttemptLost,
     AttemptPrepared, AttemptQuarantined, AttemptRetired, AttemptStarted, DiagnosticsExported,
     DiagnosticsLost, DirectiveIssued, DirectiveObservedNotApplied, DirectiveOutcomeUnknown,
-    DirectiveRefused, GuestRejected, GuestVerified, JitHandleIssued, JitHandleOrphaned,
-    JitHandleTaken, JobBound, LostEvidence, RetirementRequested, RetirementWithdrawn, RunnerExited,
-    RunnerLaunchUnknown, RunnerLaunched, StaleObservationIgnored, Staleness, VmBooted, VmCloned,
-    VmDeleted, VmObservedStopped, VmStopped,
+    DirectiveRefused, DirectiveSent, GuestRejected, GuestVerified, JitHandleIssued,
+    JitHandleOrphaned, JitHandleTaken, JobBound, LostEvidence, RetirementRequested,
+    RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
+    StaleObservationIgnored, Staleness, VmBooted, VmCloned, VmDeleted, VmObservedStopped,
+    VmStopped,
 };
 pub use evolve::evolve;
 pub use rejection::AttemptRejection;
+pub use saga::{SagaStep, next_step};
 pub use state::{
     AttemptState, Diagnostics, DirectiveKind, DirectiveTag, Identity, Jit, Outcome, OwnershipProof,
     Pending, Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, VmCondition,

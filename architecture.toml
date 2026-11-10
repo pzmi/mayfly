@@ -203,7 +203,10 @@ mayfly-adapter-sqlite = { tempfile = ["default"] }
 # The secret-provider contract runs on a current-thread runtime over tempdir sources; a oneshot
 # cancels a call from another thread (SEC-02).
 mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io-util", "time", "sync"] }
-mayfly-composition = { tempfile = ["default"] }
+# The directive loop's component tests (CP-02) poll the control plane's consumers and the data
+# plane's executor together on one current-thread runtime (`tokio::join!`, `select!`), and hold
+# a send on a `watch` gate to stage a relay takeover; nothing spawned.
+mayfly-composition = { tempfile = ["default"], tokio = ["rt", "macros", "sync"] }
 mayfly-control = { serde = ["default", "derive"] }
 # The executor's component tests poll it and their script together on a current-thread runtime
 # (`tokio::join!`), nothing spawned (DP-01).

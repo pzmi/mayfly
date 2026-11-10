@@ -25,6 +25,20 @@ pub enum AttemptCommand {
     },
     /// The inbox records an observation from the data plane (policy P8).
     RecordObservation(Observation),
+    /// The directive relay put the pending directive on the link with this deadline (P7):
+    /// its deadline runs from now on.
+    RecordDirectiveSent {
+        /// The directive sent.
+        directive_id: DirectiveId,
+        /// The deadline its frame carried.
+        deadline: Deadline,
+    },
+    /// The saga's timer: the pending directive's deadline passed with no answer (policy P7,
+    /// ADR 0034). Its outcome becomes `Unknown`, never a success or a failure (I10, ADR 0025).
+    RecordDirectiveTimeout {
+        /// The directive whose deadline passed.
+        directive_id: DirectiveId,
+    },
     /// Activation begins after the Host's grant (policy P9).
     BeginActivation {
         /// The Host's `LeaseActivated` event.
@@ -83,6 +97,8 @@ impl CommandBody for AttemptCommand {
         "adopt",
         "resolve_quarantine",
         "close",
+        "record_directive_timeout",
+        "record_directive_sent",
     ];
 
     fn command_type(&self) -> &'static str {
@@ -100,6 +116,8 @@ impl CommandBody for AttemptCommand {
             Self::Adopt { .. } => "adopt",
             Self::ResolveQuarantine => "resolve_quarantine",
             Self::Close => "close",
+            Self::RecordDirectiveTimeout { .. } => "record_directive_timeout",
+            Self::RecordDirectiveSent { .. } => "record_directive_sent",
         }
     }
 }

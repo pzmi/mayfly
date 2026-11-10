@@ -30,6 +30,8 @@ not_started x vm_observed_stopped -> refused not_started
 not_started x vm_present -> refused not_started
 not_started x vm_present_replaced -> refused not_started
 not_started x vm_absent -> refused not_started
+not_started x directive_sent -> refused not_started
+not_started x directive_timeout -> refused not_started
 reserved x start_attempt -> refused already_started
 reserved x issue_next -> accepted directive_issued/v1
 reserved x begin_activation -> refused not_prepared
@@ -61,6 +63,8 @@ reserved x vm_observed_stopped -> accepted vm_observed_stopped/v1
 reserved x vm_present -> accepted attempt_quarantined/v1
 reserved x vm_present_replaced -> accepted attempt_quarantined/v1
 reserved x vm_absent -> accepted, no event
+reserved x directive_sent -> refused directive_not_pending
+reserved x directive_timeout -> refused directive_not_pending
 cloning/in_flight x start_attempt -> refused already_started
 cloning/in_flight x issue_next -> refused directive_pending
 cloning/in_flight x begin_activation -> refused directive_pending
@@ -92,6 +96,8 @@ cloning/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 cloning/in_flight x vm_present -> accepted, no event
 cloning/in_flight x vm_present_replaced -> accepted, no event
 cloning/in_flight x vm_absent -> accepted, no event
+cloning/in_flight x directive_sent -> accepted directive_sent/v1
+cloning/in_flight x directive_timeout -> refused directive_not_sent
 cloning/unknown x start_attempt -> refused already_started
 cloning/unknown x issue_next -> refused outcome_unknown
 cloning/unknown x begin_activation -> refused outcome_unknown
@@ -123,6 +129,41 @@ cloning/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 cloning/unknown x vm_present -> accepted vm_cloned/v1
 cloning/unknown x vm_present_replaced -> accepted vm_cloned/v1
 cloning/unknown x vm_absent -> accepted directive_observed_not_applied/v1 attempt_backed_off/v1
+cloning/unknown x directive_sent -> accepted, no event
+cloning/unknown x directive_timeout -> accepted, no event
+cloning/sent x start_attempt -> refused already_started
+cloning/sent x issue_next -> refused directive_pending
+cloning/sent x begin_activation -> refused directive_pending
+cloning/sent x record_jit_handle -> refused directive_pending
+cloning/sent x bind_job -> refused directive_pending
+cloning/sent x request_retirement -> refused directive_pending
+cloning/sent x confirm_retirement -> refused directive_pending
+cloning/sent x withdraw_retirement -> refused directive_pending
+cloning/sent x quarantine -> refused directive_pending
+cloning/sent x adopt -> accepted attempt_adopted/v1
+cloning/sent x resolve_quarantine -> refused directive_pending
+cloning/sent x close -> refused directive_pending
+cloning/sent x vm_cloned -> accepted vm_cloned/v1
+cloning/sent x vm_booted -> refused observation_mismatch
+cloning/sent x guest_verified -> refused observation_mismatch
+cloning/sent x guest_rejected -> refused observation_mismatch
+cloning/sent x directive_refused -> accepted directive_refused/v1 attempt_backed_off/v1
+cloning/sent x directive_refused_proof -> accepted directive_refused/v1 attempt_backed_off/v1
+cloning/sent x directive_refused_absent -> accepted directive_refused/v1 attempt_backed_off/v1
+cloning/sent x outcome_unknown -> accepted directive_outcome_unknown/v1
+cloning/sent x runner_launched -> refused observation_mismatch
+cloning/sent x runner_launch_unknown -> refused observation_mismatch
+cloning/sent x diagnostics_exported -> refused observation_mismatch
+cloning/sent x diagnostics_lost -> refused observation_mismatch
+cloning/sent x vm_stopped -> refused observation_mismatch
+cloning/sent x vm_deleted -> refused observation_mismatch
+cloning/sent x runner_exited -> refused observation_mismatch
+cloning/sent x vm_observed_stopped -> accepted vm_observed_stopped/v1
+cloning/sent x vm_present -> accepted, no event
+cloning/sent x vm_present_replaced -> accepted, no event
+cloning/sent x vm_absent -> accepted, no event
+cloning/sent x directive_sent -> accepted, no event
+cloning/sent x directive_timeout -> accepted directive_outcome_unknown/v1
 booting x start_attempt -> refused already_started
 booting x issue_next -> accepted directive_issued/v1
 booting x begin_activation -> refused not_prepared
@@ -154,6 +195,8 @@ booting x vm_observed_stopped -> accepted vm_observed_stopped/v1
 booting x vm_present -> accepted, no event
 booting x vm_present_replaced -> accepted attempt_quarantined/v1
 booting x vm_absent -> accepted attempt_lost/v1
+booting x directive_sent -> refused directive_not_pending
+booting x directive_timeout -> refused directive_not_pending
 booting/in_flight x start_attempt -> refused already_started
 booting/in_flight x issue_next -> refused directive_pending
 booting/in_flight x begin_activation -> refused directive_pending
@@ -185,6 +228,8 @@ booting/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 booting/in_flight x vm_present -> accepted, no event
 booting/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 booting/in_flight x vm_absent -> accepted attempt_lost/v1
+booting/in_flight x directive_sent -> accepted directive_sent/v1
+booting/in_flight x directive_timeout -> refused directive_not_sent
 booting/unknown x start_attempt -> refused already_started
 booting/unknown x issue_next -> refused outcome_unknown
 booting/unknown x begin_activation -> refused outcome_unknown
@@ -216,6 +261,8 @@ booting/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 booting/unknown x vm_present -> accepted vm_booted/v1
 booting/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 booting/unknown x vm_absent -> accepted attempt_lost/v1
+booting/unknown x directive_sent -> accepted, no event
+booting/unknown x directive_timeout -> accepted, no event
 verifying x start_attempt -> refused already_started
 verifying x issue_next -> accepted directive_issued/v1
 verifying x begin_activation -> refused not_prepared
@@ -247,6 +294,8 @@ verifying x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retir
 verifying x vm_present -> accepted, no event
 verifying x vm_present_replaced -> accepted attempt_quarantined/v1
 verifying x vm_absent -> accepted attempt_lost/v1
+verifying x directive_sent -> refused directive_not_pending
+verifying x directive_timeout -> refused directive_not_pending
 verifying/in_flight x start_attempt -> refused already_started
 verifying/in_flight x issue_next -> refused directive_pending
 verifying/in_flight x begin_activation -> refused directive_pending
@@ -278,6 +327,8 @@ verifying/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 verifying/in_flight x vm_present -> accepted, no event
 verifying/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 verifying/in_flight x vm_absent -> accepted attempt_lost/v1
+verifying/in_flight x directive_sent -> accepted directive_sent/v1
+verifying/in_flight x directive_timeout -> refused directive_not_sent
 verifying/unknown x start_attempt -> refused already_started
 verifying/unknown x issue_next -> refused outcome_unknown
 verifying/unknown x begin_activation -> refused outcome_unknown
@@ -309,6 +360,8 @@ verifying/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 verifying/unknown x vm_present -> accepted, no event
 verifying/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 verifying/unknown x vm_absent -> accepted attempt_lost/v1
+verifying/unknown x directive_sent -> accepted, no event
+verifying/unknown x directive_timeout -> accepted, no event
 prepared x start_attempt -> refused already_started
 prepared x issue_next -> refused nothing_to_issue
 prepared x begin_activation -> accepted activation_started/v1
@@ -340,6 +393,8 @@ prepared x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retire
 prepared x vm_present -> accepted, no event
 prepared x vm_present_replaced -> accepted attempt_quarantined/v1
 prepared x vm_absent -> accepted attempt_lost/v1
+prepared x directive_sent -> refused directive_not_pending
+prepared x directive_timeout -> refused directive_not_pending
 activating x start_attempt -> refused already_started
 activating x issue_next -> accepted directive_issued/v1
 activating x begin_activation -> refused not_prepared
@@ -371,6 +426,8 @@ activating x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_reti
 activating x vm_present -> accepted, no event
 activating x vm_present_replaced -> accepted attempt_quarantined/v1
 activating x vm_absent -> accepted attempt_lost/v1
+activating x directive_sent -> refused directive_not_pending
+activating x directive_timeout -> refused directive_not_pending
 activating/in_flight x start_attempt -> refused already_started
 activating/in_flight x issue_next -> refused directive_pending
 activating/in_flight x begin_activation -> refused directive_pending
@@ -402,6 +459,8 @@ activating/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 activating/in_flight x vm_present -> accepted, no event
 activating/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 activating/in_flight x vm_absent -> accepted attempt_lost/v1
+activating/in_flight x directive_sent -> accepted directive_sent/v1
+activating/in_flight x directive_timeout -> refused directive_not_sent
 activating/unknown x start_attempt -> refused already_started
 activating/unknown x issue_next -> refused outcome_unknown
 activating/unknown x begin_activation -> refused outcome_unknown
@@ -433,6 +492,8 @@ activating/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 activating/unknown x vm_present -> accepted, no event
 activating/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 activating/unknown x vm_absent -> accepted attempt_lost/v1
+activating/unknown x directive_sent -> accepted, no event
+activating/unknown x directive_timeout -> accepted, no event
 activating/launching x start_attempt -> refused already_started
 activating/launching x issue_next -> refused directive_pending
 activating/launching x begin_activation -> refused directive_pending
@@ -464,6 +525,8 @@ activating/launching x vm_observed_stopped -> accepted vm_observed_stopped/v1
 activating/launching x vm_present -> accepted, no event
 activating/launching x vm_present_replaced -> accepted attempt_quarantined/v1
 activating/launching x vm_absent -> accepted attempt_lost/v1
+activating/launching x directive_sent -> accepted directive_sent/v1
+activating/launching x directive_timeout -> refused directive_not_sent
 listening x start_attempt -> refused already_started
 listening x issue_next -> refused nothing_to_issue
 listening x begin_activation -> refused not_prepared
@@ -495,6 +558,8 @@ listening x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retir
 listening x vm_present -> accepted, no event
 listening x vm_present_replaced -> accepted attempt_quarantined/v1
 listening x vm_absent -> accepted attempt_lost/v1
+listening x directive_sent -> refused directive_not_pending
+listening x directive_timeout -> refused directive_not_pending
 listening/leaked x start_attempt -> refused already_started
 listening/leaked x issue_next -> refused nothing_to_issue
 listening/leaked x begin_activation -> refused not_prepared
@@ -526,6 +591,8 @@ listening/leaked x vm_observed_stopped -> accepted vm_observed_stopped/v1 attemp
 listening/leaked x vm_present -> accepted, no event
 listening/leaked x vm_present_replaced -> accepted attempt_quarantined/v1
 listening/leaked x vm_absent -> accepted attempt_lost/v1
+listening/leaked x directive_sent -> refused directive_not_pending
+listening/leaked x directive_timeout -> refused directive_not_pending
 busy x start_attempt -> refused already_started
 busy x issue_next -> refused nothing_to_issue
 busy x begin_activation -> refused not_prepared
@@ -557,6 +624,8 @@ busy x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retired/v1
 busy x vm_present -> accepted, no event
 busy x vm_present_replaced -> accepted attempt_quarantined/v1
 busy x vm_absent -> accepted attempt_lost/v1
+busy x directive_sent -> refused directive_not_pending
+busy x directive_timeout -> refused directive_not_pending
 finished x start_attempt -> refused already_started
 finished x issue_next -> refused nothing_to_issue
 finished x begin_activation -> refused not_prepared
@@ -588,6 +657,8 @@ finished x vm_observed_stopped -> accepted vm_observed_stopped/v1
 finished x vm_present -> accepted, no event
 finished x vm_present_replaced -> accepted attempt_quarantined/v1
 finished x vm_absent -> accepted attempt_lost/v1
+finished x directive_sent -> refused directive_not_pending
+finished x directive_timeout -> refused directive_not_pending
 retiring x start_attempt -> refused already_started
 retiring x issue_next -> accepted directive_issued/v1
 retiring x begin_activation -> refused not_prepared
@@ -619,6 +690,8 @@ retiring x vm_observed_stopped -> accepted vm_observed_stopped/v1
 retiring x vm_present -> accepted, no event
 retiring x vm_present_replaced -> accepted attempt_quarantined/v1
 retiring x vm_absent -> accepted attempt_lost/v1
+retiring x directive_sent -> refused directive_not_pending
+retiring x directive_timeout -> refused directive_not_pending
 retiring/in_flight x start_attempt -> refused already_started
 retiring/in_flight x issue_next -> refused directive_pending
 retiring/in_flight x begin_activation -> refused directive_pending
@@ -650,6 +723,8 @@ retiring/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 retiring/in_flight x vm_present -> accepted, no event
 retiring/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 retiring/in_flight x vm_absent -> accepted attempt_lost/v1
+retiring/in_flight x directive_sent -> accepted directive_sent/v1
+retiring/in_flight x directive_timeout -> refused directive_not_sent
 retiring/unknown x start_attempt -> refused already_started
 retiring/unknown x issue_next -> refused outcome_unknown
 retiring/unknown x begin_activation -> refused outcome_unknown
@@ -681,6 +756,8 @@ retiring/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 retiring/unknown x vm_present -> accepted directive_observed_not_applied/v1
 retiring/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 retiring/unknown x vm_absent -> accepted attempt_lost/v1
+retiring/unknown x directive_sent -> accepted, no event
+retiring/unknown x directive_timeout -> accepted, no event
 deleting x start_attempt -> refused already_started
 deleting x issue_next -> accepted directive_issued/v1
 deleting x begin_activation -> refused not_prepared
@@ -712,6 +789,8 @@ deleting x vm_observed_stopped -> accepted vm_observed_stopped/v1
 deleting x vm_present -> accepted, no event
 deleting x vm_present_replaced -> accepted attempt_quarantined/v1
 deleting x vm_absent -> accepted attempt_lost/v1
+deleting x directive_sent -> refused directive_not_pending
+deleting x directive_timeout -> refused directive_not_pending
 deleting/in_flight x start_attempt -> refused already_started
 deleting/in_flight x issue_next -> refused directive_pending
 deleting/in_flight x begin_activation -> refused directive_pending
@@ -743,6 +822,8 @@ deleting/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 deleting/in_flight x vm_present -> accepted, no event
 deleting/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 deleting/in_flight x vm_absent -> accepted vm_deleted/v1
+deleting/in_flight x directive_sent -> accepted directive_sent/v1
+deleting/in_flight x directive_timeout -> refused directive_not_sent
 deleting/unknown x start_attempt -> refused already_started
 deleting/unknown x issue_next -> refused outcome_unknown
 deleting/unknown x begin_activation -> refused outcome_unknown
@@ -774,6 +855,8 @@ deleting/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 deleting/unknown x vm_present -> accepted directive_observed_not_applied/v1
 deleting/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 deleting/unknown x vm_absent -> accepted vm_deleted/v1
+deleting/unknown x directive_sent -> accepted, no event
+deleting/unknown x directive_timeout -> accepted, no event
 deleted x start_attempt -> refused already_started
 deleted x issue_next -> refused nothing_to_issue
 deleted x begin_activation -> refused not_prepared
@@ -805,6 +888,8 @@ deleted x vm_observed_stopped -> accepted, no event
 deleted x vm_present -> accepted, no event
 deleted x vm_present_replaced -> accepted, no event
 deleted x vm_absent -> accepted, no event
+deleted x directive_sent -> refused directive_not_pending
+deleted x directive_timeout -> refused directive_not_pending
 lost x start_attempt -> refused already_started
 lost x issue_next -> refused nothing_to_issue
 lost x begin_activation -> refused not_prepared
@@ -836,6 +921,8 @@ lost x vm_observed_stopped -> accepted, no event
 lost x vm_present -> accepted, no event
 lost x vm_present_replaced -> accepted, no event
 lost x vm_absent -> accepted, no event
+lost x directive_sent -> refused directive_not_pending
+lost x directive_timeout -> refused directive_not_pending
 backoff x start_attempt -> refused already_started
 backoff x issue_next -> accepted directive_issued/v1
 backoff x begin_activation -> refused not_prepared
@@ -867,6 +954,8 @@ backoff x vm_observed_stopped -> accepted vm_observed_stopped/v1
 backoff x vm_present -> accepted attempt_quarantined/v1
 backoff x vm_present_replaced -> accepted attempt_quarantined/v1
 backoff x vm_absent -> accepted, no event
+backoff x directive_sent -> refused directive_not_pending
+backoff x directive_timeout -> refused directive_not_pending
 quarantined x start_attempt -> refused already_started
 quarantined x issue_next -> accepted directive_issued/v1
 quarantined x begin_activation -> refused not_prepared
@@ -898,6 +987,8 @@ quarantined x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined x vm_present -> accepted, no event
 quarantined x vm_present_replaced -> accepted attempt_quarantined/v1
 quarantined x vm_absent -> accepted attempt_lost/v1
+quarantined x directive_sent -> refused directive_not_pending
+quarantined x directive_timeout -> refused directive_not_pending
 quarantined/in_flight x start_attempt -> refused already_started
 quarantined/in_flight x issue_next -> refused directive_pending
 quarantined/in_flight x begin_activation -> refused directive_pending
@@ -929,6 +1020,8 @@ quarantined/in_flight x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined/in_flight x vm_present -> accepted, no event
 quarantined/in_flight x vm_present_replaced -> accepted attempt_quarantined/v1
 quarantined/in_flight x vm_absent -> accepted attempt_lost/v1
+quarantined/in_flight x directive_sent -> accepted directive_sent/v1
+quarantined/in_flight x directive_timeout -> refused directive_not_sent
 quarantined/unknown x start_attempt -> refused already_started
 quarantined/unknown x issue_next -> refused outcome_unknown
 quarantined/unknown x begin_activation -> refused outcome_unknown
@@ -960,6 +1053,8 @@ quarantined/unknown x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined/unknown x vm_present -> accepted directive_observed_not_applied/v1
 quarantined/unknown x vm_present_replaced -> accepted attempt_quarantined/v1
 quarantined/unknown x vm_absent -> accepted attempt_lost/v1
+quarantined/unknown x directive_sent -> accepted, no event
+quarantined/unknown x directive_timeout -> accepted, no event
 quarantined/doubted x start_attempt -> refused already_started
 quarantined/doubted x issue_next -> refused nothing_to_issue
 quarantined/doubted x begin_activation -> refused not_prepared
@@ -991,6 +1086,8 @@ quarantined/doubted x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined/doubted x vm_present -> accepted, no event
 quarantined/doubted x vm_present_replaced -> accepted, no event
 quarantined/doubted x vm_absent -> accepted attempt_lost/v1
+quarantined/doubted x directive_sent -> refused directive_not_pending
+quarantined/doubted x directive_timeout -> refused directive_not_pending
 quarantined/vanished x start_attempt -> refused already_started
 quarantined/vanished x issue_next -> refused nothing_to_issue
 quarantined/vanished x begin_activation -> refused not_prepared
@@ -1022,6 +1119,8 @@ quarantined/vanished x vm_observed_stopped -> accepted vm_observed_stopped/v1
 quarantined/vanished x vm_present -> accepted, no event
 quarantined/vanished x vm_present_replaced -> accepted, no event
 quarantined/vanished x vm_absent -> accepted, no event
+quarantined/vanished x directive_sent -> refused directive_not_pending
+quarantined/vanished x directive_timeout -> refused directive_not_pending
 closed x start_attempt -> refused closed
 closed x issue_next -> refused closed
 closed x begin_activation -> refused closed
@@ -1053,3 +1152,5 @@ closed x vm_observed_stopped -> refused closed
 closed x vm_present -> refused closed
 closed x vm_present_replaced -> refused closed
 closed x vm_absent -> refused closed
+closed x directive_sent -> refused closed
+closed x directive_timeout -> refused closed

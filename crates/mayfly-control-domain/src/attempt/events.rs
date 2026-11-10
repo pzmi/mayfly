@@ -90,6 +90,25 @@ impl DomainEvent for DirectiveIssued {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// The directive relay put the pending directive on the link (CP-02): from now on its deadline
+/// runs. Recorded after the link took the frame, with the deadline the frame carried, so a
+/// directive held unsent (safe mode, no session, not adopted) never times out: its outcome is
+/// known, nothing happened (ADR 0025). An answer may be recorded before it; then it is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DirectiveSent {
+    /// The directive.
+    pub directive_id: DirectiveId,
+    /// The deadline the frame carried: the relay's clock at its first send plus the kind's
+    /// timeout.
+    pub deadline: Deadline,
+}
+
+impl DomainEvent for DirectiveSent {
+    const EVENT_TYPE: &'static str = "directive_sent";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// The data plane definitely did not apply the pending directive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -504,6 +523,8 @@ event_set! {
         AttemptStarted(AttemptStarted),
         /// See [`DirectiveIssued`].
         DirectiveIssued(DirectiveIssued),
+        /// See [`DirectiveSent`].
+        DirectiveSent(DirectiveSent),
         /// See [`DirectiveRefused`].
         DirectiveRefused(DirectiveRefused),
         /// See [`DirectiveOutcomeUnknown`].

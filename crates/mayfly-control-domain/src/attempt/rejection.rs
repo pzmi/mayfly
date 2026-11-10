@@ -71,6 +71,14 @@ pub enum AttemptRejection {
     NoProof,
     /// `Close` before the VM is deleted or lost.
     NotTerminal,
+    /// A timeout before the pending directive's deadline: a deadline is never cut short.
+    DeadlineNotReached,
+    /// A timeout for a directive that is not the pending one: it was answered, or another
+    /// directive is pending now.
+    DirectiveNotPending,
+    /// A timeout for a directive the relay has not sent: held unsent, nothing happened, and
+    /// its deadline does not run (ADR 0025).
+    DirectiveNotSent,
 }
 
 impl Rejection for AttemptRejection {
@@ -103,6 +111,9 @@ impl Rejection for AttemptRejection {
         "operator_only",
         "no_proof",
         "not_terminal",
+        "deadline_not_reached",
+        "directive_not_pending",
+        "directive_not_sent",
     ];
 
     fn code(&self) -> &'static str {
@@ -135,6 +146,9 @@ impl Rejection for AttemptRejection {
             Self::OperatorOnly => "operator_only",
             Self::NoProof => "no_proof",
             Self::NotTerminal => "not_terminal",
+            Self::DeadlineNotReached => "deadline_not_reached",
+            Self::DirectiveNotPending => "directive_not_pending",
+            Self::DirectiveNotSent => "directive_not_sent",
         }
     }
 }

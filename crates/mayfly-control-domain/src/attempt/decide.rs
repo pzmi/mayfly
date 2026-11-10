@@ -14,10 +14,11 @@ use super::events::{
     ActivationStarted, AttemptAdopted, AttemptBackedOff, AttemptClosed, AttemptEvent, AttemptLost,
     AttemptPrepared, AttemptQuarantined, AttemptRetired, AttemptStarted, DiagnosticsExported,
     DiagnosticsLost, DirectiveIssued, DirectiveObservedNotApplied, DirectiveOutcomeUnknown,
-    DirectiveRefused, GuestRejected, GuestVerified, JitHandleIssued, JitHandleOrphaned,
-    JitHandleTaken, JobBound, LostEvidence, RetirementRequested, RetirementWithdrawn, RunnerExited,
-    RunnerLaunchUnknown, RunnerLaunched, StaleObservationIgnored, Staleness, VmBooted, VmCloned,
-    VmDeleted, VmObservedStopped, VmStopped,
+    DirectiveRefused, DirectiveSent, GuestRejected, GuestVerified, JitHandleIssued,
+    JitHandleOrphaned, JitHandleTaken, JobBound, LostEvidence, RetirementRequested,
+    RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
+    StaleObservationIgnored, Staleness, VmBooted, VmCloned, VmDeleted, VmObservedStopped,
+    VmStopped,
 };
 use super::rejection::AttemptRejection;
 use super::state::{
@@ -67,6 +68,8 @@ fn decide_not_started(run_epoch: Epoch, body: AttemptCommand) -> Decision {
         AttemptCommand::StartAttempt(start) => Ok(vec![started(start, run_epoch)]),
         AttemptCommand::IssueNext { .. }
         | AttemptCommand::RecordObservation(..)
+        | AttemptCommand::RecordDirectiveTimeout { .. }
+        | AttemptCommand::RecordDirectiveSent { .. }
         | AttemptCommand::BeginActivation { .. }
         | AttemptCommand::RecordJitHandle { .. }
         | AttemptCommand::BindJob { .. }
@@ -118,6 +121,8 @@ fn decide_started(
             AttemptCommand::StartAttempt(..) => Err(AttemptRejection::AlreadyStarted),
             AttemptCommand::IssueNext { .. }
             | AttemptCommand::RecordObservation(..)
+            | AttemptCommand::RecordDirectiveTimeout { .. }
+            | AttemptCommand::RecordDirectiveSent { .. }
             | AttemptCommand::BeginActivation { .. }
             | AttemptCommand::RecordJitHandle { .. }
             | AttemptCommand::BindJob { .. }
@@ -135,6 +140,21 @@ fn decide_started(
         AttemptCommand::Adopt { inventory_ref } => decide_adopt(state, run_epoch, inventory_ref),
         AttemptCommand::RecordObservation(observation) => {
             decide_observation(state, issued_at, &observation)
+        }
+        AttemptCommand::RecordDirectiveTimeout { directive_id } => {
+            if run_epoch > state.epoch {
+                return Err(AttemptRejection::NotAdopted);
+            }
+            decide_timeout(state, issued_at, directive_id)
+        }
+        AttemptCommand::RecordDirectiveSent {
+            directive_id,
+            deadline,
+        } => {
+            if run_epoch > state.epoch {
+                return Err(AttemptRejection::NotAdopted);
+            }
+            decide_sent(state, directive_id, deadline)
         }
         command @ (AttemptCommand::IssueNext { .. }
         | AttemptCommand::BeginActivation { .. }
@@ -183,9 +203,10 @@ fn decide_command(state: &AttemptState, actor: Actor, body: AttemptCommand) -> D
         AttemptCommand::ResolveQuarantine => decide_resolve_quarantine(state, actor),
         AttemptCommand::Close => decide_close(state),
         AttemptCommand::StartAttempt(..) => Err(AttemptRejection::AlreadyStarted),
-        AttemptCommand::Adopt { .. } | AttemptCommand::RecordObservation(..) => {
-            Err(AttemptRejection::ObservationMismatch)
-        }
+        AttemptCommand::Adopt { .. }
+        | AttemptCommand::RecordObservation(..)
+        | AttemptCommand::RecordDirectiveTimeout { .. }
+        | AttemptCommand::RecordDirectiveSent { .. } => Err(AttemptRejection::ObservationMismatch),
     }
 }
 
@@ -198,7 +219,27 @@ fn decide_issue_next(
     directive_id: DirectiveId,
     deadline: Deadline,
 ) -> Decision {
-    let kind = match state.phase {
+    issuable(state)?
+        .map(|kind| {
+            vec![AttemptEvent::DirectiveIssued(DirectiveIssued {
+                directive_id,
+                kind,
+                deadline,
+            })]
+        })
+        .ok_or(AttemptRejection::NothingToIssue)
+}
+
+/// The directive `IssueNext` would issue in `state`'s phase, pending overlay aside: `None` when
+/// the phase has none (`nothing_to_issue`), an error when the stream cannot issue at all. The
+/// saga reads it to issue only what would be accepted (pinned by
+/// `tests/attempt/saga.rs::should_issue_exactly_when_issue_next_would_be_accepted`).
+///
+/// # Errors
+/// [`AttemptRejection::NotStarted`], [`AttemptRejection::Closed`], or
+/// [`AttemptRejection::NoProof`] for a stop or delete without a recorded instance id.
+pub fn issuable(state: &AttemptState) -> Result<Option<DirectiveKind>, AttemptRejection> {
+    Ok(match state.phase {
         Phase::Reserved | Phase::Cloning => Some(DirectiveKind::CloneVm),
         Phase::Booting => Some(DirectiveKind::StartVm),
         Phase::Verifying => Some(DirectiveKind::VerifyGuest),
@@ -237,15 +278,55 @@ fn decide_issue_next(
         | Phase::Lost => None,
         Phase::NotStarted => return Err(AttemptRejection::NotStarted),
         Phase::Closed => return Err(AttemptRejection::Closed),
-    };
-    kind.map(|kind| {
-        vec![AttemptEvent::DirectiveIssued(DirectiveIssued {
-            directive_id,
-            kind,
-            deadline,
-        })]
     })
-    .ok_or(AttemptRejection::NothingToIssue)
+}
+
+/// `RecordDirectiveTimeout`: the pending directive was sent and its deadline passed with no
+/// answer, so its outcome is `Unknown` (P7): the effect happened or not, and nothing is read as
+/// success. A timeout of a directive never sent is refused (held unsent, nothing happened), one
+/// before the deadline is refused, a second one changes nothing, and one for a directive no
+/// longer pending is refused (the answer came first). Pinned by
+/// `tests/attempt/lifecycle.rs::should_make_the_outcome_unknown_never_success_when_a_deadline_passes`.
+fn decide_timeout(state: &AttemptState, issued_at: Millis, directive_id: DirectiveId) -> Decision {
+    match state.pending {
+        Some(pending) if pending.directive_id == directive_id => match pending.outcome {
+            Outcome::InFlight if !pending.sent => Err(AttemptRejection::DirectiveNotSent),
+            Outcome::InFlight => {
+                if pending.deadline.is_expired(issued_at) {
+                    Ok(vec![AttemptEvent::DirectiveOutcomeUnknown(
+                        DirectiveOutcomeUnknown {
+                            directive_id,
+                            since: issued_at,
+                        },
+                    )])
+                } else {
+                    Err(AttemptRejection::DeadlineNotReached)
+                }
+            }
+            Outcome::Unknown { .. } => Ok(Vec::new()),
+        },
+        Some(..) | None => Err(AttemptRejection::DirectiveNotPending),
+    }
+}
+
+/// `RecordDirectiveSent`: the relay put the pending directive on the link; its deadline runs
+/// from the one the frame carried. A repeat (another relay worker's send) changes nothing, and
+/// one for a directive no longer pending (answered first) is refused. Pinned by
+/// `tests/attempt/lifecycle.rs::should_time_out_only_a_sent_directive_when_its_deadline_passes`.
+fn decide_sent(state: &AttemptState, directive_id: DirectiveId, deadline: Deadline) -> Decision {
+    match state.pending {
+        Some(pending) if pending.directive_id == directive_id => {
+            if pending.sent || pending.outcome != Outcome::InFlight {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![AttemptEvent::DirectiveSent(DirectiveSent {
+                    directive_id,
+                    deadline,
+                })])
+            }
+        }
+        Some(..) | None => Err(AttemptRejection::DirectiveNotPending),
+    }
 }
 
 const fn stage_directive(stage: Stage) -> DirectiveKind {

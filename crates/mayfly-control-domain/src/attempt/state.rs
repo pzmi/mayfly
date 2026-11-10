@@ -196,8 +196,11 @@ pub struct Pending {
     pub tag: DirectiveTag,
     /// In flight or unknown.
     pub outcome: Outcome,
-    /// The deadline it was issued with.
+    /// The deadline: the one it was issued with until it is sent, then the one its frame
+    /// carried (`DirectiveSent`).
     pub deadline: Deadline,
+    /// The relay put it on the link (`DirectiveSent`): only then can it time out.
+    pub sent: bool,
 }
 
 /// The JIT handle's phase on the attempt (`doc/domain-model.md` §6.4).

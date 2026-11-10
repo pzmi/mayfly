@@ -1,6 +1,6 @@
 //! The `directive_relay` consumer (`doc/event-store.md` §5.2, §5.3; ADR 0034): delivers every
-//! committed `DirectiveIssued` event, at least once, to a [`DirectiveSink`]. A skeleton: the
-//! sink that composes the protocol `Directive` and sends it over the link is CP-02's.
+//! committed `DirectiveIssued` event, at least once, to a [`DirectiveSink`]; the sink over the
+//! link, which composes the protocol `Directive`, is [`super::LinkSink`].
 
 use std::fmt;
 use std::future::Future;
@@ -60,8 +60,8 @@ impl fmt::Display for SinkError {
 
 impl std::error::Error for SinkError {}
 
-/// Where the relay hands directives: the link, once CP-02 wires it. The host epoch is stamped by
-/// the link adapter at send time, never stored (§5.3).
+/// Where the relay hands directives: the link, through [`super::LinkSink`]. The host epoch is
+/// stamped at send time, never stored (§5.3).
 ///
 /// **Order is not promised.** Within one claim the relay sends a stream's directives in
 /// revision order, but across a takeover sends may overlap and arrive out of order: a stale

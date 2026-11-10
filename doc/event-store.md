@@ -723,6 +723,37 @@ streams it wrote; a kick lost with its process loses nothing, the mark is durabl
 The reconciler is not a consumer: it reads projections and observations and issues commands
 (plan §5.4).
 
+**As built (CP-02).** `mayfly_control::saga::AttemptSaga` is `attempt_saga`: on every event of an
+`attempt-*` stream it reads the attempt's *current* state and applies the pure table
+`attempt::next_step` (issue the next directive, close, await an in-flight answer, or nothing),
+so a late or repeated event is judged against where the attempt is now. Its `IssueNext` has the
+command id `f(event_id)` and the directive id `f(command_id)` (`saga::command_for_event`,
+`directive_of`), its deadline the control plane's clock at the decision plus the kind's
+timeout (provisional: the sink fixes the real one at the first send); a redelivery whose first
+decision committed under another deadline is refused `CommandIdReused`, which the saga reads as
+"decided". Commands are issued under the host
+session's epoch (`sessions::HostSessions`, written by the handshake); with no session the event
+fails and is delivered again. Only a directive the relay *sent* arms a timer: the sink records
+`DirectiveSent { directive_id, deadline }` (command `RecordDirectiveSent`, id
+`saga::sent_of(directive_id)`) once the link took the frame, with the deadline the frame carried,
+its first send's clock plus the kind's timeout (`DirectiveTimeouts`); a resend carries the
+recorded one. A directive held unsent (safe mode, no session, not adopted) has a known outcome,
+nothing happened, so no deadline runs and its tries are not spent. `AttemptSaga::expire_due`
+issues `RecordDirectiveTimeout` (command id `f(directive_id)`) once the sent deadline plus a reply
+grace passed, which records `DirectiveOutcomeUnknown` (never a success; a timeout of a directive
+not sent is refused `directive_not_sent`, before the deadline `deadline_not_reached`, of an
+answered one `directive_not_pending`, the only refusal that disarms the timer; any other keeps it,
+retried one reply grace later). Timers do not survive a restart: startup re-arms them with
+`AttemptSaga::reconsider` (CP-04). `directive_relay` sends through
+`mayfly_control::delivery::LinkSink`, which reads the attempt through the store (an unknown kind
+raises safe mode as any load does), composes the protocol `Directive` from the stream
+(name, generation, proof) and `DirectiveDetails` (image base, run options, stop grace, nonce),
+stamps the session's epoch, sends only the attempt's pending in-flight directive decided under
+that epoch (anything else is dropped as superseded, so it never relies on order), holds
+`held_in_safe_mode` kinds while the host's session is safe (I29), and bounds each send at half
+the relay's `handle_budget` (DC-26). Pinned by `crates/mayfly-control/tests/store/saga.rs`,
+`link_sink.rs`, and across both planes `crates/mayfly-composition/tests/directive_loop/`.
+
 ### 5.3 The outbox as delivery (decided, E2, ADR 0034)
 
 plan §5.2 and the in-flight ES-01 draft keep a mutable `outbox` table (`status`, `attempts`,

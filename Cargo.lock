@@ -1032,9 +1032,19 @@ version = "0.1.0"
 name = "mayfly-composition"
 version = "0.1.0"
 dependencies = [
+ "mayfly-adapter-link",
+ "mayfly-adapter-sqlite",
+ "mayfly-control",
+ "mayfly-control-domain",
+ "mayfly-data",
+ "mayfly-data-domain",
  "mayfly-domain",
+ "mayfly-protocol",
+ "mayfly-testkit",
+ "mayfly-testkit-data",
  "rustix",
  "tempfile",
+ "tokio",
  "toml",
 ]
 
@@ -1056,6 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "mayfly-control-domain",
  "mayfly-domain",
+ "mayfly-protocol",
  "mayfly-testkit",
  "serde",
  "serde_json",
@@ -1146,6 +1157,7 @@ dependencies = [
  "mayfly-control",
  "mayfly-control-domain",
  "mayfly-domain",
+ "mayfly-protocol",
  "mayfly-testkit-shared",
  "serde",
  "serde_json",

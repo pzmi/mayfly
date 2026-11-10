@@ -52,6 +52,8 @@ const fn stimulus_ordinal(body: &AttemptCommand) -> usize {
         AttemptCommand::Adopt { .. } => 9,
         AttemptCommand::ResolveQuarantine => 10,
         AttemptCommand::Close => 11,
+        AttemptCommand::RecordDirectiveTimeout { .. } => 28,
+        AttemptCommand::RecordDirectiveSent { .. } => 29,
         AttemptCommand::RecordObservation(observation) => match observation.fact {
             Fact::VmCloned { .. } => 12,
             Fact::VmBooted { .. } => 13,
@@ -73,7 +75,7 @@ const fn stimulus_ordinal(body: &AttemptCommand) -> usize {
     }
 }
 
-const STIMULI: usize = 28;
+const STIMULI: usize = 30;
 
 /// The committed matrix. Read at compile time: the pure crate's tests do no file I/O
 /// (its `clippy.toml`), and a deliberate regeneration rewrites this file.

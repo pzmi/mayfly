@@ -65,7 +65,7 @@ pub use ports::{Clock, Committed, NoNotifier, Rng, StoreNotifier};
 use crate::journal::{
     AggregateName, AppendError, Appended, AppendedStream, CommandReceipt, CommandType, Decision,
     EventLocation, ExpectedRevision, InboxKey, Journal, NewEvent, NewReceipt, ReadCondition,
-    ReceiptOutcome, StreamId, SupportedEpochs, UnitOfWork,
+    ReceiptOutcome, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
 
 /// How many times one save re-appends a unit whose commit reply was lost before it reports
@@ -195,6 +195,11 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         &self.journal
     }
 
+    /// The clock commands are issued by (`Command::issued_at`) and units recorded at.
+    pub const fn clock(&self) -> &C {
+        &self.clock
+    }
+
     /// This build's supported epoch per aggregate.
     pub const fn supported_epochs(&self) -> &SupportedEpochs {
         &self.epochs
@@ -252,31 +257,8 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                 return answer::<A>(&stream, &receipt, true);
             }
         }
-        let recorded = self
-            .journal
-            .read_stream(&stream, None, None)
-            .await
-            .map_err(SaveError::Storage)?;
-        let expected = ExpectedRevision::of(recorded.last().map(|e| e.revision));
-        let mut state = A::initial();
-        for event in &recorded {
-            match decode_event::<A::Event>(event) {
-                Ok(event) => state = A::evolve(state, &event),
-                Err(EventDecodeError::UnknownKind) => {
-                    self.notifier.unknown_kind(&stream, &event.kind);
-                    return Err(SaveError::UnknownKind {
-                        stream,
-                        kind: event.kind.clone(),
-                    });
-                }
-                Err(EventDecodeError::Malformed) => {
-                    return Err(SaveError::Codec {
-                        stream,
-                        what: "event_payload",
-                    });
-                }
-            }
-        }
+        let (state, head) = self.fold::<A>(&stream).await?;
+        let expected = ExpectedRevision::of(head);
         let receipt = |decision| NewReceipt {
             command_id,
             command_type: command_type.clone(),
@@ -341,6 +323,31 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
             }
             Settled::Answered(receipt) => answer::<A>(&stream, &receipt, true),
         }
+    }
+
+    /// The current state of `instance`'s stream, folded from every event: a read for a durable
+    /// consumer that decides by where an aggregate is now (the attempt saga, the directive
+    /// relay's sink), never a write. A kind this build does not decode raises safe mode, as in
+    /// [`AggregateStore::save`].
+    ///
+    /// # Errors
+    /// [`SaveError::InvalidName`], [`SaveError::Storage`], [`SaveError::UnknownKind`] or
+    /// [`SaveError::Codec`].
+    pub async fn load<A: Aggregate>(&self, instance: &str) -> Result<A::State, SaveError> {
+        let stream = stream_of::<A>(instance).map_err(SaveError::InvalidName)?;
+        Ok(self.fold::<A>(&stream).await?.0)
+    }
+
+    /// Reads and folds `stream`; returns the state and the head revision read.
+    async fn fold<A: Aggregate>(
+        &self,
+        stream: &StreamId,
+    ) -> Result<(A::State, Option<StreamRevision>), SaveError> {
+        let folded = fold_stream::<A, J>(&self.journal, stream).await;
+        if let Err(SaveError::UnknownKind { stream, kind }) = &folded {
+            self.notifier.unknown_kind(stream, kind);
+        }
+        folded
     }
 
     /// Runs `attempt` (which loads, decides and saves) until it does not end in a conflict, at
@@ -515,6 +522,41 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         }
         Err(SaveError::OutcomeUnknown(lost))
     }
+}
+
+/// `stream` read whole and folded by `A`, with its head revision: what `save` decides on and
+/// `load` answers. The caller raises safe mode on [`SaveError::UnknownKind`].
+///
+/// # Errors
+/// [`SaveError::Storage`], [`SaveError::UnknownKind`] for a kind this build does not decode, or
+/// [`SaveError::Codec`] for a malformed payload.
+async fn fold_stream<A: Aggregate, J: Journal>(
+    journal: &J,
+    stream: &StreamId,
+) -> Result<(A::State, Option<StreamRevision>), SaveError> {
+    let recorded = journal
+        .read_stream(stream, None, None)
+        .await
+        .map_err(SaveError::Storage)?;
+    let mut state = A::initial();
+    for event in &recorded {
+        match decode_event::<A::Event>(event) {
+            Ok(event) => state = A::evolve(state, &event),
+            Err(EventDecodeError::UnknownKind) => {
+                return Err(SaveError::UnknownKind {
+                    stream: stream.clone(),
+                    kind: event.kind.clone(),
+                });
+            }
+            Err(EventDecodeError::Malformed) => {
+                return Err(SaveError::Codec {
+                    stream: stream.clone(),
+                    what: "event_payload",
+                });
+            }
+        }
+    }
+    Ok((state, recorded.last().map(|e| e.revision)))
 }
 
 /// The outcome a receipt records, as this aggregate's answer.

@@ -376,6 +376,16 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
         ("reserved", started()),
         ("cloning/in_flight", cloning()),
         ("cloning/unknown", unknown_clone()),
+        (
+            "cloning/sent",
+            then(
+                cloning(),
+                [AttemptCommand::RecordDirectiveSent {
+                    directive_id: directive(1),
+                    deadline: Deadline::at(Millis::new(60_000)),
+                }],
+            ),
+        ),
         ("booting", booting()),
         ("booting/in_flight", then(booting(), [issue(2)])),
         ("booting/unknown", unknown(then(booting(), [issue(2)]), 2)),
@@ -632,5 +642,24 @@ pub fn stimuli(state: &AttemptState) -> Vec<(&'static str, Step)> {
             }),
         ),
         ("vm_absent", fact(Fact::VmAbsent)),
+        (
+            "directive_sent",
+            cmd(AttemptCommand::RecordDirectiveSent {
+                directive_id: answered,
+                deadline: Deadline::at(Millis::new(60_000)),
+            }),
+        ),
+        (
+            "directive_timeout",
+            Command::new(
+                CommandId::from_u128(0xC0),
+                Millis::new(60_000),
+                Epoch::new(epoch),
+                SAGA,
+                AttemptCommand::RecordDirectiveTimeout {
+                    directive_id: answered,
+                },
+            ),
+        ),
     ]
 }

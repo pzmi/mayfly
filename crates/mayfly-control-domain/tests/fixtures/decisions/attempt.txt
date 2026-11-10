@@ -5,6 +5,9 @@ code already_retiring
 code already_started
 code busy
 code closed
+code deadline_not_reached
+code directive_not_pending
+code directive_not_sent
 code directive_pending
 code jit_already_issued
 code jit_presumed_leaked
@@ -42,8 +45,11 @@ case busy refused busy
 case close_deleted accepted
   attempt_closed/v1 {}
 case closed refused closed
+case deadline_not_reached refused deadline_not_reached
 case delete_with_proof accepted
   directive_issued/v1 {"directive_id":"0000000000000000000000000000d008","kind":{"delete_vm":{"proof":{"attempt_id":"0000000000000000000000000000a77e","host_id":"host0","slot":0,"generation":1,"vm_name":"mf-pool0-host0-s0-g1-0000a77e","instance_id":"0a:00:00:00:00:01"}}},"deadline":60000}
+case directive_not_pending refused directive_not_pending
+case directive_not_sent refused directive_not_sent
 case directive_pending refused directive_pending
 case guest_rejected_quarantines accepted
   guest_rejected/v1 {"directive_id":"0000000000000000000000000000d003","reason":"challenge_failed"}
@@ -77,6 +83,8 @@ case record_clone accepted
   vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
 case record_jit_handle accepted
   jit_handle_issued/v1 {"handle_id":"000000000000000000000000000005ec","registration_ref":"0000000000000000000000000000e002"}
+case record_sent accepted
+  directive_sent/v1 {"directive_id":"0000000000000000000000000000d001","deadline":60000}
 case retire_finished accepted
   attempt_retired/v1 {"reason":"job_done"}
 case retirement_waits_for_deregistration accepted
@@ -90,6 +98,8 @@ case stale_run refused stale_run
 case start_attempt accepted
   attempt_started/v1 {"attempt_id":"0000000000000000000000000000a77e","host_id":"host0","slot":0,"generation":1,"vm_name":"mf-pool0-host0-s0-g1-0000a77e","pool":"pool0","image_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","retry_budget":2,"epoch":1}
 case terminal refused terminal
+case timeout_makes_unknown accepted
+  directive_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d001","since":60000}
 case unknown_left_by_inventory accepted
   vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
 case vanished_vm_quarantines accepted

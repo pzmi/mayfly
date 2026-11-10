@@ -7,9 +7,10 @@
  *
  * The world (`w`) is what the provider really holds; the attempt (`a`) is what the journal
  * records, and it changes only on a command or an observation of the world. Each action is one
- * stimulus: `saga` (IssueNext), `command` (BeginActivation, RecordJitHandle, BindJob,
- * RequestRetirement, ConfirmRetirement, WithdrawRetirement, Quarantine, Adopt,
- * ResolveQuarantine, Close), `observation` (RecordObservation) or `world` (the provider changes
+ * stimulus: `saga` (IssueNext), `relay` (the directive sent, `DirectiveSent`), `timeout` (the
+ * saga's RecordDirectiveTimeout), `command` (BeginActivation,
+ * RecordJitHandle, BindJob, RequestRetirement, ConfirmRetirement, WithdrawRetirement,
+ * Quarantine, Adopt, ResolveQuarantine, Close), `observation` (RecordObservation) or `world` (the provider changes
  * on its own; the journal does not move). A data-plane reply is merged with the execution of
  * its effect, so a lost reply is two actions: the effect happened or not, and the outcome is
  * Unknown either way.
@@ -71,6 +72,9 @@ module lifecycle {
     // the pending overlay: kind and whether its outcome is Unknown
     pending: str,
     unknown: bool,
+    // the relay put the pending directive on the link (`DirectiveSent`, CP-02): only then does
+    // its deadline run, so a directive held unsent never times out
+    sent: bool,
     name: int,
     generation: int,
     // recorded from VmCloned; NONE before
@@ -99,10 +103,14 @@ module lifecycle {
   type World = { exists: bool, instance: int, running: bool, applied: bool }
 
   type Ghost = {
-    // what the last action was: "init" | "saga" | "command" | "observation" | "world"
+    // what the last action was: "init" | "saga" | "relay" | "timeout" | "command" |
+    // "observation" | "world"
     lastKind: str,
     // whether the pending outcome was Unknown before the last action
     prevUnknown: bool,
+    // the phase, and whether the pending directive had been sent, before the last action
+    prevPhase: str,
+    prevSent: bool,
     // (name, generation) of every CloneVm issued
     cloneTargets: Set[(int, int)],
     // CloneVm directives issued
@@ -227,6 +235,8 @@ module lifecycle {
     ...g0,
     lastKind: kind,
     prevUnknown: before.unknown,
+    prevPhase: before.phase,
+    prevSent: before.sent,
     served: g0.served or servedPhase(after.phase),
     done: g0.done or after.phase == RETIRING or after.phase == FINISHED
       or (before.phase != DELETED and after.phase == DELETED),
@@ -289,6 +299,7 @@ module lifecycle {
     all {
       a' = {
         phase: RESERVED, stage: "clone", tries: 0, pending: NO_DIRECTIVE, unknown: false,
+        sent: false,
         name: name, generation: generation, instance: NONE, vmRunning: false, epoch: 1,
         granted: false, freshEpoch: NONE, jit: "none", jitLeaked: false, job: NONE,
         retireRequested: false,
@@ -296,7 +307,7 @@ module lifecycle {
       },
       w' = { exists: false, instance: NONE, running: false, applied: false },
       g' = {
-        lastKind: "init", prevUnknown: false, cloneTargets: Set(), clones: 0,
+        lastKind: "init", prevUnknown: false, prevPhase: RESERVED, prevSent: false, cloneTargets: Set(), clones: 0,
         doubleIssue: false, launches: 0, jobsBound: Set(), illegalMint: false, leaked: false,
         served: false, done: false, servedAfterDone: false, quarantined: false,
         operatorResolved: false, autoDelete: false, providerInstances: Set(),
@@ -322,6 +333,7 @@ module lifecycle {
           ...a,
           pending: d,
           unknown: false,
+          sent: false,
           phase:
             if (a.phase == RESERVED) CLONING
             else if (a.phase == BACKOFF) stagePhase(a.stage)
@@ -463,6 +475,42 @@ module lifecycle {
     nondet fresh = INSTANCES.oneOf()
     nondet applied = Set(true, false).oneOf()
     replyLostWith(fresh, applied)
+  }
+
+  /// `DirectiveSent`: the relay put the pending directive on the link and recorded it (CP-02);
+  /// from now on its deadline runs. A held directive (safe mode, no session, not adopted) is
+  /// not sent, so it never reaches its timeout.
+  action relaySend = all {
+    not(idle(a)),
+    not(a.sent),
+    not(a.unknown),
+    commit("relay", { ...a, sent: true }, g),
+  }
+
+  /// Whether the saga's timer may time the pending directive out: only once it was sent.
+  pure def canTimeOut(x: Attempt): bool = and { not(idle(x)), x.sent, not(x.unknown) }
+
+  /// The sent directive's deadline passed with no answer: the saga's timer issues
+  /// `RecordDirectiveTimeout` (CP-02, ADR 0034), which records `DirectiveOutcomeUnknown`; the
+  /// effect happened or not, and nothing is read as success. The same transition as a lost
+  /// reply, but its own stimulus (`timeout`), never an observation, so I10 states that a
+  /// timeout enters `Unknown` and never leaves it, and `timeoutOnlyAfterSend` and
+  /// `timeoutNeverAdvances` state what it may not do. Time is abstract here: the aggregate
+  /// refuses a timeout before the deadline (`deadline_not_reached`), which the Rust tests pin.
+  action directiveTimeoutWith(fresh: int, applied: bool): bool = {
+    val world = if (applied) applyEffect(a, w, fresh) else w
+    all {
+      canTimeOut(a),
+      not(Set(STOP_VM, DELETE_VM).contains(a.pending)) or (w.exists and w.instance == a.instance)
+        or not(applied),
+      commitWorld("timeout", { ...a, unknown: true }, world, g),
+    }
+  }
+
+  action directiveTimeout = {
+    nondet fresh = INSTANCES.oneOf()
+    nondet applied = Set(true, false).oneOf()
+    directiveTimeoutWith(fresh, applied)
   }
 
   /// `RunnerLaunchUnknown`: the launcher may have taken the JIT config; it is presumed leaked
@@ -668,6 +716,8 @@ module lifecycle {
     replyTargetAbsent,
     replyGuestRejected,
     replyLost,
+    relaySend,
+    directiveTimeout,
     replyLaunchUnknown,
     inventoryPresent,
     inventoryAbsent,
@@ -695,6 +745,8 @@ module lifecycle {
     issueNext,
     replySucceeded,
     replyLost,
+    relaySend,
+    directiveTimeout,
     replyLaunchUnknown,
     inventoryPresent,
     inventoryAbsent,
@@ -757,6 +809,8 @@ module lifecycle {
     replyProofRefused,
     replyTargetAbsent,
     replyLost,
+    relaySend,
+    directiveTimeout,
     replyLaunchUnknown,
     inventoryPresent,
     vmReplacedOrRemoved,
@@ -780,6 +834,14 @@ module lifecycle {
   /// I10: `Unknown` leaves only on an observation: no command, no saga step, no timeout.
   val i10UnknownLeavesOnlyOnObservation =
     (g.prevUnknown and not(a.unknown)) implies g.lastKind == "observation"
+
+  /// CP-02: a directive times out only after the relay sent it; one held unsent has a known
+  /// outcome (nothing happened) and never becomes `Unknown` by its deadline.
+  val timeoutOnlyAfterSend = g.lastKind == "timeout" implies g.prevSent
+
+  /// CP-02: a timeout never moves the lifecycle; it only makes the pending outcome `Unknown`.
+  val timeoutNeverAdvances =
+    g.lastKind == "timeout" implies (a.phase == g.prevPhase and a.unknown)
 
   /// I13: at most one in-flight directive per target, every clone is of the one (name,
   /// generation), so the provider's names keep it to one VM, and the clones are bounded by the
@@ -829,6 +891,8 @@ module lifecycle {
     i06CompletedNeverServesAgain,
     busyNeverWarm,
     i10UnknownLeavesOnlyOnObservation,
+    timeoutOnlyAfterSend,
+    timeoutNeverAdvances,
     i13NoDuplicateClones,
     i14OneJob,
     i22JitMintedOnceAfterGrantAndVerification,
@@ -879,6 +943,24 @@ module lifecycle {
       .then(inventoryPresent)
       .expect((not(a.unknown) and a.phase == BOOTING and a.instance == 1
         and i10UnknownLeavesOnlyOnObservation))
+  }
+
+  // CP-02: a clone whose deadline passed unanswered is Unknown, never success: the saga's
+  // timeout issues nothing new (no second name), and only the inventory resolves it.
+  run timeoutIsUnknownNeverSuccessTest = {
+    initWith(1, 1).then(issueNext).then(relaySend).then(directiveTimeoutWith(1, true))
+      .expect(a.unknown and a.pending == CLONE_VM and a.phase == CLONING and a.instance == NONE)
+      .expect(g.lastKind == "timeout" and not(canIssueNext(a)))
+      .then(inventoryPresent)
+      .expect(not(a.unknown) and a.phase == BOOTING and g.clones == 1
+        and retryKeepsNameAndGeneration and allInvariants)
+  }
+
+  // CP-02: a directive the relay holds (safe mode) is never timed out; once sent, it may be.
+  run heldDirectiveNeverTimesOutTest = {
+    initWith(1, 1).then(issueNext)
+      .expect(not(canTimeOut(a)) and a.tries == 1)
+      .then(relaySend).expect(canTimeOut(a) and a.tries == 1 and allInvariants)
   }
 
   // U1: a lost clone reply whose effect did not happen: the inventory's absence backs off.
@@ -1097,6 +1179,8 @@ module lifecycle_traces {
   /// The success reply of the scenarios (`ok`: instance 1, a guest claiming 3).
   pure val OK = s("replySucceeded")
   pure def lost(applied: bool): Stim = { ...S0, kind: "replyLost", applied: applied }
+  pure val SENT = s("relaySend")
+  pure def timedOut(applied: bool): Stim = { ...S0, kind: "directiveTimeout", applied: applied }
   pure def replaced(other: int, removed: bool): Stim =
     { ...S0, kind: "vmReplacedOrRemoved", other: other, removed: removed }
   pure def prepare(activated: bool): Stim = { ...S0, kind: "prepareAtOnce", activated: activated }
@@ -1110,6 +1194,9 @@ module lifecycle_traces {
     s("bindJob"), s("runnerExited"), s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, OK,
     s("close"),
   ])
+  /// CP-02: a clone sent and timed out is Unknown, never cloned, and the inventory resolves it.
+  pure val TIMEOUT_IS_UNKNOWN_NEVER_SUCCESS =
+    [ISSUE, SENT, timedOut(true), s("inventoryPresent")]
   pure val UNKNOWN_CLONE_RESOLVED_BY_INVENTORY =
     [ISSUE, lost(true), s("adopt"), s("inventoryPresent")]
   pure val STAGE_FAILURE_BACKS_OFF_THEN_RETIRES =
@@ -1189,6 +1276,8 @@ module lifecycle_traces {
       all { x.kind == "replyTargetAbsent", L::replyTargetAbsent },
       all { x.kind == "replyGuestRejected", L::replyGuestRejected },
       all { x.kind == "replyLost", L::replyLostWith(fresh, applied) },
+      all { x.kind == "relaySend", L::relaySend },
+      all { x.kind == "directiveTimeout", L::directiveTimeoutWith(fresh, applied) },
       all { x.kind == "replyLaunchUnknown", L::replyLaunchUnknown },
       all { x.kind == "inventoryPresent", L::inventoryPresent },
       all { x.kind == "inventoryAbsent", L::inventoryAbsent },
@@ -1212,6 +1301,7 @@ module lifecycle_traces {
   action script(S: List[Stim]): bool = all { pc < S.length(), recorded(S[pc]), pc' = pc + 1 }
 
   action happyPath = script(HAPPY_PATH)
+  action timeoutIsUnknownNeverSuccess = script(TIMEOUT_IS_UNKNOWN_NEVER_SUCCESS)
   action unknownCloneResolvedByInventory = script(UNKNOWN_CLONE_RESOLVED_BY_INVENTORY)
   action stageFailureBacksOffThenRetires = script(STAGE_FAILURE_BACKS_OFF_THEN_RETIRES)
   action guestRejectedIsQuarantined = script(GUEST_REJECTED_IS_QUARANTINED)

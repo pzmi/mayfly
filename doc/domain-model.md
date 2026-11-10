@@ -735,8 +735,11 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
   `BeginActivation{grant_ref}`, `RecordJitHandle{handle_id, registration_ref}`, `BindJob`,
   `RequestRetirement{reason}`, `ConfirmRetirement` (after deregistration or when no registration),
   `WithdrawRetirement` (busy), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
-  `ResolveQuarantine{disposition}`, `Close`. (No `AssertOutcome`: OD10, ADR 0025.)
-- **Events:** `AttemptStarted`, `DirectiveIssued`, `DirectiveRefused{reason}`,
+  `ResolveQuarantine{disposition}`, `Close`, and from CP-02 `RecordDirectiveSent{directive_id,
+  deadline}` (the relay) and `RecordDirectiveTimeout{directive_id}` (the saga's timer). (No
+  `AssertOutcome`: OD10, ADR 0025.)
+- **Events:** `AttemptStarted`, `DirectiveIssued`, `DirectiveSent{deadline}` (CP-02: the relay
+  put it on the link; only a sent directive's deadline runs), `DirectiveRefused{reason}`,
   `DirectiveOutcomeUnknown`, `DirectiveObservedNotApplied` (a complete inventory shows an
   `Unknown` effect did not happen: U1), `VmCloned{instance_id}`, `VmBooted`, `GuestVerified{facts, nonce_ref}`,
   `GuestRejected{reason}`, `AttemptPrepared`, `ActivationStarted`, `JitHandleIssued`,

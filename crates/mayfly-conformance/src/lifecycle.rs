@@ -15,6 +15,7 @@
 //! | `tries` | `tries` | `tries` |
 //! | `pending` | `pending` | the pending directive's tag, or `none` |
 //! | `unknown` | `unknown` | the pending outcome is `Unknown` |
+//! | `sent` | `sent` while a directive is pending, else `false` | the pending directive is sent (`DirectiveSent`) |
 //! | `name` | `name` | `identity.slot` (the driver starts slot `name`) |
 //! | `generation` | `generation` | `identity.generation` |
 //! | `instance` | `instance` (0: none) | `instance_id`, mapped back to the model's number |
@@ -165,6 +166,7 @@ pub fn expected(state: &State) -> Result<Observation, DriverError> {
     o.set("tries", int("tries")?);
     o.set("pending", text("pending")?);
     o.set("unknown", flag("unknown")?);
+    o.set("sent", flag("sent")? && text("pending")? != "none");
     o.set("name", int("name")?);
     o.set("generation", int("generation")?);
     o.set("instance", none_or(int("instance")?));
@@ -233,6 +235,7 @@ pub fn observe_state(state: &AttemptState, refused: Option<&str>) -> Observation
             .pending
             .is_some_and(|p| matches!(p.outcome, PendingOutcome::Unknown { .. })),
     );
+    o.set("sent", state.pending.is_some_and(|p| p.sent));
     let (name, generation) = state.identity.as_ref().map_or_else(
         || ("-".to_owned(), "-".to_owned()),
         |i| (i.slot.get().to_string(), i.generation.get().to_string()),
@@ -299,6 +302,11 @@ const POLICY: Actor = Actor::Automation {
     policy: "conformance_driver",
 };
 const OPERATOR: Actor = Actor::Operator { uid: 501 };
+const RELAY: Actor = Actor::Automation {
+    policy: "directive_relay",
+};
+/// Every directive's deadline, the one `issueNext` gives and `relaySend` records.
+const DEADLINE: Millis = Millis::new(1_700_000_060_000);
 
 /// Drives one attempt stream of aggregate `A` (normally `Attempt`) through `AggregateStore`
 /// over a fresh `MemoryJournal`.
@@ -375,10 +383,35 @@ impl<A: AttemptLike> LifecycleDriver<A> {
     /// Saves `body` as `actor` in the current run epoch; a refusal is recorded for the
     /// observation and stops a composite step.
     fn send(&mut self, actor: Actor, body: AttemptCommand) -> Result<bool, DriverError> {
+        self.send_at(actor, body, Millis::new(1_700_000_000_000))
+    }
+
+    fn observation(&mut self, fact: Fact) -> Result<bool, DriverError> {
+        let generation = self
+            .state()?
+            .identity
+            .map_or(Generation::FIRST, |i| i.generation);
+        let id = self.mint();
+        let body = AttemptCommand::RecordObservation(Seen {
+            observation_id: ObservationId::from_u128(0x0B5_0000 + id),
+            epoch: Epoch::new(self.run_epoch),
+            generation,
+            fact,
+        });
+        self.send(SAGA, body)
+    }
+
+    /// Saves `body` as `actor` issued at `at` (the saga's timer issues past a deadline).
+    fn send_at(
+        &mut self,
+        actor: Actor,
+        body: AttemptCommand,
+        at: Millis,
+    ) -> Result<bool, DriverError> {
         let id = self.mint();
         let command = Command::new(
             CommandId::from_u128(0xC000_0000 + id),
-            Millis::new(1_700_000_000_000),
+            at,
             Epoch::new(self.run_epoch),
             actor,
             body,
@@ -397,28 +430,13 @@ impl<A: AttemptLike> LifecycleDriver<A> {
         }
     }
 
-    fn observation(&mut self, fact: Fact) -> Result<bool, DriverError> {
-        let generation = self
-            .state()?
-            .identity
-            .map_or(Generation::FIRST, |i| i.generation);
-        let id = self.mint();
-        let body = AttemptCommand::RecordObservation(Seen {
-            observation_id: ObservationId::from_u128(0x0B5_0000 + id),
-            epoch: Epoch::new(self.run_epoch),
-            generation,
-            fact,
-        });
-        self.send(SAGA, body)
-    }
-
     fn issue_next(&mut self) -> Result<bool, DriverError> {
         let id = self.mint();
         self.send(
             SAGA,
             AttemptCommand::IssueNext {
                 directive_id: DirectiveId::from_u128(0xD000_0000 + id),
-                deadline: Deadline::at(Millis::new(1_700_000_060_000)),
+                deadline: Deadline::at(DEADLINE),
             },
         )
     }
@@ -702,6 +720,26 @@ impl<A: AttemptLike> crate::replay::Driver for LifecycleDriver<A> {
             "replyLost" => {
                 let (directive_id, _) = self.pending()?;
                 self.observation(Fact::OutcomeUnknown { directive_id })?;
+            }
+            // the relay's record that the pending directive went out (CP-02)
+            "relaySend" => {
+                let (directive_id, _) = self.pending()?;
+                self.send(
+                    RELAY,
+                    AttemptCommand::RecordDirectiveSent {
+                        directive_id,
+                        deadline: Deadline::at(DEADLINE),
+                    },
+                )?;
+            }
+            // the saga's timer, past the deadline the relay recorded (CP-02)
+            "directiveTimeout" => {
+                let (directive_id, _) = self.pending()?;
+                self.send_at(
+                    SAGA,
+                    AttemptCommand::RecordDirectiveTimeout { directive_id },
+                    DEADLINE,
+                )?;
             }
             "replyLaunchUnknown" => {
                 let (directive_id, _) = self.pending()?;

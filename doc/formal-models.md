@@ -131,7 +131,10 @@ makes `quint verify` report `[violation]` with a counterexample that reaches `co
 One attempt stream (`a`), the provider's truth about its VM (`w`, with whether the pending
 directive has taken effect) and history for the invariants (`g`, read by no guard). Each action
 is one stimulus of the Rust aggregate `mayfly_control_domain::attempt`: `issueNext` is the
-saga's `IssueNext`; `replySucceeded`, `replyRefused`, `replyProofRefused`, `replyGuestRejected`,
+saga's `IssueNext`, `relaySend` the relay's `DirectiveSent` (CP-02: the directive went on the
+link; the attempt's `sent` flag), and `directiveTimeout` the saga's `RecordDirectiveTimeout`
+(enabled only once sent, `canTimeOut`; the effect applied or not, then `Unknown`; its own
+`timeout` stimulus, so I10 checks that a timeout never leaves `Unknown`); `replySucceeded`, `replyRefused`, `replyProofRefused`, `replyGuestRejected`,
 `replyLost` (`OutcomeUnknown`, the effect applied or not), `replyLaunchUnknown`,
 `inventoryPresent`, `inventoryAbsent`, `vmObservedStopped` and `runnerExited` are
 `RecordObservation` facts; `beginActivation`, `recordJitHandle`, `bindJob`,
@@ -209,7 +212,17 @@ is enabled when the provider holds no VM (the data plane answers a delete whose 
 complete listing does not list `VmDeleted`), so a lost delete reply is resolved by the answer
 to its re-delivery as well as by the inventory (`inventoryAbsent` already read absence as
 `Deleted` for a pending delete; a stop of a stopped VM was already a success), and from DEC-05
-(ADR 0066) `stopOfVanishedVmQuarantinesTest` and `startOfVanishedVmQuarantinesTest`: a stop or
+(ADR 0066) `stopOfVanishedVmQuarantinesTest` and `startOfVanishedVmQuarantinesTest`, and
+from CP-02 `timeoutIsUnknownNeverSuccessTest` (a sent clone whose deadline passed is `Unknown`,
+issues nothing new, and is resolved by the inventory) and `heldDirectiveNeverTimesOutTest` (an
+issued, unsent directive cannot time out; its tries are unchanged when it is sent), with the
+invariants `timeoutOnlyAfterSend` and `timeoutNeverAdvances` (a timeout leaves the phase where it
+was and only makes the outcome `Unknown`); negative controls tried: dropping `x.sent` from
+`canTimeOut` makes simulation of `step` report `[violation]` of `timeoutOnlyAfterSend`, and
+letting the timeout apply the success transition reports `[violation]` of
+`timeoutNeverAdvances`, each within a second. Replies are not guarded by `sent`: the relay records
+`DirectiveSent` after the link took the frame, so an answer may be recorded first, which the
+model's unguarded replies cover: a stop or
 start whose recorded VM the provider no longer holds is answered `target_absent`
 (`replyTargetAbsent`) and quarantines the attempt as a desync (the attempt's `vanished` flag,
 the VM not running), which `inventoryAbsent` no longer releases to `Lost`; and a start may be
@@ -229,6 +242,18 @@ is pending (mutant 27) makes simulation of `step` report `[violation]` of
 `i10UnknownLeavesOnlyOnObservation`; letting `inventoryAbsent` release a vanished quarantine
 (DEC-05) makes simulation of `step` report `[violation]` of `vanishedStaysQuarantined` within a
 second.
+
+**The saga (CP-02).** `mayfly_control_domain::attempt::next_step` is `issueNext`'s guard read as
+a policy: it issues exactly when `canIssueNext` holds (`issuable`, pinned against the aggregate by
+`tests/attempt/saga.rs::should_issue_exactly_when_issue_next_would_be_accepted`), waits on an
+in-flight directive until its deadline, closes a deleted or lost attempt, and does nothing while
+an outcome is `Unknown` or the pending directive is not sent yet. **Not modelled:** time (the
+deadline per directive kind fixed at the first send, the reply grace,
+the aggregate's refusal of a timeout before the deadline, `deadline_not_reached`, pinned by
+`tests/attempt/lifecycle.rs::should_make_the_outcome_unknown_never_success_when_a_deadline_passes`);
+the saga's timers being memory that startup re-arms (`AttemptSaga::reconsider`, CP-04); and the
+saga reading the attempt's current state rather than the event that woke it, so a late or repeated
+event issues nothing the model's `issueNext` would not (`crates/mayfly-control/tests/store/saga.rs`).
 
 ### link
 
@@ -295,6 +320,18 @@ listing gate until it completes; a `CloneVm` or `StartVm` re-observed by name be
 no new listing-changing effect while a pass is due or running, an overlapped listing discarded
 (the `gate`); `ReportInventory` answered from the next clean listing or
 `InventoryIncomplete{deadline}`. None of these changes what `dpDeliver` may answer; a two-step model would add them.
+
+**The relay's sink (CP-02, `mayfly_control::delivery::LinkSink`)** is this model's `relaySend`
+with three restrictions the model leaves out, each removing behaviours and adding none: it sends a
+directive only while it is the attempt's pending, in-flight directive decided under the session's
+epoch (so a late directive of a stale relay worker is dropped at the control plane; the one that
+was already on its way is answered from the data plane's table, `executesAtMostOncePerEpoch`); it
+holds the kinds `held_in_safe_mode` names while the host's session is safe, before the data
+plane's own hold (`i29SafeModeHoldsKinds` therefore holds twice); and it re-sends only on a
+redelivery of the relay, never on a timer: "until the answer is definite" is the deadline, past
+which the saga's timeout makes the outcome `Unknown` (`lifecycle`'s `directiveTimeout`). Pinned by
+`crates/mayfly-control/tests/store/link_sink.rs` and, across both planes,
+`crates/mayfly-composition/tests/directive_loop/main.rs`.
 
 ### scheduling
 

@@ -40,6 +40,27 @@ fn saga(body: AttemptCommand) -> Step {
     at(1, SAGA, body)
 }
 
+/// The relay's record that directive `n` went out, with the deadline [`issue`] gives.
+fn sent(n: u128) -> AttemptCommand {
+    AttemptCommand::RecordDirectiveSent {
+        directive_id: directive(n),
+        deadline: Deadline::at(Millis::new(60_000)),
+    }
+}
+
+/// The saga's timer, at the deadline [`issue`] gives.
+fn timeout(n: u128, at_ms: u64) -> Step {
+    Command::new(
+        CommandId::from_u128(0xC0),
+        Millis::new(at_ms),
+        Epoch::new(1),
+        SAGA,
+        AttemptCommand::RecordDirectiveTimeout {
+            directive_id: directive(n),
+        },
+    )
+}
+
 fn directive(n: u128) -> DirectiveId {
     DirectiveId::from_u128(0xD000 + n)
 }
@@ -515,6 +536,13 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             Expect::Accepted,
         ),
         accepted("close_deleted", deleted(), AttemptCommand::Close),
+        accepted("record_sent", cloning(), sent(1)),
+        case(
+            "timeout_makes_unknown",
+            then(cloning(), [sent(1)]),
+            timeout(1, 60_000),
+            Expect::Accepted,
+        ),
         // refused, one per code
         refused("not_started", Vec::new(), issue(1)),
         refused("already_started", started(), start()),
@@ -547,6 +575,24 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             },
         ),
         refused("directive_pending", cloning(), issue(2)),
+        case(
+            "deadline_not_reached",
+            then(cloning(), [sent(1)]),
+            timeout(1, 59_999),
+            Expect::Refused,
+        ),
+        case(
+            "directive_not_sent",
+            cloning(),
+            timeout(1, 60_000),
+            Expect::Refused,
+        ),
+        case(
+            "directive_not_pending",
+            booting(),
+            timeout(1, 60_000),
+            Expect::Refused,
+        ),
         refused("nothing_to_issue", prepared(), issue(4)),
         refused(
             "observation_mismatch",

@@ -373,6 +373,16 @@ seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
+file = "lifecycle-timeoutIsUnknownNeverSuccess.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "timeoutIsUnknownNeverSuccess"
+max_steps = 4
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
 file = "lifecycle-happyPath.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"

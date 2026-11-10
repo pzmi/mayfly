@@ -33,6 +33,7 @@
 //! ledgers of `doc/event-store.md` §7.6 failing named cases.
 
 mod kicks;
+mod link_sink;
 mod relay;
 mod values;
 mod worker;
@@ -45,6 +46,7 @@ use crate::journal::{StorageError, StreamId, StreamRevision};
 use crate::store::Clock;
 
 pub use kicks::Kicks;
+pub use link_sink::{DirectiveDetails, LinkSink, SinkConfig, SinkStats, compose, send_deadline};
 pub use relay::{DirectiveRelay, DirectiveSink, RelayedDirective, SinkError};
 pub use values::{
     Claim, ConsumerError, ConsumerName, ConsumerState, Delivery, DeliveryKey, LeaseError,
