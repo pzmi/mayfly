@@ -24,8 +24,9 @@
 //! - **No row asserts an outcome** (I10, ADR 0025): a decision that reads a VM's presence is
 //!   taken only on a listing that shows it, one that reads its absence only on a complete listing
 //!   without it (`should_assert_no_outcome_when_any_row_is_decided`).
-//! - **A running Busy VM is never retired** (F13), and `unreachable` is never `absent`
-//!   (`should_never_retire_when_a_busy_vm_runs`).
+//! - **A running VM whose runner may serve a job is never retired** (F13): a Busy attempt's, or
+//!   one that can hold a registration while GitHub shows its runner busy; `unreachable` is
+//!   never `absent` (`should_never_retire_when_a_busy_vm_runs`).
 //! - **Safe mode decides nothing destructive** (I29): an untrusted journal yields a recovery
 //!   plan proposal only, and no proposal retires, retries or deletes
 //!   (`should_propose_nothing_destructive_when_the_journal_is_untrusted`).
@@ -407,6 +408,13 @@ fn attempt(record: &AttemptRecord, vm: Option<&ObservedVm>, github: GithubView) 
             None => Decision::Report,
         },
         Phase::Reserved => Decision::Quarantine(QuarantineReason::OwnershipDoubt),
+        // The clone's reply was lost, so its instance id is learned here from the listing, by
+        // name. That is safe under ADR 0026: the name is this attempt's exact `OwnedVmName`
+        // (slot and generation included), no instance id is recorded yet to contradict it (a
+        // recorded one that differs was quarantined above), and the id taken here is recorded
+        // (`VmCloned`) and is the proof every later stop or delete carries, which the data plane
+        // re-observes before acting. A VM someone else made under our name is thus adopted at
+        // worst as ours, never deleted without the id it was adopted with.
         Phase::Cloning
         | Phase::Backoff {
             stage: Stage::Clone,
@@ -433,6 +441,12 @@ fn attempt(record: &AttemptRecord, vm: Option<&ObservedVm>, github: GithubView) 
             stage: Stage::Verify,
             ..
         } => prepared_vm(vm),
+        // The registration is read before the VM's liveness: a runner GitHub knows for an
+        // attempt that never activated is an outcome the journal cannot prove, so the VM is
+        // quarantined, stopped or not, and its evidence kept (ADR 0025); retiring a stopped one
+        // would delete it on that doubt, and the runner has no journaled id to deregister, so
+        // the reaper could only report it (ADR 0029). Pinned by
+        // `tests/recovery.rs::should_quarantine_when_a_prepared_vm_has_a_runner_github_knows`.
         Phase::Prepared => match github {
             GithubView::IssuedNotDelivered
             | GithubView::Online
@@ -446,15 +460,7 @@ fn attempt(record: &AttemptRecord, vm: Option<&ObservedVm>, github: GithubView) 
         | Phase::Backoff {
             stage: Stage::Activate,
             ..
-        } => match github {
-            GithubView::NotRegistered => prepared_vm(vm),
-            GithubView::IssuedNotDelivered
-            | GithubView::Online
-            | GithubView::Busy
-            | GithubView::Offline
-            | GithubView::Absent
-            | GithubView::Unreachable => Decision::PresumeLeaked,
-        },
+        } => activating(vm, github),
         Phase::Listening => listening(vm, github),
         Phase::Busy => busy(vm, github),
         Phase::Finished | Phase::Retiring => Decision::Adopt(Adoption::Continue),
@@ -503,6 +509,38 @@ const fn prepared_vm(vm: &ObservedVm) -> Decision {
         VmRun::Running { shim_alive: false } | VmRun::Stopped { .. } => {
             Decision::Retire(RetireReason::VmStopped)
         }
+    }
+}
+
+/// A launch whose outcome is unknown: the JIT is presumed leaked (I22, P13, KER-04F) and the
+/// runner deregistered by its journaled id before any stop, except under a job.
+///
+/// - `Busy`: GitHub shows the runner running a job, so the runner did start and a job is live.
+///   Retiring it would aim cleanup at that job (F13); it is adopted and monitored, its JIT
+///   still presumed leaked, so it binds no further job and is retired once the job ends.
+/// - `Online`: the runner started and is idle. It is still presumed leaked: KER-04F decided
+///   that a re-observed launch never gets a job and is retired after deregistration, and an
+///   idle runner's deregistration kills nothing (a job that lands during it is refused 422
+///   and the retirement withdrawn: F33, I21).
+/// - `Offline`: the runner started and is gone, or the JIT was used elsewhere and left. No job
+///   can be live on an offline runner, and the doubt is the delivery's, which P13 answers by
+///   presuming the JIT leaked and retiring, not by quarantine (kept for identity doubt after
+///   delivery and redaction violations): presumed leaked.
+/// - `Absent`, `IssuedNotDelivered`: the plan row: presumed leaked.
+/// - `Unreachable`: presumed leaked; the deregistration that precedes any stop waits for
+///   GitHub's answer, so a job hidden behind the outage is refused 422, never killed (I21).
+///
+/// Pinned by `tests/recovery.rs::should_decide_each_plan_row_when_its_inputs_are_given` and
+/// `should_never_retire_when_a_busy_vm_runs`.
+const fn activating(vm: &ObservedVm, github: GithubView) -> Decision {
+    match github {
+        GithubView::NotRegistered => prepared_vm(vm),
+        GithubView::Busy => Decision::Adopt(Adoption::Monitor),
+        GithubView::IssuedNotDelivered
+        | GithubView::Online
+        | GithubView::Offline
+        | GithubView::Absent
+        | GithubView::Unreachable => Decision::PresumeLeaked,
     }
 }
 

@@ -532,6 +532,8 @@ table** (pure, `mayfly-control-domain::operations::recovery`, model `formal/reco
 | Listening | running | registration absent | retire (consumed elsewhere or expired) |
 | Busy | stopped (`exit.json` or host rebooted) | offline/abandoned | retire, delete with proof, reap the registration |
 | Activating | any | registration issued, not delivered | presume leaked; deregister by id; retire |
+| Activating | any | busy | adopt and monitor; never delete (F13); the JIT stays presumed leaked, so no further job binds |
+| Prepared | any | a runner GitHub knows | quarantine `jit_presumed_leaked`, read before the VM's liveness (ADRs 0025, 0029) |
 | Deleted | owned clone present | any | leaked VM: delete with proof |
 | Deleting | absent | — | confirm deletion, release slot |
 | Deleting | present | active | suspend cleanup, inspect |

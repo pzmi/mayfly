@@ -9,56 +9,6 @@ NotStarted pending=- recorded=- x b:running+shim -> all report | safe report
 NotStarted pending=- recorded=- x b:running-shim -> all report | safe report
 NotStarted pending=- recorded=- x b:stopped+exit -> all report | safe report
 NotStarted pending=- recorded=- x b:stopped-exit -> all report | safe report
-NotStarted pending=- recorded=a x incomplete -> all wait | safe wait
-NotStarted pending=- recorded=a x absent -> all ignore | safe ignore
-NotStarted pending=- recorded=a x a:running+shim -> all report | safe report
-NotStarted pending=- recorded=a x a:running-shim -> all report | safe report
-NotStarted pending=- recorded=a x a:stopped+exit -> all report | safe report
-NotStarted pending=- recorded=a x a:stopped-exit -> all report | safe report
-NotStarted pending=- recorded=a x b:running+shim -> all report | safe report
-NotStarted pending=- recorded=a x b:running-shim -> all report | safe report
-NotStarted pending=- recorded=a x b:stopped+exit -> all report | safe report
-NotStarted pending=- recorded=a x b:stopped-exit -> all report | safe report
-NotStarted pending=clone recorded=- x incomplete -> all wait | safe wait
-NotStarted pending=clone recorded=- x absent -> all ignore | safe ignore
-NotStarted pending=clone recorded=- x a:running+shim -> all report | safe report
-NotStarted pending=clone recorded=- x a:running-shim -> all report | safe report
-NotStarted pending=clone recorded=- x a:stopped+exit -> all report | safe report
-NotStarted pending=clone recorded=- x a:stopped-exit -> all report | safe report
-NotStarted pending=clone recorded=- x b:running+shim -> all report | safe report
-NotStarted pending=clone recorded=- x b:running-shim -> all report | safe report
-NotStarted pending=clone recorded=- x b:stopped+exit -> all report | safe report
-NotStarted pending=clone recorded=- x b:stopped-exit -> all report | safe report
-NotStarted pending=clone recorded=a x incomplete -> all wait | safe wait
-NotStarted pending=clone recorded=a x absent -> all ignore | safe ignore
-NotStarted pending=clone recorded=a x a:running+shim -> all report | safe report
-NotStarted pending=clone recorded=a x a:running-shim -> all report | safe report
-NotStarted pending=clone recorded=a x a:stopped+exit -> all report | safe report
-NotStarted pending=clone recorded=a x a:stopped-exit -> all report | safe report
-NotStarted pending=clone recorded=a x b:running+shim -> all report | safe report
-NotStarted pending=clone recorded=a x b:running-shim -> all report | safe report
-NotStarted pending=clone recorded=a x b:stopped+exit -> all report | safe report
-NotStarted pending=clone recorded=a x b:stopped-exit -> all report | safe report
-NotStarted pending=delete recorded=- x incomplete -> all wait | safe wait
-NotStarted pending=delete recorded=- x absent -> all ignore | safe ignore
-NotStarted pending=delete recorded=- x a:running+shim -> all report | safe report
-NotStarted pending=delete recorded=- x a:running-shim -> all report | safe report
-NotStarted pending=delete recorded=- x a:stopped+exit -> all report | safe report
-NotStarted pending=delete recorded=- x a:stopped-exit -> all report | safe report
-NotStarted pending=delete recorded=- x b:running+shim -> all report | safe report
-NotStarted pending=delete recorded=- x b:running-shim -> all report | safe report
-NotStarted pending=delete recorded=- x b:stopped+exit -> all report | safe report
-NotStarted pending=delete recorded=- x b:stopped-exit -> all report | safe report
-NotStarted pending=delete recorded=a x incomplete -> all wait | safe wait
-NotStarted pending=delete recorded=a x absent -> all ignore | safe ignore
-NotStarted pending=delete recorded=a x a:running+shim -> all report | safe report
-NotStarted pending=delete recorded=a x a:running-shim -> all report | safe report
-NotStarted pending=delete recorded=a x a:stopped+exit -> all report | safe report
-NotStarted pending=delete recorded=a x a:stopped-exit -> all report | safe report
-NotStarted pending=delete recorded=a x b:running+shim -> all report | safe report
-NotStarted pending=delete recorded=a x b:running-shim -> all report | safe report
-NotStarted pending=delete recorded=a x b:stopped+exit -> all report | safe report
-NotStarted pending=delete recorded=a x b:stopped-exit -> all report | safe report
 Reserved pending=- recorded=- x incomplete -> all wait | safe wait
 Reserved pending=- recorded=- x absent -> all adopt | safe mark_lost
 Reserved pending=- recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
@@ -69,56 +19,6 @@ Reserved pending=- recorded=- x b:running+shim -> all quarantine(ownership_doubt
 Reserved pending=- recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Reserved pending=- recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Reserved pending=- recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=- recorded=a x incomplete -> all wait | safe wait
-Reserved pending=- recorded=a x absent -> all adopt | safe mark_lost
-Reserved pending=- recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=- recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=- recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=- recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=clone recorded=- x incomplete -> all wait | safe wait
-Reserved pending=clone recorded=- x absent -> all adopt | safe mark_lost
-Reserved pending=clone recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x a:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x a:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x a:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x b:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=clone recorded=a x incomplete -> all wait | safe wait
-Reserved pending=clone recorded=a x absent -> all adopt | safe mark_lost
-Reserved pending=clone recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=clone recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=clone recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=clone recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=delete recorded=- x incomplete -> all wait | safe wait
-Reserved pending=delete recorded=- x absent -> all adopt | safe mark_lost
-Reserved pending=delete recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x a:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x a:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x a:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x b:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Reserved pending=delete recorded=a x incomplete -> all wait | safe wait
-Reserved pending=delete recorded=a x absent -> all adopt | safe mark_lost
-Reserved pending=delete recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=delete recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=delete recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=delete recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Reserved pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Reserved pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Cloning pending=- recorded=- x incomplete -> all wait | safe wait
 Cloning pending=- recorded=- x absent -> all retry_clone | safe mark_lost
 Cloning pending=- recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
@@ -129,16 +29,6 @@ Cloning pending=- recorded=- x b:running+shim -> all quarantine(ownership_doubt)
 Cloning pending=- recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Cloning pending=- recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Cloning pending=- recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=- recorded=a x incomplete -> all wait | safe wait
-Cloning pending=- recorded=a x absent -> all retry_clone | safe mark_lost
-Cloning pending=- recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=- recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=- recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=- recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Cloning pending=clone recorded=- x incomplete -> all wait | safe wait
 Cloning pending=clone recorded=- x absent -> all retry_clone | safe mark_lost
 Cloning pending=clone recorded=- x a:running+shim -> all adopt_clone(a) | safe quarantine(ownership_doubt)
@@ -149,46 +39,6 @@ Cloning pending=clone recorded=- x b:running+shim -> all adopt_clone(b) | safe q
 Cloning pending=clone recorded=- x b:running-shim -> all adopt_clone(b) | safe quarantine(ownership_doubt)
 Cloning pending=clone recorded=- x b:stopped+exit -> all adopt_clone(b) | safe quarantine(ownership_doubt)
 Cloning pending=clone recorded=- x b:stopped-exit -> all adopt_clone(b) | safe quarantine(ownership_doubt)
-Cloning pending=clone recorded=a x incomplete -> all wait | safe wait
-Cloning pending=clone recorded=a x absent -> all retry_clone | safe mark_lost
-Cloning pending=clone recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=clone recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=clone recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=clone recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=delete recorded=- x incomplete -> all wait | safe wait
-Cloning pending=delete recorded=- x absent -> all retry_clone | safe mark_lost
-Cloning pending=delete recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x a:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x a:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x a:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x b:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Cloning pending=delete recorded=a x incomplete -> all wait | safe wait
-Cloning pending=delete recorded=a x absent -> all retry_clone | safe mark_lost
-Cloning pending=delete recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=delete recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=delete recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=delete recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Cloning pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Cloning pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=- recorded=- x incomplete -> all wait | safe wait
-Booting pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Booting pending=- recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=- recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
 Booting pending=- recorded=a x incomplete -> all wait | safe wait
 Booting pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Booting pending=- recorded=a x a:running+shim -> all adopt | safe adopt
@@ -199,56 +49,6 @@ Booting pending=- recorded=a x b:running+shim -> all quarantine(provider_identit
 Booting pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Booting pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Booting pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=clone recorded=- x incomplete -> all wait | safe wait
-Booting pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Booting pending=clone recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=clone recorded=a x incomplete -> all wait | safe wait
-Booting pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Booting pending=clone recorded=a x a:running+shim -> all adopt | safe adopt
-Booting pending=clone recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Booting pending=clone recorded=a x a:stopped+exit -> all adopt | safe adopt
-Booting pending=clone recorded=a x a:stopped-exit -> all adopt | safe adopt
-Booting pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=delete recorded=- x incomplete -> all wait | safe wait
-Booting pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Booting pending=delete recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Booting pending=delete recorded=a x incomplete -> all wait | safe wait
-Booting pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Booting pending=delete recorded=a x a:running+shim -> all adopt | safe adopt
-Booting pending=delete recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Booting pending=delete recorded=a x a:stopped+exit -> all adopt | safe adopt
-Booting pending=delete recorded=a x a:stopped-exit -> all adopt | safe adopt
-Booting pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Booting pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=- recorded=- x incomplete -> all wait | safe wait
-Verifying pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Verifying pending=- recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=- recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
 Verifying pending=- recorded=a x incomplete -> all wait | safe wait
 Verifying pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Verifying pending=- recorded=a x a:running+shim -> all adopt_reverify | safe adopt
@@ -259,56 +59,6 @@ Verifying pending=- recorded=a x b:running+shim -> all quarantine(provider_ident
 Verifying pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Verifying pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Verifying pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=clone recorded=- x incomplete -> all wait | safe wait
-Verifying pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Verifying pending=clone recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=clone recorded=a x incomplete -> all wait | safe wait
-Verifying pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Verifying pending=clone recorded=a x a:running+shim -> all adopt_reverify | safe adopt
-Verifying pending=clone recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Verifying pending=clone recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Verifying pending=clone recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Verifying pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=delete recorded=- x incomplete -> all wait | safe wait
-Verifying pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Verifying pending=delete recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Verifying pending=delete recorded=a x incomplete -> all wait | safe wait
-Verifying pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Verifying pending=delete recorded=a x a:running+shim -> all adopt_reverify | safe adopt
-Verifying pending=delete recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Verifying pending=delete recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Verifying pending=delete recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Verifying pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Verifying pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=- recorded=- x incomplete -> all wait | safe wait
-Prepared pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Prepared pending=- recorded=- x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x a:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x a:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x a:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x b:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x b:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x b:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=- recorded=- x b:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
 Prepared pending=- recorded=a x incomplete -> all wait | safe wait
 Prepared pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Prepared pending=- recorded=a x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe adopt
@@ -319,116 +69,16 @@ Prepared pending=- recorded=a x b:running+shim -> all quarantine(provider_identi
 Prepared pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Prepared pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Prepared pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=clone recorded=- x incomplete -> all wait | safe wait
-Prepared pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Prepared pending=clone recorded=- x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x a:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x a:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x a:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x b:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x b:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x b:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=- x b:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=clone recorded=a x incomplete -> all wait | safe wait
-Prepared pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Prepared pending=clone recorded=a x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe adopt
-Prepared pending=clone recorded=a x a:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=clone recorded=a x a:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=clone recorded=a x a:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=delete recorded=- x incomplete -> all wait | safe wait
-Prepared pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Prepared pending=delete recorded=- x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x a:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x a:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x a:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x b:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x b:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x b:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=- x b:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe quarantine(ownership_doubt)
-Prepared pending=delete recorded=a x incomplete -> all wait | safe wait
-Prepared pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Prepared pending=delete recorded=a x a:running+shim -> adopt_reverify quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) adopt_reverify adopt_reverify | safe adopt
-Prepared pending=delete recorded=a x a:running-shim -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=delete recorded=a x a:stopped+exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=delete recorded=a x a:stopped-exit -> retire(vm_stopped) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) quarantine(jit_presumed_leaked) retire(vm_stopped) retire(vm_stopped) | safe adopt
-Prepared pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Prepared pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=- recorded=- x incomplete -> all wait | safe wait
-Activating pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Activating pending=- recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=- recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
 Activating pending=- recorded=a x incomplete -> all wait | safe wait
 Activating pending=- recorded=a x absent -> all mark_lost | safe mark_lost
-Activating pending=- recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=- recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=- recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=- recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
+Activating pending=- recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Activating pending=- recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Activating pending=- recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Activating pending=- recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
 Activating pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Activating pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Activating pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Activating pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=clone recorded=- x incomplete -> all wait | safe wait
-Activating pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Activating pending=clone recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=clone recorded=a x incomplete -> all wait | safe wait
-Activating pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Activating pending=clone recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=clone recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=clone recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=clone recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=delete recorded=- x incomplete -> all wait | safe wait
-Activating pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Activating pending=delete recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Activating pending=delete recorded=a x incomplete -> all wait | safe wait
-Activating pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Activating pending=delete recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=delete recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=delete recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=delete recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Activating pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Activating pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=- recorded=- x incomplete -> all wait | safe wait
-Listening pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Listening pending=- recorded=- x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x a:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x b:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x b:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=- recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
 Listening pending=- recorded=a x incomplete -> all wait | safe wait
 Listening pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Listening pending=- recorded=a x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe adopt
@@ -439,56 +89,6 @@ Listening pending=- recorded=a x b:running+shim -> all quarantine(provider_ident
 Listening pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Listening pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Listening pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=clone recorded=- x incomplete -> all wait | safe wait
-Listening pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Listening pending=clone recorded=- x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x a:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x b:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x b:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=clone recorded=a x incomplete -> all wait | safe wait
-Listening pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Listening pending=clone recorded=a x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe adopt
-Listening pending=clone recorded=a x a:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe adopt
-Listening pending=clone recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Listening pending=clone recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Listening pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=delete recorded=- x incomplete -> all wait | safe wait
-Listening pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Listening pending=delete recorded=- x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x a:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x b:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x b:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Listening pending=delete recorded=a x incomplete -> all wait | safe wait
-Listening pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Listening pending=delete recorded=a x a:running+shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe adopt
-Listening pending=delete recorded=a x a:running-shim -> presume_leaked presume_leaked adopt_monitor adopt_monitor adopt_monitor retire(jit_presumed_leaked) adopt_monitor | safe adopt
-Listening pending=delete recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Listening pending=delete recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Listening pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Listening pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=- recorded=- x incomplete -> all wait | safe wait
-Busy pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Busy pending=- recorded=- x a:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x a:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x a:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x a:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x b:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x b:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x b:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=- recorded=- x b:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
 Busy pending=- recorded=a x incomplete -> all wait | safe wait
 Busy pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Busy pending=- recorded=a x a:running+shim -> all adopt_monitor | safe adopt
@@ -499,56 +99,6 @@ Busy pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_m
 Busy pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Busy pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Busy pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=clone recorded=- x incomplete -> all wait | safe wait
-Busy pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Busy pending=clone recorded=- x a:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x a:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x a:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x a:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x b:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x b:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x b:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=- x b:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=clone recorded=a x incomplete -> all wait | safe wait
-Busy pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Busy pending=clone recorded=a x a:running+shim -> all adopt_monitor | safe adopt
-Busy pending=clone recorded=a x a:running-shim -> all adopt_monitor | safe adopt
-Busy pending=clone recorded=a x a:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe adopt
-Busy pending=clone recorded=a x a:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe adopt
-Busy pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=delete recorded=- x incomplete -> all wait | safe wait
-Busy pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Busy pending=delete recorded=- x a:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x a:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x a:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x a:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x b:running+shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x b:running-shim -> all adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x b:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=- x b:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe quarantine(ownership_doubt)
-Busy pending=delete recorded=a x incomplete -> all wait | safe wait
-Busy pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Busy pending=delete recorded=a x a:running+shim -> all adopt_monitor | safe adopt
-Busy pending=delete recorded=a x a:running-shim -> all adopt_monitor | safe adopt
-Busy pending=delete recorded=a x a:stopped+exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe adopt
-Busy pending=delete recorded=a x a:stopped-exit -> adopt_monitor adopt_monitor adopt_monitor adopt_monitor retire(guest_died) retire(guest_died) adopt_monitor | safe adopt
-Busy pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Busy pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=- recorded=- x incomplete -> all wait | safe wait
-Finished pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Finished pending=- recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=- recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
 Finished pending=- recorded=a x incomplete -> all wait | safe wait
 Finished pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Finished pending=- recorded=a x a:running+shim -> all adopt | safe adopt
@@ -559,56 +109,6 @@ Finished pending=- recorded=a x b:running+shim -> all quarantine(provider_identi
 Finished pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Finished pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Finished pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=clone recorded=- x incomplete -> all wait | safe wait
-Finished pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Finished pending=clone recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=clone recorded=a x incomplete -> all wait | safe wait
-Finished pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Finished pending=clone recorded=a x a:running+shim -> all adopt | safe adopt
-Finished pending=clone recorded=a x a:running-shim -> all adopt | safe adopt
-Finished pending=clone recorded=a x a:stopped+exit -> all adopt | safe adopt
-Finished pending=clone recorded=a x a:stopped-exit -> all adopt | safe adopt
-Finished pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=delete recorded=- x incomplete -> all wait | safe wait
-Finished pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Finished pending=delete recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Finished pending=delete recorded=a x incomplete -> all wait | safe wait
-Finished pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Finished pending=delete recorded=a x a:running+shim -> all adopt | safe adopt
-Finished pending=delete recorded=a x a:running-shim -> all adopt | safe adopt
-Finished pending=delete recorded=a x a:stopped+exit -> all adopt | safe adopt
-Finished pending=delete recorded=a x a:stopped-exit -> all adopt | safe adopt
-Finished pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Finished pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=- recorded=- x incomplete -> all wait | safe wait
-Retiring pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Retiring pending=- recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=- recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
 Retiring pending=- recorded=a x incomplete -> all wait | safe wait
 Retiring pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Retiring pending=- recorded=a x a:running+shim -> all adopt | safe adopt
@@ -619,56 +119,6 @@ Retiring pending=- recorded=a x b:running+shim -> all quarantine(provider_identi
 Retiring pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Retiring pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Retiring pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=clone recorded=- x incomplete -> all wait | safe wait
-Retiring pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Retiring pending=clone recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=clone recorded=a x incomplete -> all wait | safe wait
-Retiring pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Retiring pending=clone recorded=a x a:running+shim -> all adopt | safe adopt
-Retiring pending=clone recorded=a x a:running-shim -> all adopt | safe adopt
-Retiring pending=clone recorded=a x a:stopped+exit -> all adopt | safe adopt
-Retiring pending=clone recorded=a x a:stopped-exit -> all adopt | safe adopt
-Retiring pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=delete recorded=- x incomplete -> all wait | safe wait
-Retiring pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Retiring pending=delete recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x a:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x b:running-shim -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Retiring pending=delete recorded=a x incomplete -> all wait | safe wait
-Retiring pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Retiring pending=delete recorded=a x a:running+shim -> all adopt | safe adopt
-Retiring pending=delete recorded=a x a:running-shim -> all adopt | safe adopt
-Retiring pending=delete recorded=a x a:stopped+exit -> all adopt | safe adopt
-Retiring pending=delete recorded=a x a:stopped-exit -> all adopt | safe adopt
-Retiring pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Retiring pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=- recorded=- x incomplete -> all wait | safe wait
-Deleting pending=- recorded=- x absent -> all confirm_deleted | safe mark_lost
-Deleting pending=- recorded=- x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x a:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x a:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x a:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x b:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x b:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x b:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=- recorded=- x b:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
 Deleting pending=- recorded=a x incomplete -> all wait | safe wait
 Deleting pending=- recorded=a x absent -> all confirm_deleted | safe mark_lost
 Deleting pending=- recorded=a x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
@@ -679,36 +129,6 @@ Deleting pending=- recorded=a x b:running+shim -> all quarantine(provider_identi
 Deleting pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Deleting pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Deleting pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=clone recorded=- x incomplete -> all wait | safe wait
-Deleting pending=clone recorded=- x absent -> all confirm_deleted | safe mark_lost
-Deleting pending=clone recorded=- x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x a:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x a:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x a:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x b:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x b:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x b:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=- x b:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=clone recorded=a x incomplete -> all wait | safe wait
-Deleting pending=clone recorded=a x absent -> all confirm_deleted | safe mark_lost
-Deleting pending=clone recorded=a x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
-Deleting pending=clone recorded=a x a:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
-Deleting pending=clone recorded=a x a:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
-Deleting pending=clone recorded=a x a:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
-Deleting pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Deleting pending=delete recorded=- x incomplete -> all wait | safe wait
-Deleting pending=delete recorded=- x absent -> all confirm_deleted | safe mark_lost
-Deleting pending=delete recorded=- x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x a:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x a:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x a:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x b:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x b:running-shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x b:stopped+exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
-Deleting pending=delete recorded=- x b:stopped-exit -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe quarantine(ownership_doubt)
 Deleting pending=delete recorded=a x incomplete -> all wait | safe wait
 Deleting pending=delete recorded=a x absent -> all confirm_deleted | safe mark_lost
 Deleting pending=delete recorded=a x a:running+shim -> adopt adopt suspend_cleanup suspend_cleanup adopt adopt adopt | safe adopt
@@ -739,46 +159,6 @@ Deleted pending=- recorded=a x b:running+shim -> all report | safe report
 Deleted pending=- recorded=a x b:running-shim -> all report | safe report
 Deleted pending=- recorded=a x b:stopped+exit -> all report | safe report
 Deleted pending=- recorded=a x b:stopped-exit -> all report | safe report
-Deleted pending=clone recorded=- x incomplete -> all wait | safe wait
-Deleted pending=clone recorded=- x absent -> all ignore | safe ignore
-Deleted pending=clone recorded=- x a:running+shim -> all report | safe report
-Deleted pending=clone recorded=- x a:running-shim -> all report | safe report
-Deleted pending=clone recorded=- x a:stopped+exit -> all report | safe report
-Deleted pending=clone recorded=- x a:stopped-exit -> all report | safe report
-Deleted pending=clone recorded=- x b:running+shim -> all report | safe report
-Deleted pending=clone recorded=- x b:running-shim -> all report | safe report
-Deleted pending=clone recorded=- x b:stopped+exit -> all report | safe report
-Deleted pending=clone recorded=- x b:stopped-exit -> all report | safe report
-Deleted pending=clone recorded=a x incomplete -> all wait | safe wait
-Deleted pending=clone recorded=a x absent -> all ignore | safe ignore
-Deleted pending=clone recorded=a x a:running+shim -> all delete_leaked | safe report
-Deleted pending=clone recorded=a x a:running-shim -> all delete_leaked | safe report
-Deleted pending=clone recorded=a x a:stopped+exit -> all delete_leaked | safe report
-Deleted pending=clone recorded=a x a:stopped-exit -> all delete_leaked | safe report
-Deleted pending=clone recorded=a x b:running+shim -> all report | safe report
-Deleted pending=clone recorded=a x b:running-shim -> all report | safe report
-Deleted pending=clone recorded=a x b:stopped+exit -> all report | safe report
-Deleted pending=clone recorded=a x b:stopped-exit -> all report | safe report
-Deleted pending=delete recorded=- x incomplete -> all wait | safe wait
-Deleted pending=delete recorded=- x absent -> all ignore | safe ignore
-Deleted pending=delete recorded=- x a:running+shim -> all report | safe report
-Deleted pending=delete recorded=- x a:running-shim -> all report | safe report
-Deleted pending=delete recorded=- x a:stopped+exit -> all report | safe report
-Deleted pending=delete recorded=- x a:stopped-exit -> all report | safe report
-Deleted pending=delete recorded=- x b:running+shim -> all report | safe report
-Deleted pending=delete recorded=- x b:running-shim -> all report | safe report
-Deleted pending=delete recorded=- x b:stopped+exit -> all report | safe report
-Deleted pending=delete recorded=- x b:stopped-exit -> all report | safe report
-Deleted pending=delete recorded=a x incomplete -> all wait | safe wait
-Deleted pending=delete recorded=a x absent -> all ignore | safe ignore
-Deleted pending=delete recorded=a x a:running+shim -> all delete_leaked | safe report
-Deleted pending=delete recorded=a x a:running-shim -> all delete_leaked | safe report
-Deleted pending=delete recorded=a x a:stopped+exit -> all delete_leaked | safe report
-Deleted pending=delete recorded=a x a:stopped-exit -> all delete_leaked | safe report
-Deleted pending=delete recorded=a x b:running+shim -> all report | safe report
-Deleted pending=delete recorded=a x b:running-shim -> all report | safe report
-Deleted pending=delete recorded=a x b:stopped+exit -> all report | safe report
-Deleted pending=delete recorded=a x b:stopped-exit -> all report | safe report
 Lost pending=- recorded=- x incomplete -> all wait | safe wait
 Lost pending=- recorded=- x absent -> all ignore | safe ignore
 Lost pending=- recorded=- x a:running+shim -> all report | safe report
@@ -799,46 +179,6 @@ Lost pending=- recorded=a x b:running+shim -> all report | safe report
 Lost pending=- recorded=a x b:running-shim -> all report | safe report
 Lost pending=- recorded=a x b:stopped+exit -> all report | safe report
 Lost pending=- recorded=a x b:stopped-exit -> all report | safe report
-Lost pending=clone recorded=- x incomplete -> all wait | safe wait
-Lost pending=clone recorded=- x absent -> all ignore | safe ignore
-Lost pending=clone recorded=- x a:running+shim -> all report | safe report
-Lost pending=clone recorded=- x a:running-shim -> all report | safe report
-Lost pending=clone recorded=- x a:stopped+exit -> all report | safe report
-Lost pending=clone recorded=- x a:stopped-exit -> all report | safe report
-Lost pending=clone recorded=- x b:running+shim -> all report | safe report
-Lost pending=clone recorded=- x b:running-shim -> all report | safe report
-Lost pending=clone recorded=- x b:stopped+exit -> all report | safe report
-Lost pending=clone recorded=- x b:stopped-exit -> all report | safe report
-Lost pending=clone recorded=a x incomplete -> all wait | safe wait
-Lost pending=clone recorded=a x absent -> all ignore | safe ignore
-Lost pending=clone recorded=a x a:running+shim -> all delete_leaked | safe report
-Lost pending=clone recorded=a x a:running-shim -> all delete_leaked | safe report
-Lost pending=clone recorded=a x a:stopped+exit -> all delete_leaked | safe report
-Lost pending=clone recorded=a x a:stopped-exit -> all delete_leaked | safe report
-Lost pending=clone recorded=a x b:running+shim -> all report | safe report
-Lost pending=clone recorded=a x b:running-shim -> all report | safe report
-Lost pending=clone recorded=a x b:stopped+exit -> all report | safe report
-Lost pending=clone recorded=a x b:stopped-exit -> all report | safe report
-Lost pending=delete recorded=- x incomplete -> all wait | safe wait
-Lost pending=delete recorded=- x absent -> all ignore | safe ignore
-Lost pending=delete recorded=- x a:running+shim -> all report | safe report
-Lost pending=delete recorded=- x a:running-shim -> all report | safe report
-Lost pending=delete recorded=- x a:stopped+exit -> all report | safe report
-Lost pending=delete recorded=- x a:stopped-exit -> all report | safe report
-Lost pending=delete recorded=- x b:running+shim -> all report | safe report
-Lost pending=delete recorded=- x b:running-shim -> all report | safe report
-Lost pending=delete recorded=- x b:stopped+exit -> all report | safe report
-Lost pending=delete recorded=- x b:stopped-exit -> all report | safe report
-Lost pending=delete recorded=a x incomplete -> all wait | safe wait
-Lost pending=delete recorded=a x absent -> all ignore | safe ignore
-Lost pending=delete recorded=a x a:running+shim -> all delete_leaked | safe report
-Lost pending=delete recorded=a x a:running-shim -> all delete_leaked | safe report
-Lost pending=delete recorded=a x a:stopped+exit -> all delete_leaked | safe report
-Lost pending=delete recorded=a x a:stopped-exit -> all delete_leaked | safe report
-Lost pending=delete recorded=a x b:running+shim -> all report | safe report
-Lost pending=delete recorded=a x b:running-shim -> all report | safe report
-Lost pending=delete recorded=a x b:stopped+exit -> all report | safe report
-Lost pending=delete recorded=a x b:stopped-exit -> all report | safe report
 Backoff(clone) pending=- recorded=- x incomplete -> all wait | safe wait
 Backoff(clone) pending=- recorded=- x absent -> all retry_clone | safe mark_lost
 Backoff(clone) pending=- recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
@@ -849,66 +189,6 @@ Backoff(clone) pending=- recorded=- x b:running+shim -> all quarantine(ownership
 Backoff(clone) pending=- recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Backoff(clone) pending=- recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
 Backoff(clone) pending=- recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=- recorded=a x incomplete -> all wait | safe wait
-Backoff(clone) pending=- recorded=a x absent -> all retry_clone | safe mark_lost
-Backoff(clone) pending=- recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=- recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=- recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=- recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=clone recorded=- x incomplete -> all wait | safe wait
-Backoff(clone) pending=clone recorded=- x absent -> all retry_clone | safe mark_lost
-Backoff(clone) pending=clone recorded=- x a:running+shim -> all adopt_clone(a) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x a:running-shim -> all adopt_clone(a) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x a:stopped+exit -> all adopt_clone(a) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x a:stopped-exit -> all adopt_clone(a) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x b:running+shim -> all adopt_clone(b) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x b:running-shim -> all adopt_clone(b) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x b:stopped+exit -> all adopt_clone(b) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=- x b:stopped-exit -> all adopt_clone(b) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=clone recorded=a x incomplete -> all wait | safe wait
-Backoff(clone) pending=clone recorded=a x absent -> all retry_clone | safe mark_lost
-Backoff(clone) pending=clone recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=clone recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=clone recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=clone recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=delete recorded=- x incomplete -> all wait | safe wait
-Backoff(clone) pending=delete recorded=- x absent -> all retry_clone | safe mark_lost
-Backoff(clone) pending=delete recorded=- x a:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x a:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x a:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x a:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x b:running+shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x b:running-shim -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x b:stopped+exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=- x b:stopped-exit -> all quarantine(ownership_doubt) | safe quarantine(ownership_doubt)
-Backoff(clone) pending=delete recorded=a x incomplete -> all wait | safe wait
-Backoff(clone) pending=delete recorded=a x absent -> all retry_clone | safe mark_lost
-Backoff(clone) pending=delete recorded=a x a:running+shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=delete recorded=a x a:running-shim -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=delete recorded=a x a:stopped+exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=delete recorded=a x a:stopped-exit -> all quarantine(ownership_doubt) | safe adopt
-Backoff(clone) pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(clone) pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=- recorded=- x incomplete -> all wait | safe wait
-Backoff(boot) pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(boot) pending=- recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=- recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
 Backoff(boot) pending=- recorded=a x incomplete -> all wait | safe wait
 Backoff(boot) pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Backoff(boot) pending=- recorded=a x a:running+shim -> all adopt | safe adopt
@@ -919,56 +199,6 @@ Backoff(boot) pending=- recorded=a x b:running+shim -> all quarantine(provider_i
 Backoff(boot) pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(boot) pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(boot) pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=clone recorded=- x incomplete -> all wait | safe wait
-Backoff(boot) pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(boot) pending=clone recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=clone recorded=a x incomplete -> all wait | safe wait
-Backoff(boot) pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(boot) pending=clone recorded=a x a:running+shim -> all adopt | safe adopt
-Backoff(boot) pending=clone recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Backoff(boot) pending=clone recorded=a x a:stopped+exit -> all adopt | safe adopt
-Backoff(boot) pending=clone recorded=a x a:stopped-exit -> all adopt | safe adopt
-Backoff(boot) pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=delete recorded=- x incomplete -> all wait | safe wait
-Backoff(boot) pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(boot) pending=delete recorded=- x a:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x a:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x a:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x b:running+shim -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x b:stopped+exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=- x b:stopped-exit -> all adopt | safe quarantine(ownership_doubt)
-Backoff(boot) pending=delete recorded=a x incomplete -> all wait | safe wait
-Backoff(boot) pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(boot) pending=delete recorded=a x a:running+shim -> all adopt | safe adopt
-Backoff(boot) pending=delete recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Backoff(boot) pending=delete recorded=a x a:stopped+exit -> all adopt | safe adopt
-Backoff(boot) pending=delete recorded=a x a:stopped-exit -> all adopt | safe adopt
-Backoff(boot) pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(boot) pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=- recorded=- x incomplete -> all wait | safe wait
-Backoff(verify) pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(verify) pending=- recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=- recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
 Backoff(verify) pending=- recorded=a x incomplete -> all wait | safe wait
 Backoff(verify) pending=- recorded=a x absent -> all mark_lost | safe mark_lost
 Backoff(verify) pending=- recorded=a x a:running+shim -> all adopt_reverify | safe adopt
@@ -979,106 +209,16 @@ Backoff(verify) pending=- recorded=a x b:running+shim -> all quarantine(provider
 Backoff(verify) pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(verify) pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(verify) pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=clone recorded=- x incomplete -> all wait | safe wait
-Backoff(verify) pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(verify) pending=clone recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=clone recorded=a x incomplete -> all wait | safe wait
-Backoff(verify) pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(verify) pending=clone recorded=a x a:running+shim -> all adopt_reverify | safe adopt
-Backoff(verify) pending=clone recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=clone recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=clone recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=delete recorded=- x incomplete -> all wait | safe wait
-Backoff(verify) pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(verify) pending=delete recorded=- x a:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x a:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x a:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x a:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x b:running+shim -> all adopt_reverify | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x b:running-shim -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x b:stopped+exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=- x b:stopped-exit -> all retire(vm_stopped) | safe quarantine(ownership_doubt)
-Backoff(verify) pending=delete recorded=a x incomplete -> all wait | safe wait
-Backoff(verify) pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(verify) pending=delete recorded=a x a:running+shim -> all adopt_reverify | safe adopt
-Backoff(verify) pending=delete recorded=a x a:running-shim -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=delete recorded=a x a:stopped+exit -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=delete recorded=a x a:stopped-exit -> all retire(vm_stopped) | safe adopt
-Backoff(verify) pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(verify) pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=- recorded=- x incomplete -> all wait | safe wait
-Backoff(activate) pending=- recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=- recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=- recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
 Backoff(activate) pending=- recorded=a x incomplete -> all wait | safe wait
 Backoff(activate) pending=- recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=- recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=- recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=- recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=- recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
+Backoff(activate) pending=- recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Backoff(activate) pending=- recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Backoff(activate) pending=- recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
+Backoff(activate) pending=- recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked adopt_monitor presume_leaked presume_leaked presume_leaked | safe adopt
 Backoff(activate) pending=- recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(activate) pending=- recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(activate) pending=- recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Backoff(activate) pending=- recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=clone recorded=- x incomplete -> all wait | safe wait
-Backoff(activate) pending=clone recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=clone recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=clone recorded=a x incomplete -> all wait | safe wait
-Backoff(activate) pending=clone recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=clone recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=clone recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=clone recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=clone recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=clone recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=clone recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=clone recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=clone recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=delete recorded=- x incomplete -> all wait | safe wait
-Backoff(activate) pending=delete recorded=- x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=delete recorded=- x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x b:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x b:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x b:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=- x b:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe quarantine(ownership_doubt)
-Backoff(activate) pending=delete recorded=a x incomplete -> all wait | safe wait
-Backoff(activate) pending=delete recorded=a x absent -> all mark_lost | safe mark_lost
-Backoff(activate) pending=delete recorded=a x a:running+shim -> adopt_reverify presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=delete recorded=a x a:running-shim -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=delete recorded=a x a:stopped+exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=delete recorded=a x a:stopped-exit -> retire(vm_stopped) presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked presume_leaked | safe adopt
-Backoff(activate) pending=delete recorded=a x b:running+shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=delete recorded=a x b:running-shim -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=delete recorded=a x b:stopped+exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
-Backoff(activate) pending=delete recorded=a x b:stopped-exit -> all quarantine(provider_identity_mismatch) | safe quarantine(provider_identity_mismatch)
 Quarantined(mismatch,running) pending=- recorded=- x incomplete -> all wait | safe wait
 Quarantined(mismatch,running) pending=- recorded=- x absent -> all keep | safe keep
 Quarantined(mismatch,running) pending=- recorded=- x a:running+shim -> all keep | safe keep
@@ -1099,46 +239,6 @@ Quarantined(mismatch,running) pending=- recorded=a x b:running+shim -> all keep 
 Quarantined(mismatch,running) pending=- recorded=a x b:running-shim -> all keep | safe keep
 Quarantined(mismatch,running) pending=- recorded=a x b:stopped+exit -> all keep | safe keep
 Quarantined(mismatch,running) pending=- recorded=a x b:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x incomplete -> all wait | safe wait
-Quarantined(mismatch,running) pending=clone recorded=- x absent -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x a:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x a:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x a:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x a:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x b:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x b:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x b:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=- x b:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x incomplete -> all wait | safe wait
-Quarantined(mismatch,running) pending=clone recorded=a x absent -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x a:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x a:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x a:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x a:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x b:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x b:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x b:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=clone recorded=a x b:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x incomplete -> all wait | safe wait
-Quarantined(mismatch,running) pending=delete recorded=- x absent -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x a:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x a:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x a:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x a:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x b:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x b:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x b:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=- x b:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x incomplete -> all wait | safe wait
-Quarantined(mismatch,running) pending=delete recorded=a x absent -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x a:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x a:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x a:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x a:stopped-exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x b:running+shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x b:running-shim -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x b:stopped+exit -> all keep | safe keep
-Quarantined(mismatch,running) pending=delete recorded=a x b:stopped-exit -> all keep | safe keep
 Quarantined(doubt,stopped) pending=- recorded=- x incomplete -> all wait | safe wait
 Quarantined(doubt,stopped) pending=- recorded=- x absent -> all keep | safe keep
 Quarantined(doubt,stopped) pending=- recorded=- x a:running+shim -> all keep | safe keep
@@ -1159,46 +259,6 @@ Quarantined(doubt,stopped) pending=- recorded=a x b:running+shim -> all keep | s
 Quarantined(doubt,stopped) pending=- recorded=a x b:running-shim -> all keep | safe keep
 Quarantined(doubt,stopped) pending=- recorded=a x b:stopped+exit -> all keep | safe keep
 Quarantined(doubt,stopped) pending=- recorded=a x b:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x incomplete -> all wait | safe wait
-Quarantined(doubt,stopped) pending=clone recorded=- x absent -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x a:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x a:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x a:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x a:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x b:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x b:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x b:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=- x b:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x incomplete -> all wait | safe wait
-Quarantined(doubt,stopped) pending=clone recorded=a x absent -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x a:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x a:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x a:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x a:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x b:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x b:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x b:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=clone recorded=a x b:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x incomplete -> all wait | safe wait
-Quarantined(doubt,stopped) pending=delete recorded=- x absent -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x a:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x a:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x a:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x a:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x b:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x b:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x b:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=- x b:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x incomplete -> all wait | safe wait
-Quarantined(doubt,stopped) pending=delete recorded=a x absent -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x a:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x a:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x a:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x a:stopped-exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x b:running+shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x b:running-shim -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x b:stopped+exit -> all keep | safe keep
-Quarantined(doubt,stopped) pending=delete recorded=a x b:stopped-exit -> all keep | safe keep
 Closed pending=- recorded=- x incomplete -> all wait | safe wait
 Closed pending=- recorded=- x absent -> all ignore | safe ignore
 Closed pending=- recorded=- x a:running+shim -> all report | safe report
@@ -1219,46 +279,6 @@ Closed pending=- recorded=a x b:running+shim -> all report | safe report
 Closed pending=- recorded=a x b:running-shim -> all report | safe report
 Closed pending=- recorded=a x b:stopped+exit -> all report | safe report
 Closed pending=- recorded=a x b:stopped-exit -> all report | safe report
-Closed pending=clone recorded=- x incomplete -> all wait | safe wait
-Closed pending=clone recorded=- x absent -> all ignore | safe ignore
-Closed pending=clone recorded=- x a:running+shim -> all report | safe report
-Closed pending=clone recorded=- x a:running-shim -> all report | safe report
-Closed pending=clone recorded=- x a:stopped+exit -> all report | safe report
-Closed pending=clone recorded=- x a:stopped-exit -> all report | safe report
-Closed pending=clone recorded=- x b:running+shim -> all report | safe report
-Closed pending=clone recorded=- x b:running-shim -> all report | safe report
-Closed pending=clone recorded=- x b:stopped+exit -> all report | safe report
-Closed pending=clone recorded=- x b:stopped-exit -> all report | safe report
-Closed pending=clone recorded=a x incomplete -> all wait | safe wait
-Closed pending=clone recorded=a x absent -> all ignore | safe ignore
-Closed pending=clone recorded=a x a:running+shim -> all report | safe report
-Closed pending=clone recorded=a x a:running-shim -> all report | safe report
-Closed pending=clone recorded=a x a:stopped+exit -> all report | safe report
-Closed pending=clone recorded=a x a:stopped-exit -> all report | safe report
-Closed pending=clone recorded=a x b:running+shim -> all report | safe report
-Closed pending=clone recorded=a x b:running-shim -> all report | safe report
-Closed pending=clone recorded=a x b:stopped+exit -> all report | safe report
-Closed pending=clone recorded=a x b:stopped-exit -> all report | safe report
-Closed pending=delete recorded=- x incomplete -> all wait | safe wait
-Closed pending=delete recorded=- x absent -> all ignore | safe ignore
-Closed pending=delete recorded=- x a:running+shim -> all report | safe report
-Closed pending=delete recorded=- x a:running-shim -> all report | safe report
-Closed pending=delete recorded=- x a:stopped+exit -> all report | safe report
-Closed pending=delete recorded=- x a:stopped-exit -> all report | safe report
-Closed pending=delete recorded=- x b:running+shim -> all report | safe report
-Closed pending=delete recorded=- x b:running-shim -> all report | safe report
-Closed pending=delete recorded=- x b:stopped+exit -> all report | safe report
-Closed pending=delete recorded=- x b:stopped-exit -> all report | safe report
-Closed pending=delete recorded=a x incomplete -> all wait | safe wait
-Closed pending=delete recorded=a x absent -> all ignore | safe ignore
-Closed pending=delete recorded=a x a:running+shim -> all report | safe report
-Closed pending=delete recorded=a x a:running-shim -> all report | safe report
-Closed pending=delete recorded=a x a:stopped+exit -> all report | safe report
-Closed pending=delete recorded=a x a:stopped-exit -> all report | safe report
-Closed pending=delete recorded=a x b:running+shim -> all report | safe report
-Closed pending=delete recorded=a x b:running-shim -> all report | safe report
-Closed pending=delete recorded=a x b:stopped+exit -> all report | safe report
-Closed pending=delete recorded=a x b:stopped-exit -> all report | safe report
 unrecorded mf-* x incomplete -> all wait | safe wait
 unrecorded mf-* x absent -> all ignore | safe ignore
 unrecorded mf-* x a:running+shim -> all report | safe report

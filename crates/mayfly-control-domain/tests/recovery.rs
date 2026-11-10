@@ -109,7 +109,61 @@ fn providers() -> Vec<(String, ProviderView)> {
     out
 }
 
-/// One row's subject and its label.
+/// Whether the attempt aggregate can hold `phase` with this pending directive and with or
+/// without a recorded instance id (`attempt::evolve`): a clone is pending only in `Cloning`, a
+/// delete only in `Deleting`; `VmCloned` records the id and leaves `Cloning`, so the phases
+/// before it never have one and the phases after it always do, except that `Deleted`, `Lost`,
+/// `Closed` and `Quarantined` are reached both ways (a retirement before any clone, a lost
+/// clone, an `ownership_doubt`). The golden lists only these triples; the rules below still
+/// range over every combination.
+fn reachable(phase: Phase, pending: Option<DirectiveTag>, recorded: bool) -> bool {
+    match pending {
+        Some(DirectiveTag::CloneVm) => phase == Phase::Cloning && !recorded,
+        Some(DirectiveTag::DeleteVm) => phase == Phase::Deleting && recorded,
+        Some(
+            DirectiveTag::StartVm
+            | DirectiveTag::VerifyGuest
+            | DirectiveTag::LaunchRunner
+            | DirectiveTag::ExportDiagnostics
+            | DirectiveTag::StopVm,
+        )
+        | None => match phase {
+            Phase::NotStarted
+            | Phase::Reserved
+            | Phase::Cloning
+            | Phase::Backoff {
+                stage: Stage::Clone,
+                ..
+            } => !recorded,
+            Phase::Booting
+            | Phase::Verifying
+            | Phase::Prepared
+            | Phase::Activating
+            | Phase::Listening
+            | Phase::Busy
+            | Phase::Finished
+            | Phase::Retiring
+            | Phase::Deleting
+            | Phase::Backoff { .. } => recorded,
+            Phase::Deleted | Phase::Lost | Phase::Closed | Phase::Quarantined { .. } => true,
+        },
+    }
+}
+
+/// Every subject the golden lists: the reachable records and the unrecorded names.
+fn reachable_subjects() -> Vec<(String, Subject)> {
+    subjects()
+        .into_iter()
+        .filter(|(_, subject)| match subject {
+            Subject::Attempt(record) => {
+                reachable(record.phase, record.pending, record.instance_id.is_some())
+            }
+            Subject::Unrecorded(_) => true,
+        })
+        .collect()
+}
+
+/// One row's subject and its label: every combination, reachable or not.
 fn subjects() -> Vec<(String, Subject)> {
     let mut out = Vec::new();
     for (phase_name, phase) in phases() {
@@ -279,7 +333,7 @@ fn should_define_every_row_when_each_view_meets_each_other() {
         github.join(" ")
     );
     // when
-    for (subject_name, subject) in subjects() {
+    for (subject_name, subject) in reachable_subjects() {
         for (provider_name, provider) in providers() {
             let decisions: Vec<String> = GITHUB
                 .iter()
@@ -408,6 +462,34 @@ fn should_decide_each_plan_row_when_its_inputs_are_given() {
             record(Phase::Activating, Some("a"), None),
             vm("a", RUNNING),
             GithubView::IssuedNotDelivered,
+            Decision::PresumeLeaked,
+        ),
+        (
+            "Activating | running | busy: adopt and monitor, never retired under its job (F13)",
+            record(Phase::Activating, Some("a"), None),
+            vm("a", RUNNING),
+            GithubView::Busy,
+            Decision::Adopt(Adoption::Monitor),
+        ),
+        (
+            "Activating | running | online: presume leaked, an idle runner (I22, KER-04F)",
+            record(Phase::Activating, Some("a"), None),
+            vm("a", RUNNING),
+            GithubView::Online,
+            Decision::PresumeLeaked,
+        ),
+        (
+            "Activating | running | offline: presume leaked, no job can be live (P13)",
+            record(Phase::Activating, Some("a"), None),
+            vm("a", RUNNING),
+            GithubView::Offline,
+            Decision::PresumeLeaked,
+        ),
+        (
+            "Activating | running | unreachable: presume leaked, deregistration waits for GitHub",
+            record(Phase::Activating, Some("a"), None),
+            vm("a", RUNNING),
+            GithubView::Unreachable,
             Decision::PresumeLeaked,
         ),
         (
@@ -725,14 +807,26 @@ fn should_never_retire_when_a_busy_vm_runs() {
         let Some(observed) = present(&provider) else {
             continue;
         };
-        if record.phase != Phase::Busy {
-            continue;
-        }
+        let running = matches!(observed.run, VmRun::Running { .. });
+        let registered = matches!(
+            record.phase,
+            Phase::Prepared
+                | Phase::Activating
+                | Phase::Listening
+                | Phase::Deleting
+                | Phase::Backoff {
+                    stage: Stage::Activate,
+                    ..
+                }
+        );
         // when
         let decision = classify(&journal, &provider, github);
         // then
         let label = format!("{journal:?} {provider:?} {github:?} -> {}", code(&decision));
-        if matches!(observed.run, VmRun::Running { .. }) || github == GithubView::Unreachable {
+        if record.phase == Phase::Busy && (running || github == GithubView::Unreachable) {
+            assert!(!decision.is_destructive(), "{label}");
+        }
+        if registered && running && github == GithubView::Busy {
             assert!(!decision.is_destructive(), "{label}");
         }
     }
@@ -770,6 +864,75 @@ fn should_propose_nothing_destructive_when_the_journal_is_untrusted() {
         assert_eq!(
             proposal, twin,
             "the proposal depends on neither the cause nor GitHub: {label}"
+        );
+    }
+}
+
+#[test]
+fn should_quarantine_when_a_prepared_vm_has_a_runner_github_knows() {
+    // given: every listing of the VM, alive or not, and every view that shows a registration
+    for (_, provider) in providers() {
+        let Some(observed) = present(&provider) else {
+            continue;
+        };
+        if observed.instance_id != id("a") {
+            continue;
+        }
+        for github in [
+            GithubView::IssuedNotDelivered,
+            GithubView::Online,
+            GithubView::Busy,
+            GithubView::Offline,
+        ] {
+            // when
+            let decision = classify(
+                &trusted(record(Phase::Prepared, Some("a"), None)),
+                &provider,
+                github,
+            );
+            // then: the registration is read before the VM's liveness
+            assert_eq!(
+                decision,
+                Decision::Quarantine(QuarantineReason::JitPresumedLeaked),
+                "{provider:?} {github:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn should_decide_as_its_stage_when_the_attempt_backs_off() {
+    // given: a backoff and the phase its retry re-enters
+    let stages = [
+        (Stage::Clone, Phase::Cloning),
+        (Stage::Boot, Phase::Booting),
+        (Stage::Verify, Phase::Verifying),
+        (Stage::Activate, Phase::Activating),
+    ];
+    for (journal, provider, github) in all_rows() {
+        let Some(record) = record_of(&journal) else {
+            continue;
+        };
+        let Phase::Backoff { stage, .. } = record.phase else {
+            continue;
+        };
+        let Some((_, phase)) = stages.iter().find(|(s, _)| *s == stage) else {
+            panic!("no phase for {stage:?}");
+        };
+        let staged = JournalView {
+            trust: journal.trust,
+            subject: Subject::Attempt(AttemptRecord {
+                phase: *phase,
+                ..record.clone()
+            }),
+        };
+        // when
+        let decision = classify(&journal, &provider, github);
+        // then
+        assert_eq!(
+            decision,
+            classify(&staged, &provider, github),
+            "{journal:?} {provider:?} {github:?}"
         );
     }
 }
