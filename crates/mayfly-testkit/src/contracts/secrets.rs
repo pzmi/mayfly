@@ -15,7 +15,7 @@
 //! | SP-08 | a multi-line value (a PEM key) resolves byte for byte |
 //! | FS-01 | a file readable or writable by group or others is refused, without echo |
 //! | FS-02 | a file in a directory open to group or others is refused |
-//! | FS-03 | a file owned by another user than the daemon's is refused |
+//! | FS-03 | a file of another user is refused by its own owner check, not an ancestor's |
 //! | FS-04 | a symlink to a good file is refused |
 //! | FS-05 | a good file in a directory reached through a symlink is refused |
 //! | FS-06 | a relative path is refused |
@@ -88,7 +88,9 @@ pub trait FileSourceFactory: SecretSourceFactory {
     fn install_under_symlinked_ancestor(&mut self, value: &str) -> SecretRef;
 
     /// A provider that expects the files to belong to another user than the one
-    /// [`install`](SecretSourceFactory::install) creates them as.
+    /// [`install`](SecretSourceFactory::install) creates them as, and still accepts the
+    /// directories above the secret's directory, so that FS-03 is decided by the secret's own
+    /// owner (its file or directory) and not by who runs the tests: an ancestor refusal fails it.
     fn foreign_owner_provider(&self) -> Self::Provider;
 }
 

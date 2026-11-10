@@ -21,14 +21,14 @@ use rustix::fs::{Mode, OFlags, openat};
 
 use crate::command::{blocking, daemon_uid};
 use crate::path::{
-    Stat, errno_refusal, io_refusal, open_directory_of, secret_directory_refusal,
+    Ancestors, Stat, errno_refusal, io_refusal, open_directory_of, secret_directory_refusal,
     secret_file_refusal,
 };
 
 /// Reads owner-only files.
 #[derive(Debug, Clone, Copy)]
 pub struct FileProvider {
-    owner: u32,
+    ancestors: Ancestors,
 }
 
 impl FileProvider {
@@ -41,13 +41,32 @@ impl FileProvider {
     /// Files must belong to `uid`.
     #[must_use]
     pub const fn owned_by(uid: u32) -> Self {
-        Self { owner: uid }
+        Self {
+            ancestors: Ancestors::of(uid),
+        }
+    }
+
+    /// The same provider, also accepting directories above the secret's directory (never the
+    /// directory or the file) that `uid` owns. The daemon never builds one: its provider
+    /// ([`Self::for_daemon_user`]) trusts root and its own user only. It exists so that the
+    /// contract's FS-03 can expect files of another user and still be decided by the secret's
+    /// own owner, not by who owns the tempdir above it, as root and as any other user (pinned
+    /// by `tests/contract.rs::should_pass_file_contract_when_provider_is_file_provider`).
+    #[must_use]
+    pub const fn trusting_ancestors_of(self, uid: u32) -> Self {
+        Self {
+            ancestors: Ancestors {
+                owner: self.ancestors.owner,
+                also: uid,
+            },
+        }
     }
 }
 
 /// Opens, checks and reads the file `path` names.
-fn read_checked(path: &Path, owner: u32) -> Result<Vec<u8>, Refusal> {
-    let (directory, name) = open_directory_of(path, owner, secret_directory_refusal)?;
+fn read_checked(path: &Path, ancestors: Ancestors) -> Result<Vec<u8>, Refusal> {
+    let owner = ancestors.owner;
+    let (directory, name) = open_directory_of(path, ancestors, secret_directory_refusal)?;
     let flags =
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
     let file = File::from(openat(&directory, name, flags, Mode::empty()).map_err(errno_refusal)?);
@@ -67,8 +86,8 @@ impl SecretProvider for FileProvider {
         let SecretRef::File { path } = reference else {
             return Err(SecretError::new(reference, Refusal::Unsupported));
         };
-        let (path, owner) = (path.clone(), self.owner);
-        let bytes = blocking(reference, move || read_checked(&path, owner)).await?;
+        let (path, ancestors) = (path.clone(), self.ancestors);
+        let bytes = blocking(reference, move || read_checked(&path, ancestors)).await?;
         secret_from_bytes(reference, bytes)
     }
 }

@@ -72,14 +72,19 @@ struct FileFactory<P> {
 }
 
 impl<P> FileFactory<P> {
-    fn new(make: impl Fn(u32) -> P) -> Self {
+    /// `make(owner, also)` builds a provider expecting files of `owner` that also trusts
+    /// ancestors of `also`. The foreign provider expects another uid than the tests' and trusts
+    /// the tests' user above the secret's directory, so FS-03 is decided by the secret's own
+    /// owner whoever runs the tests: root, trusted everywhere, or any other user, whose tempdir
+    /// would otherwise be refused first as a foreign ancestor.
+    fn new(make: impl Fn(u32, u32) -> P) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
         let uid = fs::metadata(root.path()).expect("stat").uid();
         Self {
             root,
             next: 0,
-            provider: make(uid),
-            foreign: make(uid.wrapping_add(1)),
+            provider: make(uid, uid),
+            foreign: make(uid.wrapping_add(1), uid),
         }
     }
 
@@ -203,7 +208,8 @@ impl SecretProvider for PermissiveFileProvider {
 #[test]
 fn should_pass_file_contract_when_provider_is_file_provider() {
     // given
-    let mut factory = FileFactory::new(FileProvider::owned_by);
+    let mut factory =
+        FileFactory::new(|owner, also| FileProvider::owned_by(owner).trusting_ancestors_of(also));
 
     // when
     let report = run(check_file_contract(&mut factory));
@@ -215,7 +221,7 @@ fn should_pass_file_contract_when_provider_is_file_provider() {
 #[test]
 fn should_fail_permission_and_symlink_cases_when_file_provider_is_permissive() {
     // given
-    let mut factory = FileFactory::new(|_| PermissiveFileProvider);
+    let mut factory = FileFactory::new(|_, _| PermissiveFileProvider);
 
     // when
     let report = run(check_file_contract(&mut factory));

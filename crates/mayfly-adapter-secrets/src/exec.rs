@@ -16,7 +16,7 @@ use mayfly_domain::{Secret, SecretRef};
 
 use crate::command::{blocking, daemon_uid, run};
 use crate::path::{
-    Stat, command_directory_refusal, command_refusal, io_refusal, open_directory_of,
+    Ancestors, Stat, command_directory_refusal, command_refusal, io_refusal, open_directory_of,
 };
 
 /// The deadline a secret command gets unless composition gives another.
@@ -96,7 +96,7 @@ impl ExecProvider {
 
 /// Checks the command `path` names and what is above it.
 fn check_command(path: &Path, owner: u32) -> Result<(), Refusal> {
-    let _directory = open_directory_of(path, owner, command_directory_refusal)?;
+    let _directory = open_directory_of(path, Ancestors::of(owner), command_directory_refusal)?;
     let stat = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => Refusal::NotFound,
         _ => io_refusal(&e),

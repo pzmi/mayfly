@@ -87,9 +87,39 @@ const fn trusted(owner: u32, uid: u32) -> bool {
     uid == ROOT || uid == owner
 }
 
+/// Who may own the directories above the last one (and the symlinks on the way to it): root,
+/// the daemon's user and, only where a caller says so, one more user.
+///
+/// The daemon's providers trust exactly root and the daemon's user (`for_daemon`, where
+/// `also` is the daemon's uid). The one more user exists for the contract's FS-03: a provider
+/// that expects files of another uid than the tests' must still accept the tempdir the tests'
+/// user owns above the secret, or the case would be decided by an ancestor and so by who runs
+/// the tests (root trusts everything, any other user nothing). Rejected: starting the walk at
+/// a configured root below `/`, which would leave the top of the path unchecked in any provider
+/// built that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ancestors {
+    /// The daemon's user.
+    pub owner: u32,
+    /// One more user whose ancestors are trusted; `owner` when there is none.
+    pub also: u32,
+}
+
+impl Ancestors {
+    /// Root and `owner` only.
+    pub const fn of(owner: u32) -> Self {
+        Self { owner, also: owner }
+    }
+
+    const fn trust(self, uid: u32) -> bool {
+        trusted(self.owner, uid) || uid == self.also
+    }
+}
+
 /// A directory above the last one, or a symlink on the way.
-pub const fn ancestor_refusal(owner: u32, stat: &Stat) -> Option<Refusal> {
-    if !trusted(owner, stat.uid) {
+pub const fn ancestor_refusal(ancestors: Ancestors, stat: &Stat) -> Option<Refusal> {
+    let owner = ancestors.owner;
+    if !ancestors.trust(stat.uid) {
         return Some(Refusal::AncestorWrongOwner {
             expected: owner,
             found: stat.uid,
@@ -204,14 +234,14 @@ fn stat_of(file: &File) -> Result<Stat, Refusal> {
 }
 
 /// Opens the directory `path` names its last component in, walking from `/`: every ancestor
-/// passes [`ancestor_refusal`], the directory itself is no symlink and passes
+/// passes [`ancestor_refusal`] for `ancestors`, the directory itself is no symlink and passes
 /// `directory_rule`. Returns that directory and the last component.
 ///
 /// # Errors
 /// The first refusal on the way; `RelativePath` for a path that is not absolute or holds `..`.
 pub fn open_directory_of(
     path: &Path,
-    owner: u32,
+    ancestors: Ancestors,
     directory_rule: fn(u32, &Stat) -> Option<Refusal>,
 ) -> Result<(File, &OsStr), Refusal> {
     if !path.is_absolute() {
@@ -231,12 +261,15 @@ pub fn open_directory_of(
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
     let mut directory = File::from(open("/", flags, Mode::empty()).map_err(errno_refusal)?);
     let root = stat_of(&directory)?;
-    let root_rule = if components.is_empty() {
-        directory_rule
-    } else {
-        ancestor_refusal
+    let owner = ancestors.owner;
+    let check = |is_last: bool, stat: &Stat| {
+        if is_last {
+            directory_rule(owner, stat)
+        } else {
+            ancestor_refusal(ancestors, stat)
+        }
     };
-    if let Some(refusal) = root_rule(owner, &root) {
+    if let Some(refusal) = check(components.is_empty(), &root) {
         return Err(refusal);
     }
     let last = components.len().saturating_sub(1);
@@ -254,7 +287,7 @@ pub fn open_directory_of(
                 if index == last {
                     return Err(Refusal::Symlink);
                 }
-                if !trusted(owner, link.st_uid) {
+                if !ancestors.trust(link.st_uid) {
                     return Err(Refusal::AncestorWrongOwner {
                         expected: owner,
                         found: link.st_uid,
@@ -265,12 +298,7 @@ pub fn open_directory_of(
             Err(errno) => return Err(errno_refusal(errno)),
         };
         let stat = stat_of(&next)?;
-        let rule = if index == last {
-            directory_rule
-        } else {
-            ancestor_refusal
-        };
-        if let Some(refusal) = rule(owner, &stat) {
+        if let Some(refusal) = check(index == last, &stat) {
             return Err(refusal);
         }
         directory = next;
@@ -305,7 +333,10 @@ mod tests {
         ];
 
         // when
-        let got: Vec<Option<Refusal>> = cases.iter().map(|s| ancestor_refusal(DAEMON, s)).collect();
+        let got: Vec<Option<Refusal>> = cases
+            .iter()
+            .map(|s| ancestor_refusal(Ancestors::of(DAEMON), s))
+            .collect();
 
         // then
         assert_eq!(got, [None, None, None, None]);
@@ -322,7 +353,10 @@ mod tests {
         ];
 
         // when
-        let got: Vec<Option<Refusal>> = cases.iter().map(|s| ancestor_refusal(DAEMON, s)).collect();
+        let got: Vec<Option<Refusal>> = cases
+            .iter()
+            .map(|s| ancestor_refusal(Ancestors::of(DAEMON), s))
+            .collect();
 
         // then
         assert_eq!(
@@ -338,6 +372,44 @@ mod tests {
                 }),
                 Some(Refusal::AncestorTooOpen { mode: 0o775 }),
                 Some(Refusal::AncestorTooOpen { mode: 0o757 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_trust_one_more_ancestor_owner_when_named_and_never_otherwise() {
+        // given
+        const ANOTHER: u32 = 503;
+        let theirs = stat(OTHER, 0o755, Kind::Directory);
+        let open = stat(OTHER, 0o775, Kind::Directory);
+        let elsewhere = stat(ANOTHER, 0o755, Kind::Directory);
+        let naming = Ancestors {
+            owner: DAEMON,
+            also: OTHER,
+        };
+
+        // when
+        let got = [
+            ancestor_refusal(naming, &theirs),
+            ancestor_refusal(naming, &open),
+            ancestor_refusal(naming, &elsewhere),
+            ancestor_refusal(Ancestors::of(DAEMON), &theirs),
+        ];
+
+        // then
+        assert_eq!(
+            got,
+            [
+                None,
+                Some(Refusal::AncestorTooOpen { mode: 0o775 }),
+                Some(Refusal::AncestorWrongOwner {
+                    expected: DAEMON,
+                    found: ANOTHER
+                }),
+                Some(Refusal::AncestorWrongOwner {
+                    expected: DAEMON,
+                    found: OTHER
+                }),
             ]
         );
     }
