@@ -59,7 +59,7 @@ arm (plan §6 rule 6).
 
 **Philosophy** (`doc/philosophy.md` §8, a draft awaiting the owner): a new feature, directive, command, default, metric, log field or dependency that fails the decision test (effect without proof of ownership, state nothing observed, one job seeing another, anything sent where the operator did not configure, a widened default) is a finding, HIGH when it breaks a safety or privacy line. A conflict with the document goes to the owner, not into the code.
 
-**Public repository**: flag any name or path of a private project of the owner's, private-repo content, personal paths or internal hostnames, in files and in commit messages (HIGH).
+**Public repository**: flag any name or path of a private project of the owner's, or any wording that hints a design came from elsewhere ("the reference design", "an earlier project", "ported from", "the same owner"), private-repo content, personal paths or internal hostnames, in files and in commit messages (HIGH).
 
 **Data-oriented DDD** (ADR 0022): flag getters/setters, private fields or object ceremony on domain state, commands or events that add no safety; flag names that drift from `doc/domain-model.md` §5; flag a deviation from any Accepted or Proposed ADR without a new or superseding ADR.
 

@@ -244,8 +244,10 @@ reviewable.
 ## Public repository
 
 Never commit secrets, tokens, JIT configs, private keys, credentials, internal hostnames,
-private-repo content or personal paths. **Never name a private project** of the owner's anywhere
-(code, docs, ADRs, fixtures, commit messages): no name, no path, and no hint that a design came
-from elsewhere; every design is described as mayfly's own, on its own merits. Fixtures (GitHub recordings, Tart JSON, configs) are
+private-repo content or personal paths. **Never name or allude to a private project** of the
+owner's anywhere (code, docs, ADRs, fixtures, commit messages): no name, no path, and no hint
+that a design came from elsewhere ("the reference design", "an earlier project", "ported from",
+"the same owner", lessons "we learned before"). Every design is described as mayfly's own, on its
+own merits. Fixtures (GitHub recordings, Tart JSON, configs) are
 redacted or synthetic. An allowlist entry for the secret scan is added only after auditing the
 finding, inline with its reason where the tool allows, never as a blanket refresh.
