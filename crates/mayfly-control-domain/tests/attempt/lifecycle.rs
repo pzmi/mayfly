@@ -2,8 +2,9 @@
 //! `formal/lifecycle.qnt`.
 
 use mayfly_control_domain::attempt::{
-    AttemptCommand, AttemptEvent, AttemptRejection, DirectiveKind, Fact, Jit, Outcome, Phase,
-    QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage, VmCondition,
+    AttemptCommand, AttemptEvent, AttemptRejection, AttemptState, DirectiveKind, Fact, Jit,
+    Outcome, Phase, QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage,
+    VmCondition,
 };
 use mayfly_control_domain::{Actor, Rejection};
 
@@ -725,7 +726,12 @@ fn should_resolve_an_unknown_start_or_stop_when_the_inventory_shows_the_vm() {
         }
     );
     let (state, _) = stopped.unwrap_or_else(|r| panic!("{r:?}"));
-    assert_eq!((state.pending, state.vm_running), (None, false));
+    // a stop the listing shows took effect is the stop's success: the delete has its own budget
+    // (VER-01F, the model's `unknownStopResolvedByListingTest`)
+    assert_eq!(
+        (state.pending, state.vm_running, state.tries),
+        (None, false, 0)
+    );
 }
 
 #[test]
@@ -1029,4 +1035,131 @@ fn should_wait_for_adoption_when_a_timeout_comes_from_a_newer_run() {
 
     // then
     assert_eq!(decided.err(), Some(AttemptRejection::NotAdopted));
+}
+
+/// A retirement requested while activating, after a restart orphaned the handle; then the
+/// fresh verification of the new epoch is refused, so the attempt backs off with the request
+/// still waiting for its deregistration.
+fn retirement_waiting_in_backoff() -> AttemptState {
+    let mut path = jit_issued();
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    ));
+    path.push(at(
+        2,
+        SAGA,
+        AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        },
+    ));
+    path.push(at(2, SAGA, issue(5)));
+    path.push(at(
+        2,
+        SAGA,
+        observe_in(
+            2,
+            Fact::DirectiveRefused {
+                directive_id: directive(5),
+                reason: RefusalReason::EffectFailed,
+            },
+        ),
+    ));
+    reach(&path).0
+}
+
+#[test]
+fn should_retire_when_a_retirement_is_confirmed_after_the_attempt_backed_off() {
+    // given
+    let waiting = retirement_waiting_in_backoff();
+    // when
+    let confirmed = apply(&waiting, at(2, SAGA, AttemptCommand::ConfirmRetirement));
+    // then
+    assert_eq!(
+        (waiting.phase, waiting.retirement_requested),
+        (
+            Phase::Backoff {
+                stage: Stage::Activate,
+                n: 1
+            },
+            Some(RetireReason::Surplus)
+        )
+    );
+    let (retired, events) = confirmed.unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!(
+        (
+            retired.phase,
+            retired.retirement_requested,
+            retired.retire_reason
+        ),
+        (Phase::Retiring, None, Some(RetireReason::Surplus))
+    );
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::AttemptRetired(..)]
+    ));
+}
+
+#[test]
+fn should_withdraw_when_a_busy_answer_arrives_after_the_attempt_backed_off() {
+    // given
+    let waiting = retirement_waiting_in_backoff();
+    // when
+    let withdrawn = apply(&waiting, at(2, SAGA, AttemptCommand::WithdrawRetirement));
+    // then
+    let (state, _) = withdrawn.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(state.phase, Phase::Backoff { .. }));
+    assert_eq!(state.retirement_requested, None);
+}
+
+#[test]
+fn should_retire_when_a_retirement_is_confirmed_after_the_runner_exited() {
+    // given: a launch of unknown outcome, the retirement requested, then the runner exits
+    let (waiting, _) = reach(&then(
+        jit_issued(),
+        [
+            issue(5),
+            observe(Fact::RunnerLaunchUnknown {
+                directive_id: directive(5),
+            }),
+            AttemptCommand::RequestRetirement {
+                reason: RetireReason::JitPresumedLeaked,
+            },
+            observe(Fact::RunnerExited { code: 1 }),
+        ],
+    ));
+    // when
+    let confirmed = apply(&waiting, saga(AttemptCommand::ConfirmRetirement));
+    // then
+    assert_eq!(
+        (waiting.phase, waiting.retirement_requested),
+        (Phase::Finished, Some(RetireReason::JitPresumedLeaked))
+    );
+    let (retired, _) = confirmed.unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!(
+        (retired.phase, retired.retire_reason),
+        (Phase::Retiring, Some(RetireReason::JitPresumedLeaked))
+    );
+}
+
+#[test]
+fn should_refuse_a_confirmation_when_the_vm_was_lost_while_a_retirement_waited() {
+    // given
+    let (lost, _) = reach(&then(
+        listening(),
+        [
+            AttemptCommand::RequestRetirement {
+                reason: RetireReason::Surplus,
+            },
+            observe(Fact::VmAbsent),
+        ],
+    ));
+    // when
+    let confirmed = apply(&lost, saga(AttemptCommand::ConfirmRetirement));
+    // then
+    assert_eq!(lost.phase, Phase::Lost);
+    assert_eq!(code(confirmed), Some("no_retirement_requested"));
 }

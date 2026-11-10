@@ -563,52 +563,62 @@ fn decide_request_retirement(state: &AttemptState, reason: RetireReason) -> Deci
     }
 }
 
+/// `ConfirmRetirement` after the deregistration (I21, P11). A request made while activating or
+/// listening outlives the phase: a failed fresh verification backs off and a runner that exits
+/// finishes with it still set, and the deregistration's confirmation retires the attempt there
+/// too (VER-01F; pinned by
+/// `tests/attempt/lifecycle.rs::should_retire_when_a_retirement_is_confirmed_after_the_attempt_backed_off`
+/// and `should_retire_when_a_retirement_is_confirmed_after_the_runner_exited`). A lost VM ends
+/// the attempt: nothing is confirmed after it.
 fn decide_confirm_retirement(state: &AttemptState) -> Decision {
     match state.phase {
-        Phase::Activating | Phase::Listening => match state.retirement_requested {
-            Some(reason) => Ok(vec![AttemptEvent::AttemptRetired(AttemptRetired {
-                reason,
-            })]),
-            None => Err(AttemptRejection::NoRetirementRequested),
-        },
+        Phase::Activating | Phase::Listening | Phase::Backoff { .. } | Phase::Finished => {
+            match state.retirement_requested {
+                Some(reason) => Ok(vec![AttemptEvent::AttemptRetired(AttemptRetired {
+                    reason,
+                })]),
+                None => Err(AttemptRejection::NoRetirementRequested),
+            }
+        }
         Phase::Reserved
         | Phase::Cloning
         | Phase::Booting
         | Phase::Verifying
         | Phase::Prepared
         | Phase::Busy
-        | Phase::Finished
         | Phase::Retiring
         | Phase::Deleting
         | Phase::Deleted
         | Phase::Lost
-        | Phase::Backoff { .. }
         | Phase::Quarantined { .. } => Err(AttemptRejection::NoRetirementRequested),
         Phase::NotStarted => Err(AttemptRejection::NotStarted),
         Phase::Closed => Err(AttemptRejection::Closed),
     }
 }
 
+/// `WithdrawRetirement` after a busy answer: wherever a request can be confirmed, it can be
+/// withdrawn (VER-01F; pinned by
+/// `tests/attempt/lifecycle.rs::should_withdraw_when_a_busy_answer_arrives_after_the_attempt_backed_off`).
 fn decide_withdraw_retirement(state: &AttemptState) -> Decision {
     match state.phase {
-        Phase::Activating | Phase::Listening => match state.retirement_requested {
-            Some(..) => Ok(vec![AttemptEvent::RetirementWithdrawn(
-                RetirementWithdrawn {},
-            )]),
-            None => Err(AttemptRejection::NoRetirementRequested),
-        },
+        Phase::Activating | Phase::Listening | Phase::Backoff { .. } | Phase::Finished => {
+            match state.retirement_requested {
+                Some(..) => Ok(vec![AttemptEvent::RetirementWithdrawn(
+                    RetirementWithdrawn {},
+                )]),
+                None => Err(AttemptRejection::NoRetirementRequested),
+            }
+        }
         Phase::Reserved
         | Phase::Cloning
         | Phase::Booting
         | Phase::Verifying
         | Phase::Prepared
         | Phase::Busy
-        | Phase::Finished
         | Phase::Retiring
         | Phase::Deleting
         | Phase::Deleted
         | Phase::Lost
-        | Phase::Backoff { .. }
         | Phase::Quarantined { .. } => Err(AttemptRejection::NoRetirementRequested),
         Phase::NotStarted => Err(AttemptRejection::NotStarted),
         Phase::Closed => Err(AttemptRejection::Closed),

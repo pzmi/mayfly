@@ -71,11 +71,16 @@ fn should_give_each_trace_its_verdict_when_the_regression_manifest_is_replayed()
 
     // then
     let count = |f: fn(&Verdict) -> bool| verdicts.iter().filter(|(_, v)| f(v)).count();
-    assert_eq!(count(|v| matches!(v, Verdict::Known { .. })), 4);
-    assert!(count(|v| matches!(v, Verdict::Passed(..))) >= 12);
+    // VER-01F resolved the four divergences VER-01 found: none is left known
+    assert_eq!(count(|v| matches!(v, Verdict::Known { .. })), 0);
+    assert!(count(|v| matches!(v, Verdict::Passed(..))) >= 17);
     assert!(count(|v| matches!(v, Verdict::NoDriver { .. })) >= 30);
     assert_eq!(count(Verdict::failed), 0);
     assert!(verdicts.iter().all(|(_, v)| !v.to_string().is_empty()));
+    assert_eq!(
+        Verdict::Known { id: "k", step: 3 }.to_string(),
+        "KNOWN divergence k at step 3"
+    );
 }
 
 #[test]
@@ -129,7 +134,11 @@ fn should_exit_by_verdict_when_manifests_are_replayed() {
     assert_eq!(none.0, 2);
     assert_eq!(missing.0, 2);
     assert_eq!(green.0, 0, "{}", green.2);
-    assert!(green.1.contains("KNOWN divergence"), "{}", green.1);
+    assert!(
+        green.1.contains(", 0 ended in a known divergence"),
+        "{}",
+        green.1
+    );
     assert!(green.1.contains("no driver for this model yet"));
     assert!(green.1.contains(", 0 failed"));
     assert_eq!(red.0, 1);

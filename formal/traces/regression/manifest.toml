@@ -17,8 +17,10 @@
 # script takes exactly the stimuli of the `run` of the same name (`<step>Test`), so a scenario
 # and its trace cannot drift; `mbt::actionTaken` is the model action and `last.stimulus` names
 # it too. The lifecycle scripts are `lifecycle_traces` in `formal/lifecycle.qnt` (`main =
-# "lifecycle_traces"`, `init = "tinit"`), built the same way; the four `divergence*` scripts
-# reproduce the known divergences of `mayfly-conformance`'s `KNOWN_DIVERGENCES`. Every
+# "lifecycle_traces"`, `init = "tinit"`), built the same way; the scripts VER-01F added
+# (`unknownStopResolvedByListing`, `confirmRetirementInBackoff`, `confirmRetirementAfterExit`,
+# `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`) pin the divergences VER-01 found,
+# resolved. Every
 # `*.itf.json` here has exactly one entry.
 
 [[trace]]
@@ -503,41 +505,51 @@ seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-divergenceUnknownStopResolvedByListing.itf.json"
+file = "lifecycle-unknownStopResolvedByListing.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "divergenceUnknownStopResolvedByListing"
-max_steps = 12
+step = "unknownStopResolvedByListing"
+max_steps = 13
 seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-divergenceConfirmRetirementInBackoff.itf.json"
+file = "lifecycle-confirmRetirementInBackoff.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "divergenceConfirmRetirementInBackoff"
+step = "confirmRetirementInBackoff"
 max_steps = 7
 seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-divergenceCloneAnsweredAfterRemoval.itf.json"
+file = "lifecycle-confirmRetirementAfterExit.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "divergenceCloneAnsweredAfterRemoval"
+step = "confirmRetirementAfterExit"
+max_steps = 7
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-cloneAnsweredAfterRemoval.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "cloneAnsweredAfterRemoval"
 max_steps = 4
 seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-divergenceRequarantineAfterVanished.itf.json"
+file = "lifecycle-requarantineAfterVanished.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "divergenceRequarantineAfterVanished"
+step = "requarantineAfterVanished"
 max_steps = 14
 seed = "0x5ce1"
 invariant = "allInvariants"

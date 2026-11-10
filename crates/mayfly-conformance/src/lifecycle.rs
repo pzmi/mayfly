@@ -28,7 +28,7 @@
 //! | `retire_requested` | `retireRequested` | `retirement_requested` is set |
 //! | `diagnostics` | `diagnostics` | `diagnostics` |
 //! | `runner_exited` | `runnerExited` | `runner_exited` |
-//! | `vanished` | `vanished` and `phase == Quarantined` | quarantined `vm_vanished_externally` |
+//! | `vanished` | `vanished` | quarantined `vm_vanished_externally` |
 //! | `refused` | `-`: every model step is an accepted transition | the last command's refusal code, else `-` |
 //!
 //! # What is abstracted
@@ -41,8 +41,9 @@
 //!   an orphaned handle `jit = orphaned`, and the consequence (no job is ever bound) shows as a
 //!   refusal only if the model offers `bindJob`, which it never does then.
 //! - `freshEpoch` is compared as "fresh in the current epoch"; the aggregate keeps no number.
-//! - `vanished` is compared only while quarantined: the model keeps the flag after an
-//!   operator's resolution, the aggregate keeps the reason only inside `Quarantined`.
+//! - `vanished` is the model's flag, which holds only while quarantined (its
+//!   `vanishedStaysQuarantined`; an operator's resolution clears it, VER-01F), and the
+//!   aggregate's quarantine reason.
 //! - Ids, deadlines, refusal and quarantine reasons, the retirement reason, guest facts and
 //!   diagnostics digests are minted by the driver; the model has none of them.
 //! - Rust-only rows (`NotStarted`, stale observations, the run-epoch fence of I18, actor
@@ -51,9 +52,11 @@
 //!
 //! # Stimuli
 //!
-//! The saga's `IssueNext` is issued by the driver itself: the attempt saga (CP-02) does not
-//! exist yet, so the trace drives the aggregate directly, and the saga's own choices (when to
-//! issue) are the model's. Observations carry the driver's current run epoch, as answers
+//! The model's `issueNext` is the saga's decision: the driver reads the folded attempt with the
+//! saga's pure table, `attempt::next_step` (CP-02), and saves `IssueNext` only when it answers
+//! `Issue`; any other step is recorded as the refusal `saga_idle`, so a model state where the
+//! saga would not issue shows as a divergence on `refused` (and `pending`). The consumer around
+//! the table (ids, timers) is not driven. Observations carry the driver's current run epoch, as answers
 //! re-delivered in the session after an adoption would. `prepareAtOnce` is the sequence of
 //! stimuli it stands for, compared once at its end.
 //!
@@ -69,7 +72,8 @@ use mayfly_control::store::{
 use mayfly_control_domain::attempt::{
     AttemptCommand, AttemptEvent, AttemptState, Diagnostics, DirectiveTag, Fact, GuestFacts,
     GuestOs, GuestRejection, Jit, Observation as Seen, Outcome as PendingOutcome, Phase,
-    QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage, StartAttempt,
+    QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, SagaStep, Stage, StartAttempt,
+    next_step,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, ControlAggregates, Rejection};
 use mayfly_domain::{
@@ -161,7 +165,7 @@ pub fn expected(state: &State) -> Result<Observation, DriverError> {
             "-".to_owned()
         },
     );
-    o.set("vanished", flag("vanished")? && phase == "Quarantined");
+    o.set("vanished", flag("vanished")?);
     o.set("phase", phase);
     o.set("tries", int("tries")?);
     o.set("pending", text("pending")?);
@@ -430,7 +434,15 @@ impl<A: AttemptLike> LifecycleDriver<A> {
         }
     }
 
+    /// The saga's `IssueNext`, issued only when its table says so (`next_step` is `Issue`).
     fn issue_next(&mut self) -> Result<bool, DriverError> {
+        match next_step(&self.state()?) {
+            SagaStep::Issue(..) => {}
+            SagaStep::AwaitAnswer { .. } | SagaStep::Close | SagaStep::Idle => {
+                self.refused = Some("saga_idle");
+                return Ok(false);
+            }
+        }
         let id = self.mint();
         self.send(
             SAGA,
@@ -601,61 +613,26 @@ pub struct KnownDivergence {
     pub summary: &'static str,
 }
 
-/// The divergences VER-01's replays found (see [`KnownDivergence`]).
-pub const KNOWN_DIVERGENCES: &[KnownDivergence] = &[
-    KnownDivergence {
-        id: "unknown-stop-resolved-by-listing-keeps-tries",
-        action: "inventoryPresent",
-        fields: &["tries"],
-        pins: &[("tries", "*", "0")],
-        regression: "divergenceUnknownStopResolvedByListing",
-        summary: "a StopVm of unknown outcome resolved by a listing that shows the VM stopped: \
-                  the model keeps the stop counted in `tries` (inventoryPresent), the aggregate \
-                  records VmStopped and resets `tries` to 0, as a stop's success reply does in both",
-    },
-    KnownDivergence {
-        id: "confirm-retirement-refused-outside-activating-or-listening",
-        action: "confirmRetirement",
-        fields: &["phase", "refused", "retire_requested", "stage", "tries"],
-        pins: &[
-            ("phase", "Retiring", "*"),
-            ("refused", "-", "no_retirement_requested"),
-        ],
-        regression: "divergenceConfirmRetirementInBackoff",
-        summary: "a retirement requested while activating survives into Backoff(activate) (a \
-                  failed fresh verification) or Finished (the runner exited after a launch of \
-                  unknown outcome); the model confirms it there (retire), the aggregate refuses \
-                  ConfirmRetirement outside Activating and Listening (no_retirement_requested) \
-                  while keeping `retirement_requested` set",
-    },
-    KnownDivergence {
-        id: "clone-answered-after-removal-records-no-instance",
-        action: "replySucceeded",
-        fields: &["instance"],
-        pins: &[("instance", "-", "0")],
-        regression: "divergenceCloneAnsweredAfterRemoval",
-        summary: "a CloneVm whose reply was lost (applied) and whose VM was then removed is \
-                  answered by a re-delivery: the model's success reply records the world's \
-                  instance NONE and reaches Booting with no instance id; a real VmCloned always \
-                  carries an instance id, so the model allows a reply the data plane cannot give",
-    },
-    KnownDivergence {
-        id: "requarantine-after-resolved-vanished-keeps-the-flag",
-        action: "*",
-        fields: &["vanished"],
-        pins: &[("vanished", "true", "false")],
-        regression: "divergenceRequarantineAfterVanished",
-        summary: "the model never clears `vanished`: after an operator resolves a vanished \
-                  quarantine, any later quarantine (a policy's, or the delete refused again and \
-                  again) is read as vanished again, so a later absence would not release it, \
-                  while the aggregate records the new reason",
-    },
-];
+/// The divergences left for a follow-up (see [`KnownDivergence`]). VER-01's replays found four;
+/// VER-01F resolved them (the model's stop resolution, retirement confirmation, clone
+/// re-delivery and vanished flag; the aggregate's confirmation outside activation) and their
+/// scripts replay as ordinary regression traces. Empty, the mechanism stays for the next one.
+pub const KNOWN_DIVERGENCES: &[KnownDivergence] = &[];
 
 /// The known divergence `divergence` is, if any.
 #[must_use]
 pub fn known(divergence: &crate::replay::Divergence) -> Option<&'static KnownDivergence> {
-    KNOWN_DIVERGENCES.iter().find(|k| {
+    known_in(KNOWN_DIVERGENCES, divergence)
+}
+
+/// The entry of `list` that `divergence` is, if any: the classification [`known`] applies to
+/// [`KNOWN_DIVERGENCES`], over any list (its tests' own).
+#[must_use]
+pub fn known_in<'a>(
+    list: &'a [KnownDivergence],
+    divergence: &crate::replay::Divergence,
+) -> Option<&'a KnownDivergence> {
+    list.iter().find(|k| {
         let value = |side: &Observation, field: &str| side.0.get(field).cloned();
         (k.action == "*" || k.action == canonical_action(&divergence.action))
             && divergence.fields.iter().all(|f| k.fields.contains(f))

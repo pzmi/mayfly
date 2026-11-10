@@ -775,6 +775,15 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
   - *Actor.* Who issued each command (operator uid, policy, startup) is recorded in the event
     envelope, not the payload; `ResolveQuarantine` is refused unless the actor is an operator,
     so an `AttemptRetired{quarantine_resolved}` event's envelope names that operator.
+- **Behaviour decided by VER-01F** (the conformance replay's divergences; `doc/formal-models.md`,
+  lifecycle):
+  - *A retirement request outlives its phase.* Requested while activating or listening, it stays
+    set when a fresh verification fails (`Backoff`) or the runner exits (`Finished`), and
+    `ConfirmRetirement` (or `WithdrawRetirement`) is decided there too: the deregistration has
+    happened, so retiring is safe (I21). A lost attempt is terminal and confirms nothing.
+  - *An Unknown stop that a listing shows stopped* is `VmStopped`, the stop's success: the
+    count of tries restarts for the delete.
+  - *A vanished case ends with its resolution*: a later quarantine has its own reason.
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
   nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per

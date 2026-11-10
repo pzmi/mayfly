@@ -1107,6 +1107,10 @@ Cites: ver §6. ITF decoding, seeded trace generation via `quint run --mbt`, per
 canonical observations (initial state included), regression trace manifest, `QUINT_SEED` replay,
 divergence report; lifecycle driver against the `Attempt` aggregate + saga with `MemoryJournal`.
 Accept: a negative control (mutated transition) is caught at the first divergent step.
+Note (VER-01F): the four divergences VER-01's replays found are resolved (the model's stop
+resolution by listing, clone re-delivery, vanished flag and terminal retirement; the aggregate's
+`ConfirmRetirement`/`WithdrawRetirement` in `Backoff` and `Finished`); each script replays clean
+and `KNOWN_DIVERGENCES` is empty (`doc/formal-models.md`, lifecycle).
 
 #### VER-02 Conformance drivers
 Cites: ver §6. Drivers for scheduling (capacity policy + Host), recovery (startup use case with

@@ -98,7 +98,7 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
-| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`) | KER-04, KER-04F, DEC-04, DEC-05 |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside) | KER-04, KER-04F, DEC-04, DEC-05, VER-01F |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); simulation about 3 min per seed and relation | KER-05, DEC-04 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
@@ -171,6 +171,71 @@ never tries an action the model did not take). The committed traces are the scri
 `formal/traces/regression/`); generated ones come from `step`, `serveStep` and `activationStep`
 under a printed seed (`cargo xtask conformance`, ver §6.2).
 
+**Divergences (VER-01, resolved by VER-01F).** The first replays found four disagreements
+between the model and the aggregate. VER-01F decided each (which side is right, by the rules
+the attempt protects) and fixed the wrong side; each script stays as a regression trace that now
+replays clean, and `KNOWN_DIVERGENCES` (`crates/mayfly-conformance/src/lifecycle.rs`) is empty,
+its mechanism kept for the next one (a replay that ends in a listed divergence is reported
+`KNOWN`, and `should_reproduce_each_known_divergence_when_its_regression_trace_is_replayed`
+fails as soon as one no longer reproduces).
+
+| Was | Right side | Fix | Script and pins |
+|:--|:--|:--|:--|
+| a `StopVm` of unknown outcome resolved by a listing that shows the VM stopped kept the stop counted in the model's `tries`; the aggregate records `VmStopped` and resets them | the aggregate: the listing observes the stop took effect, which is the stop's success (one event, `VmStopped`, as its reply records), so the delete gets its own budget like every directive after a success | model: `inventoryPresent` resets `tries` | `unknownStopResolvedByListing`; `unknownStopResolvedByListingTest`; `tests/attempt/lifecycle.rs::should_resolve_an_unknown_start_or_stop_when_the_inventory_shows_the_vm` |
+| a retirement requested while activating outlives a failed fresh verification (`Backoff(activate)`) or a runner exit after a launch of unknown outcome (`Finished`); the model confirmed it there, the aggregate refused `no_retirement_requested` and kept the request set, so the deregistration's confirmation was lost | the model: `ConfirmRetirement` follows the deregistration (I21, P11), so retiring is safe wherever the request still waits; refusing it strands a deregistered runner's attempt with a request nothing can answer | Rust: `ConfirmRetirement` and `WithdrawRetirement` are decided in `Backoff` and `Finished` too; model: neither is enabled once the attempt is terminal (`Lost` keeps the flag; the model resurrected a lost attempt into `Retiring`) | `confirmRetirementInBackoff`, `confirmRetirementAfterExit`; the runs of the same name; `tests/attempt/lifecycle.rs::should_retire_when_a_retirement_is_confirmed_after_the_attempt_backed_off`, `should_retire_when_a_retirement_is_confirmed_after_the_runner_exited`, `should_withdraw_when_a_busy_answer_arrives_after_the_attempt_backed_off`, `should_refuse_a_confirmation_when_the_vm_was_lost_while_a_retirement_waited` |
+| a `CloneVm` whose lost reply took effect, then whose VM someone removed, was answered success with instance `NONE`: `Booting` with no instance id | the aggregate: a `VmCloned` carries the instance id of a listed VM (plan §8.2, DP-01: a clone is re-observed by name first, and a delivery that finds no VM clones) | model: `applyEffect` clones whenever no VM of the name exists, so the re-delivery's reply carries the new VM's instance id | `cloneAnsweredAfterRemoval`; `cloneAnsweredAfterRemovalTest` |
+| the model's `vanished` was never cleared, so after an operator resolved a vanished case any later quarantine read as vanished again (and a later absence would not release it) | the aggregate: the reason belongs to the quarantine the attempt is in | model: `retire` clears `vanished` (an operator's resolution is the only way out of a vanished quarantine); `vanishedStaysQuarantined` is strengthened to `vanished implies Quarantined`, with no history, so it now also covers a second vanished case after a resolved one | `requarantineAfterVanished`; `requarantineAfterVanishedTest` |
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `withinLimit` | `0 <= count <= LIMIT` in every reachable state | `formal-verify-bounded` (Apalache, 6 steps), `formal-verify-simulate` |
+
+Tests (`quint test`, stage `formal-test`): `climbsToLimitTest`, `resetReturnsToZeroTest`,
+`resetNeedsNonZeroTest`. Negative control tried: tightening the invariant to `count < LIMIT`
+makes `quint verify` report `[violation]` with a counterexample that reaches `count = 3`.
+
+### lifecycle
+
+One attempt stream (`a`), the provider's truth about its VM (`w`, with whether the pending
+directive has taken effect) and history for the invariants (`g`, read by no guard). Each action
+is one stimulus of the Rust aggregate `mayfly_control_domain::attempt`: `issueNext` is the
+saga's `IssueNext`; `replySucceeded`, `replyRefused`, `replyProofRefused`, `replyGuestRejected`,
+`replyLost` (`OutcomeUnknown`, the effect applied or not), `replyLaunchUnknown`,
+`inventoryPresent`, `inventoryAbsent`, `vmObservedStopped` and `runnerExited` are
+`RecordObservation` facts; `beginActivation`, `recordJitHandle`, `bindJob`,
+`requestRetirement`, `confirmRetirement`, `withdrawRetirement`, `quarantineCommand`, `adopt`,
+`resolveQuarantine` and `close` are commands; `vmReplacedOrRemoved` changes the provider behind
+the journal's back. A reply is merged with the execution of its effect, so a lost reply is the
+effect happening or not, then `Unknown`. `step` offers every stimulus at every state;
+`serveStep` is the biased relation of verification §6 (no policy retirement before the job ends,
+no interference with the provider), because a uniform random walk of `step` almost never strings
+the fifteen stimuli of the happy path together: `serveStep` reaches Busy, Finished and Closed in
+simulation, `step` does not. `activationStep` (KER-04F) starts with `prepareAtOnce`, which turns
+the preparation (and, nondeterministically, the grant and the fresh verification) into one
+step, then offers the stimuli around activation: the JIT handle, the launch, the job, restarts,
+lost replies, launch outcomes, refused proofs, a replaced VM, quarantine and retirement. It
+exists because the KER-04 review found a counterexample nine steps from `init` (a restart with
+the launch in flight, the late launch reply, a job bound to a runner whose JIT was presumed
+leaked) that `step` at depth 8 could not reach and random simulation did not sample; at depth 8
+of `activationStep` it is six steps deep.
+
+**What the invariants are evidence of.** Most invariants hold in the model because its guards
+enforce them (`recordJitHandle` needs the grant and the fresh verification, so
+`illegalMint` stays false): checking them proves that the guards and the transitions of the
+model, taken together, cannot reach a violating state, including through interleavings nobody
+wrote down, which is how the review's counterexample was a real defect of the model. They are
+evidence about the Rust code through the matrix golden, the Rust tests named below and,
+since VER-01, the conformance replay: `mayfly-conformance`'s lifecycle driver runs every action
+of a trace as a stimulus of the `Attempt` aggregate through `AggregateStore` over
+`MemoryJournal` and compares the folded state with the model's `a` at every step, the initial
+one included (`crates/mayfly-conformance/src/lifecycle.rs` names each compared field and what is
+abstracted). The replay checks only what the model does: a guard the Rust code lacks is caught
+when a trace takes the model's path past it, not when the model disables an action (the driver
+never tries an action the model did not take). The committed traces are the scripts of
+`lifecycle_traces` (the named runs above as `List[Stim]`, exported to
+`formal/traces/regression/`); generated ones come from `step`, `serveStep` and `activationStep`
+under a printed seed (`cargo xtask conformance`, ver §6.2).
+
 **Known divergences (VER-01).** The first replays found four disagreements between the model
 and the aggregate, each reproduced by a `divergence*` script and listed with its follow-up in
 `KNOWN_DIVERGENCES` (`crates/mayfly-conformance/src/lifecycle.rs`); a replay that ends in one is
@@ -196,7 +261,7 @@ was changed: which side is wrong is the follow-up's decision (ver §6.2 item 9).
 | `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
 | `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
 | `quarantineNeverAutoDeleted` | I28: no `DeleteVm` while quarantined and unresolved | the same |
-| `vanishedStaysQuarantined` | ADR 0066: an attempt quarantined because a stop or start found its recorded VM absent stays quarantined until an operator resolves it; the inventory's absence does not release it | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent`, `should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent`; `matrix/attempt.txt` (`quarantined/vanished`) |
+| `vanishedStaysQuarantined` | ADR 0066: an attempt quarantined because a stop or start found its recorded VM absent stays quarantined until an operator resolves it; the inventory's absence does not release it (VER-01F: `vanished implies Quarantined`, the flag cleared only by the resolution) | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent`, `should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent`; `matrix/attempt.txt` (`quarantined/vanished`) |
 | `retryKeepsNameAndGeneration` | every `CloneVm`, first or retried, targets the name and generation fixed at start | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
 
 Tests (`quint test`, stage `formal-test`, all deterministic): `happyPathTest`,
@@ -227,7 +292,10 @@ start whose recorded VM the provider no longer holds is answered `target_absent`
 (`replyTargetAbsent`) and quarantines the attempt as a desync (the attempt's `vanished` flag,
 the VM not running), which `inventoryAbsent` no longer releases to `Lost`; and a start may be
 refused its proof too (`replyProofRefused`, an over-approximation for a start: the model's world
-has no listed-but-unproven VM). Stops and deletes count against the
+has no listed-but-unproven VM), and from VER-01F `unknownStopResolvedByListingTest`,
+`confirmRetirementInBackoffTest`, `confirmRetirementAfterExitTest`,
+`cloneAnsweredAfterRemovalTest` and `requarantineAfterVanishedTest` (the resolved divergences
+above). Stops and deletes count against the
 retry budget like the stage directives: a cleanup the data plane keeps refusing ends in
 quarantine (`delete_refused_repeatedly`), and inside quarantine the stops, a refused proof
 included, end. The Rust code asserts the model's invariants on every accepted transition two
@@ -245,7 +313,9 @@ second.
 
 **The saga (CP-02).** `mayfly_control_domain::attempt::next_step` is `issueNext`'s guard read as
 a policy: it issues exactly when `canIssueNext` holds (`issuable`, pinned against the aggregate by
-`tests/attempt/saga.rs::should_issue_exactly_when_issue_next_would_be_accepted`), waits on an
+`tests/attempt/saga.rs::should_issue_exactly_when_issue_next_would_be_accepted`, and since
+VER-01F against the model too: the lifecycle driver issues the model's `issueNext` only when
+`next_step` answers `Issue`, else records the refusal `saga_idle`), waits on an
 in-flight directive until its deadline, closes a deleted or lost attempt, and does nothing while
 an outcome is `Unknown` or the pending directive is not sent yet. **Not modelled:** time (the
 deadline per directive kind fixed at the first send, the reply grace,

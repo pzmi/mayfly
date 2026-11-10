@@ -1,13 +1,13 @@
 //! The lifecycle driver over the committed regression traces (conformance level, ver §2 and
-//! §6.2): every trace replays against the real `Attempt`; each known divergence still
-//! reproduces; a deliberately mutated transition is caught at the first divergent step, named
+//! §6.2): every trace replays against the real `Attempt`, the four divergences VER-01 found
+//! and VER-01F resolved included; each known divergence still reproduces; a deliberately mutated transition is caught at the first divergent step, named
 //! by step, action and field (ver §6.2 item 7); and every observed field is sensitive to the
 //! model (item 8).
 
 use std::path::PathBuf;
 
 use mayfly_conformance::itf::{self, Trace, Value};
-use mayfly_conformance::lifecycle::{self, KNOWN_DIVERGENCES, canonical_action};
+use mayfly_conformance::lifecycle::{self, KNOWN_DIVERGENCES, KnownDivergence, canonical_action};
 use mayfly_conformance::manifest::{self, Entry, Manifest};
 use mayfly_conformance::replay::{Divergence, ReplayError};
 use mayfly_control_domain::attempt::{
@@ -58,7 +58,6 @@ fn should_replay_every_committed_lifecycle_trace_when_the_aggregate_conforms() {
     // when
     let failures: Vec<String> = entries
         .iter()
-        .filter(|e| !e.step.starts_with("divergence"))
         .filter_map(|entry| {
             let (_, trace) = load(&manifest, &entry.step);
             lifecycle::replay::<Attempt>(entry, &trace)
@@ -68,8 +67,31 @@ fn should_replay_every_committed_lifecycle_trace_when_the_aggregate_conforms() {
         .collect();
 
     // then
-    assert!(entries.len() >= 12, "{entries:?}");
+    assert!(entries.len() >= 17, "{entries:?}");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn should_replay_each_resolved_divergence_when_its_regression_trace_is_replayed() {
+    // given: the scripts of the divergences VER-01 found, resolved by VER-01F
+    let manifest = regression();
+    let resolved = [
+        "unknownStopResolvedByListing",
+        "confirmRetirementInBackoff",
+        "confirmRetirementAfterExit",
+        "cloneAnsweredAfterRemoval",
+        "requarantineAfterVanished",
+    ];
+
+    for step in resolved {
+        let (entry, trace) = load(&manifest, step);
+
+        // when
+        let replayed = lifecycle::replay::<Attempt>(&entry, &trace);
+
+        // then
+        assert!(replayed.is_ok(), "{step}: {replayed:?}");
+    }
 }
 
 #[test]
@@ -353,16 +375,31 @@ fn should_compare_the_initial_state_when_the_model_starts_elsewhere() {
 }
 
 #[test]
-fn should_classify_no_divergence_as_known_when_a_field_or_value_differs() {
-    // given: the known clone divergence with another actual value
+fn should_classify_a_divergence_as_known_only_when_its_action_fields_and_values_match() {
+    // given: the I21 mutant's divergence, and an entry that names it
     let manifest = regression();
-    let (entry, trace) = load(&manifest, "divergenceCloneAnsweredAfterRemoval");
-    let mut found = divergence(lifecycle::replay::<Attempt>(&entry, &trace));
-    found.actual.set("instance", 2);
+    let (entry, trace) = load(&manifest, "retirementWaitsForDeregistration");
+    let found = divergence(lifecycle::replay::<RetiresAtOnce>(&entry, &trace));
+    let list = [KnownDivergence {
+        id: "retires-at-once",
+        action: "requestRetirement",
+        fields: &["phase", "retire_requested"],
+        pins: &[("phase", "Listening", "Retiring")],
+        regression: "retirementWaitsForDeregistration",
+        summary: "a test's own entry",
+    }];
+    let mut other_value = found.clone();
+    other_value.actual.set("phase", "Deleted");
+    let mut other_field = found.clone();
+    other_field.fields.push("tries");
+    let mut other_action = found.clone();
+    other_action.action = "bindJob".to_owned();
 
     // when
-    let classified = lifecycle::known(&found);
+    let classified = [&found, &other_value, &other_field, &other_action]
+        .map(|d| lifecycle::known_in(&list, d).map(|k| k.id));
 
     // then
-    assert_eq!(classified, None);
+    assert_eq!(classified, [Some("retires-at-once"), None, None, None]);
+    assert_eq!(lifecycle::known(&found), None);
 }

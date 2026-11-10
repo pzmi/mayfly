@@ -95,7 +95,9 @@ module lifecycle {
     diagnostics: str,
     runnerExited: bool,
     // quarantined because a stop or start found its recorded VM absent on a complete listing:
-    // we know it was there and did not remove it, a desync kept for review (ADR 0066)
+    // we know it was there and did not remove it, a desync kept for review (ADR 0066); the
+    // reason of the quarantine the attempt is in, so leaving it (an operator's resolution)
+    // clears it (VER-01F)
     vanished: bool,
   }
 
@@ -195,10 +197,12 @@ module lifecycle {
   /// Directives counted against the retry budget: the stage directives, stops and deletes.
   pure def isCounted(d: str): bool = isStageDirective(d) or isCleanupDirective(d)
 
-  /// Retirement decided: cleanup begins, or ends at once when no VM was ever cloned.
+  /// Retirement decided: cleanup begins, or ends at once when no VM was ever cloned. An
+  /// operator's resolution of a quarantine is one, so it ends a vanished case too: a later
+  /// quarantine has its own reason (VER-01F).
   pure def retire(x: Attempt): Attempt =
     { ...x, phase: if (x.instance == NONE) DELETED else RETIRING, retireRequested: false,
-      pending: NO_DIRECTIVE, unknown: false, tries: 0 }
+      pending: NO_DIRECTIVE, unknown: false, tries: 0, vanished: false }
 
   /// Quarantine; entering it restarts the count of stops, staying in it does not.
   pure def quarantine(x: Attempt): Attempt =
@@ -361,8 +365,11 @@ module lifecycle {
   /// The world after the pending directive took effect, and whether it created a VM.
   pure def applyEffect(x: Attempt, world: World, fresh: int): World =
     if (x.pending == CLONE_VM)
-      // clones are idempotent by name: an existing VM of this name is kept
-      if (world.applied or world.exists) { ...world, applied: true }
+      // clones are idempotent by name: an existing VM of this name is kept, and a clone is
+      // re-observed by name before its effect (plan §8.2, DP-01), so a delivery that finds no
+      // VM, even one an earlier delivery cloned and someone then removed, clones afresh; a
+      // `VmCloned` always carries the instance id of a listed VM (VER-01F)
+      if (world.exists) { ...world, applied: true }
       else { exists: true, instance: fresh, running: false, applied: true }
     else if (world.applied) world
     else if (x.pending == START_VM) { ...world, running: world.exists, applied: true }
@@ -538,9 +545,11 @@ module lifecycle {
           { ...x, phase: VERIFYING, vmRunning: true, pending: NO_DIRECTIVE, unknown: false,
             tries: 0 }
         else notApplied(x)
+      // a stop the listing shows took effect is a stop that succeeded: `VmStopped`, as its
+      // success reply records, so the next cleanup directive has its own budget (VER-01F)
       else if (x.unknown and x.pending == STOP_VM)
         if (w.running) notApplied(x)
-        else { ...x, vmRunning: false, pending: NO_DIRECTIVE, unknown: false }
+        else { ...x, vmRunning: false, pending: NO_DIRECTIVE, unknown: false, tries: 0 }
       else if (x.unknown and x.pending == DELETE_VM) notApplied(x)
       else if (x.instance == NONE and idle(x) and not(terminal(x)) and x.phase != QUARANTINED)
         // a VM of our exact name that we never recorded cloning
@@ -658,10 +667,14 @@ module lifecycle {
       g),
   }
 
-  /// `ConfirmRetirement` after the registration was deregistered.
+  /// `ConfirmRetirement` after the registration was deregistered. The request outlives the
+  /// phase it was made in: a failed fresh verification backs off, a runner that exits finishes,
+  /// and the deregistration still ends in a confirmation there (VER-01F). A lost VM ends the
+  /// attempt instead: it is terminal, and nothing is confirmed after it.
   action confirmRetirement = all {
     idle(a),
     a.retireRequested,
+    not(terminal(a)),
     commit("command", retire(a), g),
   }
 
@@ -669,6 +682,7 @@ module lifecycle {
   action withdrawRetirement = all {
     idle(a),
     a.retireRequested,
+    not(terminal(a)),
     commit("command", { ...a, retireRequested: false }, g),
   }
 
@@ -877,9 +891,10 @@ module lifecycle {
 
   /// vanishedStaysQuarantined: an attempt quarantined because its recorded VM vanished stays
   /// quarantined until an operator resolves it; no inventory, saga step or retry takes it out
-  /// (ADR 0066: a desync is reported, never absorbed).
-  val vanishedStaysQuarantined =
-    (a.vanished and not(g.operatorResolved)) implies a.phase == QUARANTINED
+  /// (ADR 0066: a desync is reported, never absorbed). The flag is the reason of the current
+  /// quarantine and only the resolution's `retire` clears it (VER-01F), so the invariant needs
+  /// no history: it also holds for a second vanished case after a first one was resolved.
+  val vanishedStaysQuarantined = a.vanished implies a.phase == QUARANTINED
 
   /// retryKeepsNameAndGeneration: every clone, first or retried, targets the name and slot
   /// generation fixed at start.
@@ -1130,6 +1145,63 @@ module lifecycle {
       .expect(a.phase == PREPARED and a.vmRunning and w.running and allInvariants)
       .then(beginActivation).then(issueNext).expect(a.pending == VERIFY_GUEST)
   }
+
+  // VER-01F: a lost stop reply resolved by a listing that shows the VM stopped is the stop's
+  // success (`VmStopped`): the count of tries restarts, and the delete has its own budget.
+  run unknownStopResolvedByListingTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).expect(a.pending == STOP_VM and a.tries == 1)
+      .then(replyLostWith(1, true)).expect(a.unknown)
+      .then(inventoryPresent)
+      .expect(not(a.unknown) and a.pending == NO_DIRECTIVE and not(a.vmRunning) and a.tries == 0
+        and i10UnknownLeavesOnlyOnObservation)
+      .then(issueNext).expect(a.pending == DELETE_VM and a.tries == 1 and allInvariants)
+  }
+
+  // VER-01F: a retirement requested while activating outlives a failed fresh verification;
+  // the deregistration's confirmation retires the attempt from Backoff.
+  run confirmRetirementInBackoffTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, true)).then(recordJitHandle).then(adopt)
+      .then(requestRetirement).expect(a.phase == ACTIVATING and a.retireRequested)
+      .then(issueNext).expect(a.pending == VERIFY_GUEST)
+      .then(replyRefused)
+      .expect(a.phase == BACKOFF and a.stage == "activate" and a.retireRequested)
+      .then(confirmRetirement)
+      .expect(a.phase == RETIRING and not(a.retireRequested) and allInvariants)
+  }
+
+  // VER-01F: and a runner that exits after a launch of unknown outcome finishes with the
+  // request still waiting for its deregistration; the confirmation retires it from Finished.
+  run confirmRetirementAfterExitTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, true)).then(recordJitHandle)
+      .then(issueNext).expect(a.pending == LAUNCH_RUNNER)
+      .then(replyLaunchUnknown).then(requestRetirement).expect(a.retireRequested)
+      .then(runnerExited).expect(a.phase == FINISHED and a.retireRequested)
+      .then(confirmRetirement)
+      .expect(a.phase == RETIRING and not(a.retireRequested) and allInvariants)
+  }
+
+  // VER-01F: a clone whose lost reply took effect, and whose VM someone then removed, is
+  // cloned afresh by its re-delivery: the reply carries the new VM's instance id.
+  run cloneAnsweredAfterRemovalTest = {
+    initWith(1, 1).then(issueNext).then(replyLostWith(1, true))
+      .then(vmReplacedOrRemovedWith(1, true)).expect(a.unknown and not(w.exists))
+      .then(ok)
+      .expect(a.phase == BOOTING and a.instance == 1 and w.exists and w.instance == 1
+        and i10UnknownLeavesOnlyOnObservation and allInvariants)
+  }
+
+  // VER-01F: an operator's resolution ends a vanished case; a later quarantine has its own
+  // reason, so a later absence is read by that reason, not as the old desync.
+  run requarantineAfterVanishedTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext)
+      .then(vmReplacedOrRemovedWith(1, true)).then(replyTargetAbsent)
+      .expect(a.phase == QUARANTINED and a.vanished)
+      .then(resolveQuarantine).expect(a.phase == RETIRING and not(a.vanished))
+      .then(quarantineCommand)
+      .expect(a.phase == QUARANTINED and not(a.vanished) and allInvariants)
+  }
 }
 
 /**
@@ -1141,9 +1213,10 @@ module lifecycle {
  * relations name them (`fresh`, `claim`, `applied`, `job`, `other`, `removed`, `instance`,
  * `activated`), and its `any` makes the model action taken `mbt::actionTaken`.
  *
- * The scripts follow the `run`s of `lifecycle` of the same name, and four reproduce the
- * divergences the first replays found between the model and the aggregate (the `divergence`
- * scripts; `mayfly-conformance`'s `KNOWN_DIVERGENCES` names each and its follow-up).
+ * The scripts follow the `run`s of `lifecycle` of the same name. Four of them reproduced the
+ * divergences the first replays found between the model and the aggregate (VER-01); VER-01F
+ * resolved each and keeps its script as a regression trace (`unknownStopResolvedByListing`,
+ * `confirmRetirementInBackoff`, `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`).
  *
  * Each trace is regenerated into `formal/traces/regression/` from the repository root (the
  * scripts are deterministic; the seed is recorded for byte-for-byte freshness, VER-01):
@@ -1235,20 +1308,25 @@ module lifecycle_traces {
     prepare(true), s("recordJitHandle"), ISSUE, OK, s("bindJob"), s("vmObservedStopped"),
   ]
 
-  // The divergences (see the module docs).
+  // The divergences VER-01 found and VER-01F resolved (see the module docs).
   /// A stop whose reply was lost, resolved by a listing showing the VM stopped.
-  pure val DIVERGENCE_UNKNOWN_STOP_RESOLVED_BY_LISTING =
-    TO_STOPPING.concat([lost(true), s("inventoryPresent")])
+  pure val UNKNOWN_STOP_RESOLVED_BY_LISTING =
+    TO_STOPPING.concat([lost(true), s("inventoryPresent"), ISSUE])
   /// A retirement requested while activating, confirmed after the fresh verification failed.
-  pure val DIVERGENCE_CONFIRM_RETIREMENT_IN_BACKOFF = [
+  pure val CONFIRM_RETIREMENT_IN_BACKOFF = [
     prepare(true), s("recordJitHandle"), s("adopt"), s("requestRetirement"), ISSUE,
     s("replyRefused"), s("confirmRetirement"),
   ]
+  /// A retirement requested after a launch of unknown outcome, confirmed after the exit.
+  pure val CONFIRM_RETIREMENT_AFTER_EXIT = [
+    prepare(true), s("recordJitHandle"), ISSUE, s("replyLaunchUnknown"),
+    s("requestRetirement"), s("runnerExited"), s("confirmRetirement"),
+  ]
   /// A clone whose reply was lost and whose VM was then removed, answered by a re-delivery.
-  pure val DIVERGENCE_CLONE_ANSWERED_AFTER_REMOVAL =
+  pure val CLONE_ANSWERED_AFTER_REMOVAL =
     [ISSUE, lost(true), replaced(1, true), OK]
   /// A vanished quarantine resolved by an operator, then quarantined again by a policy.
-  pure val DIVERGENCE_REQUARANTINE_AFTER_VANISHED = TO_STOPPING.concat([
+  pure val REQUARANTINE_AFTER_VANISHED = TO_STOPPING.concat([
     replaced(1, true), s("replyTargetAbsent"), s("resolveQuarantine"), s("quarantineCommand"),
   ])
 
@@ -1313,10 +1391,10 @@ module lifecycle_traces {
   action deleteLostThenAnsweredDeleted = script(DELETE_LOST_THEN_ANSWERED_DELETED)
   action stopOfVanishedVmQuarantines = script(STOP_OF_VANISHED_VM_QUARANTINES)
   action activationAtOnce = script(ACTIVATION_AT_ONCE)
-  action divergenceUnknownStopResolvedByListing =
-    script(DIVERGENCE_UNKNOWN_STOP_RESOLVED_BY_LISTING)
-  action divergenceConfirmRetirementInBackoff = script(DIVERGENCE_CONFIRM_RETIREMENT_IN_BACKOFF)
-  action divergenceCloneAnsweredAfterRemoval = script(DIVERGENCE_CLONE_ANSWERED_AFTER_REMOVAL)
-  action divergenceRequarantineAfterVanished = script(DIVERGENCE_REQUARANTINE_AFTER_VANISHED)
+  action unknownStopResolvedByListing = script(UNKNOWN_STOP_RESOLVED_BY_LISTING)
+  action confirmRetirementInBackoff = script(CONFIRM_RETIREMENT_IN_BACKOFF)
+  action confirmRetirementAfterExit = script(CONFIRM_RETIREMENT_AFTER_EXIT)
+  action cloneAnsweredAfterRemoval = script(CLONE_ANSWERED_AFTER_REMOVAL)
+  action requarantineAfterVanished = script(REQUARANTINE_AFTER_VANISHED)
 
 }
