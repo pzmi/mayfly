@@ -64,8 +64,11 @@ cargo xtask land <sha> --push origin main    # orchestrator only (D4)
 
 Coverage is live: `cargo xtask coverage [--changed-since REV]`, stages `coverage` and
 `changed-lines`; the floors in `coverage-floor.toml` only ratchet up. The formal stages
-`formal-typecheck` and `formal-test` are live (FND-06). Later tasks add stages (conformance
-VER-01, mutants VER-05, `contract-postgres` ES-09). `quick` is not `check`;
+`formal-typecheck` and `formal-test` are live (FND-06). Conformance is live (VER-01): stages
+`formal-freshness` (regression traces regenerate byte for byte) and `conformance-replay`
+(seeded traces replayed against the Rust aggregates); `cargo xtask conformance [--model M]
+[--seed S] [--traces K] [--steps N]` repeats a run from its printed seed. Later tasks add stages
+(mutants VER-05, `contract-postgres` ES-09). `quick` is not `check`;
 never report one as the other. A repeatable job becomes an `xtask` subcommand. A missing tool
 fails, never a skipped-but-green check. Run the gate in the foreground; commit only on green.
 **Never prefix a command with inline `MAYFLY_*`, `QUINT_SEED` or `PROPTEST_*` variables**; a
