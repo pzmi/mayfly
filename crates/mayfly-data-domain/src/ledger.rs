@@ -8,13 +8,27 @@
 //! counted as macOS, a running VM of unknown memory as [`Sizing::vm_memory_bytes`], an
 //! outcome that is `Unknown` keeps its reservation until a complete listing shows what exists,
 //! and every sum saturates, so an overflow fits nothing.
+//!
+//! Owner decision pending: how unknown sizes are counted (unknown memory as
+//! [`Sizing::vm_memory_bytes`], unknown guest as macOS); see the KER-08 card in `doc/tasks.md`.
+//!
+//! What a VM takes is the data plane's own sizing, never only what the control plane sent
+//! (ADR 0024, mutant 24): a `StartVm` is counted at the larger of its run options and
+//! [`Sizing`] ([`Ledger::demand`]), so a zero or tiny request cannot skip the memory fit.
+//!
+//! **DP-01 must serialise inventory listing against effects.** [`Ledger::apply_inventory`]
+//! takes a complete listing as the truth and removes every VM absent from it: a listing taken
+//! before a clone was applied and applied after it would forget that clone and free its
+//! capacity. DP-01 lists only while no VM effect runs, or discards a listing that overlapped
+//! one. Likewise [`HostProbe::foreign`] counts only VMs whose names are not `mf-*`: the ledger
+//! counts a malformed `mf-*` VM itself from the inventory ([`Ledger::malformed`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use mayfly_domain::{DirectiveId, Epoch, ImageDigest, OwnedVmName, Resources, VmNameClass};
 use mayfly_protocol::{
     BaseName, Capacity, CapacityConstraint, CapacityReport, DirectiveKind, GuestOs,
-    ResourceDimension,
+    ResourceDimension, RunOptions,
 };
 
 use crate::inventory::Inventory;
@@ -29,7 +43,9 @@ pub struct Sizing {
     pub base_disk_bytes: u64,
     /// The disk ceiling of one clone.
     pub clone_disk_bytes: u64,
-    /// The memory a running VM of unknown memory is counted with (one adopted after a restart).
+    /// The memory of one running VM by the data plane's own configuration: what a running VM
+    /// of unknown memory is counted with (one adopted after a restart), and the floor of a
+    /// `StartVm`'s memory demand whatever its run options ask (ADR 0024).
     pub vm_memory_bytes: u64,
 }
 
@@ -40,7 +56,9 @@ pub struct HostProbe {
     pub totals: Capacity,
     /// What the operator keeps back from VMs.
     pub reserve: Capacity,
-    /// What VMs that are not ours use: their slots, running macOS guests, memory and disk.
+    /// What VMs that are not ours use: their slots, running macOS guests, memory and disk. Only
+    /// VMs whose names are not `mf-*` ([`VmNameClass::Foreign`]): a malformed `mf-*` VM is
+    /// counted by the ledger from the inventory ([`Ledger::malformed`]), never here too.
     pub foreign: Capacity,
     /// Free disk is under the low-water mark: nothing that needs disk starts (F17).
     pub disk_low_water: bool,
@@ -102,9 +120,15 @@ pub struct Ledger {
     /// Our VMs: every listed VM whose name has our shape (plan §8.4: shape, not ownership; for
     /// accounting a VM is counted either way).
     pub vms: BTreeMap<OwnedVmName, VmUse>,
+    /// Listed VMs with the `mf-` prefix whose names do not parse ([`VmNameClass::MalformedManaged`]):
+    /// neither ours nor in [`HostProbe::foreign`], so counted here, the larger way (macOS, the
+    /// configured memory while running, a clone's disk), and rebuilt by each complete inventory.
+    /// Never a target: no directive can name one (plan §8.4: reported, never deleted).
+    pub malformed: BTreeMap<String, VmUse>,
     /// Pulled images and their disk.
     pub images: BTreeMap<ImageDigest, u64>,
-    /// Materialised bases: also the set a destructive directive may never name (ADR 0026).
+    /// Materialised bases. No VM directive can name one (ADR 0026): it names an
+    /// [`OwnedVmName`] (`mf-`), which a base name (`mfb-`) never parses as (I05).
     pub bases: BTreeMap<BaseName, BaseUse>,
     /// Capacity set aside per `(epoch, directive)` from admission until its outcome is applied.
     pub reservations: BTreeMap<(Epoch, DirectiveId), Reservation>,
@@ -176,6 +200,7 @@ impl Ledger {
             sizing,
             probe,
             vms: BTreeMap::new(),
+            malformed: BTreeMap::new(),
             images: BTreeMap::new(),
             bases: BTreeMap::new(),
             reservations: BTreeMap::new(),
@@ -189,12 +214,15 @@ impl Ledger {
         minus(self.probe.totals, self.probe.reserve)
     }
 
-    /// What is used: our VMs, images, bases, every reservation and foreign VMs.
+    /// What is used: our VMs, malformed `mf-*` VMs, images, bases, every reservation and
+    /// foreign VMs. Pinned by
+    /// `tests/data_plane/ledger.rs::should_count_a_malformed_mf_vm_when_a_complete_inventory_lists_it`.
     #[must_use]
     pub fn used(&self) -> Capacity {
         let vms = self
             .vms
             .values()
+            .chain(self.malformed.values())
             .fold(ZERO, |sum, vm| plus(sum, running_use(vm)));
         let images = self
             .images
@@ -222,8 +250,12 @@ impl Ledger {
 
     /// What `kind` would take, by the data plane's own sizing and records. A target that is
     /// already there takes nothing more (a re-run is a re-observation, ADR 0042); a kind that
-    /// creates or starts nothing takes nothing. Pinned by
-    /// `tests/data_plane/matrix.rs::should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_host`.
+    /// creates or starts nothing takes nothing. A `StartVm` takes at least the configured
+    /// sizing ([`Ledger::started`]), whatever its run options ask. A `StartVm` of a VM the
+    /// ledger does not know takes no VM slot: there is nothing to start, so its effect fails;
+    /// if it is applied all the same, [`Ledger::commit`] records the VM and its slot. Pinned by
+    /// `tests/data_plane/matrix.rs::should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_host`
+    /// and `tests/data_plane/ledger.rs::should_count_a_start_at_the_configured_sizing_when_its_run_options_ask_for_less`.
     #[must_use]
     pub fn demand(&self, kind: &DirectiveKind) -> Capacity {
         match kind {
@@ -245,7 +277,7 @@ impl Ledger {
                 vm_name,
                 run_options,
             } => {
-                let wanted = run_options.resources;
+                let wanted = self.started(run_options);
                 match self.vms.get(vm_name) {
                     Some(vm) if vm.running => ZERO,
                     Some(vm) => Capacity {
@@ -364,6 +396,7 @@ impl Ledger {
                 vm_name,
                 run_options,
             } => {
+                let started = self.started(run_options);
                 let vm = self.vms.entry(vm_name.clone()).or_insert(VmUse {
                     guest: GuestOs::Macos,
                     running: false,
@@ -371,8 +404,8 @@ impl Ledger {
                     disk_bytes: sizing.clone_disk_bytes,
                 });
                 vm.running = true;
-                vm.memory_bytes = run_options.resources.memory_bytes;
-                vm.disk_bytes = vm.disk_bytes.max(run_options.resources.disk_bytes);
+                vm.memory_bytes = started.memory_bytes;
+                vm.disk_bytes = vm.disk_bytes.max(started.disk_bytes);
             }
             DirectiveKind::StopVm { proof, .. } => {
                 if let Some(vm) = self.vms.get_mut(&proof.vm_name) {
@@ -412,28 +445,63 @@ impl Ledger {
         }
     }
 
+    /// What a `StartVm` runs with by the ledger: its run options, raised to the configured
+    /// sizing (the memory of one VM, the disk of one clone). The control plane may ask for
+    /// more and is counted at that; it never gets less counted than the data plane's own sizing
+    /// (ADR 0024, mutant 24). Raising rather than refusing: the data plane has no per-pool
+    /// ceiling to refuse against, and counting the larger way never over-commits.
+    #[must_use]
+    pub fn started(&self, run_options: &RunOptions) -> Resources {
+        let wanted = run_options.resources;
+        Resources::new(
+            wanted.memory_bytes.max(self.sizing.vm_memory_bytes),
+            wanted.disk_bytes.max(self.sizing.clone_disk_bytes),
+        )
+    }
+
     /// Applies an inventory. A complete one is the truth about our VMs: a listed VM of our
     /// shape is counted (unknown ones the larger way), an unlisted one is gone, and held VM
-    /// reservations are settled. An incomplete one changes nothing (I25): no VM is released on
-    /// it. Pinned by
+    /// reservations are settled; a listed malformed `mf-*` VM is counted in
+    /// [`Ledger::malformed`]. An incomplete one changes nothing (I25): no VM is released on it.
+    /// The caller serialises listing against effects (module doc). Pinned by
     /// `tests/data_plane/ledger.rs::should_release_nothing_when_an_inventory_is_incomplete`.
     pub fn apply_inventory(&mut self, inventory: &Inventory) {
         let listed = match inventory {
             Inventory::Complete { vms } => vms,
             Inventory::Incomplete { .. } => return,
         };
+        let sizing = self.sizing;
         let mut ours: BTreeMap<OwnedVmName, bool> = BTreeMap::new();
+        self.malformed.clear();
         for vm in listed {
             match mayfly_domain::classify_vm_name(&vm.name) {
                 VmNameClass::WellFormed(name) => {
                     ours.insert(name, vm.running);
                 }
-                VmNameClass::MalformedManaged | VmNameClass::Foreign => {}
+                VmNameClass::MalformedManaged => {
+                    self.malformed.insert(
+                        vm.name.clone(),
+                        VmUse {
+                            guest: GuestOs::Macos,
+                            running: vm.running,
+                            memory_bytes: if vm.running {
+                                sizing.vm_memory_bytes
+                            } else {
+                                0
+                            },
+                            disk_bytes: sizing.clone_disk_bytes,
+                        },
+                    );
+                }
+                VmNameClass::Foreign => {}
             }
         }
         self.vms.retain(|name, _| ours.contains_key(name));
-        let sizing = self.sizing;
         for (name, running) in ours {
+            // Owner decision pending: an adopted VM's unknown guest is counted as macOS and its
+            // unknown memory as `Sizing::vm_memory_bytes` (proposal: the pool maximum, in an
+            // ADR); see "Owner decisions pending (KER-08 review)" on the KER-08 card in
+            // doc/tasks.md.
             let vm = self.vms.entry(name).or_insert(VmUse {
                 guest: GuestOs::Macos,
                 running: false,
@@ -480,13 +548,6 @@ impl Ledger {
             .retain(|_, r| !(r.held && r.settles == Settles::Images));
     }
 
-    /// Whether `name` is one of the image bases (ADR 0026: never the target of a destructive
-    /// directive).
-    #[must_use]
-    pub fn is_base(&self, name: &str) -> bool {
-        self.bases.keys().any(|base| base.as_str() == name)
-    }
-
     /// The `CapacityReported` content now, under the next report id (ADR 0024). Pinned by
     /// `tests/data_plane/ledger.rs::should_report_totals_used_free_and_foreign_when_capacity_is_reported`.
     pub fn report(&mut self) -> CapacityReport {
@@ -495,10 +556,14 @@ impl Ledger {
         let totals = self.available();
         let used = self.used();
         let probe = &self.probe;
+        let foreign = self
+            .malformed
+            .values()
+            .fold(probe.foreign, |sum, vm| plus(sum, running_use(vm)));
         let flags = [
             (probe.disk_low_water, CapacityConstraint::DiskLowWater),
             (probe.memory_pressure, CapacityConstraint::MemoryPressure),
-            (probe.foreign != ZERO, CapacityConstraint::ForeignGuests),
+            (foreign != ZERO, CapacityConstraint::ForeignGuests),
             (probe.reserve != ZERO, CapacityConstraint::OperatorReserve),
             (
                 probe.hypervisor_limit || used.macos_guests >= totals.macos_guests,
@@ -510,7 +575,7 @@ impl Ledger {
             totals,
             used,
             free: minus(totals, used),
-            foreign: probe.foreign,
+            foreign,
             reasons: flags
                 .into_iter()
                 .filter(|(on, _)| *on)

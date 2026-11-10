@@ -1,7 +1,8 @@
 //! Builders and names shared by the data-plane tests.
 
 use mayfly_data_domain::{
-    DataPlane, Discard, HostProbe, Ledger, LinkOutcome, LinkStimulus, Receipt, Sizing,
+    DataPlane, Discard, HostProbe, Ledger, LinkOutcome, LinkStimulus, Receipt, Reobservation,
+    Sizing,
 };
 use mayfly_domain::{
     AttemptId, Deadline, DirectiveId, Epoch, Generation, HostId, ImageDigest, Millis, OwnedVmName,
@@ -60,6 +61,19 @@ pub fn proof(n: u128) -> OwnershipProof {
         vm_name: vm(n),
         instance_id: ProviderInstanceId::sample(),
     }
+}
+
+/// A re-observation of `name` with `instance_id`.
+pub fn seen(name: OwnedVmName, instance_id: ProviderInstanceId) -> Reobservation {
+    Reobservation {
+        vm_name: name,
+        instance_id,
+    }
+}
+
+/// The re-observation that matches [`proof`]`(n)` exactly.
+pub fn seen_as_proved(n: u128) -> Reobservation {
+    seen(vm(n), ProviderInstanceId::sample())
 }
 
 pub fn base() -> BaseName {

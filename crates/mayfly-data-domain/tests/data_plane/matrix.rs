@@ -591,7 +591,7 @@ fn should_answer_every_effect_when_it_is_applied_in_its_session() {
             dp.reobserved(
                 EPOCH,
                 d.directive_id,
-                Some(&mayfly_domain::Sample::sample()),
+                Some(&super::support::seen_as_proved(1)),
             );
         }
         let done = dp.finish(EPOCH, d.directive_id, Stimulus::Applied(applied(&kind)));

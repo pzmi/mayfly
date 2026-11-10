@@ -46,3 +46,22 @@ epochs that were already used, and nothing outside the journal remembers the hig
 - A marker file written into the VM's directory: reads provider internals.
 - Floor in the Keychain (headless access), a sidecar in the state directory (restored with it),
   or no floor (ghost writers after a restore).
+
+## Implementation note (2026-11-10), not an amendment
+
+Recorded from the KER-08 checkpoint review (KER-08F); the decision and its status are unchanged.
+
+- A `MaterialiseImage` whose runner version is malformed (empty, longer than 64 bytes, or not
+  inert: anything outside `[A-Za-z0-9.+_-]`) is refused `effect_failed` before it reaches argv
+  (`mayfly-data-domain` `executor::admission`; pinned by
+  `tests/data_plane/executor.rs::should_refuse_a_runner_version_when_it_is_empty_too_long_or_not_inert`).
+- A VM directive naming a VM of another host, and a `StopVm` or `DeleteVm` whose proof names
+  another host, is refused `protected_target` (pinned by
+  `tests/data_plane/executor.rs::should_refuse_a_protected_target_when_a_delete_names_another_host`
+  and the `other_host` column of `tests/fixtures/matrix/admission.txt`).
+- Decision 1's base refusal holds by type: a VM directive names an `OwnedVmName` (`mf-`), which
+  a base name (`mfb-`) never parses as (I05), so the executor has no runtime base check (pinned
+  by `tests/data_plane/executor.rs::should_never_parse_a_base_name_as_a_vm_name_when_a_vm_directive_could_name_it`).
+- The re-observation before a destructive effect compares the exact name, the generation and
+  the instance id with the proof (`DataPlane::reobserved`; pinned by
+  `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`).

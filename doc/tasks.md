@@ -485,6 +485,12 @@ content) with refusal `insufficient_resources` (I33).
 Accept: exhaustive matrices; stale epoch never executed (answered `Unknown{stale_epoch}`,
 ADR 0042); delete without matching proof or with a changed instance id refused; a directive that
 does not fit is refused whatever the CP sent (mutant 24).
+Owner decisions pending (KER-08 review): (a) unknown sizes: an adopted VM of unknown memory is
+counted at `Sizing::vm_memory_bytes` and one of unknown guest as macOS; proposal: count unknown
+memory as the pool maximum and record it, with unknown guest = macOS, in an ADR; (b) a `DeleteVm`
+re-sent (new id or session) after its delete succeeded finds the target absent and is answered
+`Refused(ProofMismatch)`; proposal: the data plane answers `VmDeleted` when a complete listing
+shows the target absent. Both are marked `Owner decision pending:` in `mayfly-data-domain`.
 
 #### KER-09 Registration model and `RunnerRegistration` aggregate
 Cites: dm §6.5, P10–P14, ADRs 0028, 0029, 0038. Model first: `formal/registration.qnt` (I19, I20,
@@ -750,6 +756,10 @@ and emitting `CapacityReported` on handshake, change and request; inventory obse
 test kit (ADR 0019).
 Accept: component tests: duplicate directive executes once; ambiguous provider error → `Unknown`;
 restart rebuilds ledger and inventory from observation; an over-allocating CP is refused (I33).
+Note (KER-08 review): `Ledger::apply_inventory` treats a complete listing as the truth and drops
+every VM absent from it, so the executor serialises inventory listing against VM effects (a
+listing that overlapped an effect is discarded, never applied); `HostProbe::foreign` counts only
+non-`mf-*` VMs, since the ledger counts malformed `mf-*` VMs itself from the inventory.
 
 #### DP-02 In-process link and link contract suite
 Cites: plan §3.3. `mayfly-adapter-link::inproc` with bounded channels and serde round-trip; the

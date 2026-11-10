@@ -233,3 +233,119 @@ fn should_report_totals_used_free_and_foreign_when_capacity_is_reported() {
         ])
     );
 }
+
+#[test]
+fn should_count_a_start_at_the_configured_sizing_when_its_run_options_ask_for_less() {
+    // given: room for exactly one VM at the configured 8 GiB, and a request for none
+    let mut probe = roomy();
+    probe.totals = capacity(4, 2, 12, 1000);
+    let mut dp = super::support::open_with(mayfly_protocol::Mode::Normal, ledger(probe));
+    let start = |n: u128, id: u128| {
+        directive(
+            id,
+            EPOCH,
+            DirectiveKind::StartVm {
+                vm_name: vm(n),
+                run_options: mayfly_protocol::RunOptions {
+                    resources: mayfly_domain::Resources::new(0, 1),
+                },
+            },
+        )
+    };
+    let tiny = |n: u128, id: u128| {
+        let mut d = start(n, id);
+        if let DirectiveKind::StartVm { run_options, .. } = &mut d.kind {
+            run_options.resources = mayfly_domain::Resources::new(1, 1);
+        }
+        d
+    };
+    let (first, second) = (start(1, 1), tiny(2, 2));
+
+    // when
+    let demand = dp.ledger.demand(&first.kind);
+    let admitted = dp.receive(V1_0, &first, NOW);
+    dp.finish(
+        EPOCH,
+        first.directive_id,
+        Stimulus::Applied(mayfly_protocol::ObservationKind::VmBooted),
+    );
+    let recorded = dp.ledger.vms[&vm(1)];
+    let over = dp.receive(V1_0, &second, NOW);
+
+    // then
+    assert_eq!(demand, capacity(0, 1, 8, 80), "the data plane's own sizing");
+    assert_eq!(admitted, mayfly_data_domain::Receipt::Execute);
+    assert_eq!(
+        (recorded.memory_bytes, recorded.disk_bytes),
+        (8 * GIB, 80 * GIB),
+        "recorded at the sizing, never at what the control plane sent"
+    );
+    match over {
+        mayfly_data_domain::Receipt::Reply(reply) => assert_eq!(
+            reply.kind,
+            mayfly_protocol::ObservationKind::DirectiveRefused {
+                reason: mayfly_protocol::RefusalReason::InsufficientResources {
+                    dimension: mayfly_protocol::ResourceDimension::Memory,
+                },
+            },
+            "a one-byte request cannot over-commit memory"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn should_count_a_start_at_its_run_options_when_they_ask_for_more_than_the_sizing() {
+    // given
+    let ledger = ledger(roomy());
+    let start = DirectiveKind::StartVm {
+        vm_name: vm(1),
+        run_options: mayfly_protocol::RunOptions {
+            resources: mayfly_domain::Resources::new(16 * GIB, 120 * GIB),
+        },
+    };
+
+    // when
+    let demand = ledger.demand(&start);
+
+    // then
+    assert_eq!(demand, capacity(0, 1, 16, 120));
+}
+
+#[test]
+fn should_count_a_malformed_mf_vm_when_a_complete_inventory_lists_it() {
+    // given
+    let mut ledger = ledger(roomy());
+
+    // when
+    ledger.apply_inventory(&Inventory::Complete {
+        vms: vec![
+            listed("mf-not-ours".to_owned(), true),
+            listed("mf-also-not-ours".to_owned(), false),
+            listed("someone-elses-vm".to_owned(), true),
+        ],
+    });
+    let used = ledger.used();
+    let report = ledger.report();
+    ledger.apply_inventory(&Inventory::Incomplete {
+        reason: InventoryGap::Unparseable,
+    });
+    let kept = ledger.used();
+    ledger.apply_inventory(&Inventory::Complete { vms: Vec::new() });
+
+    // then
+    assert!(ledger.vms.is_empty(), "never ours");
+    assert_eq!(
+        used,
+        capacity(2, 1, 8, 160),
+        "two slots, one running macOS guest at the configured memory, two clones' disk"
+    );
+    assert_eq!(report.foreign, capacity(2, 1, 8, 160));
+    assert!(report.reasons.contains(&CapacityConstraint::ForeignGuests));
+    assert_eq!(kept, used, "an incomplete inventory releases nothing (I25)");
+    assert_eq!(
+        ledger.used(),
+        capacity(0, 0, 0, 0),
+        "gone once a complete listing omits them"
+    );
+}

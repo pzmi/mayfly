@@ -8,10 +8,12 @@
 //! frame of a session not entered is discarded, one of an older session answered
 //! `OutcomeUnknown{stale_epoch}` and never executed), the outcome table (a repeated id answers
 //! the recorded outcome), then [`admission`]: safe mode (I29), the deadline, bounded strings,
-//! the target (another host's VM, an image base), the proof's own consistency, and the
-//! resource ledger (I33). Nothing the control plane allocated overrides a check.
+//! the target (another host's VM), the proof's own consistency, and the resource ledger (I33).
+//! Nothing the control plane allocated overrides a check. An image base is never a VM
+//! directive's target by type: a VM directive names an [`OwnedVmName`] (`mf-`), which a base
+//! name (`mfb-`) never parses as (I05).
 
-use mayfly_domain::{DirectiveId, Epoch, HostId, Millis, ProviderInstanceId};
+use mayfly_domain::{DirectiveId, Epoch, HostId, Millis, OwnedVmName, ProviderInstanceId};
 use mayfly_protocol::{
     Directive, DirectiveKind, DirectiveOutcome, DirectiveRef, DirectiveTag, EpochCheck, Mode,
     ObservationKind, OwnershipProof, ProtocolVersion, RefusalReason, SUPPORTED, UnknownReason,
@@ -23,6 +25,16 @@ use crate::link::{self, Link, LinkOutcome, LinkStimulus};
 
 /// The longest runner version a `MaterialiseImage` may carry: it reaches argv and file names.
 pub const MAX_RUNNER_VERSION: usize = 64;
+
+/// What a re-observation found at a destructive directive's target, right before its effect
+/// (ADR 0026): the listed VM's parsed name (its generation included) and its instance id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reobservation {
+    /// The listed name, parsed.
+    pub vm_name: OwnedVmName,
+    /// The provider's instance id of that VM.
+    pub instance_id: ProviderInstanceId,
+}
 
 /// What `Executing` waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,20 +338,27 @@ impl DataPlane {
         receipt
     }
 
-    /// The target of the directive `id` admitted under `epoch` was re-observed with
-    /// `observed` as its instance id (`None`: not there). Only the proof's exact instance id
-    /// lets the effect run (ADR 0026); anything else is `ProofMismatch`. Pinned by
-    /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_instance_id_changed`.
+    /// The target of the directive `id` admitted under `epoch` was re-observed as `observed`
+    /// (`None`: not there). Only the proof's exact name, generation and instance id, all three,
+    /// let the effect run (ADR 0026); anything else is `ProofMismatch`. Pinned by
+    /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`
+    /// and `should_refuse_proof_mismatch_when_the_vm_is_gone_at_reobservation`.
+    ///
+    /// Owner decision pending: a `DeleteVm` re-sent under a new id or session after its delete
+    /// succeeded finds the target absent and is answered `Refused(ProofMismatch)` (proposal:
+    /// answer `VmDeleted` when a complete listing shows the target absent); see
+    /// "Owner decisions pending (KER-08 review)" on the KER-08 card in `doc/tasks.md`.
     pub fn reobserved(
         &mut self,
         epoch: Epoch,
         id: DirectiveId,
-        observed: Option<&ProviderInstanceId>,
+        observed: Option<&Reobservation>,
     ) -> Progress {
         self.advance(epoch, id, |entry| {
             Ok(Stimulus::ReObserved {
                 matches: proof_of(&entry.directive.kind)
-                    .is_some_and(|proof| observed == Some(&proof.instance_id)),
+                    .zip(observed)
+                    .is_some_and(|(proof, seen)| proven(proof, seen)),
             })
         })
     }
@@ -411,10 +430,11 @@ impl DataPlane {
 }
 
 /// The checks a received directive passes before it executes, in order: safe mode holds the
-/// effect kinds (I29); a directive past its deadline does not start; strings are bounded; a VM
-/// directive names a VM of this host, a destructive one never an image base (ADR 0026); a
-/// proof is consistent with its own name and the directive's attempt; and the ledger has room
-/// (I33). Pure: the ledger is read, not changed. Pinned by
+/// effect kinds (I29); a directive past its deadline does not start; strings are bounded (a
+/// malformed runner version is refused `effect_failed`); a VM directive names a VM of this
+/// host, else `protected_target` (ADR 0026; an image base it cannot name, see the module doc);
+/// a proof is consistent with its own name and the directive's attempt; and the ledger has
+/// room (I33). Pure: the ledger is read, not changed. Pinned by
 /// `tests/data_plane/matrix.rs::should_admit_or_refuse_every_kind_when_it_meets_each_condition`.
 ///
 /// # Errors
@@ -438,7 +458,7 @@ pub fn admission(
         return Err(RefusalReason::EffectFailed);
     }
     if let Some(vm) = kind.vm_name()
-        && (vm.host() != host || ledger.is_base(&vm.to_string()))
+        && vm.host() != host
     {
         return Err(RefusalReason::ProtectedTarget);
     }
@@ -486,6 +506,12 @@ fn well_formed(kind: &DirectiveKind) -> bool {
 
 /// Whether a proof agrees with its own VM name and with the directive's attempt: the name's
 /// slot, generation and attempt short are the proof's, and so is the directive's attempt.
+/// A directive without an attempt (`directive.attempt` is `None`: the protocol documents that
+/// for image and host directives only, but its type does not forbid it on a `StopVm` or
+/// `DeleteVm`) skips the attempt check: the proof is then checked against its own name only,
+/// and the re-observation ([`proven`]) still requires the exact name, generation and instance
+/// id. Pinned by
+/// `tests/data_plane/executor.rs::should_check_the_proof_against_its_name_only_when_the_directive_has_no_attempt`.
 fn consistent(proof: &OwnershipProof, directive: &Directive) -> bool {
     let name = &proof.vm_name;
     name.slot() == proof.slot
@@ -493,6 +519,15 @@ fn consistent(proof: &OwnershipProof, directive: &Directive) -> bool {
         && directive.attempt.is_none_or(|attempt| {
             attempt.attempt_id == proof.attempt_id && attempt.generation == proof.generation
         })
+}
+
+/// Whether a re-observed target is the proof's: the same name, the same generation and the
+/// same instance id (ADR 0026). The generation is part of the name; it is compared on its own
+/// too so that the rule reads as the ADR states it.
+fn proven(proof: &OwnershipProof, seen: &Reobservation) -> bool {
+    seen.vm_name == proof.vm_name
+        && seen.vm_name.generation() == proof.generation
+        && seen.instance_id == proof.instance_id
 }
 
 /// The proof a destructive directive carries.

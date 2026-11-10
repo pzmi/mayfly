@@ -13,7 +13,7 @@ use mayfly_protocol::{
 
 use super::support::{
     EPOCH, NOW, V1_0, applied, base, capacity, directive, every_kind, host, instance, ledger, open,
-    open_with, proof, roomy, vm,
+    open_with, proof, roomy, seen, seen_as_proved, vm,
 };
 
 fn reply_kind(receipt: &Receipt) -> ObservationKind {
@@ -227,12 +227,106 @@ fn should_refuse_proof_mismatch_when_the_instance_id_changed() {
     dp.receive(V1_0, &d, NOW);
 
     // when
-    let got = dp.reobserved(EPOCH, d.directive_id, Some(&instance("0a:00:00:00:00:02")));
+    let got = dp.reobserved(
+        EPOCH,
+        d.directive_id,
+        Some(&seen(vm(1), instance("0a:00:00:00:00:02"))),
+    );
     let again = dp.receive(V1_0, &d, NOW);
 
     // then
     assert_eq!(progress_kind(&got), refused(RefusalReason::ProofMismatch));
     assert_eq!(reply_kind(&again), refused(RefusalReason::ProofMismatch));
+}
+
+#[test]
+fn should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs() {
+    // given
+    let next_generation = mayfly_domain::OwnedVmName::new(
+        mayfly_domain::PoolName::sample(),
+        host(),
+        mayfly_domain::Slot::new(1),
+        Generation::new(2).expect("nonzero"),
+        mayfly_domain::AttemptId::from_u128(1),
+    );
+    let observations = [
+        (
+            "name",
+            seen(vm(2), mayfly_domain::ProviderInstanceId::sample()),
+        ),
+        (
+            "generation",
+            seen(next_generation, mayfly_domain::ProviderInstanceId::sample()),
+        ),
+        ("instance_id", seen(vm(1), instance("0a:00:00:00:00:02"))),
+    ];
+    let kinds = [
+        DirectiveKind::DeleteVm { proof: proof(1) },
+        DirectiveKind::StopVm {
+            grace: Millis::new(1),
+            proof: proof(1),
+        },
+    ];
+
+    // when
+    let got: Vec<(String, ObservationKind)> = kinds
+        .iter()
+        .flat_map(|kind| {
+            observations.iter().map(|(what, observed)| {
+                let mut dp = open();
+                let d = directive(1, EPOCH, kind.clone());
+                dp.receive(V1_0, &d, NOW);
+                let progress = dp.reobserved(EPOCH, d.directive_id, Some(observed));
+                (format!("{:?} {what}", kind.tag()), progress_kind(&progress))
+            })
+        })
+        .collect();
+
+    // then
+    assert_eq!(got.len(), 6);
+    for (case, kind) in got {
+        assert_eq!(kind, refused(RefusalReason::ProofMismatch), "{case}");
+    }
+}
+
+#[test]
+fn should_check_the_proof_against_its_name_only_when_the_directive_has_no_attempt() {
+    // given
+    let mut unattempted = directive(1, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
+    unattempted.attempt = None;
+    let mut inconsistent = proof(1);
+    inconsistent.generation = Generation::new(2).expect("nonzero");
+    let mut broken = directive(
+        2,
+        EPOCH,
+        DirectiveKind::DeleteVm {
+            proof: inconsistent,
+        },
+    );
+    broken.attempt = None;
+    let mut dp = open();
+
+    // when
+    let admitted = dp.receive(V1_0, &unattempted, NOW);
+    let wrong_instance = dp.reobserved(
+        EPOCH,
+        unattempted.directive_id,
+        Some(&seen(vm(1), instance("0a:00:00:00:00:02"))),
+    );
+    let refused_on_its_name = dp.receive(V1_0, &broken, NOW);
+
+    // then
+    assert_eq!(admitted, Receipt::ReObserve, "no attempt to compare with");
+    assert_eq!(
+        progress_kind(&wrong_instance),
+        refused(RefusalReason::ProofMismatch),
+        "the re-observation still needs the exact target"
+    );
+    assert_eq!(
+        reply_kind(&refused_on_its_name),
+        refused(RefusalReason::ProofMismatch),
+        "a proof that disagrees with its own name is refused without an attempt too"
+    );
 }
 
 #[test]
@@ -274,11 +368,7 @@ fn should_delete_only_when_the_reobserved_instance_id_is_the_proofs() {
     dp.receive(V1_0, &delete, NOW);
 
     // when
-    let go = dp.reobserved(
-        EPOCH,
-        delete.directive_id,
-        Some(&mayfly_domain::ProviderInstanceId::sample()),
-    );
+    let go = dp.reobserved(EPOCH, delete.directive_id, Some(&seen_as_proved(1)));
     let done = dp.finish(
         EPOCH,
         delete.directive_id,
@@ -327,19 +417,11 @@ fn should_refuse_proof_mismatch_when_the_proof_does_not_match_its_name_or_direct
 }
 
 #[test]
-fn should_refuse_a_protected_target_when_a_delete_names_another_host_or_a_base() {
+fn should_refuse_a_protected_target_when_a_delete_names_another_host() {
     // given
     let mut foreign_host = proof(1);
     foreign_host.host_id = super::support::other_host();
     let mut dp = open();
-    let based = proof(1);
-    dp.ledger.bases.insert(
-        mayfly_protocol::BaseName::new("mfb-x").expect("a base name"),
-        mayfly_data_domain::BaseUse {
-            guest: mayfly_protocol::GuestOs::Macos,
-            disk_bytes: 0,
-        },
-    );
 
     // when
     let host_refusal = dp.receive(
@@ -353,16 +435,34 @@ fn should_refuse_a_protected_target_when_a_delete_names_another_host_or_a_base()
         ),
         NOW,
     );
-    let is_base = dp.ledger.is_base("mfb-x") && !dp.ledger.is_base(&based.vm_name.to_string());
 
     // then
     assert_eq!(
         reply_kind(&host_refusal),
         refused(RefusalReason::ProtectedTarget)
     );
+}
+
+#[test]
+fn should_never_parse_a_base_name_as_a_vm_name_when_a_vm_directive_could_name_it() {
+    // given
+    let bases = ["mfb-x", "mfb-base", "mfb-sha256-0123-2-330-0"];
+
+    // when
+    let classes: Vec<mayfly_domain::VmNameClass> = bases
+        .iter()
+        .map(|name| {
+            mayfly_protocol::BaseName::new(name).expect("a valid base name");
+            mayfly_domain::classify_vm_name(name)
+        })
+        .collect();
+
+    // then
     assert!(
-        is_base,
-        "a base is in the protected set; a VM name never is (mf- vs mfb-)"
+        classes
+            .iter()
+            .all(|class| *class == mayfly_domain::VmNameClass::Foreign),
+        "a VM directive names an OwnedVmName, which a base never is (I05): {classes:?}"
     );
 }
 
