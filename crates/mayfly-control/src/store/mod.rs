@@ -15,6 +15,14 @@
 //!    read: another intent is `CommandIdReused`; an accepted receipt answers for ever; a refusal
 //!    receipt answers while every stream it is bound to is unchanged, and is decided afresh
 //!    otherwise (`should_replay_a_refusal_until_its_stream_moves_when_a_command_is_repeated`).
+//!    A receipt that answers is checked once more against the epochs of the streams its answer
+//!    is for ([`CommandReceipt::replay_streams`]), read **after** the receipt: a newer build may
+//!    have raised the stream and recorded this command's receipt between step 1 and the receipt
+//!    read, and an epoch read after the receipt is at least the epoch the receipt was read at
+//!    (epochs never fall), so the check holds as of the receipt read
+//!    (`should_refuse_the_replay_when_a_newer_build_recorded_the_receipt_after_the_epoch_check`;
+//!    the model's `request`/`decide` split and `epochRaceTest`). The journal makes the same check
+//!    atomically for a replay it answers at the append (JC-33).
 //! 3. **Load.** The whole stream is read and folded; a kind this build does not decode refuses
 //!    the command and raises safe mode through [`StoreNotifier::unknown_kind`]. Snapshots join
 //!    with ES-08.
@@ -239,6 +247,8 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                 return Err(SaveError::CommandIdReused { command_id });
             }
             if self.still_answers(&receipt).await? {
+                self.replay_within_epoch(&receipt, &stream, &request.reads)
+                    .await?;
                 return answer::<A>(&stream, &receipt, true);
             }
         }
@@ -405,6 +415,35 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         Ok(true)
     }
 
+    /// Refuses `StreamEpochUnsupported`, naming the lowest stream, when a stream the answer of
+    /// `receipt` is for (the receipt's own streams, or for an acceptance that recorded none, the
+    /// command's stream and its other reads) is above this build's supported epoch. Its heads
+    /// are read after the receipt (step 2 of the module docs).
+    async fn replay_within_epoch(
+        &self,
+        receipt: &CommandReceipt,
+        stream: &StreamId,
+        reads: &[ReadCondition],
+    ) -> Result<(), SaveError> {
+        let named = std::iter::once(stream).chain(reads.iter().map(|r| &r.stream));
+        for replayed in receipt.replay_streams(named) {
+            let head = self
+                .journal
+                .head(&replayed)
+                .await
+                .map_err(SaveError::Storage)?;
+            if let Some(head) = head
+                && head.epoch > self.epochs.of(&head.aggregate)
+            {
+                return Err(SaveError::StreamEpochUnsupported {
+                    stream: replayed,
+                    epoch: head.epoch,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Appends `unit` and settles what happened, resolving a lost commit reply by re-appending
     /// the identical unit (ES-I18), at most [`RESOLVE_ATTEMPTS`] times:
     ///
@@ -414,14 +453,18 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
     /// - after a lost reply, a receipt answers as this call's own commit when [`own_commit`] says
     ///   it records exactly this unit, else as another run's; `DuplicateEventId` is this
     ///   unit's commit only when `lookup_event` finds the id exactly where this unit placed it,
-    ///   anywhere else a collision; a definite error is returned as it is; replies lost on
-    ///   every re-append end in [`SaveError::OutcomeUnknown`], never in success.
+    ///   anywhere else a collision; `StreamEpochUnsupported` (a newer build raised a stream since,
+    ///   so the journal will not answer from the receipt, JC-33) leaves the outcome unknown,
+    ///   [`SaveError::OutcomeUnknown`], since the unit may have committed; any other definite
+    ///   error is returned as it is; replies lost on every re-append end in
+    ///   [`SaveError::OutcomeUnknown`], never in success.
     ///
     /// Pinned by: `tests/store/save.rs::should_resolve_a_lost_reply_by_its_receipt_when_the_commit_landed_or_not`,
     /// `should_answer_from_the_twin_receipt_when_the_same_command_commits_first`,
     /// `should_confirm_a_lost_reply_by_lookup_when_the_id_sits_where_the_unit_wrote_it`,
-    /// `should_report_a_collision_when_a_derived_id_lives_elsewhere` and
-    /// `should_settle_a_lost_refusal_reply_as_its_own_commit_when_the_receipt_landed`.
+    /// `should_report_a_collision_when_a_derived_id_lives_elsewhere`,
+    /// `should_settle_a_lost_refusal_reply_as_its_own_commit_when_the_receipt_landed` and
+    /// `should_leave_a_lost_reply_unknown_when_a_newer_build_raised_the_stream_since`.
     async fn settle(&self, unit: UnitOfWork) -> Result<Settled, SaveError> {
         let lost = match self.journal.append(unit.clone()).await {
             Ok(appended) => return Ok(Settled::Committed(appended)),
@@ -464,6 +507,9 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                     };
                 }
                 Err(AppendError::OutcomeUnknown(_)) => {}
+                Err(AppendError::StreamEpochUnsupported { .. }) => {
+                    return Err(SaveError::OutcomeUnknown(lost));
+                }
                 Err(other) => return Err(definite(other)),
             }
         }

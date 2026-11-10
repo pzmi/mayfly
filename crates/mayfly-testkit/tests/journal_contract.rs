@@ -60,6 +60,13 @@ enum Fault {
     /// decision read and forgets the others, so a refusal decided over two streams is replayed
     /// after the other one moved (ADR 0041).
     OneReadRefusal,
+    /// `ReplayBeforeEpochJournal`: answers a repeat from its receipt before judging the epochs
+    /// of the streams the answer is for, so an older build is answered from a newer build's
+    /// outcome (the order ES-06F's review found, JC-33).
+    ReplayBeforeEpoch,
+    /// `RefusalInboxJournal`: commits a refusal receipt that carries an inbox key, consuming
+    /// the message, so a redelivery after the bound streams moved would be dropped (JC-34).
+    RefusalConsumesInbox,
 }
 
 /// Pending once, waking itself: where a broken journal lets another future run.
@@ -135,10 +142,40 @@ impl BrokenJournal {
     }
 
     async fn append_broken(&self, unit: UnitOfWork) -> Result<Appended, AppendError> {
+        if self.fault == Fault::RefusalConsumesInbox
+            && unit.check_shape() == Err(MalformedUnit::RefusalWithInbox)
+        {
+            let mut refusal = unit.clone();
+            refusal.inbox = None;
+            let appended = self.inner.append(refusal).await?;
+            let mut note = UnitOfWork::new(unit.recorded_at, unit.supported_epochs.clone());
+            note.inbox = unit.inbox;
+            self.inner.append(note).await?;
+            return Ok(appended);
+        }
         if unit.check_shape().is_err() {
             return self.inner.append(unit).await;
         }
         match self.fault {
+            Fault::RefusalConsumesInbox => self.inner.append(unit).await,
+            Fault::ReplayBeforeEpoch => match self.inner.append(unit.clone()).await {
+                Err(AppendError::StreamEpochUnsupported { stream, epoch }) => {
+                    let stored = match &unit.receipt {
+                        Some(new) => self
+                            .inner
+                            .receipt(new.command_id)
+                            .await
+                            .map_err(AppendError::Storage)?
+                            .filter(|stored| stored.intent == new.intent),
+                        None => None,
+                    };
+                    Err(stored.map_or(
+                        AppendError::StreamEpochUnsupported { stream, epoch },
+                        |stored| AppendError::CommandReplayed(Box::new(stored)),
+                    ))
+                }
+                other => other,
+            },
             Fault::LooseRevision => {
                 let unit = self.loosened(unit).await?;
                 self.inner.append(unit).await
@@ -571,7 +608,8 @@ fn should_fail_survives_reopen_when_journal_loses_receipts_on_reopen() {
             JournalCase::StoreRefusalLeavesNoReceipt,
             JournalCase::SurvivesReopen,
             JournalCase::RefusalReceipts,
-            JournalCase::RacingStaleRefusal
+            JournalCase::RacingStaleRefusal,
+            JournalCase::ReplayWithinEpoch
         ]
     );
 }
@@ -696,6 +734,30 @@ fn should_fail_refusal_receipts_when_journal_binds_a_refusal_to_one_read() {
 
     // then
     assert_eq!(failed, [JournalCase::RefusalReceipts]);
+}
+
+#[test]
+fn should_fail_replay_within_epoch_when_journal_replays_before_the_epoch() {
+    // given
+    let fault = Fault::ReplayBeforeEpoch;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(failed, [JournalCase::ReplayWithinEpoch]);
+}
+
+#[test]
+fn should_fail_refusal_with_inbox_when_journal_lets_a_refusal_consume_a_message() {
+    // given
+    let fault = Fault::RefusalConsumesInbox;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(failed, [JournalCase::RefusalWithInbox]);
 }
 
 #[test]

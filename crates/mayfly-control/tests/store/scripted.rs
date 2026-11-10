@@ -1,6 +1,7 @@
 //! `ScriptedJournal`: a `MemoryJournal` that misbehaves once, on purpose, at the moment a test
-//! names: a competitor commits between the store's load and its append, or a commit's reply is
-//! lost in a way the plain fault injection cannot stage.
+//! names: a competitor commits between the store's load and its append, or between its epoch
+//! check and its receipt read, or a commit's reply is lost in a way the plain fault injection
+//! cannot stage.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -27,6 +28,25 @@ pub enum Script {
     /// The next append does not commit; its first event's id is recorded on `elsewhere` instead,
     /// and the reply is lost.
     LoseReplyAfterPlanting { elsewhere: StreamId },
+    /// The next append commits, then `raise` (a newer build's unit) commits too, then the
+    /// first append's reply is lost.
+    LoseReplyThenRaise { raise: Box<UnitOfWork> },
+}
+
+/// Work that runs once, right before the next receipt read: a newer build committing between
+/// the store's epoch check and its receipt read.
+pub struct BeforeReceipt(Box<dyn FnOnce() + Send>);
+
+impl BeforeReceipt {
+    pub fn new(work: impl FnOnce() + Send + 'static) -> Self {
+        Self(Box::new(work))
+    }
+}
+
+impl std::fmt::Debug for BeforeReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BeforeReceipt")
+    }
 }
 
 /// See the module docs. Clones share the script and the store.
@@ -34,6 +54,7 @@ pub enum Script {
 pub struct ScriptedJournal {
     pub inner: MemoryJournal,
     script: Arc<Mutex<(Script, u128)>>,
+    before_receipt: Arc<Mutex<Option<BeforeReceipt>>>,
 }
 
 impl ScriptedJournal {
@@ -41,7 +62,16 @@ impl ScriptedJournal {
         Self {
             inner,
             script: Arc::new(Mutex::new((Script::Plain, 0))),
+            before_receipt: Arc::default(),
         }
+    }
+
+    /// Runs `work` right before the next receipt read.
+    pub fn before_next_receipt(&self, work: BeforeReceipt) {
+        *self
+            .before_receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(work);
     }
 
     pub fn play(&self, script: Script) {
@@ -118,6 +148,11 @@ impl Journal for ScriptedJournal {
                 self.inner.append(bare).await?;
                 Err(lost())
             }
+            Script::LoseReplyThenRaise { raise } => {
+                self.inner.append(unit).await?;
+                self.inner.append(*raise).await?;
+                Err(lost())
+            }
             Script::LoseReplyAfterPlanting { elsewhere } => {
                 if let Some(id) = unit.event_ids().next() {
                     self.inner
@@ -147,6 +182,14 @@ impl Journal for ScriptedJournal {
     }
 
     async fn receipt(&self, command_id: CommandId) -> Result<Option<CommandReceipt>, StorageError> {
+        let work = self
+            .before_receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(BeforeReceipt(work)) = work {
+            work();
+        }
         self.inner.receipt(command_id).await
     }
 

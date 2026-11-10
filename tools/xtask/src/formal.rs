@@ -75,7 +75,13 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         file: "event_store.qnt",
-        steps: &["step", "implStepSerial", "relayStep"],
+        steps: &[
+            "step",
+            "implStepSerial",
+            "relayStep",
+            "storeOnlyStep",
+            "deliveryOnlyStep",
+        ],
     },
 ];
 

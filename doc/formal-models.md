@@ -93,7 +93,7 @@ then, a model's task records the one it tried.
 
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed | KER-09 |
 | scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted) (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation | KER-06 |
-| event_store | `formal/event_store.qnt` | the journal (stream heads, histories, the identity registry, receipts with intent digests and refusals bound to every stream read, the inbox, stream epochs), units of work judged in the port's reporting order and committed in one step or as split transactions with head locks in `StreamId` order and recorded waits, the `AggregateStore` write path, the after-commit kick and a crash before it, the directive relay as a durable consumer (marks, checkpoints, fenced leases, workers), and the online rebuild's shadow generation, dual writes and cutover fence (event-store §7.3, ADRs 0034, 0041) | `ES_I1_atomicUnit`, `ES_I2_streamOrder`, `ES_I3_independentStreams`, `ES_I4_globalEventIdentity`, `ES_I5_commandIdentity`, `refusalReplayedAtSameRevision`, `ES_I6_messageIdentity`, `ES_I7_historyPreservation`, `ES_I11_rebuildEquivalence`, `ES_I12_epochSafety`, `ES_I14_durableDelivery`, `ES_I15_noSkip`, `ES_I16_lockOrder`, `directivesFromJournal`, `reactorsNeverReplayed` | `step`, `implStepSerial`, `relayStep` | 3 steps for `step` and `implStepSerial`, 4 for `relayStep` | about 4 min for `step`, 4 min for `implStepSerial`, 2.5 min for `relayStep` (Apalache, run two at a time beside another lane's runs; 4-CPU sandbox, measured at ES-06); depth 4 of `step` and `implStepSerial` took 23 and 21 min: checking the 29 invariant conditions at the last state is most of it; simulation about 3 min per seed and relation (300 traces of 50 steps of `step` ran at 30 traces per second) | ES-06 |
+| event_store | `formal/event_store.qnt` | the journal (stream heads, histories, the identity registry, receipts with intent digests and refusals bound to every stream read, the inbox, stream epochs), units of work judged in the port's reporting order and committed in one step or as split transactions with head locks in `StreamId` order and recorded waits, the `AggregateStore` write path (its epoch check and receipt read as one step or with another writer between them), the after-commit kick and a crash before it, the directive relay as a durable consumer (marks, checkpoints, fenced leases, workers), and the online rebuild's shadow generation, dual writes and cutover fence (event-store §7.3, ADRs 0034, 0041) | `ES_I1_atomicUnit`, `ES_I2_streamOrder`, `ES_I3_independentStreams`, `ES_I4_globalEventIdentity`, `ES_I5_commandIdentity`, `refusalReplayedAtSameRevision`, `ES_I6_messageIdentity`, `ES_I7_historyPreservation`, `ES_I11_rebuildEquivalence`, `ES_I12_epochSafety`, `replayWithinEpoch`, `ES_I14_durableDelivery`, `ES_I15_noSkip`, `ES_I16_lockOrder`, `directivesFromJournal`, `reactorsNeverReplayed` | `step`, `implStepSerial`, `relayStep`, `storeOnlyStep`, `deliveryOnlyStep` | 3 steps for `step` and `implStepSerial`, 4 for `relayStep` and `storeOnlyStep`, 8 for `deliveryOnlyStep` | about 13 min for `step`, 13 min for `implStepSerial`, 3.5 min for `relayStep`, 78 min for `storeOnlyStep`, 42 min for `deliveryOnlyStep` (Apalache, two runs at a time beside another lane's builds; 4-CPU sandbox, measured at ES-06F, after the model gained `request`, `decide`, `rawRefusal` and intent 3: `step` and `implStepSerial` took 4 min at ES-06); `storeOnlyStep` at depth 5 had not finished checking its fourth state after 40 min, and depth 4 of `step` took 23 min at ES-06: checking the 31 invariant conditions at the last state is most of it; simulation about 3 min per seed and relation (300 traces of 50 steps of `step` ran at 30 traces per second) | ES-06, ES-06F |
 
 ### Simulation budget
 
@@ -607,21 +607,29 @@ and two delivery workers. The journal (`j`) holds the heads, the log (each event
 required epoch, whether it is a `DirectiveIssued`, and the commit that wrote it), the stream
 epochs, the identity registry, the receipts (an acceptance with what it appended, or a refusal
 bound to every stream the decision read: ADR 0041) and the inbox. A slot (`slots`) prepares one
-unit: `command` is `AggregateStore::save` up to the append (the epoch before the receipt, a
-receipt replay or `CommandIdReused`, then the decision outside any transaction: a pure function
-of the event counts it read, so a refusal can turn into an acceptance once a stream it read
-moves; an accepted command appends one event, a `DirectiveIssued` for intent 1); `rawUnit` is a
-unit a journal caller builds (any expected revision, a batch of one or two events, one or two
-streams, any epoch, no receipt); `noteMessage` records only an inbox key. The unit then commits
+unit: `command` is `AggregateStore::save` up to the append (the epoch of its stream, then the
+receipt read with the epochs of the streams a replay would answer for: `CommandIdReused`, a
+replay refused `StreamEpochUnsupported` when one of them is above the build, the replay, or the
+decision outside any transaction: a pure function of the event counts it read, so a refusal can
+turn into an acceptance once a stream it read moves; intent 1 appends a `DirectiveIssued`,
+intent 2 is refused until its streams hold an event, intent 3 is accepted with no event; a
+refusal carries no inbox key); `request` and `decide` are the same save with its epoch check
+and its receipt read as two steps, so another writer can commit between them (the race of
+event-store §3.7, review MED1); `rawUnit` is a unit a journal caller builds (any expected
+revision, a batch of one or two events, one or two streams, any epoch, no receipt); `rawRefusal`
+a refusal receipt a caller builds, with or without an inbox key (malformed with one, JC-34);
+`noteMessage` records only an inbox key. The unit then commits
 in one step (`appendUnit`: the memory journal) or as a split transaction: `begin`, one `lock`
 per head in `StreamId` order (shared for a read, exclusive for an append; a held head is a
 recorded wait), `write` (the receipt, inbox and identity keys, waiting on a key another open
 transaction wrote, then the judgement), `commit`, or `rollback` and `timeout` (`Busy`). The
 judgement (`judge`) follows `MemoryJournal::refusal` in the port's reporting order: malformed,
-epoch above build, `CommandIdReused`, `CommandReplayed`, duplicate message, duplicate event id,
-wrong expected revision, stream epoch unsupported, then ES-12's generation fence. A commit kicks
-the reactors once (`kick`); a `crash` drops prepared units, open transactions, pending kicks and
-workers, never a commit. The directive relay (`d`) is registered, bootstraps streams written
+epoch above build, `CommandIdReused`, a replay above the build (`StreamEpochUnsupported`),
+`CommandReplayed`, duplicate message, duplicate event id, wrong expected revision, stream epoch
+unsupported, then ES-12's generation fence. A commit kicks the reactors once (`kick`, named by
+the unit: its lowest appended stream and that stream's new head; the commit counter is ghost
+and no guard reads it, ES-I17); a `crash` drops prepared units, open transactions, pending kicks
+and workers, never a commit. The directive relay (`d`) is registered, bootstraps streams written
 before it, and its workers `claim` a marked stream with the next fence, run the `effect` of the
 next revision under the live lease, `advance` the checkpoint only up and clear the mark only up
 to the delivered revision, `release`, or `failHandle` (released, nothing skipped); leases
@@ -634,27 +642,43 @@ refused at commit. Snapshots (`ES_I8`) join with ES-08.
 `step` offers every stimulus with concurrent held writers (memory and PostgreSQL);
 `implStepSerial` is the same with at most one open transaction (SQLite's `BEGIN IMMEDIATE`): a
 unit begins, or appends in one step, only while no other transaction is open; `relayStep` is
-the biased relation: commands of either intent by one build, one-step appends, kicks, crashes
-and every consumer stimulus, because a uniform walk of `step` rarely strings registration, a
-commit, a claim, an effect and an advance together.
+the biased relation: commands of intents 1 and 2 by one build, one-step appends, kicks, crashes
+and every consumer stimulus (registration among them), because a uniform walk of `step` rarely
+strings registration, a commit, a claim, an effect and an advance together. Two component
+relations exist for Apalache (ES-06F, review MED4): `storeOnlyStep` is `step` without the
+consumer and the rebuild, and `deliveryOnlyStep` is the consumer over a journal grown by
+`DirectiveIssued` commands of one build appended in one step from one slot.
+
+What each check reaches. Apalache covers every trace of a relation up to its depth, so at depth
+3 (`step`, `implStepSerial`) and 4 (`relayStep`) it reaches no delivered effect (registration,
+a command, its append, a claim and an effect take five steps): `ES_I14_durableDelivery`,
+`ES_I15_noSkip` and `directivesFromJournal` hold there only vacuously. `deliveryOnlyStep` at
+depth 8 is what Apalache proves them to: every trace of registration, commits, claims,
+effects, advances, releases, failures, expiries and worker crashes of that length.
+`storeOnlyStep` at depth 4 covers two units interleaving their commands (as one step or as
+a request and a decision), one-step appends and split transactions, kicks and crashes. Beyond
+those depths the invariants are checked by the scenarios (every one runs `allInvariants` at its
+end) and by simulation (`formal-verify-simulate`: 3 seeds of 5000 traces of 50 steps per
+relation), which samples and proves nothing.
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
 | `ES_I1_atomicUnit` | a commit wrote every event of its unit (the `DirectiveIssued` among them), its receipt and its inbox entry, or nothing | `rollbackTest`, `batchFailsAfterSecondEventTest`, `multiStreamConflictTest`, `directiveInUnitTest`; JC-10, JC-23, JC-32 |
 | `ES_I2_streamOrder` | revisions consecutive from 0, the head at the last; at most one unit commits per (stream, expected revision) | `lostRaceTest`, `noStreamVersusEmptyTest`, `headQueueTest`; JC-02..JC-06, JC-21 |
-| `ES_I3_independentStreams` | a transaction waits only on one holding a head it names or a key it writes | `independentStreamsTest`, `independentHeldWritersTest`; JC-22 |
+| `ES_I3_independentStreams` | a transaction waits only on one holding, in a conflicting mode (one of the two appends to it; two readers never conflict), a head it names, or a key it writes; a unit that cannot append in one step is held up only by such a slot | `independentStreamsTest`, `independentHeldWritersTest`; JC-22 |
 | `ES_I4_globalEventIdentity` | an event id is bound to exactly the place its event is | `duplicateAcrossStreamsTest`, `repeatedWithinBatchTest`, `idWaitTest`; JC-07, JC-08, JC-16, JC-31 |
 | `ES_I5_commandIdentity` | one accepted outcome per command id; a replay answers the same intent only; an accepted receipt is never replaced, a refusal receipt only once stale | `receiptReplayTest`, `racingCommandsTest`, `refusedThenAcceptedTest`; JC-12..JC-14, JC-28, JC-29, JC-29b |
 | `refusalReplayedAtSameRevision` | a refusal is answered from its receipt only while every stream it read is at the revision read; otherwise decided afresh | `refusalReplayedAtSameRevisionTest` (two reads, the other stream moves); JC-28 (two-read half) |
-| `ES_I6_messageIdentity` | an inbox key is consumed by at most one commit | `inboxRedeliveryTest`; JC-15, JC-30 |
+| `ES_I6_messageIdentity` | an inbox key is consumed by at most one commit, never by a refusal (ADR 0041 rule 6) | `inboxRedeliveryTest`, `refusedRedeliveryTest`, `refusalWithInboxTest`; JC-15, JC-30, JC-34 |
 | `ES_I7_historyPreservation` | no committed event changes or disappears | every test; JC-24, JC-27 |
 | `ES_I11_rebuildEquivalence` | the active rows are the fold of every stream; a rebuilt shadow row too | `shadowRebuildDualWriteTest`, `cutoverFenceTest` (ES-12's PC-07..PC-09 to come) |
-| `ES_I12_epochSafety` | a stream's epoch never decreases; nothing is appended above its build or to a stream above it | `epochRaiseTest`, `refusedAboveEpochTest`; JC-18, `tests/store/save.rs::should_refuse_a_newer_epoch_before_the_receipt_when_a_newer_build_wrote_the_stream` |
-| `ES_I14_durableDelivery` | the checkpoint never passes the head nor moves back; an undelivered revision of a covered stream is marked; no effect and no advance without the live lease | `bootstrapAfterWritesTest`, `commitBetweenFetchAndApplyTest`, `markDuringProcessingTest`, `staleWorkerFencedTest`, `workerCrashRedeliversTest`; DC cases with ES-05 |
+| `ES_I12_epochSafety` | a stream's epoch never decreases; nothing is appended above its build or to a stream above it; `replayWithinEpoch` | `epochRaiseTest`, `refusedAboveEpochTest`, `epochRaceTest`; JC-18, `tests/store/save.rs::should_refuse_a_newer_epoch_before_the_receipt_when_a_newer_build_wrote_the_stream` |
+| `replayWithinEpoch` | no receipt answers a build for a stream above it (those the receipt appended or is bound to, or for an acceptance with no event the streams the repeat names), also when a newer build commits between the older build's epoch check and its receipt read | `epochRaceTest`, negative world `staleBuildReplayViolatesTest`; JC-33, `tests/store/save.rs::should_refuse_the_replay_when_a_newer_build_recorded_the_receipt_after_the_epoch_check` |
+| `ES_I14_durableDelivery` | the checkpoint never passes the head nor moves back (checked on every consumer step, whichever action it is); an undelivered revision of a covered stream is marked; no effect and no advance without the live lease | `bootstrapAfterWritesTest`, `commitBetweenFetchAndApplyTest`, `markDuringProcessingTest`, `staleWorkerFencedTest`, `workerCrashRedeliversTest`; DC cases with ES-05 |
 | `ES_I15_noSkip` | the delivered revisions of a stream are a prefix of its committed ones | `failingConsumerNoSkipTest`; DC-08, DC-18 with ES-05 |
 | `ES_I16_lockOrder` | no wait-for cycle | `oppositeOrderUnitsTest`, `racingCommandsTest`, `idWaitTest`; JC-22's two-unit case |
 | `directivesFromJournal` | a directive is sent only for a committed `DirectiveIssued` event, and only committed events are delivered (ADR 0034) | `crashBeforeReactorsTest`, `directiveInUnitTest` |
-| `reactorsNeverReplayed` | the after-commit kick runs at most once per commit and never for a replay; a crash before it loses only the kick | `crashBeforeReactorsTest` |
+| `reactorsNeverReplayed` | the after-commit kick runs at most once per commit and never for a replay; a crash before it loses only the kick. Structural in the relations (only `apply` sets a kick; `kick` and `crash` clear them); the negative world shows it is not vacuous | `crashBeforeReactorsTest`, `zeroEventAcceptanceTest`, negative world `replayingRestartViolatesTest` |
 
 Tests (`quint test`, all deterministic): one per scenario of event-store §7.3 that the model
 expresses before ES-08 (`lostRaceTest`, `noStreamVersusEmptyTest`, `independentStreamsTest`,
@@ -666,14 +690,18 @@ expresses before ES-08 (`lostRaceTest`, `noStreamVersusEmptyTest`, `independentS
 `commitBetweenFetchAndApplyTest`, `markDuringProcessingTest`, `staleWorkerFencedTest`,
 `workerCrashRedeliversTest`, `failingConsumerNoSkipTest`), plus `refusalReplayedAtSameRevisionTest`,
 `crashBeforeReactorsTest`, `directiveInUnitTest`, `shadowRebuildDualWriteTest` and
-`cutoverFenceTest`, and the two negative worlds of §7.3, each an action kept out of every step
-relation: `headTrustingReaderViolatesTest` (`advanceToHead`, the `HeadTrustingWorker`, breaks
-`ES_I15_noSkip`) and `unfencedWorkerViolatesTest` (`effectUnfenced`, the `UnfencedLedger`, breaks
-`ES_I14_durableDelivery`). A scenario is a `List[Stim]` read by both its `run` (through `stim`,
-an `if` chain, so `quint test` samples it once) and its script in the module
-`event_store_traces` (through `recorded`, which records each argument as a pick of `step`), so
-the regression trace in `formal/traces/regression/` (listed in its `manifest.toml`) takes exactly
-the steps of the test; ES-07's driver replays them (`mbt::actionTaken` is the model action,
+`cutoverFenceTest`, then (ES-06F) `epochRaceTest`, `refusedRedeliveryTest`,
+`refusalWithInboxTest` and `zeroEventAcceptanceTest`, and the negative worlds, each an action
+kept out of every step relation: `headTrustingReaderViolatesTest` (`advanceToHead`, the
+`HeadTrustingWorker`, breaks `ES_I15_noSkip`) and `unfencedWorkerViolatesTest`
+(`effectUnfenced`, the `UnfencedLedger`, breaks `ES_I14_durableDelivery`), both of §7.3, and
+`staleBuildReplayViolatesTest` (`decideBlind`, the store before ES-06F, breaks
+`replayWithinEpoch`) and `replayingRestartViolatesTest` (`replayingRestart`, a restart that
+kicks every commit again, breaks `reactorsNeverReplayed`). A scenario is a `List[Stim]` read by
+both its `run` (through `stim`, an `if` chain, so `quint test` samples it once) and its script
+in the module `event_store_traces` (through `recorded`, which records each argument as a pick of
+`step`), so the regression trace in `formal/traces/regression/` (listed in its `manifest.toml`)
+takes exactly the steps of the test; ES-07's driver replays them (`mbt::actionTaken` is the model action,
 `last` its outcome).
 
 Negative controls tried (ES-06; scratch mutations, not committed). Each fails the scenario named
@@ -703,6 +731,19 @@ first Apalache run of `step` and `implStepSerial` found a bug of the model itsel
 inline rows computed from the rows of now instead of the rows at the unit's expected revision,
 so a unit whose expected revision another unit reached in between wrote a stale count; the
 row is now the fold at the expected revision (`rowAfter`), as §3.2 says.
+
+Negative controls tried at ES-06F (scratch mutations, not committed): the journal answering a
+replay without the epoch gate (`epochRaceTest` fails; `quint run` of `step` reports a
+`replayWithinEpoch` violation); the store's decision without it (`epochRaceTest`, `step`); a
+refusal carrying an inbox key accepted (`refusalWithInboxTest`; `step` breaks
+`ES_I6_messageIdentity`); a held head blocking whatever its mode (`step` breaks
+`ES_I3_independentStreams`: two readers of one stream); a worker crash that resets its stream's
+checkpoint (`deliveryOnlyStep` breaks `ES_I14_durableDelivery`; `relayStep` at 3000 traces of 20
+steps misses it); a relay that sends every delivered event, not only `DirectiveIssued`
+(`relayStep` at 5000 traces of 40 steps breaks `directivesFromJournal`; 20 steps miss it). The
+review's other points: the first conjunct of `directivesFromJournal` is kept, as it pins the
+relay's filter (the mutant just named); `ckpt >= ckptSeen` became the per-step `ckptBack` ghost;
+kicks are named by their unit and the commit counter moved to the ghost (ES-I17).
 
 ## Promoting a counterexample
 

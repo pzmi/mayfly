@@ -135,13 +135,16 @@ read, at the revision it read it** (E3, ADR 0034; ADR 0041): a repeat while all 
 there is answered with the recorded refusal; once any moved, the repeat is decided afresh, never
 replayed, and its outcome replaces the refusal receipt. A zero-event acceptance writes a receipt like any other.
 Pinned by JC-12..JC-14, JC-28, JC-29, JC-29b; model
-`ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`); SW6, SW8;
+`ES_I5_commandIdentity` (`receiptReplay`, `racingCommands`, `refusedThenAccepted`, `refusalReplayedAtSameRevision`, `zeroEventAcceptance`, `refusedRedelivery`); SW6, SW8;
 `ForgetfulReceiptsJournal`, `IntentBlindReceipts`, `BlindReceiptUpsertJournal`.
 
 **ES-I6 Message identity**. An inbox key is consumed by at most one committed unit; a
 redelivered message is answered `DuplicateMessage` with no write; a unit that only records the
-entry (nothing to do) is legal. Pinned by JC-15, JC-30; model `ES_I6_messageIdentity`
-(`inboxRedelivery`); SW10; `ForgetfulInbox`; ver §9 mutant 7.
+entry (nothing to do) is legal; a refusal consumes no key (ADR 0041 rule 6): a refusal receipt
+carrying one is `Malformed(RefusalWithInbox)` in every journal, so a redelivery after the bound
+streams moved is decided afresh. Pinned by JC-15, JC-30, JC-34; model `ES_I6_messageIdentity`
+(`inboxRedelivery`, `refusedRedelivery`, `refusalWithInbox`); SW10; `ForgetfulInbox`,
+`RefusalInboxJournal`; ver §9 mutant 7.
 
 **ES-I7 History preservation**. No committed event, identity or head-revision step
 changes or disappears; `read_stream` returns the full history whatever snapshots exist. Pinned by
@@ -174,8 +177,14 @@ the old generation set. Pinned by PC-01, PC-02, PC-06, PC-07..PC-09; model scena
 
 **ES-I12 Epoch safety**. A stream's `required_epoch` never decreases; a build never
 appends to a stream whose epoch exceeds its aggregate's supported epoch; a batch requiring more
-than the build supports is refused before any write; reads are never refused for an epoch.
-Pinned by JC-18; model `ES_I12_epochSafety` (`epochRaise`, `refusedAboveEpoch`).
+than the build supports is refused before any write; reads are never refused for an epoch; a
+receipt never answers a build for a stream above it (the streams the answer is for:
+`CommandReceipt::replay_streams`), judged with the receipt, so an older build is refused
+`StreamEpochUnsupported` rather than answered from a newer build's outcome, also when the newer
+build commits between the older build's epoch check and its receipt read (ES-06F).
+Pinned by JC-18, JC-33; `tests/store/save.rs::should_refuse_the_replay_when_a_newer_build_recorded_the_receipt_after_the_epoch_check`;
+model `ES_I12_epochSafety` and `replayWithinEpoch` (`epochRaise`, `refusedAboveEpoch`,
+`epochRace`, negative world `staleBuildReplay`); `ReplayBeforeEpochJournal`.
 
 **ES-I13 Nothing secret or free-form at rest**. No secret, JIT configuration,
 token, credential or upstream free text is stored in events, receipts, inbox entries, snapshots,
@@ -329,8 +338,15 @@ The **reporting order** above is part of the contract (JC-09) and of the model: 
 refuse the same unit for different reasons diverge in conformance replay, which compares the
 refusal itself, not only that one occurred. Within a
 variant the lowest key is named: the lowest stored event id, the lowest `StreamId` among the
-appended and read streams. `CommandReplayed` is an `Err` so that a caller cannot mistake it for a
-fresh commit; `AggregateStore` turns it into the receipt's answer.
+appended and read streams (and for `EpochAboveBuild`, the lowest appended stream above the
+build, ES-06F). `CommandReplayed` is an `Err` so that a caller cannot mistake it for a
+fresh commit; `AggregateStore` turns it into the receipt's answer. A receipt answers only while
+every stream its answer is for (those an acceptance appended or a refusal is bound to; for an
+acceptance with no event, the streams the unit names) is within the unit's build: otherwise the
+unit is refused `StreamEpochUnsupported`, naming the lowest such stream, in place of
+`CommandReplayed` and judged in the same transaction as the receipt (JC-33; ES-06F, review MED1:
+the journals once answered the replay first, so a rolled-back build racing a newer one could
+answer for the newer build's outcome).
 
 The reporting order is **not the lock order** of §4.2. Event ids are reported before expected
 revisions (ES-01F, review M1/M4), although an adapter locks heads before identities: a writer that
@@ -443,7 +459,13 @@ previous generation set is refused (`ProjectionGenerationMoved`, retried like
    **before** any receipt answer, so a rolled-back build never claims a newer
    build's outcome.
 2. Read the receipt for `command_id`: same digest → its recorded answer; other digest →
-   `CommandIdReused`.
+   `CommandIdReused`. Step 1 alone does not keep the promise: a newer build may raise the stream
+   and record this command's receipt between the head read and the receipt read (blue-green).
+   So an answering receipt is checked again against the epochs of the streams its answer is
+   for, read **after** the receipt; epochs never fall and a receipt's binding only goes stale, so
+   those reads hold as of the receipt read. The journal makes the same check atomically when it
+   answers a unit with `CommandReplayed` (§3.3, JC-33). A lost reply re-appended after a newer
+   build raised its stream is answered `StreamEpochUnsupported` and stays `OutcomeUnknown`.
 3. Load: latest trusted snapshot plus tail, or the whole stream; decode; an unknown kind refuses
    the command and raises safe mode (§6.3).
 4. `decide` **outside** any transaction; derive event ids from `(command_id, ordinal)` by a pure,
@@ -797,7 +819,12 @@ the winner's receipt; memory passes by judging one unit at a time, an engine thr
 compare-and-set. JC-30 the same for one inbox key
 (`DuplicateMessage`). JC-31 the same for one event id (`DuplicateEventId`). JC-32 a reader running
 beside an append never sees part of the unit (ES-I1), reading its parts first stream first and, on
-alternate passes, last stream first. JC-26 and JC-27 need an engine: they are the engine cases
+alternate passes, last stream first. JC-33 a newer build's receipts (an acceptance, a refusal
+bound to two raised streams, an acceptance with no event) answer an older build's repeat with
+`StreamEpochUnsupported` naming the lowest stream the answer is for, never `CommandReplayed`;
+the newer build is still answered, and so is the older one from a receipt within its epoch
+(ES-06F). JC-34 a refusal receipt carrying an inbox key is `Malformed(RefusalWithInbox)` and
+consumes nothing (ADR 0041 rule 6). JC-26 and JC-27 need an engine: they are the engine cases
 (`EngineJournalFactory`, `check_engine_contract`), run by the adapters (ES-02, ES-09); the rest
 run on memory from ES-01F.
 
@@ -904,6 +931,18 @@ It states the store's mechanisms of §2 that a model can state, the online rebui
   `shadowRebuildDualWrite`, `cutoverFence`. Each scenario is one `List[Stim]` read by its `run`
   and by its script in `event_store_traces`, exported to `formal/traces/regression/`
   (`doc/formal-models.md`, "event_store").
+- **As fixed (ES-06F, the ES-06 review).** `command` is also offered as `request` (the store's
+  epoch check) and a later `decide` (its receipt read, with the epochs of the streams the answer
+  is for), so another writer can commit between them; the model found every journal answering
+  a replay before the epoch, fixed in §3.3 and §3.7 (`replayWithinEpoch`, `epochRace`, negative
+  world `staleBuildReplay`). `rawRefusal` lets a caller build a refusal with an inbox key, which
+  is malformed (`refusalWithInbox`); `refusedRedelivery` and `zeroEventAcceptance` (intent 3) are
+  added; kicks are named by their unit and the commit counter is ghost (ES-I17); a restart that
+  replays kicks is the negative world `replayingRestart`. Apalache's reach is stated exactly in
+  `doc/formal-models.md` ("What each check reaches"): `deliveryOnlyStep` is the relation at
+  whose depth ES-I14, ES-I15 and `directivesFromJournal` are proved for every trace;
+  `storeOnlyStep` goes deeper than `step` for the store alone; beyond the depths, scenarios and
+  simulation check, and simulation proves nothing.
 
 ### 7.4 What the lower levels already prove, and what they cannot
 
@@ -997,6 +1036,9 @@ then a fix.
 | `TornUnitJournal` (a unit's last stream visible after the rest) | contract | JC-32 |
 | `TornUnitLastFirst` (a unit's last stream, receipt and inbox entry visible before the rest) | contract | JC-32 (its last-stream-first passes) |
 | `BlindReceiptUpsertJournal` (replaces a stale refusal receipt without comparing it) | contract | JC-29b |
+| `OneReadRefusalJournal` (binds a refusal to the lowest stream it read) | contract | JC-28 |
+| `ReplayBeforeEpochJournal` (answers from a receipt before judging the epochs it is for) | contract | JC-33; model negative world `staleBuildReplay` (the store's half) |
+| `RefusalInboxJournal` (a refusal receipt consumes its inbox key) | contract | JC-34 |
 | SQLite without its journal triggers | contract | JC-27 |
 | SQLite opening a store without durability under the production profile | contract | JC-26 |
 | `AckBeforeCommitJournal` (reports success before `COMMIT` returns) | lab | SW6 `ack-before-commit` |

@@ -642,6 +642,14 @@ including refusal receipts bound to revisions (`refusalReplayedAtSameRevision`) 
 rebuild-generation part (`shadowRebuildDualWrite`, `cutoverFence`); every invariant shown to catch a
 scratch mutation; registered in `MODELS`; regression traces exported.
 Accept: scenarios pass; the two negative worlds break their invariants; `formal-freshness` green.
+Note (ES-06F, the ES-06 review): the model splits the store's epoch check from its receipt read
+(`request`, `decide`) and found the journals answering a replay before the epoch: a rolled-back
+build racing a newer one could answer for the newer build's outcome. Every journal now judges
+the epochs of the streams a receipt's answer is for with the receipt (JC-33), and the store
+re-reads them after the receipt; a refusal receipt carrying an inbox key is
+`Malformed(RefusalWithInbox)` (JC-34, ADR 0041 rule 6); `EpochAboveBuild` names the lowest
+stream. Component relations `storeOnlyStep` and `deliveryOnlyStep` take Apalache to where
+ES-I14, ES-I15 and `directivesFromJournal` are reached (`doc/formal-models.md`, "event_store").
 
 #### ES-05 Durable delivery
 Cites: event-store §3.4, §5; ADR 0034 (E2). `DeliveryLedger` (memory, SQLite), marks written by the

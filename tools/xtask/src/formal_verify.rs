@@ -143,6 +143,16 @@ pub const BOUNDED: &[Bound] = &[
         step: "relayStep",
         steps: 4,
     },
+    Bound {
+        file: "event_store.qnt",
+        step: "storeOnlyStep",
+        steps: 4,
+    },
+    Bound {
+        file: "event_store.qnt",
+        step: "deliveryOnlyStep",
+        steps: 8,
+    },
 ];
 
 /// Seeds of the multi-seed simulation, derived from one printed base seed.

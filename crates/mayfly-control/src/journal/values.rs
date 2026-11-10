@@ -2,7 +2,7 @@
 //! stay encoded: the journal stores and returns them verbatim and never parses them, so this
 //! port names no format (encoding is `AggregateStore`'s job).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mayfly_domain::{CommandId, EventId, Millis};
@@ -502,6 +502,40 @@ pub struct CommandReceipt {
     pub intent: IntentDigest,
     /// Its recorded outcome.
     pub outcome: ReceiptOutcome,
+}
+
+impl CommandReceipt {
+    /// The streams a replay of this receipt answers for, in `StreamId` order: those an
+    /// acceptance appended or a refusal is bound to. An acceptance that appended nothing records
+    /// none, so the streams `named` by the repeat stand in for it (the command's own stream is
+    /// among them: the intent digest covers the stream). A journal answers a repeat from this
+    /// receipt only while every one of them is within the repeating build's supported epoch,
+    /// and refuses `StreamEpochUnsupported` naming the lowest one that is not, so an older
+    /// build never answers for a newer build's outcome (`doc/event-store.md` §3.3, §3.7,
+    /// ES-I12; `replayStreams` in `formal/event_store.qnt`).
+    ///
+    /// Pinned by: `crates/mayfly-testkit/src/contracts/journal.rs::replay_within_epoch` (JC-33),
+    /// which `ReplayBeforeEpochJournal` fails
+    /// (`crates/mayfly-testkit/tests/journal_contract.rs::should_fail_replay_within_epoch_when_journal_replays_before_the_epoch`).
+    #[must_use]
+    pub fn replay_streams<'a>(
+        &self,
+        named: impl IntoIterator<Item = &'a StreamId>,
+    ) -> BTreeSet<StreamId> {
+        let recorded: BTreeSet<StreamId> = match &self.outcome {
+            ReceiptOutcome::Accepted(appended) => {
+                appended.streams.iter().map(|s| s.stream.clone()).collect()
+            }
+            ReceiptOutcome::Refused { bound, .. } => {
+                bound.iter().map(|r| r.stream.clone()).collect()
+            }
+        };
+        if recorded.is_empty() {
+            named.into_iter().cloned().collect()
+        } else {
+            recorded
+        }
+    }
 }
 
 /// One inline projection row write, committed with the unit that caused it (ES-I9). A

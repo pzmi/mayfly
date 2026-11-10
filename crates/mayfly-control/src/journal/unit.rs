@@ -190,6 +190,9 @@ impl UnitOfWork {
         if rejection.is_some() && (!self.appends.is_empty() || self.reads.is_empty()) {
             return Err(MalformedUnit::RefusalNotBound);
         }
+        if rejection.is_some() && self.inbox.is_some() {
+            return Err(MalformedUnit::RefusalWithInbox);
+        }
         let mut rows = BTreeSet::new();
         if !self
             .projections
@@ -215,17 +218,29 @@ impl UnitOfWork {
         Ok(())
     }
 
-    /// The first appended stream with an event needing more than this build supports: the
-    /// [`crate::journal::AppendError::EpochAboveBuild`] check, which reads no stored state.
+    /// The lowest appended stream, in `StreamId` order like every other refusal that names a
+    /// stream (`doc/event-store.md` §3.3), with an event needing more than this build supports:
+    /// the [`crate::journal::AppendError::EpochAboveBuild`] check, which reads no stored state.
+    /// Pinned by `should_name_the_stream_when_an_event_needs_more_than_the_build_supports`
+    /// (two offenders, the higher one first in the unit).
     #[must_use]
     pub fn epoch_above_build(&self) -> Option<&StreamId> {
         self.appends
             .iter()
-            .find(|a| {
+            .filter(|a| {
                 let supported = self.supported_epochs.of(&a.aggregate);
                 a.events.iter().any(|e| e.required_epoch > supported)
             })
             .map(|a| &a.stream)
+            .min()
+    }
+
+    /// Every stream the unit names, appended or read.
+    pub fn named_streams(&self) -> impl Iterator<Item = &StreamId> {
+        self.appends
+            .iter()
+            .map(|a| &a.stream)
+            .chain(self.reads.iter().map(|r| &r.stream))
     }
 }
 
@@ -249,6 +264,10 @@ pub enum MalformedUnit {
     NulInPayload,
     /// A refusal receipt with appends, or with no read to bind it to (E3, ADR 0041).
     RefusalNotBound,
+    /// A refusal receipt with an inbox entry: a refusal consumes no message, so a redelivery
+    /// after the bound streams moved is decided afresh, never dropped as a duplicate (ADR 0041
+    /// rule 6; contract case JC-34 `refusal_with_inbox`).
+    RefusalWithInbox,
     /// It writes a projection row twice.
     DuplicateProjectionRow,
     /// A projection row is keyed by a stream the unit does not append to (ES-I10).
@@ -268,6 +287,7 @@ impl fmt::Display for MalformedUnit {
             Self::InvalidEventType => "an event type is not a snake_case name",
             Self::NulInPayload => "a payload of the unit of work holds a NUL",
             Self::RefusalNotBound => "a refusal receipt has appends or no read to bind it to",
+            Self::RefusalWithInbox => "a refusal receipt consumes an inbox entry",
             Self::DuplicateProjectionRow => "the unit of work writes a projection row twice",
             Self::ProjectionOutsideUnit => "a projection row belongs to a stream not appended",
             Self::InvalidProjectionKey => "a projection key is empty, long or not printable",
@@ -524,6 +544,25 @@ mod tests {
     }
 
     #[test]
+    fn should_refuse_unit_when_a_refusal_receipt_carries_an_inbox_entry() {
+        // given
+        let key = InboxKey {
+            source: InboxSource::new("scaleset-1").unwrap_or_else(|e| panic!("{e}")),
+            message_id: MessageId::new("7").unwrap_or_else(|e| panic!("{e}")),
+        };
+        let unit = unit()
+            .with_read(stream("a-1"), ExpectedRevision::NoStream)
+            .with_receipt(receipt(refused()))
+            .with_inbox(key);
+
+        // when
+        let shape = unit.check_shape();
+
+        // then
+        assert_eq!(shape, Err(MalformedUnit::RefusalWithInbox));
+    }
+
+    #[test]
     fn should_refuse_unit_when_it_writes_a_projection_row_twice() {
         // given
         let unit = appending(vec![event(1)])
@@ -567,14 +606,30 @@ mod tests {
     #[test]
     fn should_name_the_stream_when_an_event_needs_more_than_the_build_supports() {
         // given
-        let mut newer = event(2);
-        newer.required_epoch = 2;
+        let newer = |id: u128| {
+            let mut e = event(id);
+            e.required_epoch = 2;
+            e
+        };
         let unit = appending(vec![event(1)]).with_append(
             stream("a-2"),
             attempt(),
             ExpectedRevision::NoStream,
-            vec![newer],
+            vec![newer(2)],
         );
+        let two_offenders = appending(vec![event(3)])
+            .with_append(
+                stream("a-9"),
+                attempt(),
+                ExpectedRevision::NoStream,
+                vec![newer(4)],
+            )
+            .with_append(
+                stream("a-3"),
+                attempt(),
+                ExpectedRevision::NoStream,
+                vec![newer(5)],
+            );
         let unknown_aggregate =
             super::UnitOfWork::new(Millis::new(1), SupportedEpochs::new().with(attempt(), 1))
                 .with_append(
@@ -590,6 +645,7 @@ mod tests {
 
         // then
         assert_eq!(above, Some(&stream("a-2")));
+        assert_eq!(two_offenders.epoch_above_build(), Some(&stream("a-3")));
         assert_eq!(fine, None);
         assert_eq!(unknown_aggregate.epoch_above_build(), Some(&stream("h-1")));
     }

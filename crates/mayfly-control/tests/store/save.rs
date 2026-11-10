@@ -3,14 +3,14 @@
 
 use mayfly_control::journal::{
     AggregateName, Appended, AppendedStream, ExpectedRevision, InboxKey, InboxSource, Journal,
-    MessageId, ReadCondition, ReceiptOutcome, StoredKind, StreamId, StreamRevision,
-    SupportedEpochs,
+    MessageId, NewEvent, Payload, ReadCondition, ReceiptOutcome, StorageError, StoredKind,
+    StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
 use mayfly_control::store::{
     AggregateStore, Clock, Committed, KindCheck, NoNotifier, Outcome, SaveError, SaveRequest,
     UnknownStoredKind, check_stored_kinds, derive_event_id,
 };
-use mayfly_domain::{CommandId, Millis};
+use mayfly_domain::{CommandId, EventId, Millis};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, Notification, RecordingNotifier, SeededRng};
 use mayfly_testkit::contracts::journal::InjectedFault;
@@ -20,7 +20,7 @@ use crate::counter::{
     Counter, CounterBody, CounterLog, CounterRejection, Counters, NewerCounter, NewerCounters,
     command,
 };
-use crate::scripted::{Script, ScriptedJournal};
+use crate::scripted::{BeforeReceipt, Script, ScriptedJournal};
 
 type Store = AggregateStore<ScriptedJournal, FakeClock, SeededRng, RecordingNotifier>;
 
@@ -299,6 +299,73 @@ fn should_refuse_a_newer_epoch_before_the_receipt_when_a_newer_build_wrote_the_s
     let readable = block_on(h.journal.read_stream(&stream("counter-1"), None, None))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(readable.len(), 2);
+}
+
+#[test]
+fn should_refuse_the_replay_when_a_newer_build_recorded_the_receipt_after_the_epoch_check() {
+    // given
+    let memory = MemoryJournal::new();
+    let h = harness(&memory);
+    save(&h.store, inc(1, 1, 9)).unwrap_or_else(|e| panic!("{e}"));
+    let newer_memory = memory.clone();
+    h.journal.before_next_receipt(BeforeReceipt::new(move || {
+        let newer = newer(&newer_memory);
+        block_on(newer.save::<NewerCounter>(SaveRequest::new("1", command(2, CounterBody::Seal))))
+            .unwrap_or_else(|e| panic!("{e}"));
+        block_on(newer.save::<NewerCounter>(inc(3, 1, 9))).unwrap_or_else(|e| panic!("{e}"));
+    }));
+
+    // when
+    let raced = save(&h.store, inc(3, 1, 9));
+
+    // then
+    assert_eq!(
+        raced,
+        Err(SaveError::StreamEpochUnsupported {
+            stream: stream("counter-1"),
+            epoch: 2
+        })
+    );
+    assert_eq!(head(&h.journal, "counter-1"), Some(StreamRevision::new(2)));
+}
+
+#[test]
+fn should_leave_a_lost_reply_unknown_when_a_newer_build_raised_the_stream_since() {
+    // given
+    let h = harness(&MemoryJournal::new());
+    let raise = UnitOfWork::new(
+        Millis::new(1),
+        SupportedEpochs::new().with(name("counter"), 2),
+    )
+    .with_append(
+        stream("counter-1"),
+        name("counter"),
+        at(0),
+        vec![NewEvent {
+            event_id: EventId::from_u128(0xFEED),
+            kind: StoredKind {
+                event_type: "sealed".to_owned(),
+                schema_version: 1,
+            },
+            required_epoch: 2,
+            payload: Payload::new("{}"),
+        }],
+    );
+    h.journal.play(Script::LoseReplyThenRaise {
+        raise: Box::new(raise),
+    });
+
+    // when
+    let outcome = save(&h.store, inc(1, 1, 9));
+
+    // then
+    assert_eq!(
+        outcome,
+        Err(SaveError::OutcomeUnknown(StorageError::new(
+            "scripted_lost_reply"
+        )))
+    );
+    assert!(h.notifier.seen().is_empty());
 }
 
 #[test]

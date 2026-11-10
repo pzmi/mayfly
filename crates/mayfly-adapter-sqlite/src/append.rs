@@ -8,7 +8,10 @@
 //! sequence matches PostgreSQL's (ES-09), where it is what prevents a wait cycle. The reads
 //! decide the refusal in the port's **reporting order** (receipt, inbox, event ids, expected
 //! revisions, stream epochs), which is not the lock order: a duplicate id is reported ahead of
-//! a stale revision even though the heads were read first (JC-09, JC-25).
+//! a stale revision even though the heads were read first (JC-09, JC-25). A receipt that would
+//! answer is first checked against the epochs of the streams its answer is for, read in the
+//! same transaction, so an older build is refused rather than answered from a newer build's
+//! outcome (JC-33).
 //!
 //! **No correctness from the single writer** (§4.3 rule 2). Every refusal also stands in the
 //! data: a head moves only by a compare-and-set on its revision and epoch (0 rows:
@@ -284,22 +287,39 @@ impl<H: StoreHooks> Tx<'_, H> {
                 command_id: stored.receipt.command_id,
             }));
         }
-        let bound = match &stored.receipt.outcome {
-            ReceiptOutcome::Accepted(_) => return Err(answers(stored.receipt)),
-            ReceiptOutcome::Refused { bound, .. } => bound.clone(),
-        };
-        for read in &bound {
-            let at = match heads.get(&read.stream) {
-                Some(head) => head.as_ref().map(|h| h.revision),
-                None => self
-                    .read(|c| rows::head(c, &read.stream))?
-                    .map(|h| h.revision),
-            };
-            if !read.expected.matches(at) {
-                return Ok(stored.outcome_text);
+        if let ReceiptOutcome::Refused { bound, .. } = &stored.receipt.outcome {
+            for read in bound {
+                let at = self.head_of(&read.stream, heads)?.map(|h| h.revision);
+                if !read.expected.matches(at) {
+                    return Ok(stored.outcome_text);
+                }
+            }
+        }
+        // The receipt answers: only while every stream the answer is for is within this
+        // build's epoch, read in this transaction (JC-33, `doc/event-store.md` §3.3).
+        for stream in stored.receipt.replay_streams(unit.named_streams()) {
+            if let Some(head) = self.head_of(&stream, heads)?
+                && head.epoch > unit.supported_epochs.of(&head.aggregate)
+            {
+                return Err(Stop::Refused(AppendError::StreamEpochUnsupported {
+                    stream,
+                    epoch: head.epoch,
+                }));
             }
         }
         Err(answers(stored.receipt))
+    }
+
+    /// The head of `stream`: the one already read for the unit, else read now.
+    fn head_of(
+        &mut self,
+        stream: &StreamId,
+        heads: &BTreeMap<StreamId, Option<StreamHead>>,
+    ) -> Result<Option<StreamHead>, Stop> {
+        match heads.get(stream) {
+            Some(head) => Ok(head.clone()),
+            None => self.read(|c| rows::head(c, stream)),
+        }
     }
 
     /// The writes, in lock order.

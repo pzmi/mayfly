@@ -316,3 +316,43 @@ max_steps = 15
 seed = "0x5ce1"
 invariant = "allInvariants"
 
+
+[[trace]]
+file = "event_store-epochRace.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "epochRace"
+max_steps = 9
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-refusedRedelivery.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "refusedRedelivery"
+max_steps = 8
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-refusalWithInbox.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "refusalWithInbox"
+max_steps = 6
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "event_store-zeroEventAcceptance.itf.json"
+model = "event_store.qnt"
+main = "event_store_traces"
+init = "tinit"
+step = "zeroEventAcceptance"
+max_steps = 5
+seed = "0x5ce1"
+invariant = "allInvariants"

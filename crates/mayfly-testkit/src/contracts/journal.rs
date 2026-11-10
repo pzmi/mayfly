@@ -170,11 +170,19 @@ pub enum JournalCase {
     RacingEventIds,
     /// JC-32: a reader running beside an append never sees part of the unit.
     UnitVisibleAtOnce,
+    /// JC-33: a receipt answers a repeat only while every stream its answer is for is within
+    /// the repeating build's epoch, judged with the receipt; otherwise `StreamEpochUnsupported`
+    /// naming the lowest such stream, so an older build is never answered from a newer build's
+    /// outcome.
+    ReplayWithinEpoch,
+    /// JC-34: a refusal receipt carrying an inbox key is `Malformed(RefusalWithInbox)` and
+    /// consumes nothing.
+    RefusalWithInbox,
 }
 
 impl JournalCase {
     /// Every case, in the order the suite runs them.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 33] = [
         Self::AbsentStream,
         Self::ConsecutiveRevisions,
         Self::ContinuesFromHead,
@@ -206,6 +214,8 @@ impl JournalCase {
         Self::RacingInboxKeys,
         Self::RacingEventIds,
         Self::UnitVisibleAtOnce,
+        Self::ReplayWithinEpoch,
+        Self::RefusalWithInbox,
     ];
 
     /// The case's id in `doc/event-store.md` §7.1.
@@ -243,6 +253,8 @@ impl JournalCase {
             Self::RacingInboxKeys => "JC-30",
             Self::RacingEventIds => "JC-31",
             Self::UnitVisibleAtOnce => "JC-32",
+            Self::ReplayWithinEpoch => "JC-33",
+            Self::RefusalWithInbox => "JC-34",
         }
     }
 
@@ -281,6 +293,8 @@ impl JournalCase {
             Self::RacingInboxKeys => "racing_inbox_keys",
             Self::RacingEventIds => "racing_event_ids",
             Self::UnitVisibleAtOnce => "unit_visible_at_once",
+            Self::ReplayWithinEpoch => "replay_within_epoch",
+            Self::RefusalWithInbox => "refusal_with_inbox",
         }
     }
 }
@@ -396,6 +410,8 @@ pub async fn check_case<F: JournalFactory>(factory: &F, case: JournalCase) -> Re
         JournalCase::RacingInboxKeys => racing_inbox_keys(factory).await,
         JournalCase::RacingEventIds => racing_event_ids(factory).await,
         JournalCase::UnitVisibleAtOnce => unit_visible_at_once(factory).await,
+        JournalCase::ReplayWithinEpoch => replay_within_epoch(factory).await,
+        JournalCase::RefusalWithInbox => refusal_with_inbox(factory).await,
     }
 }
 
@@ -3242,6 +3258,197 @@ async fn unit_visible_at_once<F: JournalFactory>(factory: &F) -> Check {
         &read_parts(&reader, &s1, &s2, false).await?,
         &vec![true; PARTS],
     )
+}
+
+// ---------------------------------------------------------------------------------------------
+// JC-33, JC-34: receipts across builds, refusals and the inbox (ES-06F)
+
+/// JC-33: a newer build (epoch 2) raises streams and records receipts there; an older build
+/// (epoch 1) repeating the same commands is refused `StreamEpochUnsupported` naming the lowest
+/// stream the answer is for, never answered from the receipt, whatever the receipt: an
+/// acceptance (its appended stream), a refusal bound to two raised streams (the lowest named),
+/// an acceptance with no event (the repeat's own stream stands in). The newer build is still
+/// answered, and a receipt whose streams are within the older build answers it too.
+async fn replay_within_epoch<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let (s1, s2, s3, s4, s5) = (
+        stream("attempt-1"),
+        stream("attempt-2"),
+        stream("attempt-3"),
+        stream("attempt-4"),
+        stream("attempt-5"),
+    );
+    let by = |epoch: u32| UnitOfWork::new(Millis::new(1_000), build(epoch));
+    let add = |u: UnitOfWork, s: &StreamId, expected: ExpectedRevision, id: u128, epoch: u32| {
+        u.with_append(
+            s.clone(),
+            aggregate("attempt"),
+            expected,
+            vec![at_epoch(id, epoch)],
+        )
+    };
+    // The newer build: command 1 accepted on s1 at epoch 2; s3, s2 and s4 raised; command 2
+    // refused over s3 and s2; command 3 accepted on s4 with no event; command 4 accepted on s5
+    // at epoch 1.
+    io(
+        "command 1 by the newer build",
+        journal
+            .append(add(by(2), &s1, NEW, 1, 2).with_receipt(accepted(1, 1)))
+            .await,
+    )?;
+    for (s, id) in [(&s3, 3), (&s2, 2), (&s4, 4)] {
+        io(
+            "a stream raised by the newer build",
+            journal.append(add(by(2), s, NEW, id, 2)).await,
+        )?;
+    }
+    io(
+        "command 2 refused by the newer build",
+        journal
+            .append(
+                by(2)
+                    .with_read(s3.clone(), at(0))
+                    .with_read(s2.clone(), at(0))
+                    .with_receipt(refusal(2, 1, "pool_draining")),
+            )
+            .await,
+    )?;
+    io(
+        "command 3 accepted with no event by the newer build",
+        journal
+            .append(
+                by(2)
+                    .with_read(s4.clone(), at(0))
+                    .with_receipt(accepted(3, 1)),
+            )
+            .await,
+    )?;
+    let fourth = io(
+        "command 4 by the newer build at epoch 1",
+        journal
+            .append(add(by(2), &s5, NEW, 5, 1).with_receipt(accepted(4, 1)))
+            .await,
+    )?;
+    let journal = factory.reopen(journal).await;
+    let probe = Probe {
+        streams: vec![s1.clone(), s2.clone(), s3.clone(), s4.clone(), s5.clone()],
+        commands: vec![1, 2, 3, 4],
+        events: vec![1, 2, 3, 4, 5, 11, 15],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    let older = [
+        (
+            "command 1 repeated by the older build",
+            add(by(1), &s1, NEW, 11, 1).with_receipt(accepted(1, 1)),
+            &s1,
+        ),
+        (
+            "command 2 repeated by the older build",
+            by(1)
+                .with_read(s2.clone(), at(0))
+                .with_read(s3.clone(), at(0))
+                .with_receipt(refusal(2, 1, "pool_draining")),
+            &s2,
+        ),
+        (
+            "command 3 repeated by the older build",
+            by(1)
+                .with_read(s4.clone(), at(0))
+                .with_receipt(accepted(3, 1)),
+            &s4,
+        ),
+    ];
+    for (what, repeat, named) in older {
+        eq(
+            what,
+            &journal.append(repeat).await.map(|_| ()),
+            &Err(AppendError::StreamEpochUnsupported {
+                stream: named.clone(),
+                epoch: 2,
+            }),
+        )?;
+    }
+    eq(
+        "the journal after the older build's repeats",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    let replayed = |r: Result<Appended, AppendError>| match r {
+        Err(AppendError::CommandReplayed(receipt)) => Some(receipt.command_id.as_u128()),
+        _ => None,
+    };
+    eq(
+        "command 1 repeated by the newer build",
+        &replayed(
+            journal
+                .append(add(by(2), &s1, NEW, 11, 1).with_receipt(accepted(1, 1)))
+                .await,
+        ),
+        &Some(1),
+    )?;
+    eq(
+        "command 4 repeated by the older build",
+        &journal
+            .append(add(by(1), &s5, NEW, 15, 1).with_receipt(accepted(4, 1)))
+            .await
+            .map(|_| ()),
+        &Err(AppendError::CommandReplayed(Box::new(CommandReceipt {
+            command_id: CommandId::from_u128(4),
+            command_type: command_type(),
+            intent: intent(1),
+            outcome: ReceiptOutcome::Accepted(fourth),
+        }))),
+    )
+}
+
+/// JC-34: a refusal receipt carrying an inbox key is malformed (ADR 0041 rule 6: a refusal
+/// consumes no message); nothing is written, and the key is still free afterwards.
+async fn refusal_with_inbox<F: JournalFactory>(factory: &F) -> Check {
+    let journal = factory.fresh().await;
+    let s1 = stream("attempt-1");
+    let message = key("scaleset-1", "m1");
+    let probe = Probe {
+        streams: vec![s1.clone()],
+        commands: vec![1],
+        keys: vec![message.clone()],
+        ..Probe::default()
+    };
+    let before = observe(&journal, &probe).await?;
+    eq(
+        "a refusal carrying an inbox key",
+        &journal
+            .append(
+                unit(1_000)
+                    .with_read(s1.clone(), NEW)
+                    .with_receipt(refusal(1, 1, "pool_draining"))
+                    .with_inbox(message.clone()),
+            )
+            .await
+            .map(|_| ()),
+        &Err(AppendError::Malformed(MalformedUnit::RefusalWithInbox)),
+    )?;
+    let journal = factory.reopen(journal).await;
+    eq(
+        "the journal after it",
+        &observe(&journal, &probe).await?,
+        &before,
+    )?;
+    io(
+        "the same refusal without the key",
+        journal
+            .append(unit(1_000).with_read(s1.clone(), NEW).with_receipt(refusal(
+                1,
+                1,
+                "pool_draining",
+            )))
+            .await,
+    )?;
+    io(
+        "the key, consumed by a unit that only records it",
+        journal.append(unit(1_000).with_inbox(message)).await,
+    )
+    .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------------------------

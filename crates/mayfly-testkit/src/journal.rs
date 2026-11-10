@@ -60,6 +60,13 @@ impl State {
                     .all(|read| read.expected.matches(self.revision(&read.stream))),
             };
             if answers {
+                // Judged with the receipt, under the same lock: an older build is never
+                // answered from a newer build's outcome (JC-33, §3.3).
+                if let Some(refusal) =
+                    self.above_build(stored.replay_streams(unit.named_streams()).iter(), unit)
+                {
+                    return Some(refusal);
+                }
                 return Some(AppendError::CommandReplayed(Box::new(stored.clone())));
             }
         }
@@ -92,17 +99,25 @@ impl State {
         }
         let mut appended: Vec<&StreamId> = unit.appends.iter().map(|a| &a.stream).collect();
         appended.sort();
-        for stream in appended {
-            if let Some(head) = self.heads.get(stream)
-                && head.epoch > unit.supported_epochs.of(&head.aggregate)
-            {
-                return Some(AppendError::StreamEpochUnsupported {
+        self.above_build(appended.into_iter(), unit)
+    }
+
+    /// The first of `streams` (given in `StreamId` order) whose epoch exceeds what `unit`'s
+    /// build supports for its recorded aggregate, as `StreamEpochUnsupported`.
+    fn above_build<'a>(
+        &self,
+        streams: impl Iterator<Item = &'a StreamId>,
+        unit: &UnitOfWork,
+    ) -> Option<AppendError> {
+        streams.into_iter().find_map(|stream| {
+            let head = self.heads.get(stream)?;
+            (head.epoch > unit.supported_epochs.of(&head.aggregate)).then(|| {
+                AppendError::StreamEpochUnsupported {
                     stream: stream.clone(),
                     epoch: head.epoch,
-                });
-            }
-        }
-        None
+                }
+            })
+        })
     }
 
     /// The state after `unit`, or its refusal. `self` is never touched, which is what makes

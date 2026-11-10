@@ -64,13 +64,17 @@ pub enum AppendError {
     /// ([`crate::journal::UnitOfWork::epoch_above_build`]): this build could not decide the
     /// stream afterwards (ES-I12).
     EpochAboveBuild {
-        /// The first such stream, in unit order.
+        /// The lowest such stream in `StreamId` order.
         stream: StreamId,
     },
     /// The unit's command already has a receipt with the same intent that still answers: an
     /// accepted receipt (for ever), or a refusal receipt whose stream is still at the revision
     /// it was decided at (E3). Carries that receipt, so a repeat answers exactly as the first
-    /// run did; an `Err` so no caller mistakes it for a fresh commit.
+    /// run did; an `Err` so no caller mistakes it for a fresh commit. Only while every stream
+    /// the answer is for ([`CommandReceipt::replay_streams`]) is within this build's supported
+    /// epoch, judged in the same transaction as the receipt: otherwise the receipt may be a
+    /// newer build's outcome, and the unit is refused [`AppendError::StreamEpochUnsupported`]
+    /// instead (contract case JC-33 `replay_within_epoch`).
     CommandReplayed(Box<CommandReceipt>),
     /// The unit's command id has a receipt for another intent. Reveals nothing else.
     CommandIdReused {
@@ -95,7 +99,9 @@ pub enum AppendError {
     },
     /// A stream the unit appends to holds events of a higher epoch than this build supports
     /// for its aggregate: this build may read it but never write it (ES-I12, `doc/event-store.md`
-    /// §6.3); the lowest such stream in `StreamId` order is named.
+    /// §6.3); the lowest such stream in `StreamId` order is named. Also, ahead of
+    /// `CommandReplayed`, a stream a stored receipt's answer is for: this build never answers
+    /// from it (§3.3).
     StreamEpochUnsupported {
         /// The stream.
         stream: StreamId,
