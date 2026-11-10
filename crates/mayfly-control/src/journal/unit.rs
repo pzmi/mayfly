@@ -7,8 +7,9 @@ use std::fmt;
 use mayfly_domain::{EventId, Millis};
 
 use crate::journal::values::{
-    AggregateName, Decision, ExpectedRevision, InboxKey, NewEvent, NewReceipt, ProjectionWrite,
-    ReadCondition, StreamId, StreamRevision, SupportedEpochs, valid_snake_name,
+    AggregateName, Decision, ExpectedRevision, InboxKey, NewEvent, NewReceipt, Payload,
+    ProjectionWrite, ReadCondition, StreamId, StreamRevision, SupportedEpochs, row_key_in_stream,
+    valid_snake_name,
 };
 
 /// Events for one stream, appended only if the stream is still at `expected`.
@@ -49,8 +50,8 @@ pub struct UnitOfWork {
     pub receipt: Option<NewReceipt>,
     /// The inbound message the unit consumed.
     pub inbox: Option<InboxKey>,
-    /// Inline projection rows, each `(projection, key)` at most once, each keyed by a stream
-    /// the unit appends to (ES-I10).
+    /// Inline projection writes, each `(projection, stream)` at most once, each for a stream
+    /// the unit appends to and keyed within it (ES-I10).
     pub projections: Vec<ProjectionWrite>,
     /// This build's supported epoch per aggregate (ES-I12).
     pub supported_epochs: SupportedEpochs,
@@ -113,7 +114,7 @@ impl UnitOfWork {
         self
     }
 
-    /// Adds a projection row write.
+    /// Adds one projection's writes for one stream.
     #[must_use]
     pub fn with_projection(mut self, write: ProjectionWrite) -> Self {
         self.projections.push(write);
@@ -181,8 +182,9 @@ impl UnitOfWork {
             || self
                 .projections
                 .iter()
-                .filter_map(|p| p.row.as_ref())
-                .any(|r| r.holds_nul())
+                .flat_map(|p| &p.rows)
+                .filter_map(|r| r.row.as_ref())
+                .any(Payload::holds_nul)
             || rejection.is_some_and(|r| r.holds_nul());
         if holds_nul {
             return Err(MalformedUnit::NulInPayload);
@@ -193,25 +195,27 @@ impl UnitOfWork {
         if rejection.is_some() && self.inbox.is_some() {
             return Err(MalformedUnit::RefusalWithInbox);
         }
+        let mut writes = BTreeSet::new();
         let mut rows = BTreeSet::new();
-        if !self
-            .projections
-            .iter()
-            .all(|p| rows.insert((&p.projection, &p.key)))
-        {
+        let unique = self.projections.iter().all(|p| {
+            writes.insert((&p.projection, &p.stream))
+                && p.rows.iter().all(|r| rows.insert((&p.projection, &r.key)))
+        });
+        if !unique {
             return Err(MalformedUnit::DuplicateProjectionRow);
         }
-        if !self
-            .projections
-            .iter()
-            .all(|p| self.appends.iter().any(|a| a.stream == p.stream))
-        {
+        let local = self.projections.iter().all(|p| {
+            self.appends.iter().any(|a| a.stream == p.stream)
+                && p.rows.iter().all(|r| row_key_in_stream(&p.stream, &r.key))
+        });
+        if !local {
             return Err(MalformedUnit::ProjectionOutsideUnit);
         }
         if !self
             .projections
             .iter()
-            .all(|p| (1..=256).contains(&p.key.len()) && !p.key.chars().any(char::is_control))
+            .flat_map(|p| &p.rows)
+            .all(|r| (1..=256).contains(&r.key.len()) && !r.key.chars().any(char::is_control))
         {
             return Err(MalformedUnit::InvalidProjectionKey);
         }
@@ -268,9 +272,10 @@ pub enum MalformedUnit {
     /// after the bound streams moved is decided afresh, never dropped as a duplicate (ADR 0041
     /// rule 6; contract case JC-34 `refusal_with_inbox`).
     RefusalWithInbox,
-    /// It writes a projection row twice.
+    /// It writes a projection row twice, or one projection's rows of one stream in two writes.
     DuplicateProjectionRow,
-    /// A projection row is keyed by a stream the unit does not append to (ES-I10).
+    /// A projection write names a stream the unit does not append to, or a row key outside its
+    /// stream (ES-I10, contract case PC-05).
     ProjectionOutsideUnit,
     /// A projection key is empty, longer than 256 bytes or holds a control character.
     InvalidProjectionKey,
@@ -322,7 +327,8 @@ mod tests {
 
     use super::*;
     use crate::journal::values::{
-        CommandType, InboxSource, IntentDigest, MessageId, Payload, ProjectionName, StoredKind,
+        CommandType, InboxSource, IntentDigest, MessageId, Payload, ProjectionName, RowWrite,
+        StoredKind,
     };
 
     fn stream(name: &str) -> StreamId {
@@ -366,8 +372,10 @@ mod tests {
         ProjectionWrite {
             projection: ProjectionName::new("attempts").unwrap_or_else(|e| panic!("{e}")),
             stream: stream(stream_name),
-            key: key.to_owned(),
-            row: Some(Payload::new(value)),
+            rows: vec![RowWrite {
+                key: key.to_owned(),
+                row: Some(Payload::new(value)),
+            }],
         }
     }
 
@@ -510,7 +518,7 @@ mod tests {
         nul_event.payload = Payload::new("{\"n\":\"\\u0000\"}");
         let units = [
             appending(vec![nul_event]),
-            appending(vec![event(1)]).with_projection(row("a-1", "k", "\u{0}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "a-1", "\u{0}")),
             unit()
                 .with_read(stream("a-1"), ExpectedRevision::NoStream)
                 .with_receipt(receipt(Decision::Refused {
@@ -565,35 +573,46 @@ mod tests {
     #[test]
     fn should_refuse_unit_when_it_writes_a_projection_row_twice() {
         // given
-        let unit = appending(vec![event(1)])
-            .with_projection(row("a-1", "k", "{}"))
-            .with_projection(row("a-1", "k", "{}"));
+        let mut twice_in_one = row("a-1", "a-1", "{}");
+        twice_in_one.rows.extend(row("a-1", "a-1", "{}").rows);
+        let units = [
+            appending(vec![event(1)])
+                .with_projection(row("a-1", "a-1", "{}"))
+                .with_projection(row("a-1", "a-1/x", "{}")),
+            appending(vec![event(1)]).with_projection(twice_in_one),
+        ];
 
         // when
-        let shape = unit.check_shape();
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
 
         // then
-        assert_eq!(shape, Err(MalformedUnit::DuplicateProjectionRow));
+        assert_eq!(shapes, [Err(MalformedUnit::DuplicateProjectionRow); 2]);
     }
 
     #[test]
     fn should_refuse_unit_when_a_projection_row_belongs_to_another_stream() {
         // given
-        let unit = appending(vec![event(1)]).with_projection(row("a-2", "k", "{}"));
+        let units = [
+            appending(vec![event(1)]).with_projection(row("a-2", "a-2", "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "a-2", "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "a-2/1", "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "k", "{}")),
+        ];
 
         // when
-        let shape = unit.check_shape();
+        let shapes: Vec<_> = units.iter().map(UnitOfWork::check_shape).collect();
 
         // then
-        assert_eq!(shape, Err(MalformedUnit::ProjectionOutsideUnit));
+        assert_eq!(shapes, [Err(MalformedUnit::ProjectionOutsideUnit); 4]);
     }
 
     #[test]
-    fn should_refuse_unit_when_a_projection_key_is_empty_or_not_printable() {
+    fn should_refuse_unit_when_a_projection_key_is_long_or_not_printable() {
         // given
+        let long = format!("a-1/{}", "x".repeat(253));
         let units = [
-            appending(vec![event(1)]).with_projection(row("a-1", "", "{}")),
-            appending(vec![event(1)]).with_projection(row("a-1", "a\nb", "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", &long, "{}")),
+            appending(vec![event(1)]).with_projection(row("a-1", "a-1/a\nb", "{}")),
         ];
 
         // when

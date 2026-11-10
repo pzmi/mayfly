@@ -44,7 +44,7 @@ pub use values::{
     AggregateName, CommandReceipt, CommandType, Decision, EventLocation, ExpectedRevision,
     InboxKey, InboxSource, IntentDigest, JournalValueError, MessageId, NewEvent, NewReceipt,
     Payload, ProjectionName, ProjectionWrite, ReadCondition, ReceiptOutcome, RecordedEvent,
-    StoredKind, StreamHead, StreamId, StreamRevision, SupportedEpochs,
+    RowWrite, StoredKind, StreamHead, StreamId, StreamRevision, SupportedEpochs, row_key_in_stream,
 };
 
 /// The largest page [`Journal::streams`] returns; a larger `limit` is clamped to it, so a
@@ -198,8 +198,10 @@ pub trait Journal: Send + Sync {
     /// [`StorageError`] when the store fails.
     fn stored_kinds(&self) -> impl Future<Output = Result<Vec<StoredKind>, StorageError>> + Send;
 
-    /// The projection row `key` of `projection`, if present. An interim read until ES-04's
-    /// `ProjectionStore` takes projection rows, with their generations, off this port.
+    /// The projection row `key` of `projection` in its active generation, if present: the same
+    /// row [`crate::projection::ProjectionStore::row`] reads, kept here so the journal
+    /// contract can look for a unit's rows beside its other parts (JC-10, JC-32). Readers of
+    /// projections (queries) take `ProjectionStore`, which has no write method.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.

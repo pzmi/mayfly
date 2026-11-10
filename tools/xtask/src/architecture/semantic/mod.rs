@@ -22,7 +22,7 @@
 //! `macro_export` attributes, include-family macros, item declarations, test functions) with
 //! their file, line and context (production or test code); `rules_purity`, `rules_include`,
 //! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs`,
-//! `rules_transition`, `rules_seams`, `rules_store`, `rules_append`, `rules_order`,
+//! `rules_transition`, `rules_seams`, `rules_store`, `rules_append`, `rules_projection`, `rules_order`,
 //! `rules_journal_sql` and `rules_locks` turn facts into diagnostics, and
 //! `rules_clippy` checks the pure crates' Clippy configuration, the
 //! semantic layer behind these syntactic rules.
@@ -39,6 +39,7 @@ mod rules_include;
 mod rules_journal_sql;
 mod rules_locks;
 mod rules_order;
+mod rules_projection;
 mod rules_purity;
 mod rules_runtime;
 mod rules_seams;
@@ -452,6 +453,7 @@ pub fn check(
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(rules_store::check(root, facts));
         out.extend(rules_append::check(facts, policy));
+        out.extend(rules_projection::check(facts, policy));
         out.extend(rules_order::check(root, facts, policy));
         out.extend(rules_journal_sql::check(root, facts, policy));
         out.extend(hygiene.check(facts));

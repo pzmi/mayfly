@@ -15,10 +15,11 @@ workspace = true
 mayfly-control-domain = { version = "0.1.0", path = "../mayfly-control-domain" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 mayfly-testkit = { path = "../mayfly-testkit" }
-serde = { version = "1.0.229", features = ["derive"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }

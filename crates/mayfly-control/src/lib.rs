@@ -4,6 +4,10 @@
 //!   `doc/event-store.md` §3).
 //! - [`store`]: `AggregateStore`, the one write path over the journal, with its `Clock`, `Rng`
 //!   and `StoreNotifier` ports (`doc/event-store.md` §3.7).
+//! - [`projection`]: projection specs, their inline folds, the `ProjectionStore` and
+//!   `ProjectionRebuild` ports, the offline rebuild and the first read models (`doc/event-store.md`
+//!   §3.6).
+//! - [`queries`]: cross-stream views computed at query time over projection rows.
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
 //!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
 //!   over the link (`doc/event-store.md` §3.4, §5).
@@ -15,6 +19,8 @@
 
 pub mod delivery;
 pub mod journal;
+pub mod projection;
+pub mod queries;
 pub mod saga;
 pub mod secrets;
 pub mod sessions;

@@ -655,6 +655,16 @@ with applied revisions (offline form here; online in ES-12), first projections `
 `slots`, `pools`, `pending_effects`, `recent_failures` (query-time views for cross-stream counts).
 PC-01..PC-06 on memory and SQLite; `ARCH-projection-locality`.
 Accept: PC green; "rebuild equals live" property; a cross-stream inline write is refused.
+Note (ES-04, as built; event-store §3.6 "As built (ES-04)"): PC-01..PC-06 run on memory and SQLite
+(fresh, reopened, two writers, crash-reopened); "rebuild equals live" is a property over seeded
+pool histories (`tests/store/projections.rs`); a cross-stream write is `Malformed` in every journal
+and `ARCH-projection-locality` in the code. Later tasks: CP-04 runs `projection::prepare` after the
+stored-kinds check and before any writer, and RT-02 builds `AggregateStore::with_projections`
+with `projection::control()` and a `BuildId` from the build; CP-01 makes `queries` the operator
+use cases' read side; ES-08 must read the rows at the snapshot's revision (`stream_rows` with
+`applied`) instead of folding from revision 0 once a load starts from a snapshot; ES-09 ports
+migration 0004 and runs PC on PostgreSQL; ES-12 adds dual writes into the shadow generation and
+the cutover fence to the unit.
 
 #### ES-06 Event-store model
 Cites: event-store §7.3, D10, ver §6; ADR 0034 (E7: before delivery). `formal/event_store.qnt` and

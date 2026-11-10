@@ -27,8 +27,11 @@
 //!    the command and raises safe mode through [`StoreNotifier::unknown_kind`]. Snapshots join
 //!    with ES-08.
 //! 4. **Decide** outside any transaction; event ids are derived from `(command_id, ordinal)`
-//!    ([`derive_event_id`]), so a retried command writes the same ids. Inline projections join
-//!    with ES-04.
+//!    ([`derive_event_id`]), so a retried command writes the same ids. The inline projections of
+//!    the stream's aggregate ([`AggregateStore::with_projections`]) are computed here too, still
+//!    outside the transaction: each from the events the decision was made on plus its batch
+//!    ([`crate::projection::Projection::inline`]), so the rows are those at the expected
+//!    revision plus the batch, guarded by that revision like the events (ES-I9, ES-I10).
 //! 5. **Append** the unit. `WrongExpectedRevision` becomes [`SaveError::Conflict`], which only
 //!    [`AggregateStore::with_revision_retry`] retries (load and decide inside its closure, three
 //!    attempts, full-jitter backoff through the [`Rng`] and [`Clock`] ports); `Busy`, `Storage`
@@ -65,8 +68,9 @@ pub use ports::{Clock, Committed, NoNotifier, Rng, StoreNotifier};
 use crate::journal::{
     AggregateName, AppendError, Appended, AppendedStream, CommandReceipt, CommandType, Decision,
     EventLocation, ExpectedRevision, InboxKey, Journal, NewEvent, NewReceipt, ReadCondition,
-    ReceiptOutcome, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
+    ReceiptOutcome, RecordedEvent, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
+use crate::projection::Projections;
 
 /// How many times one save re-appends a unit whose commit reply was lost before it reports
 /// [`SaveError::OutcomeUnknown`].
@@ -151,7 +155,11 @@ pub struct AggregateStore<J, C, R, N> {
     notifier: N,
     epochs: SupportedEpochs,
     retry: RetryPolicy,
+    projections: Projections,
 }
+
+/// A stream as `save` read it: the folded state, the head revision and the events.
+type Loaded<S> = (S, Option<StreamRevision>, Vec<RecordedEvent>);
 
 /// What appending a unit settled to.
 enum Settled {
@@ -180,7 +188,23 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
             notifier,
             epochs: supported_epochs::<G>().map_err(SaveError::InvalidName)?,
             retry: RetryPolicy::default(),
+            projections: Projections::none(),
         })
+    }
+
+    /// The same store keeping `projections` inline: every unit that appends to a stream writes
+    /// the rows of each projection of the stream's aggregate (`doc/event-store.md` §3.6). The
+    /// projections must have been prepared ([`crate::projection::prepare`]) before the first
+    /// save, so their stored rows are this build's.
+    #[must_use]
+    pub fn with_projections(mut self, projections: Projections) -> Self {
+        self.projections = projections;
+        self
+    }
+
+    /// The inline projections this store keeps.
+    pub const fn projections(&self) -> &Projections {
+        &self.projections
     }
 
     /// The same store retrying conflicts by `retry`.
@@ -257,7 +281,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                 return answer::<A>(&stream, &receipt, true);
             }
         }
-        let (state, head) = self.fold::<A>(&stream).await?;
+        let (state, head, history) = self.fold::<A>(&stream).await?;
         let expected = ExpectedRevision::of(head);
         let receipt = |decision| NewReceipt {
             command_id,
@@ -283,7 +307,19 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                 let unit = if events.is_empty() {
                     unit.with_read(stream.clone(), expected)
                 } else {
-                    unit.with_append(stream.clone(), aggregate, expected, events)
+                    let batch = recorded(&stream, expected, &events, unit.recorded_at);
+                    let mut projections = Vec::new();
+                    for projection in self.projections.of(&aggregate) {
+                        projections.push(projection.inline(&stream, &history, &batch).map_err(
+                            |_| SaveError::Codec {
+                                stream: stream.clone(),
+                                what: "projection_row",
+                            },
+                        )?);
+                    }
+                    let mut unit = unit.with_append(stream.clone(), aggregate, expected, events);
+                    unit.projections = projections;
+                    unit
                 };
                 let mut unit = unit.with_receipt(receipt(Decision::Accepted));
                 unit.inbox = request.inbox;
@@ -338,11 +374,8 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         Ok(self.fold::<A>(&stream).await?.0)
     }
 
-    /// Reads and folds `stream`; returns the state and the head revision read.
-    async fn fold<A: Aggregate>(
-        &self,
-        stream: &StreamId,
-    ) -> Result<(A::State, Option<StreamRevision>), SaveError> {
+    /// Reads and folds `stream`; returns the state, the head revision read and the events.
+    async fn fold<A: Aggregate>(&self, stream: &StreamId) -> Result<Loaded<A::State>, SaveError> {
         let folded = fold_stream::<A, J>(&self.journal, stream).await;
         if let Err(SaveError::UnknownKind { stream, kind }) = &folded {
             self.notifier.unknown_kind(stream, kind);
@@ -524,8 +557,9 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
     }
 }
 
-/// `stream` read whole and folded by `A`, with its head revision: what `save` decides on and
-/// `load` answers. The caller raises safe mode on [`SaveError::UnknownKind`].
+/// `stream` read whole and folded by `A`, with its head revision and its events: what `save`
+/// decides on (and folds the inline projections from) and `load` answers. The caller raises
+/// safe mode on [`SaveError::UnknownKind`].
 ///
 /// # Errors
 /// [`SaveError::Storage`], [`SaveError::UnknownKind`] for a kind this build does not decode, or
@@ -533,7 +567,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
 async fn fold_stream<A: Aggregate, J: Journal>(
     journal: &J,
     stream: &StreamId,
-) -> Result<(A::State, Option<StreamRevision>), SaveError> {
+) -> Result<Loaded<A::State>, SaveError> {
     let recorded = journal
         .read_stream(stream, None, None)
         .await
@@ -556,7 +590,34 @@ async fn fold_stream<A: Aggregate, J: Journal>(
             }
         }
     }
-    Ok((state, recorded.last().map(|e| e.revision)))
+    let head = recorded.last().map(|e| e.revision);
+    Ok((state, head, recorded))
+}
+
+/// The events of a batch as they will be recorded if the unit commits at `expected`: what the
+/// inline projections fold after the stream's history.
+fn recorded(
+    stream: &StreamId,
+    expected: ExpectedRevision,
+    events: &[NewEvent],
+    recorded_at: Millis,
+) -> Vec<RecordedEvent> {
+    let mut revision = expected.next_revision();
+    events
+        .iter()
+        .map_while(|event| {
+            let at = revision?;
+            revision = at.next();
+            Some(RecordedEvent {
+                stream: stream.clone(),
+                revision: at,
+                event_id: event.event_id,
+                kind: event.kind.clone(),
+                payload: event.payload.clone(),
+                recorded_at,
+            })
+        })
+        .collect()
 }
 
 /// The outcome a receipt records, as this aggregate's answer.

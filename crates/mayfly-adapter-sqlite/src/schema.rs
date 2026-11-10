@@ -51,6 +51,13 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         compat_floor: 2,
         sql: include_str!("migrations/0003_dispatch_mark_rises.sql"),
     },
+    // Expand-only, and no build before it writes a projection row (none registered a spec), so
+    // one that ignores the generations writes nothing they would miss: the floor stays at 2.
+    Migration {
+        version: 4,
+        compat_floor: 2,
+        sql: include_str!("migrations/0004_projection_generations.sql"),
+    },
 ];
 
 fn engine(stage: impl Fn(StorageError) -> OpenError) -> impl Fn(rusqlite::Error) -> OpenError {
@@ -165,14 +172,14 @@ mod tests {
     use super::*;
 
     const EXTRA: Migration = Migration {
-        version: 4,
+        version: 5,
         compat_floor: 2,
         sql: "CREATE TABLE extra_fact (id TEXT NOT NULL, CONSTRAINT extra_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
     const BREAKING: Migration = Migration {
-        version: 4,
-        compat_floor: 4,
+        version: 5,
+        compat_floor: 5,
         sql: "CREATE TABLE breaking_fact (id TEXT NOT NULL, CONSTRAINT breaking_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
@@ -213,13 +220,15 @@ mod tests {
                 "inbox",
                 "journal_event",
                 "journal_identity",
+                "projection_meta",
                 "projection_row",
+                "projection_stream",
                 "schema_meta",
                 "stream_dispatch",
                 "stream_head"
             ]
         );
-        assert_eq!(stored_version(&conn), Ok((3, 2)));
+        assert_eq!(stored_version(&conn), Ok((4, 2)));
         assert!(!backup_path(&path, 1).exists());
         assert!(!backup_path(&path, 2).exists());
         assert!(!backup_path(&path, 3).exists());
@@ -230,16 +239,22 @@ mod tests {
         // given
         let (_dir, path, conn) = store();
         migrate(&conn, MIGRATIONS, Some(&path), Millis::new(7)).unwrap_or_else(|e| panic!("{e}"));
-        let with_extra = [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], EXTRA];
+        let with_extra = [
+            MIGRATIONS[0],
+            MIGRATIONS[1],
+            MIGRATIONS[2],
+            MIGRATIONS[3],
+            EXTRA,
+        ];
 
         // when
         let migrated = migrate(&conn, &with_extra, Some(&path), Millis::new(8));
 
         // then
         assert_eq!(migrated, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((4, 2)));
-        let backup = Connection::open(backup_path(&path, 4)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(stored_version(&backup), Ok((3, 2)));
+        assert_eq!(stored_version(&conn), Ok((5, 2)));
+        let backup = Connection::open(backup_path(&path, 5)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stored_version(&backup), Ok((4, 2)));
         assert!(!tables(&backup).contains(&"extra_fact".to_owned()));
         assert_eq!(
             migrate(&conn, &with_extra, Some(&path), Millis::new(9)),
@@ -253,7 +268,13 @@ mod tests {
         let (_dir, path, conn) = store();
         migrate(
             &conn,
-            &[MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], EXTRA],
+            &[
+                MIGRATIONS[0],
+                MIGRATIONS[1],
+                MIGRATIONS[2],
+                MIGRATIONS[3],
+                EXTRA,
+            ],
             Some(&path),
             Millis::new(7),
         )
@@ -264,7 +285,7 @@ mod tests {
 
         // then
         assert_eq!(older, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((4, 2)));
+        assert_eq!(stored_version(&conn), Ok((5, 2)));
     }
 
     #[test]
@@ -273,7 +294,13 @@ mod tests {
         let (_dir, path, conn) = store();
         migrate(
             &conn,
-            &[MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], BREAKING],
+            &[
+                MIGRATIONS[0],
+                MIGRATIONS[1],
+                MIGRATIONS[2],
+                MIGRATIONS[3],
+                BREAKING,
+            ],
             Some(&path),
             Millis::new(7),
         )
@@ -286,9 +313,9 @@ mod tests {
         assert_eq!(
             older,
             Err(OpenError::SchemaAboveBuild {
-                store: 4,
-                compat_floor: 4,
-                build: 3
+                store: 5,
+                compat_floor: 5,
+                build: 4
             })
         );
     }

@@ -358,8 +358,9 @@ and, if it commits, its receipt replaces the refusal (E3, JC-28).
 
 No `read_all`, no global position, no `head()` of the journal (ES-I17), and no method returns
 events of more than one stream. A journal-wide view for the operator (`mayfly events --follow`,
-plan §11) is built in §5.6 without one. Until ES-04's `ProjectionStore`, the landed port keeps an
-interim `projection(name, key)` read and inline rows as `ProjectionWrite { projection, stream,
+plan §11) is built in §5.6 without one. Before ES-04 the landed port kept an
+interim `projection(name, key)` read (kept by ES-04 as a read of the active generation, §3.6 "As
+built") and inline rows as `ProjectionWrite { projection, stream,
 key, row }`, refused `Malformed(ProjectionOutsideUnit)` when keyed by a stream the unit does not
 append to (ES-I10).
 
@@ -526,6 +527,43 @@ cutover fence flips the active generation in one transaction, and a unit that co
 previous generation set is refused (`ProjectionGenerationMoved`, retried like
 `WrongExpectedRevision`). Readers see the active generation only.
 
+**As built (ES-04).** `mayfly_control::projection` holds the ports and the specs; the sketch
+differs as follows. (1) *The spec* is `ProjectionSpec { NAME, VERSION, SUBSCRIBES: &[EventKind],
+type Source: Aggregate, type Row }` with `apply(rows, event, state_after, EventMeta) ->
+Vec<RowChange>`: `apply` sees its own stream's rows (by suffix), the decoded event and the
+aggregate's state after it, never a stream id, and returns suffixes the fold keys as `<stream>` or
+`<stream>/<suffix>`. `SUBSCRIBES` is matched against the decoded (upcast) kind; a kind missing
+from it is found by `mayfly_testkit::contracts::projections::check_subscriptions` over every
+aggregate's determinism-case histories. (2) *Inline rows* are computed by `AggregateStore::save`
+outside the transaction by folding the stream's history the decision was made on, then the batch
+(`Projection::inline`): the rows are those at the expected revision plus the batch by
+construction, the model's `rowAfter` (the bug ES-06's first Apalache run found was a fold from
+the rows of *now*). The unit carries one `ProjectionWrite { projection, stream, rows: [RowWrite
+{ key, row: Option }] }` per projection of each appended stream's aggregate, even with no row,
+and the journal writes the rows in the spec's active generation (a meta row's, or 0 before the
+first rebuild) and records the stream's new head as the revision applied. (3) *Locality* is in
+the data and the code: a write naming a stream the unit does not append to, or a key that is not
+`<stream>` or `<stream>/…` (stream ids hold no `/`), is `Malformed(ProjectionOutsideUnit)`
+(PC-05); `ARCH-projection-locality` refuses a spec that names a stream, a write, the journal or
+the store, and a write built outside the fold. (4) *Ports*: `ProjectionStore` (reads of the
+active generation: `meta`, `stream_rows` with the applied revision, `row`, `rows` paged by key)
+and `ProjectionRebuild` (`begin_rebuild`, `apply_stream(spec, generation, stream, rows,
+applied)`, refused on the active generation, and `cutover`, one transaction that records version
+and build and drops every other generation), so a query (`mayfly_control::queries`) takes the
+read port only. `Journal::projection` stays, the same read of the active generation, for the
+journal contract's atomicity cases. (5) *Offline rebuild*: `projection::prepare` rebuilds every
+projection with no meta row, another version in either direction or another build, at start-up
+before any writer; it pages `Journal::streams` by key, folds each stream of the spec's aggregate
+from revision 0 and records the revision of the last event it folded, never the paged head's.
+ES-12 adds the dual writes and the cutover fence (`ProjectionGenerationMoved`). (6) *Storage*:
+migration 0004 adds `projection_meta` and `projection_stream (spec, generation, stream_id) →
+applied`, the per-stream applied revision of ES-I11 (floor 2: no earlier build writes a row).
+(7) *First read models*: `attempts`, `pending_effects` (attempt streams; a pending row is deleted
+when its directive resolves), `slots` (host streams; deleted on release), `pools` and
+`recent_failures` (pool streams; deleted when the breaker's window drops a failure or a reset
+clears it). Counts across streams (`failures_by_pool`, `leases_by_host`, unknown effects) are
+query-time views over those rows.
+
 ### 3.7 What `AggregateStore::save` does, and transaction scopes
 
 `AggregateStore::save` (ES-03) is the only caller of `Journal::append` (`ARCH-single-append`):
@@ -585,6 +623,7 @@ anomalies; a constraint or a CAS is the guard).
 | `snapshot_request` | `stream_id` | `target` | target only rises |
 | `projection_row` | `(spec, generation, key)` | `stream_id`, `payload` | index `(spec, generation, stream_id)` |
 | `projection_meta` | `spec` | `version`, `active_generation`, `written_by` | |
+| `projection_stream` | `(spec, generation, stream_id)` | `applied` | the revision a stream's rows are the fold of (ES-04) |
 | `schema_meta` | `version` | `applied_at`, `compat_floor` | §6.5 |
 
 `ES-02` and `ES-09` each own their migration set with the same numbers and the same logical
@@ -1176,7 +1215,14 @@ then a fix.
 | `CursorlessLedger` (discovery restarts from the lowest key at every claim) | contract | DC-28 |
 | A worker without its `handle` deadline (`SuiteWorker::WithoutHandleDeadline`) | contract | DC-26 |
 | `BlindSnapshotUpsert`, `ResealingSnapshots` | contract | SC-09, SC-08 |
-| `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01 |
+| `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01, PC-03 |
+| `RowlessJournal` (commits events without their rows) | contract | PC-01, PC-02, PC-03, PC-05, PC-06 |
+| `UndeletingJournal` (drops row deletes) | contract | PC-01, PC-03 |
+| `LeakyRowsJournal` (writes a refused unit's rows) | contract | PC-04, PC-05 |
+| `UnscopedRowsJournal` (no locality check) | contract | PC-05 |
+| `InPlaceRebuildStore` (a rebuild writes the active generation) | contract | PC-01, PC-02, PC-06 |
+| A start that rebuilds only upward (`SuitePrepare::UpwardOnly`) | contract | PC-06 |
+| A start blind to versions (`SuitePrepare::VersionBlind`) | contract | PC-02, PC-06 |
 
 The curated-mutant table of ver §9 gains the store rows that are not already contract fixtures.
 

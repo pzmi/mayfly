@@ -52,6 +52,7 @@ const STORE_TABLES: &[&str] = &[
     "SNAPSHOT_REQUEST",
     "PROJECTION_ROW",
     "PROJECTION_META",
+    "PROJECTION_STREAM",
     "SCHEMA_META",
 ];
 

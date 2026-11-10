@@ -19,6 +19,7 @@ use mayfly_domain::{CommandId, EventId};
 
 use crate::contracts::journal::{InjectedFault, JournalFactory};
 use crate::delivery::DeliveryRows;
+use crate::projections::ProjectionRows;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct State {
@@ -28,7 +29,7 @@ pub(crate) struct State {
     kinds: BTreeSet<StoredKind>,
     receipts: BTreeMap<CommandId, CommandReceipt>,
     inbox: BTreeSet<InboxKey>,
-    projections: BTreeMap<(ProjectionName, String), Payload>,
+    pub(crate) projections: ProjectionRows,
     /// The delivery ledger's rows (`crate::delivery::MemoryLedger`), in the same store as the
     /// journal so a unit's dispatch marks commit with it (ES-I1, DC-03).
     pub(crate) delivery: DeliveryRows,
@@ -221,11 +222,10 @@ impl State {
             next.delivery.mark_all(&stream.stream, stream.last);
         }
         for write in unit.projections {
-            let key = (write.projection, write.key);
-            match write.row {
-                Some(row) => next.projections.insert(key, row),
-                None => next.projections.remove(&key),
-            };
+            if let Some(stream) = appended.streams.iter().find(|s| s.stream == write.stream) {
+                let applied = stream.last;
+                next.projections.write(write, applied);
+            }
         }
         Ok((next, appended))
     }
@@ -378,11 +378,7 @@ impl Journal for MemoryJournal {
         projection: &ProjectionName,
         key: &str,
     ) -> Result<Option<Payload>, StorageError> {
-        Ok(self.read(|s| {
-            s.projections
-                .get(&(projection.clone(), key.to_owned()))
-                .cloned()
-        }))
+        Ok(self.read(|s| s.projections.row(projection, key)))
     }
 }
 
@@ -412,5 +408,26 @@ impl JournalFactory for MemoryJournalFactory {
 
     async fn crash(&self, journal: MemoryJournal) -> MemoryJournal {
         journal
+    }
+}
+
+/// Makes [`MemoryJournal`]s for the projection contract: reopening hands back the same store,
+/// and faults are injected with [`MemoryJournal::inject`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryProjectionFactory;
+
+impl crate::contracts::projections::ProjectionFactory for MemoryProjectionFactory {
+    type Store = MemoryJournal;
+
+    async fn fresh(&self) -> MemoryJournal {
+        MemoryJournal::new()
+    }
+
+    async fn reopen(&self, store: MemoryJournal) -> MemoryJournal {
+        store
+    }
+
+    async fn inject(&self, store: &MemoryJournal, fault: InjectedFault) -> bool {
+        store.inject(fault)
     }
 }

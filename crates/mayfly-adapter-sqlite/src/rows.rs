@@ -20,8 +20,11 @@ use serde_json::{Value, json};
 
 use crate::classify::{Failure, classify};
 
-/// The generation every inline projection row lives in until ES-04 brings generations.
-pub(crate) const GENERATION: i64 = 0;
+/// The active generation of the spec bound to `?1`, as a SQL expression: its meta row's, or 0
+/// before its first rebuild (`doc/event-store.md` §3.6). Read inside the statement that uses
+/// it, so a reader sees one generation.
+pub(crate) const ACTIVE_GENERATION: &str =
+    "coalesce((SELECT m.active_generation FROM projection_meta m WHERE m.spec = ?1), 0)";
 
 /// A row that does not decode: a fixed code, never the value.
 pub(crate) const fn unreadable() -> Failure {
@@ -294,20 +297,19 @@ pub(crate) fn stored_kinds(conn: &Connection) -> Result<Vec<StoredKind>, Failure
         .collect()
 }
 
-/// The projection row `key` of `projection`.
+/// The projection row `key` of `projection` in its active generation.
 pub(crate) fn projection(
     conn: &Connection,
     projection: &ProjectionName,
     key: &str,
 ) -> Result<Option<Payload>, Failure> {
-    conn.prepare_cached(
-        "SELECT payload FROM projection_row WHERE spec = ?1 AND generation = ?2 AND key = ?3",
-    )
+    conn.prepare_cached(&format!(
+        "SELECT payload FROM projection_row WHERE spec = ?1 AND generation = {ACTIVE_GENERATION} \
+         AND key = ?2"
+    ))
     .and_then(|mut s| {
-        s.query_row(params![projection.as_str(), GENERATION, key], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()
+        s.query_row(params![projection.as_str(), key], |r| r.get::<_, String>(0))
+            .optional()
     })
     .map(|row| row.map(Payload::new))
     .map_err(|e| engine(&e))

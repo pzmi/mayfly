@@ -41,7 +41,7 @@ use rusqlite::{Connection, params};
 
 use crate::classify::{Constraint, Failure, classify};
 use crate::hooks::{HookAction, StoreHooks};
-use crate::rows::{self, GENERATION, StoredReceipt, sql_millis, sql_revision};
+use crate::rows::{self, ACTIVE_GENERATION, StoredReceipt, sql_millis, sql_revision};
 
 /// Why an append stopped before an ordinary commit.
 #[derive(Debug)]
@@ -485,25 +485,46 @@ impl<H: StoreHooks> Tx<'_, H> {
                 params![kind.event_type, i64::from(kind.schema_version), at],
             )?;
         }
-        for row in &unit.projections {
-            match &row.row {
-                Some(payload) => self.exec(
-                    "INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (spec, generation, key) \
-                     DO UPDATE SET stream_id = excluded.stream_id, payload = excluded.payload",
-                    params![
-                        row.projection.as_str(),
-                        GENERATION,
-                        row.key,
-                        row.stream.as_str(),
-                        payload.as_str()
-                    ],
-                )?,
-                None => self.exec(
-                    "DELETE FROM projection_row WHERE spec = ?1 AND generation = ?2 AND key = ?3",
-                    params![row.projection.as_str(), GENERATION, row.key],
-                )?,
+        // Projection rows (stream-local, §4.2's eighth lock), in each spec's active generation
+        // read in this transaction, with the stream's new head as the revision applied.
+        for write in &unit.projections {
+            let Some((_, placed)) = appends.iter().find(|(a, _)| a.stream == write.stream) else {
+                continue;
             };
+            let applied = sql_revision(placed.last).map_err(refused)?;
+            for row in &write.rows {
+                match &row.row {
+                    Some(payload) => self.exec(
+                        &format!(
+                            "INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
+                             VALUES (?1, {ACTIVE_GENERATION}, ?2, ?3, ?4) \
+                             ON CONFLICT (spec, generation, key) \
+                             DO UPDATE SET stream_id = excluded.stream_id, payload = excluded.payload"
+                        ),
+                        params![
+                            write.projection.as_str(),
+                            row.key,
+                            write.stream.as_str(),
+                            payload.as_str()
+                        ],
+                    )?,
+                    None => self.exec(
+                        &format!(
+                            "DELETE FROM projection_row WHERE spec = ?1 \
+                             AND generation = {ACTIVE_GENERATION} AND key = ?2"
+                        ),
+                        params![write.projection.as_str(), row.key],
+                    )?,
+                };
+            }
+            self.exec(
+                &format!(
+                    "INSERT INTO projection_stream (spec, generation, stream_id, applied) \
+                     VALUES (?1, {ACTIVE_GENERATION}, ?2, ?3) \
+                     ON CONFLICT (spec, generation, stream_id) DO UPDATE SET applied = excluded.applied"
+                ),
+                params![write.projection.as_str(), write.stream.as_str(), applied],
+            )?;
         }
         // Dispatch marks, last in the lock order (§4.2): every consumer registered as this
         // transaction reads it is marked at each appended stream's new head; a mark only

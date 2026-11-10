@@ -66,7 +66,7 @@ impl<H: StoreHooks> SqliteJournal<H> {
 
 /// Runs `f` in one `BEGIN IMMEDIATE` transaction: committed when it returns `Ok`, rolled back
 /// otherwise.
-fn transaction<T>(
+pub(crate) fn transaction<T>(
     conn: &Connection,
     f: impl FnOnce(&Connection) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
@@ -92,7 +92,11 @@ fn transaction<T>(
     }
 }
 
-fn exec(conn: &Connection, sql: &str, values: impl rusqlite::Params) -> Result<usize, Failure> {
+pub(crate) fn exec(
+    conn: &Connection,
+    sql: &str,
+    values: impl rusqlite::Params,
+) -> Result<usize, Failure> {
     conn.prepare_cached(sql)
         .and_then(|mut s| s.execute(values))
         .map_err(|e| classify(&e))

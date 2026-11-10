@@ -39,8 +39,8 @@ use mayfly_control::journal::{
     AggregateName, AppendError, Appended, AppendedStream, CommandReceipt, CommandType, Decision,
     EventLocation, ExpectedRevision, InboxKey, InboxSource, IntentDigest, Journal, MAX_PAGE,
     MalformedUnit, MessageId, NewEvent, NewReceipt, Payload, ProjectionName, ProjectionWrite,
-    ReadCondition, ReceiptOutcome, RecordedEvent, StoredKind, StreamHead, StreamId, StreamRevision,
-    SupportedEpochs, UnitOfWork,
+    ReadCondition, ReceiptOutcome, RecordedEvent, RowWrite, StoredKind, StreamHead, StreamId,
+    StreamRevision, SupportedEpochs, UnitOfWork,
 };
 use mayfly_domain::{CommandId, EventId, Millis};
 
@@ -554,12 +554,19 @@ fn projection_name() -> ProjectionName {
     ProjectionName::new("contract_rows").unwrap_or_else(|e| panic!("contract projection: {e}"))
 }
 
-fn row(s: &StreamId, row_key: &str, value: Option<&str>) -> ProjectionWrite {
+/// The stored key of the contract row tagged `tag` of stream `s`: within the stream (ES-I10).
+fn row_key(s: &StreamId, tag: &str) -> String {
+    format!("{s}/{tag}")
+}
+
+fn row(s: &StreamId, tag: &str, value: Option<&str>) -> ProjectionWrite {
     ProjectionWrite {
         projection: projection_name(),
         stream: s.clone(),
-        key: row_key.to_owned(),
-        row: value.map(Payload::new),
+        rows: vec![RowWrite {
+            key: row_key(s, tag),
+            row: value.map(Payload::new),
+        }],
     }
 }
 
@@ -633,10 +640,16 @@ async fn observe<J: Journal>(journal: &J, probe: &Probe) -> Result<Observed, Str
         )?);
     }
     for r in &probe.rows {
-        seen.rows.push(io(
-            "projection",
-            journal.projection(&projection_name(), r).await,
-        )?);
+        let mut found = None;
+        for s in &probe.streams {
+            if found.is_none() {
+                found = io(
+                    "projection",
+                    journal.projection(&projection_name(), &row_key(s, r)).await,
+                )?;
+            }
+        }
+        seen.rows.push(found);
     }
     Ok(seen)
 }
@@ -751,7 +764,12 @@ fn tagged(n: u128, s: &StreamId, expected: ExpectedRevision, event_id: u128) -> 
 }
 
 /// Whether the event, receipt, inbox entry and row of [`tagged`] unit `n` are stored.
-async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[bool; 4], String> {
+async fn traces_of<J: Journal>(
+    journal: &J,
+    s: &StreamId,
+    n: u128,
+    event_id: u128,
+) -> Result<[bool; 4], String> {
     Ok([
         io(
             "lookup_event",
@@ -767,7 +785,9 @@ async fn traces_of<J: Journal>(journal: &J, n: u128, event_id: u128) -> Result<[
         )?,
         io(
             "projection",
-            journal.projection(&projection_name(), &n.to_string()).await,
+            journal
+                .projection(&projection_name(), &row_key(s, &n.to_string()))
+                .await,
         )?
         .is_some(),
     ])
@@ -1205,7 +1225,7 @@ async fn malformed_unit<F: JournalFactory>(factory: &F) -> Check {
         (
             extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(
                 &s2,
-                "",
+                "a\nb",
                 Some("{}"),
             ))),
             MalformedUnit::InvalidProjectionKey,
@@ -2568,12 +2588,12 @@ async fn racing_handles<F: JournalFactory>(factory: &F) -> Check {
         )?;
         eq(
             &format!("round {round}: the winner's unit"),
-            &traces_of(&journal, winner, winner).await?,
+            &traces_of(&journal, &s1, winner, winner).await?,
             &[true; 4],
         )?;
         eq(
             &format!("round {round}: the loser's unit"),
-            &traces_of(&other, loser, loser).await?,
+            &traces_of(&other, &s1, loser, loser).await?,
             &[false; 4],
         )?;
     }
@@ -3195,7 +3215,9 @@ async fn read_part<J: Journal>(
         )?,
         _ => io(
             "projection",
-            journal.projection(&projection_name(), "r2").await,
+            journal
+                .projection(&projection_name(), &row_key(s2, "r2"))
+                .await,
         )?
         .is_some(),
     })

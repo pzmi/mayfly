@@ -1,0 +1,4 @@
+rule: ARCH-projection-locality
+at: crates/mayfly-control/src/lib.rs:13
+contains: names `StreamId` in a ProjectionSpec impl
+only: true

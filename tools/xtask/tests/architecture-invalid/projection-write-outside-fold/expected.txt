@@ -1,0 +1,4 @@
+rule: ARCH-projection-locality
+at: crates/mayfly-control/src/lib.rs:14
+contains: builds a `ProjectionWrite` outside the inline fold
+only: true

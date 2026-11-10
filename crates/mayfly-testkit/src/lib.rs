@@ -7,6 +7,8 @@
 //!   refusals included, over accepted and refused cases, and its outcomes and refusal codes
 //!   match its decisions golden (ver §3.1).
 //! - [`journal`]: `MemoryJournal`, the in-memory `Journal` (ver §7.1).
+//! - `MemoryJournal` also keeps projection rows with their generations and implements
+//!   `ProjectionStore` and `ProjectionRebuild` (`doc/event-store.md` §3.6).
 //! - [`delivery`]: `MemoryLedger`, the in-memory `DeliveryLedger` over a `MemoryJournal`'s store
 //!   (`doc/event-store.md` §3.4).
 //! - [`clock`]: `FakeClock`, `SeededRng` and `RecordingNotifier`, fakes for `AggregateStore`'s
@@ -34,6 +36,7 @@ pub mod delivery;
 pub mod determinism;
 pub mod golden;
 pub mod journal;
+mod projections;
 pub mod secrets;
 
 pub use block_on::block_on;

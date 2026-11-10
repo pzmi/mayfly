@@ -160,9 +160,11 @@ mayfly-protocol = { serde = ["default", "derive"] }
 mayfly-control-domain = { serde = ["default", "derive"] }
 mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["default"] }
 # AggregateStore encodes events and refusals and hashes intent digests (ADR 0041); tracing for the
-# delivery worker's ERROR on a stream whose journal read falls short of its mark (ES-05F).
-mayfly-control = { serde_json = ["default"], sha2 = ["default"], tracing = ["std"] }
-mayfly-testkit = { serde_json = ["default"] }
+# delivery worker's ERROR on a stream whose journal read falls short of its mark (ES-05F); serde
+# derives the projection rows, encoded as JSON documents like every payload (ES-04).
+mayfly-control = { serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], tracing = ["std"] }
+# The projection contract tags rows with the spec version that built them (serde derive, ES-04).
+mayfly-testkit = { serde = ["default", "derive"], serde_json = ["default"] }
 # ITF traces are JSON and the trace manifests TOML (ver section 6.2, VER-01).
 mayfly-conformance = { serde_json = ["default"], toml = ["default"] }
 # The link transports (plan section 3.3): bounded Tokio channels for inproc, JSON frames
@@ -211,6 +213,8 @@ mayfly-domain = { proptest = ["std"] }
 mayfly-protocol = { serde_json = ["default"] }
 # Properties of the capacity policy and the Host aggregate over generated inputs (KER-05).
 mayfly-control-domain = { proptest = ["std"] }
+# "Rebuild equals live" over random pool histories (ES-04, ES-I11).
+mayfly-control = { proptest = ["std"] }
 mayfly-adapter-sqlite = { tempfile = ["default"] }
 # The secret-provider contract runs on a current-thread runtime over tempdir sources; a oneshot
 # cancels a call from another thread (SEC-02).
@@ -219,11 +223,10 @@ mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io
 # plane's executor together on one current-thread runtime (`tokio::join!`, `select!`), and hold
 # a send on a `watch` gate to stage a relay takeover; nothing spawned.
 mayfly-composition = { tempfile = ["default"], tokio = ["rt", "macros", "sync"] }
-mayfly-control = { serde = ["default", "derive"] }
 # The executor's component tests poll it and their script together on a current-thread runtime
 # (`tokio::join!`), nothing spawned (DP-01).
 mayfly-data = { tokio = ["rt", "macros"] }
-mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
+mayfly-testkit = { tempfile = ["default"] }
 mayfly-fake-tart = { tempfile = ["default"] }
 # The Tart adapter's tests: tempdir state and fake homes, the fake's JSON log.
 mayfly-adapter-tart = { tempfile = ["default"], serde_json = ["default"] }

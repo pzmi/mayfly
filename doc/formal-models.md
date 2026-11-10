@@ -826,6 +826,20 @@ stream's events, computed outside the transaction (`withRows`); `startRebuild`,
 rebuilt, and a unit computed for another generation set, or before its stream was rebuilt, is
 refused at commit. Snapshots (`ES_I8`) join with ES-08.
 
+**ES-04 against the model.** The Rust inline projection keeps the model's rule: a unit's rows
+are the fold of its stream at the unit's expected revision plus its batch (`rowAfter`), computed
+outside the transaction from the events the decision was made on
+(`mayfly_control::projection::Projection::inline`), never from the rows of now, and guarded by
+the expected revision like the events, so a unit whose revision another unit reached in between
+is refused `WrongExpectedRevision` with its rows (PC-01, PC-03). Gaps, none of which an invariant
+of the model depends on: the model's projection is one count per stream, so it has no row keys,
+no deletes and no cross-stream write to refuse (ES-I10 is pinned by PC-05 and
+`ARCH-projection-locality`, not by the model); its rebuild is ES-12's online one, and the offline
+`prepare` of ES-04 (version or build mismatch, run before any writer) is not modelled; the
+applied revision the store keeps per stream (`projection_stream`) is the row itself in the model;
+and the conformance driver (ES-07) observes no projection rows yet. ES-12 closes the rebuild gap
+when it implements `startRebuild`, `rebuildStream` and `cutover`.
+
 `step` offers every stimulus with concurrent held writers (memory and PostgreSQL);
 `implStepSerial` is the same with at most one open transaction (SQLite's `BEGIN IMMEDIATE`): a
 unit begins, or appends in one step, only while no other transaction is open; `relayStep` is

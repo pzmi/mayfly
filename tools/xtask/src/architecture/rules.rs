@@ -219,6 +219,9 @@ rules! {
     MigrationFrozen => "ARCH-migration-frozen", "ES-03R",
         "A store migration (src/migrations/**.sql) differs from its migrations.lock line, a listed migration is gone, a migration is not listed, or the lock is malformed or missing.",
         ["migration-without-lock-line", "released-migration-edited"];
+    ProjectionLocality => "ARCH-projection-locality", "ES-04",
+        "Production code of a control-plane or both-planes crate names a stream, a projection write, the journal or the store inside an impl ProjectionSpec block (also in macro tokens), or builds a ProjectionWrite or RowWrite struct outside the inline fold, the journal module and the testkit contract suites (ES-I10).",
+        ["projection-spec-names-stream", "projection-write-outside-fold"];
     FixturesLock => "ARCH-fixtures-lock", "ES-03R",
         "A golden fixture (tests/fixtures/**) differs from its fixtures.lock line, a listed fixture is gone, a fixture is not listed, or the lock is malformed or missing.",
         ["frozen-fixture-changed"];

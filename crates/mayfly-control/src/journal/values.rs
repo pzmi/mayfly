@@ -541,19 +541,51 @@ impl CommandReceipt {
     }
 }
 
-/// One inline projection row write, committed with the unit that caused it (ES-I9). A
-/// placeholder shape until ES-04's projection specs and generations: a keyed document per
-/// projection, owned by one stream the unit appends to (ES-I10).
+/// One row of an inline projection: its key and its new encoded document, or `None` to delete
+/// it (a delete target: a resolved pending effect, a released slot, a failure out of its window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowWrite {
+    /// The row's key: the stream id itself or `<stream>/<suffix>` ([`row_key_in_stream`]), 1 to
+    /// 256 bytes, no control character.
+    pub key: String,
+    /// The new encoded row, or `None` to remove it.
+    pub row: Option<Payload>,
+}
+
+/// One inline projection's writes for one stream the unit appends to, committed with the unit
+/// (ES-I9) in the projection's active generation (ES-04; ES-12 adds the shadow). The journal
+/// records the stream's new head as the revision the projection has applied for the stream,
+/// so a unit names every projection of the stream's aggregate, even with no row to write.
+///
+/// **Locality (ES-I10).** `stream` must be one the unit appends to, and every key must be that
+/// stream's ([`row_key_in_stream`]): a unit can neither name another stream nor reach one of its
+/// rows through a key, so its rows are computable outside the transaction from the stream it
+/// appends to, guarded by that stream's expected revision. Otherwise the unit is
+/// `Malformed(ProjectionOutsideUnit)` before any storage access (contract case PC-05
+/// `outside_unit_refused`; `ARCH-projection-locality` holds the same line in the code).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionWrite {
     /// The projection.
     pub projection: ProjectionName,
-    /// The stream the row belongs to; it must be one the unit appends to.
+    /// The stream whose rows these are; one the unit appends to.
     pub stream: StreamId,
-    /// The row's key within the projection: 1 to 256 bytes, no control character.
-    pub key: String,
-    /// The new encoded row, or `None` to remove it.
-    pub row: Option<Payload>,
+    /// The rows written or removed, each key at most once.
+    pub rows: Vec<RowWrite>,
+}
+
+/// Whether `key` is a row key of `stream`: the stream id itself, or the id, a `/` and a
+/// non-empty suffix. A stream id holds no `/`, so the keys of two streams never meet, and the
+/// `(spec, generation, key)` key of a row names exactly one stream (ES-I10). Pinned by
+/// `should_keep_row_keys_within_their_stream_when_keys_are_checked`.
+#[must_use]
+pub fn row_key_in_stream(stream: &StreamId, key: &str) -> bool {
+    match key.strip_prefix(stream.as_str()) {
+        Some("") => true,
+        Some(rest) => rest
+            .strip_prefix('/')
+            .is_some_and(|suffix| !suffix.is_empty()),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -641,6 +673,32 @@ mod tests {
         assert!(ProjectionName::new("pending_effects").is_ok());
         assert!(AggregateName::new("attempt").is_ok());
         assert!(CommandType::new("start_attempt").is_ok());
+    }
+
+    #[test]
+    fn should_keep_row_keys_within_their_stream_when_keys_are_checked() {
+        // given
+        let stream = StreamId::new("attempt-1").unwrap_or_else(|e| panic!("{e}"));
+        let keys = [
+            ("attempt-1", true),
+            ("attempt-1/42", true),
+            ("attempt-1/a/b", true),
+            ("attempt-1/", false),
+            ("attempt-10", false),
+            ("attempt-10/1", false),
+            ("attempt-", false),
+            ("pool-1", false),
+            ("", false),
+        ];
+
+        // when
+        let judged: Vec<(&str, bool)> = keys
+            .iter()
+            .map(|(k, _)| (*k, row_key_in_stream(&stream, k)))
+            .collect();
+
+        // then
+        assert_eq!(judged, keys);
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! `mayfly-adapter-sqlite` (control plane): the SQLite journal (ES-02), with receipts, inbox,
 //! the event-kind manifest, inline projection rows and forward-only migrations, and the delivery
-//! ledger (ES-05, [`SqliteLedger`]); snapshots and projection generations join with ES-08 and
-//! ES-04.
+//! ledger (ES-05, [`SqliteLedger`]); projection generations (ES-04); snapshots join with ES-08.
 //!
 //! [`SqliteJournal`] implements `mayfly_control::journal::Journal` over one file through
 //! `rusqlite` with its bundled SQLite (ADR 0008, amended by ADR 0021), following the adapter
@@ -21,6 +20,10 @@
 //!   stream it appends, in its own transaction; the ledger's claims, renewals, advances and
 //!   releases are short `BEGIN IMMEDIATE` transactions on the same writers, fenced by the lease
 //!   and judged by an injected store clock (`doc/event-store.md` §4.2, §5.1).
+//! - **Projections** (`projections`, migration 0004): inline rows in each spec's active
+//!   generation, written by the unit's transaction with the stream's new head as applied; the
+//!   `ProjectionStore` reads and the offline rebuild's `ProjectionRebuild` writes (ES-04,
+//!   `doc/event-store.md` §3.6).
 //! - **Threads** (`writer`): each connection lives on its own thread; one writer is an
 //!   implementation detail, never a premise (§4.3 rule 2).
 //! - **Barriers** ([`StoreHooks`], [`NoHooks`]): where tests and the store lab strike.
@@ -30,6 +33,7 @@ mod classify;
 mod hooks;
 mod journal;
 mod ledger;
+mod projections;
 mod rows;
 mod schema;
 mod writer;
