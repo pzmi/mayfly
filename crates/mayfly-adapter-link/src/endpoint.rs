@@ -9,7 +9,12 @@
 //! version not admitted, bytes that are not a frame, and a message of the wrong kind for the
 //! phase (a directive before the welcome is of a session not entered yet, discarded unanswered
 //! per ADR 0042; a duplicated `Welcome` or `Hello` after it). Nothing a peer sends closes the
-//! link; at-least-once delivery re-sends what was lost (plan §3.2).
+//! link; at-least-once delivery re-sends what was lost (plan §3.2). Link contract case LK-16
+//! sends each of these to both ends and reads the counts back.
+//!
+//! Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
+//! (LK-16), and `should_fail_the_version_cases_when_a_link_does_not_check_versions` for the
+//! version count.
 
 use mayfly_protocol::{
     Directive, DirectiveSink, DirectiveSource, Frame, HandshakeInitiator, HandshakeRefused,
@@ -20,7 +25,11 @@ use mayfly_protocol::{
 use crate::codec::{self, Discard};
 use crate::wire::{Wire, WireRx, WireTx};
 
-/// What a receiving end discarded instead of handing up, by cause.
+/// What a receiving end discarded instead of handing up, by cause. Each count is a lower bound
+/// on what the peer sent of that kind once the frames arrived (at-least-once may deliver one
+/// twice); link contract case LK-16.
+///
+/// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Discards {
     /// Frames of a version not admitted (`mayfly_protocol::admit_frame`).
@@ -52,6 +61,10 @@ impl<R: WireRx> Reader<R> {
         }
     }
 
+    /// Counts an admitted message of the wrong kind for the phase, which the caller then drops
+    /// unanswered (a directive before the welcome: ADR 0042). Link contract case LK-16.
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     fn unexpected(&mut self) {
         self.discards.unexpected += 1;
     }
@@ -125,7 +138,9 @@ impl<W: Wire> DataPlaneLink<W> {
         self.session
     }
 
-    /// What this end discarded so far.
+    /// What this end discarded so far (link contract case LK-16).
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     #[must_use]
     pub const fn discarded(&self) -> Discards {
         self.reader.discards
@@ -198,14 +213,18 @@ impl<R: WireRx> DirectiveReceiver<R> {
         self.version
     }
 
-    /// What this half and the handshake before it discarded so far.
+    /// What this half and the handshake before it discarded so far (link contract case
+    /// LK-16).
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     #[must_use]
     pub const fn discarded(&self) -> Discards {
         self.reader.discards
     }
 
     /// Closes the session's inbound direction: the control plane's sends fail from now on.
-    /// Returns how many frames were discarded unread (link contract case LK-14).
+    /// Returns how many frames were discarded unread (link contract case LK-14: at least one
+    /// when any was).
     ///
     /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     pub async fn close(self) -> usize {
@@ -280,7 +299,9 @@ impl<W: Wire> ControlPlaneLink<W> {
         self.session
     }
 
-    /// What this end discarded so far.
+    /// What this end discarded so far (link contract case LK-16).
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     #[must_use]
     pub const fn discarded(&self) -> Discards {
         self.reader.discards
@@ -372,14 +393,18 @@ impl<R: WireRx> ObservationReceiver<R> {
         self.version
     }
 
-    /// What this half and the handshake before it discarded so far.
+    /// What this half and the handshake before it discarded so far (link contract case
+    /// LK-16).
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     #[must_use]
     pub const fn discarded(&self) -> Discards {
         self.reader.discards
     }
 
     /// Closes the session's inbound direction: the data plane's sends fail from now on.
-    /// Returns how many frames were discarded unread (link contract case LK-14).
+    /// Returns how many frames were discarded unread (link contract case LK-14: at least one
+    /// when any was).
     ///
     /// Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
     pub async fn close(self) -> usize {

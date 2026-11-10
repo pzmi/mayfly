@@ -116,7 +116,11 @@ Rules over the table:
    dependent's normal list (`ARCH-forbidden-dev-edge`), and by rule 2 only a test crate whose
    production closure stays within the dependent's plane and the shared crates: a DP crate's
    tests do not use the SQLite adapter, not even through `mayfly-conformance` (ADR 0019), and
-   a shared crate's tests use only the shared kit and other shared crates.
+   a shared crate's tests use only the shared kit and other shared crates. The kit's own
+   dependencies (`mayfly-domain`, `mayfly-protocol`) form a Cargo dev cycle with it, so they use
+   it from integration tests (`tests/`) only: a unit test's kit links a different build of the
+   crate, whose types never match `crate::` ones (the compiler refuses the mix; see the note at
+   `mayfly-testkit-shared` in `architecture.toml`).
    Test support is therefore split per plane: `mayfly-testkit` is the control plane's kit; the
    shared kit `mayfly-testkit-shared` (the poll helper, FND-05; the link contract suite,
    DP-02) depends on the shared crates only (`mayfly-domain`, `mayfly-protocol`), so every

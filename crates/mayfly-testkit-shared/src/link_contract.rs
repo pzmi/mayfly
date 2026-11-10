@@ -17,15 +17,22 @@
 //! The contract on an accepted frame is: while the link stays open, it is delivered, at least
 //! once (LK-10); a full transport makes the next send wait rather than drop (LK-11); after a
 //! close, what the closing side had not received is discarded and *counted* by its close
-//! (LK-14), and the peer sees the close (LK-12, LK-13). End-to-end acknowledgement is the
-//! protocol's: the relay re-sends a directive until an observation answers it definitely, and
-//! both ends are idempotent (plan §3.2, `formal/link.qnt`).
+//! (LK-14), and the peer sees the close only once what it sent before is drained (LK-12,
+//! LK-13). End-to-end acknowledgement is the protocol's: the relay re-sends a directive until
+//! an observation answers it definitely, and both ends are idempotent (plan §3.2,
+//! `formal/link.qnt`).
 //!
 //! **Order is never assumed.** Every case that receives several frames collects them as a set
 //! until all it waits for have arrived, tolerates duplicates, and tells a forbidden frame from
-//! an allowed one by content, never by position. The suite's own tests prove it: a transport
-//! that delivers in reverse and duplicates frames passes every case
-//! (`crates/mayfly-adapter-link/tests/link_contract.rs`, `ReorderingLink`).
+//! an allowed one by content, never by position. A case about frames that may not be handed up
+//! (LK-04, LK-05, LK-09, LK-16) sends the forbidden frames, then the readable ones, then
+//! finishes the peer's direction ([`RawWire::finish`]), and drains until `Closed`: every frame
+//! is examined whatever order the transport delivers them in, so a transport that hands up the
+//! readable frame first cannot hide that it would hand up a forbidden one next. The suite's own
+//! tests prove both halves: a transport that delivers in reverse and duplicates frames passes
+//! every case (`crates/mayfly-adapter-link/tests/link_contract.rs`, `ReorderingLink`), and the
+//! same transport without the version check fails the version cases
+//! (`ReorderingNoVersionCheckLink`).
 //!
 //! **No case relies on time.** Each case runs on its own current-thread Tokio runtime, with the
 //! clock paused unless the factory says otherwise ([`LinkFactory::paused_clock`]); a bounded
@@ -34,27 +41,27 @@
 //!
 //! [`check_link_contract`] returns a report of failed cases instead of panicking: the suite's
 //! own tests use it to show deliberately broken transports failing named cases (ver §5:
-//! `SilentDropLink`, `NoVersionCheckLink`, `DeafCloseLink`, `CorruptingLink`). A factory that
-//! cannot build what a case needs fails that case: no case is skipped.
+//! `SilentDropLink`, `NoVersionCheckLink`, `ReorderingNoVersionCheckLink`, `DeafCloseLink`,
+//! `LossyCloseLink`, `CorruptingLink`). A factory that cannot build what a case needs fails
+//! that case: no case is skipped.
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display};
 use std::future::{Future, poll_fn};
+use std::path::Path;
 use std::pin::{Pin, pin};
 use std::task::Poll;
 use std::time::Duration;
 
-use mayfly_domain::{
-    AttemptId, Deadline, DirectiveId, Epoch, Generation, HostId, Millis, ObservationId,
-    OwnedVmName, SecretHandleId,
-};
+use mayfly_domain::{Deadline, DirectiveId, Epoch, HostId, Millis, ObservationId};
 use mayfly_protocol::{
-    AttemptRef, CURRENT, Directive, DirectiveKind, DirectiveRef, DirectiveSink, DirectiveSource,
-    Frame, HandshakeInitiator, HandshakeRefusal, HandshakeRefused, HandshakeResponder, Hello,
-    LinkError, Message, Mode, Observation, ObservationKind, ObservationSink, ObservationSource,
-    ProtocolVersion, RefusalReason, ResourceDimension, SUPPORTED, SecretHandle, Welcome, negotiate,
+    CURRENT, Directive, DirectiveKind, DirectiveRef, DirectiveSink, DirectiveSource, Frame,
+    HandshakeInitiator, HandshakeRefusal, HandshakeRefused, HandshakeResponder, Hello, LinkError,
+    Message, Mode, Observation, ObservationKind, ObservationSink, ObservationSource,
+    ProtocolVersion, RefusalReason, ResourceDimension, SUPPORTED, Welcome, admit_frame, negotiate,
 };
 
+use crate::fixtures::read_tree;
 use crate::poll::within;
 
 /// How long a case waits for one step before it calls it a hang. Under the paused clock it
@@ -71,6 +78,25 @@ pub trait RawWire {
 
     /// The next frame's bytes the typed end wrote, or `None` once it closed.
     fn recv(&mut self) -> impl Future<Output = Option<Vec<u8>>>;
+
+    /// Closes the peer's sending direction only (a socket's `shutdown(Write)`): the typed end
+    /// reads what was sent before and then `Closed`, while this side can still [`recv`]. Sends
+    /// after it fail with [`LinkError::Closed`].
+    ///
+    /// [`recv`]: RawWire::recv
+    fn finish(&mut self) -> impl Future<Output = ()>;
+}
+
+/// What an endpoint discarded instead of handing up, by cause: the transport-neutral view of
+/// `mayfly_adapter_link::Discards` (LK-16).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiscardCounts {
+    /// Frames of a version not admitted (`mayfly_protocol::admit_frame`).
+    pub version: u64,
+    /// Bytes that are not a frame of an admitted version.
+    pub malformed: u64,
+    /// Admitted frames of a kind the end does not take at that point.
+    pub unexpected: u64,
 }
 
 /// Makes the links the suite runs against.
@@ -93,8 +119,10 @@ pub trait LinkFactory {
     /// The peer's side of a connection, as bytes.
     type Raw: RawWire;
 
-    /// The most frames one direction holds while its reader reads nothing: a send beyond it
-    /// waits (LK-11). At least 1.
+    /// The bound the transport promises on one direction: the most frames it holds while its
+    /// reader reads nothing, so a send beyond it waits (LK-11). At least 1. It is an upper
+    /// bound, not an exact size: a send may wait sooner (a socket's buffers count bytes, not
+    /// frames), never later.
     fn capacity(&self) -> usize;
 
     /// Whether the cases run under Tokio's paused clock (the default). A transport whose
@@ -154,6 +182,18 @@ pub trait LinkFactory {
         directives: Self::CpDirectives,
         observations: Self::CpObservations,
     ) -> impl Future<Output = usize>;
+
+    /// What the data plane's handshake end discarded so far (LK-16).
+    fn data_plane_discards(&self, link: &Self::DpLink) -> DiscardCounts;
+
+    /// What the data plane's receiving half, and the handshake before it, discarded so far.
+    fn data_plane_session_discards(&self, directives: &Self::DpDirectives) -> DiscardCounts;
+
+    /// What the control plane's handshake end discarded so far (LK-16).
+    fn control_plane_discards(&self, link: &Self::CpLink) -> DiscardCounts;
+
+    /// What the control plane's receiving half, and the handshake before it, discarded so far.
+    fn control_plane_session_discards(&self, observations: &Self::CpObservations) -> DiscardCounts;
 }
 
 /// One case of the link contract.
@@ -167,44 +207,61 @@ pub enum LinkCase {
     MixedMinors,
     /// LK-03: a refused handshake reaches the data plane as `Refused` with its reason.
     HandshakeRefused,
-    /// LK-04: a handshake frame of a major the reader does not speak is never handed up; the
-    /// next readable one is.
+    /// LK-04: a handshake frame of a major the reader does not speak is never handed up, in
+    /// any order: a data plane offered only a 2.0 welcome ends its hello in `Closed` when the
+    /// peer finishes, a readable welcome sent after it is handed up, and a control plane drained
+    /// to `Closed` hands up the 1.x hello and never the 2.0 one.
     UnknownMajorDiscarded,
     /// LK-05: within a session, a frame of a newer minor or another major is never handed up,
-    /// in either direction.
+    /// in either direction: drained to `Closed`, exactly the readable frames arrive.
     SessionVersionHeld,
     /// LK-06: a welcome in a version the end does not speak opens no session, on either end.
     WelcomeOutsideOffer,
     /// LK-07: handshake frames are written in the oldest major the writer speaks.
     HandshakeInOldestMajor,
-    /// LK-08: every message survives the serde round trip: the bytes on the wire are the JSON
-    /// frame of what was sent, stamped with the session's version, and a JSON frame written by
-    /// the peer is read as itself.
+    /// LK-08: every message survives the serde round trip, in 1.0 and 1.1 sessions: the hello
+    /// on the wire is its JSON frame; every directive and observation of the protocol's golden
+    /// fixtures (`crates/mayfly-protocol/tests/fixtures`, whose harness proves they show every
+    /// directive kind, observation kind, refusal reason and unknown reason) goes on the wire as
+    /// the JSON frame of what was sent, stamped with the session's version (an observation
+    /// written down to it), and each fixture's bytes, written by the peer, are read as
+    /// themselves when the session admits their version.
     WireEncoding,
-    /// LK-09: bytes that are not a frame are discarded; the link stays open and the next frame
-    /// is handed up.
+    /// LK-09: bytes that are not a frame are discarded; the link stays open, and drained to
+    /// `Closed` it hands up exactly the frames sent after them.
     MalformedDiscarded,
     /// LK-10: every accepted frame is delivered while the link is open (at least once, any
     /// order), in both directions, past the capacity.
     AtLeastOnce,
-    /// LK-11: a direction holds at most its capacity unread; the next send waits, and completes
+    /// LK-11: a direction holds at most its capacity unread ([`LinkFactory::capacity`], an
+    /// upper bound: a send by then waits, and may wait sooner); the send that waits completes
     /// once the reader takes a frame, losing none.
     Backpressure,
-    /// LK-12: the control plane's close is seen by the data plane: its receive ends in
-    /// `Closed`, and its sends then fail with `Closed`.
+    /// LK-12: the control plane's close is seen by the data plane: its receive hands up every
+    /// directive sent before the close and then ends in `Closed` (drained, then `Closed`), and
+    /// its sends then fail with `Closed`.
     CloseSeenByDataPlane,
     /// LK-13: the data plane's close is seen by the control plane, likewise.
     CloseSeenByControlPlane,
-    /// LK-14: a close discards the frames its side had not received and reports how many.
+    /// LK-14: a close discards the frames its side had not received and reports them: at least
+    /// one when any was unread, so a lost burst never reads as zero. The count is a lower bound,
+    /// not exact: at-least-once may count a duplicate, and a socket transport cannot count what
+    /// is still in its peer's writer when it closes.
     CloseReportsInFlight,
     /// LK-15: a directive of any epoch is handed up: fencing is the data plane's (I09, ADR
     /// 0042), so a stale frame can be answered `OutcomeUnknown{stale_epoch}`.
     EveryEpochHandedUp,
+    /// LK-16: what an end may not hand up is discarded and counted by cause
+    /// ([`DiscardCounts`], lower bounds under at-least-once): a directive before the welcome is
+    /// discarded unanswered (ADR 0042), as are garbage and a frame of another major; within a
+    /// session a duplicate `Welcome`, a `Hello` and a message of the other direction are
+    /// discarded as unexpected, on both ends, and the link stays open.
+    DiscardsCounted,
 }
 
 impl LinkCase {
     /// Every case, in id order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Handshake,
         Self::MixedMinors,
         Self::HandshakeRefused,
@@ -220,6 +277,7 @@ impl LinkCase {
         Self::CloseSeenByControlPlane,
         Self::CloseReportsInFlight,
         Self::EveryEpochHandedUp,
+        Self::DiscardsCounted,
     ];
 
     /// The case's id, `LK-01` …
@@ -241,6 +299,7 @@ impl LinkCase {
             Self::CloseSeenByControlPlane => "LK-13",
             Self::CloseReportsInFlight => "LK-14",
             Self::EveryEpochHandedUp => "LK-15",
+            Self::DiscardsCounted => "LK-16",
         }
     }
 }
@@ -342,6 +401,7 @@ async fn run_case<F: LinkFactory>(f: &F, case: LinkCase) -> Check {
         LinkCase::CloseSeenByControlPlane => close_seen_by_control_plane(f).await,
         LinkCase::CloseReportsInFlight => close_reports_in_flight(f).await,
         LinkCase::EveryEpochHandedUp => every_epoch_handed_up(f).await,
+        LinkCase::DiscardsCounted => discards_counted(f).await,
     }
 }
 
@@ -499,23 +559,127 @@ async fn collect<T: Debug, K: Ord + Clone + Debug>(
     Ok(got)
 }
 
-/// Receives until `Closed`; every frame before it must be one of `allowed`. At most
-/// `4 × allowed + 4` receives, each bounded.
-async fn until_closed<T: Debug, K: Ord>(
+/// The control plane's handshake end as a source of hellos, so a case can drain it.
+struct Hellos<'a, C>(&'a mut C);
+
+impl<C: HandshakeResponder> Receive<Hello> for Hellos<'_, C> {
+    fn receive(&mut self) -> impl Future<Output = Result<Hello, LinkError>> {
+        self.0.next_hello()
+    }
+}
+
+/// Receives until `Closed`: every item `want` names must arrive before it (a finished or
+/// closed sender's direction is drained first, then ends: "drained, then `Closed`"), and no
+/// item outside `want` may arrive at all. Duplicates and order are ignored. At most
+/// `4 × want + 4` receives, each bounded.
+async fn until_closed<T: Debug, K: Ord + Debug>(
     what: &str,
     source: &mut impl Receive<T>,
-    allowed: &BTreeSet<K>,
+    want: &BTreeSet<K>,
     key: impl Fn(&T) -> K,
 ) -> Check {
-    for _ in 0..allowed.len() * 4 + 4 {
+    let mut seen = BTreeSet::new();
+    for _ in 0..want.len() * 4 + 4 {
         match step(what, source.receive()).await? {
-            Err(LinkError::Closed) => return Ok(()),
+            Err(LinkError::Closed) => {
+                let missing: Vec<&K> = want.difference(&seen).collect();
+                return if missing.is_empty() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{what}: Closed before {missing:?} arrived (what was sent before a close is drained first)"
+                    ))
+                };
+            }
             Err(other) => return Err(format!("{what}: got {other}, want Closed")),
-            Ok(item) if allowed.contains(&key(&item)) => {}
-            Ok(item) => return Err(format!("{what}: handed up {item:?}, which was never sent")),
+            Ok(item) => {
+                let k = key(&item);
+                if !want.contains(&k) {
+                    return Err(format!("{what}: handed up {item:?}, which it may not"));
+                }
+                seen.insert(k);
+            }
         }
     }
     Err(format!("{what}: never ended in Closed"))
+}
+
+/// Sends each frame as the raw peer, then finishes the peer's sending direction.
+async fn send_then_finish<R: RawWire>(raw: &mut R, frames: Vec<Vec<u8>>) -> Check {
+    for bytes in frames {
+        ok("a raw frame", raw.send(bytes).await)?;
+    }
+    raw.finish().await;
+    Ok(())
+}
+
+/// The raw peer sends `frames` and finishes while `source` is drained until `Closed`; exactly
+/// the items `want` names must arrive (see [`until_closed`]).
+async fn drain_after<R: RawWire, T: Debug, K: Ord + Debug>(
+    what: &str,
+    raw: &mut R,
+    frames: Vec<Vec<u8>>,
+    source: &mut impl Receive<T>,
+    want: &BTreeSet<K>,
+    key: impl Fn(&T) -> K,
+) -> Check {
+    let (sent, drained) = step(
+        what,
+        join2(
+            send_then_finish(raw, frames),
+            until_closed(what, source, want, key),
+        ),
+    )
+    .await?;
+    sent.map_err(|e| format!("{what}: {e}"))?;
+    drained
+}
+
+/// Reads frames from the raw peer until every frame `want` names (by [`frame_json`]) has
+/// arrived; a frame outside `want` fails. Duplicates and order are ignored.
+async fn raw_collect<R: RawWire>(what: &str, raw: &mut R, want: &BTreeSet<String>) -> Check {
+    let mut seen = BTreeSet::new();
+    let mut budget = want.len() * 4 + 4;
+    while !want.is_subset(&seen) {
+        if budget == 0 {
+            return Err(format!(
+                "{what}: still missing {:?}",
+                want.difference(&seen).collect::<Vec<_>>()
+            ));
+        }
+        budget -= 1;
+        let frame = read_frame(what, step(what, raw.recv()).await?)?;
+        let k = frame_json(&frame);
+        if !want.contains(&k) {
+            return Err(format!("{what}: the typed end wrote {k}, which it may not"));
+        }
+        seen.insert(k);
+    }
+    Ok(())
+}
+
+/// Fails unless each count of `got` reaches the one of `want`.
+fn at_least(what: &str, got: DiscardCounts, want: DiscardCounts) -> Check {
+    if got.version >= want.version
+        && got.malformed >= want.malformed
+        && got.unexpected >= want.unexpected
+    {
+        Ok(())
+    } else {
+        Err(format!("{what}: got {got:?}, want at least {want:?}"))
+    }
+}
+
+const fn counts(version: u64, malformed: u64, unexpected: u64) -> DiscardCounts {
+    DiscardCounts {
+        version,
+        malformed,
+        unexpected,
+    }
+}
+
+fn hello_key(h: &Hello) -> String {
+    h.boot_id.clone()
 }
 
 fn directive_key(d: &Directive) -> (DirectiveId, Epoch) {
@@ -571,26 +735,71 @@ fn directive(n: u128, epoch: Epoch) -> Directive {
     }
 }
 
-/// A directive with every optional part filled: an attempt, a VM name and a secret handle.
-fn launch_runner() -> Result<Directive, String> {
-    let generation = Generation::new(1).ok_or("generation 1")?;
-    Ok(Directive {
-        directive_id: DirectiveId::from_u128(0xd1),
-        epoch: SESSION_EPOCH,
-        attempt: Some(AttemptRef {
-            attempt_id: AttemptId::from_u128(0x0a11_ce01),
-            generation,
-        }),
-        deadline: Deadline::at(Millis::new(1_700_000_060_000)),
-        kind: DirectiveKind::LaunchRunner {
-            vm_name: ok(
-                "vm name",
-                OwnedVmName::parse("mf-pool0-host0-s1-g1-0a11ce01"),
-            )?,
-            launch: SecretHandle {
-                handle_id: SecretHandleId::from_u128(0x05ec),
-            },
-        },
+/// One golden fixture of the protocol: its bytes as written there and the frame they decode to.
+struct Golden {
+    bytes: Vec<u8>,
+    frame: Frame,
+}
+
+/// The protocol's golden frames (`crates/mayfly-protocol/tests/fixtures`, ver §4). Their
+/// harness (`crates/mayfly-protocol/tests/golden.rs`) proves they show every directive kind,
+/// observation kind, refusal reason and unknown reason, read from serde's own variant lists,
+/// so LK-08 covers a new variant as soon as its fixture lands.
+fn golden_frames() -> Result<Vec<Golden>, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mayfly-protocol/tests/fixtures");
+    let files =
+        read_tree(&root).map_err(|e| format!("reading the protocol's golden fixtures: {e}"))?;
+    files
+        .into_iter()
+        .map(|(path, text)| {
+            let frame = serde_json::from_str(&text)
+                .map_err(|e| format!("the golden fixture {path} does not decode: {e}"))?;
+            Ok(Golden {
+                bytes: text.into_bytes(),
+                frame,
+            })
+        })
+        .collect()
+}
+
+/// The golden directives and observations, each with its fixture.
+type GoldenMessages<'a> = (Vec<(&'a Golden, Directive)>, Vec<(&'a Golden, Observation)>);
+
+/// Splits the golden frames into directives and observations, each with its fixture.
+fn golden_messages(golden: &[Golden]) -> Result<GoldenMessages<'_>, String> {
+    let mut directives = Vec::new();
+    let mut observations = Vec::new();
+    for g in golden {
+        match &g.frame.message {
+            Message::Directive(d) => directives.push((g, d.clone())),
+            Message::Observation(o) => observations.push((g, o.clone())),
+            Message::Hello(_) | Message::Welcome(_) | Message::HandshakeRefused(_) => {}
+        }
+    }
+    if directives.is_empty() || observations.is_empty() {
+        return Err(
+            "the protocol's golden fixtures hold no directive or no observation".to_owned(),
+        );
+    }
+    Ok((directives, observations))
+}
+
+/// A frame's identity for a set: its JSON (protocol data always encodes).
+fn frame_json(frame: &Frame) -> String {
+    serde_json::to_string(frame).unwrap_or_else(|e| format!("a frame that does not encode: {e}"))
+}
+
+fn directive_json(d: &Directive) -> String {
+    frame_json(&Frame {
+        protocol_version: CURRENT,
+        message: Message::Directive(d.clone()),
+    })
+}
+
+fn observation_json(o: &Observation) -> String {
+    frame_json(&Frame {
+        protocol_version: CURRENT,
+        message: Message::Observation(o.clone()),
     })
 }
 
@@ -859,7 +1068,27 @@ async fn handshake_refused<F: LinkFactory>(f: &F) -> Check {
 }
 
 async fn unknown_major_discarded<F: LinkFactory>(f: &F) -> Check {
-    // The data plane: a 2.0 welcome (epoch 9) is not handed up; the 1.x one (epoch 5) is.
+    // The data plane offered only a 2.0 welcome: its hello ends in Closed when the peer
+    // finishes, whatever order the transport delivers in.
+    let (mut dp_link, mut raw) = step("connecting", f.data_plane_facing_raw(SUPPORTED)).await?;
+    let foreign = welcome(CURRENT, Epoch::new(9));
+    let frames = vec![frame_bytes(V2_0, Message::Welcome(foreign))?];
+    let (answer, sent) = step(
+        "a 2.0 welcome, then the peer's finish",
+        join2(dp_link.hello(hello(SUPPORTED, "boot-1")?), async {
+            read_frame("the hello", raw.recv().await)?;
+            send_then_finish(&mut raw, frames).await
+        }),
+    )
+    .await?;
+    sent?;
+    eq(
+        "the data plane's answer to a 2.0 welcome alone",
+        &answer,
+        &Err(LinkError::Closed),
+    )?;
+
+    // The data plane: after a 2.0 welcome (epoch 9), the 1.x one (epoch 5) is handed up.
     let (mut dp_link, mut raw) = step("connecting", f.data_plane_facing_raw(SUPPORTED)).await?;
     let mut hello_sent = pin!(dp_link.hello(hello(SUPPORTED, "boot-1")?));
     let bytes = step("the hello", beside(hello_sent.as_mut(), raw.recv()))
@@ -883,47 +1112,45 @@ async fn unknown_major_discarded<F: LinkFactory>(f: &F) -> Check {
     let welcomed = step_ok("the data plane's hello", hello_sent).await?;
     eq("the welcome handed up", &welcomed, &readable)?;
 
-    // The control plane: a 2.0 hello is not handed up; the 1.x one is.
+    // The control plane, drained to Closed: the 1.x hello is handed up, the 2.0 one never.
     let (mut cp_link, mut raw) = step("connecting", f.control_plane_facing_raw(SUPPORTED)).await?;
     let foreign = hello(&[V2_0], "boot-foreign")?;
     let readable = hello(SUPPORTED, "boot-1")?;
-    step_ok(
-        "a 2.0 hello",
-        raw.send(frame_bytes(V2_0, Message::Hello(foreign))?),
+    let frames = vec![
+        frame_bytes(V2_0, Message::Hello(foreign))?,
+        frame_bytes(CURRENT, Message::Hello(readable.clone()))?,
+    ];
+    drain_after(
+        "hellos after a 2.0 one",
+        &mut raw,
+        frames,
+        &mut Hellos(&mut cp_link),
+        &set([hello_key(&readable)]),
+        hello_key,
     )
-    .await?;
-    step_ok(
-        "a 1.x hello",
-        raw.send(frame_bytes(CURRENT, Message::Hello(readable.clone()))?),
-    )
-    .await?;
-    let heard = step_ok("the control plane's next hello", cp_link.next_hello()).await?;
-    eq("the hello handed up", &heard, &readable)
+    .await
 }
 
 async fn session_version_held<F: LinkFactory>(f: &F) -> Check {
     // The data plane in a 1.0 session: a 1.1 and a 2.0 directive are discarded.
     let (mut directives, _observations, mut raw) =
         data_plane_session_against_raw(f, SUPPORTED, V1_0).await?;
-    let frames = [
+    let sent = [
         (CURRENT, directive(11, SESSION_EPOCH)),
         (V2_0, directive(12, SESSION_EPOCH)),
         (V1_0, directive(13, SESSION_EPOCH)),
         (V1_0, directive(14, SESSION_EPOCH)),
     ];
-    for (version, d) in &frames {
-        step_ok(
-            "a raw directive",
-            raw.send(frame_bytes(*version, Message::Directive(d.clone()))?),
-        )
-        .await?;
-    }
-    let want = set([&frames[2].1, &frames[3].1].map(directive_key));
-    collect(
+    let frames = sent
+        .iter()
+        .map(|(version, d)| frame_bytes(*version, Message::Directive(d.clone())))
+        .collect::<Result<_, _>>()?;
+    drain_after(
         "directives of a 1.0 session",
+        &mut raw,
+        frames,
         &mut directives,
-        &want,
-        &want,
+        &set([&sent[2].1, &sent[3].1].map(directive_key)),
         directive_key,
     )
     .await?;
@@ -931,29 +1158,25 @@ async fn session_version_held<F: LinkFactory>(f: &F) -> Check {
     // The control plane in a 1.0 session: a 1.1 and a 2.0 observation are discarded.
     let (_directives, mut observations, mut raw) =
         control_plane_session_against_raw(f, SUPPORTED, V1_0).await?;
-    let frames = [
+    let sent = [
         (CURRENT, booted(21)),
         (V2_0, booted(22)),
         (V1_0, booted(23)),
         (V1_0, booted(24)),
     ];
-    for (version, o) in &frames {
-        step_ok(
-            "a raw observation",
-            raw.send(frame_bytes(*version, Message::Observation(o.clone()))?),
-        )
-        .await?;
-    }
-    let want = set([&frames[2].1, &frames[3].1].map(observation_key));
-    collect(
+    let frames = sent
+        .iter()
+        .map(|(version, o)| frame_bytes(*version, Message::Observation(o.clone())))
+        .collect::<Result<_, _>>()?;
+    drain_after(
         "observations of a 1.0 session",
+        &mut raw,
+        frames,
         &mut observations,
-        &want,
-        &want,
+        &set([&sent[2].1, &sent[3].1].map(observation_key)),
         observation_key,
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn welcome_outside_offer<F: LinkFactory>(f: &F) -> Check {
@@ -1087,95 +1310,190 @@ async fn wire_encoding<F: LinkFactory>(f: &F) -> Check {
             &readable,
         )?;
     }
-    let (mut directives, observations) =
-        ok("the data plane's session", f.data_plane_session(dp_link))?;
-    step_ok("an observation", observations.send(capacity_unknown(31))).await?;
-    eq(
-        "the observation on the wire",
-        &read_frame(
-            "the observation",
-            step("the observation", raw.recv()).await?,
-        )?,
-        &Frame {
-            protocol_version: CURRENT,
-            message: Message::Observation(capacity_unknown(31)),
-        },
-    )?;
-    let rich = launch_runner()?;
-    step_ok(
-        "a raw directive",
-        raw.send(frame_bytes(CURRENT, Message::Directive(rich.clone()))?),
-    )
-    .await?;
-    eq(
-        "the directive read",
-        &step_ok("the directive", directives.recv()).await?,
-        &rich,
-    )?;
 
-    // The control plane, in a 1.0 session.
-    let (directives, mut observations, mut raw) =
-        control_plane_session_against_raw(f, SUPPORTED, V1_0).await?;
-    step_ok("a directive", directives.send(rich.clone())).await?;
-    eq(
-        "the directive on the wire",
-        &read_frame("the directive", step("the directive", raw.recv()).await?)?,
-        &Frame {
-            protocol_version: V1_0,
-            message: Message::Directive(rich),
-        },
-    )?;
-    step_ok(
-        "a raw observation",
-        raw.send(frame_bytes(V1_0, Message::Observation(booted(32)))?),
+    // Every golden directive and observation, through both ends, in a 1.0 and a 1.1 session.
+    let golden = golden_frames()?;
+    let (directives, observations) = golden_messages(&golden)?;
+    for session in [V1_0, CURRENT] {
+        let label = format!("a {}.{} session", session.major, session.minor);
+        data_plane_wire(f, session, &directives, &observations)
+            .await
+            .map_err(|e| format!("the data plane in {label}: {e}"))?;
+        control_plane_wire(f, session, &directives, &observations)
+            .await
+            .map_err(|e| format!("the control plane in {label}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Whether a session at `session` admits the golden frame's version.
+fn admitted(session: ProtocolVersion, g: &Golden) -> bool {
+    admit_frame(Some(session), g.frame.protocol_version, SUPPORTED).is_ok()
+}
+
+/// LK-08 for the data plane: every golden observation it sends is on the wire as its frame,
+/// stamped `session` and written down to it; every golden directive frame the session admits,
+/// written by the peer as the fixture's bytes, is read as itself.
+async fn data_plane_wire<F: LinkFactory>(
+    f: &F,
+    session: ProtocolVersion,
+    directives: &[(&Golden, Directive)],
+    observations: &[(&Golden, Observation)],
+) -> Check {
+    let (mut source, sink, mut raw) = data_plane_session_against_raw(f, SUPPORTED, session).await?;
+    let want = set(observations.iter().map(|(_, o)| {
+        frame_json(&Frame {
+            protocol_version: session,
+            message: Message::Observation(Observation {
+                kind: o.kind.clone().written_in(session),
+                ..o.clone()
+            }),
+        })
+    }));
+    let (sent, written) = step(
+        "golden observations",
+        join2(
+            async {
+                for (_, o) in observations {
+                    sink.send(o.clone()).await?;
+                }
+                Ok::<(), LinkError>(())
+            },
+            raw_collect("golden observations on the wire", &mut raw, &want),
+        ),
     )
     .await?;
-    eq(
-        "the observation read",
-        &step_ok("the observation", observations.recv()).await?,
-        &booted(32),
+    ok("sending golden observations", sent)?;
+    written?;
+
+    let readable: Vec<_> = directives
+        .iter()
+        .filter(|(g, _)| admitted(session, g))
+        .collect();
+    let want = set(readable.iter().map(|(_, d)| directive_json(d)));
+    let (sent, read) = step(
+        "golden directive bytes",
+        join2(
+            async {
+                for (g, _) in &readable {
+                    raw.send(g.bytes.clone()).await?;
+                }
+                Ok::<(), LinkError>(())
+            },
+            collect(
+                "golden directives read",
+                &mut source,
+                &want,
+                &want,
+                directive_json,
+            ),
+        ),
     )
+    .await?;
+    ok("the peer's golden directives", sent)?;
+    read.map(|_| ())
+}
+
+/// LK-08 for the control plane: every golden directive it sends is on the wire as its frame,
+/// stamped `session`; every golden observation frame the session admits, written by the peer
+/// as the fixture's bytes, is read as itself.
+async fn control_plane_wire<F: LinkFactory>(
+    f: &F,
+    session: ProtocolVersion,
+    directives: &[(&Golden, Directive)],
+    observations: &[(&Golden, Observation)],
+) -> Check {
+    let (sink, mut source, mut raw) =
+        control_plane_session_against_raw(f, SUPPORTED, session).await?;
+    let want = set(directives.iter().map(|(_, d)| {
+        frame_json(&Frame {
+            protocol_version: session,
+            message: Message::Directive(d.clone()),
+        })
+    }));
+    let (sent, written) = step(
+        "golden directives",
+        join2(
+            async {
+                for (_, d) in directives {
+                    sink.send(d.clone()).await?;
+                }
+                Ok::<(), LinkError>(())
+            },
+            raw_collect("golden directives on the wire", &mut raw, &want),
+        ),
+    )
+    .await?;
+    ok("sending golden directives", sent)?;
+    written?;
+
+    let readable: Vec<_> = observations
+        .iter()
+        .filter(|(g, _)| admitted(session, g))
+        .collect();
+    let want = set(readable.iter().map(|(_, o)| observation_json(o)));
+    let (sent, read) = step(
+        "golden observation bytes",
+        join2(
+            async {
+                for (g, _) in &readable {
+                    raw.send(g.bytes.clone()).await?;
+                }
+                Ok::<(), LinkError>(())
+            },
+            collect(
+                "golden observations read",
+                &mut source,
+                &want,
+                &want,
+                observation_json,
+            ),
+        ),
+    )
+    .await?;
+    ok("the peer's golden observations", sent)?;
+    read.map(|_| ())
 }
 
 async fn malformed_discarded<F: LinkFactory>(f: &F) -> Check {
-    let garbage: [&[u8]; 3] = [
-        b"not json",
-        br#"{"message":{"hello":{}}}"#,
-        br#"{"protocol_version":{"major":1,"minor":1},"message":{"hello":{"nonsense":1}}}"#,
-    ];
+    let garbage = || -> Vec<Vec<u8>> {
+        [
+            &b"not json"[..],
+            br#"{"message":{"hello":{}}}"#,
+            br#"{"protocol_version":{"major":1,"minor":1},"message":{"hello":{"nonsense":1}}}"#,
+        ]
+        .map(<[u8]>::to_vec)
+        .to_vec()
+    };
 
     let (mut cp_link, mut raw) = step("connecting", f.control_plane_facing_raw(SUPPORTED)).await?;
-    for bytes in garbage {
-        step_ok("raw garbage", raw.send(bytes.to_vec())).await?;
-    }
     let readable = hello(SUPPORTED, "boot-2")?;
-    step_ok(
-        "a hello",
-        raw.send(frame_bytes(CURRENT, Message::Hello(readable.clone()))?),
+    let mut frames = garbage();
+    frames.push(frame_bytes(CURRENT, Message::Hello(readable.clone()))?);
+    drain_after(
+        "hellos after garbage",
+        &mut raw,
+        frames,
+        &mut Hellos(&mut cp_link),
+        &set([hello_key(&readable)]),
+        hello_key,
     )
     .await?;
-    eq(
-        "the hello after garbage",
-        &step_ok("the control plane's next hello", cp_link.next_hello()).await?,
-        &readable,
-    )?;
 
     let (mut directives, _observations, mut raw) =
         data_plane_session_against_raw(f, SUPPORTED, CURRENT).await?;
-    for bytes in garbage {
-        step_ok("raw garbage", raw.send(bytes.to_vec())).await?;
-    }
     let sent = directive(41, SESSION_EPOCH);
-    step_ok(
-        "a directive",
-        raw.send(frame_bytes(CURRENT, Message::Directive(sent.clone()))?),
+    let mut frames = garbage();
+    frames.push(frame_bytes(CURRENT, Message::Directive(sent.clone()))?);
+    drain_after(
+        "directives after garbage",
+        &mut raw,
+        frames,
+        &mut directives,
+        &set([directive_key(&sent)]),
+        directive_key,
     )
-    .await?;
-    eq(
-        "the directive after garbage",
-        &step_ok("the directive", directives.recv()).await?,
-        &sent,
-    )
+    .await
 }
 
 async fn at_least_once<F: LinkFactory>(f: &F) -> Check {
@@ -1291,11 +1609,11 @@ async fn close_seen_by_data_plane<F: LinkFactory>(f: &F) -> Check {
         f.close_control_plane(s.cp_directives, s.cp_observations),
     )
     .await?;
-    let allowed = set(sent.iter().map(directive_key));
+    let want = set(sent.iter().map(directive_key));
     until_closed(
         "the data plane's receive after the close",
         &mut s.dp_directives,
-        &allowed,
+        &want,
         directive_key,
     )
     .await?;
@@ -1322,11 +1640,11 @@ async fn close_seen_by_control_plane<F: LinkFactory>(f: &F) -> Check {
         f.close_data_plane(s.dp_directives, s.dp_observations),
     )
     .await?;
-    let allowed = set(sent.iter().map(observation_key));
+    let want = set(sent.iter().map(observation_key));
     until_closed(
         "the control plane's receive after the close",
         &mut s.cp_observations,
-        &allowed,
+        &want,
         observation_key,
     )
     .await?;
@@ -1360,7 +1678,7 @@ async fn close_reports_in_flight<F: LinkFactory>(f: &F) -> Check {
         f.close_control_plane(s.cp_directives, s.cp_observations),
     )
     .await?;
-    eq("observations the close discarded", &discarded, &unread)?;
+    reported("observations the close discarded", discarded, unread)?;
     until_closed(
         "the data plane's receive after the close",
         &mut s.dp_directives,
@@ -1389,7 +1707,19 @@ async fn close_reports_in_flight<F: LinkFactory>(f: &F) -> Check {
         f.close_data_plane(s.dp_directives, s.dp_observations),
     )
     .await?;
-    eq("directives the close discarded", &discarded, &unread)
+    reported("directives the close discarded", discarded, unread)
+}
+
+/// LK-14's count: at least one when `unread` frames were unread. A lower bound, not exact
+/// (see [`LinkCase::CloseReportsInFlight`]).
+fn reported(what: &str, discarded: usize, unread: usize) -> Check {
+    if unread == 0 || discarded >= 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what}: got {discarded} with {unread} unread, want at least 1"
+        ))
+    }
 }
 
 async fn every_epoch_handed_up<F: LinkFactory>(f: &F) -> Check {
@@ -1414,6 +1744,133 @@ async fn every_epoch_handed_up<F: LinkFactory>(f: &F) -> Check {
     )
     .await
     .map(|_| ())
+}
+
+async fn discards_counted<F: LinkFactory>(f: &F) -> Check {
+    let garbage = || b"not json".to_vec();
+
+    // The data plane before the welcome: a directive (of a session not entered yet), garbage
+    // and a 2.0 welcome are discarded; the hello ends in Closed when the peer finishes.
+    let (mut dp_link, mut raw) = step("connecting", f.data_plane_facing_raw(SUPPORTED)).await?;
+    let frames = vec![
+        frame_bytes(CURRENT, Message::Directive(directive(0xa1, SESSION_EPOCH)))?,
+        garbage(),
+        frame_bytes(V2_0, Message::Welcome(welcome(CURRENT, SESSION_EPOCH)))?,
+    ];
+    let (answer, sent) = step(
+        "frames before any welcome",
+        join2(dp_link.hello(hello(SUPPORTED, "boot-1")?), async {
+            read_frame("the hello", raw.recv().await)?;
+            send_then_finish(&mut raw, frames).await
+        }),
+    )
+    .await?;
+    sent?;
+    eq(
+        "the hello's answer when no welcome came",
+        &answer,
+        &Err(LinkError::Closed),
+    )?;
+    at_least(
+        "the data plane's discards before the welcome",
+        f.data_plane_discards(&dp_link),
+        counts(1, 1, 1),
+    )?;
+    // Unanswered (ADR 0042): the next frame the data plane writes is a second hello, not an
+    // answer to the directive.
+    let again = hello(SUPPORTED, "boot-2")?;
+    eq(
+        "a second hello's answer",
+        &step("a second hello", dp_link.hello(again.clone())).await?,
+        &Err(LinkError::Closed),
+    )?;
+    eq(
+        "the frame the data plane wrote after its first hello",
+        &read_frame("the next frame", step("the next frame", raw.recv()).await?)?.message,
+        &Message::Hello(again),
+    )?;
+
+    // The data plane in a session: a duplicate welcome, a hello and an observation are
+    // unexpected; garbage and a 2.0 directive are discarded too; the readable directive arrives.
+    let (mut directives, _observations, mut raw) =
+        data_plane_session_against_raw(f, SUPPORTED, CURRENT).await?;
+    let readable = directive(0xa2, SESSION_EPOCH);
+    let frames = vec![
+        frame_bytes(CURRENT, Message::Welcome(welcome(CURRENT, SESSION_EPOCH)))?,
+        frame_bytes(CURRENT, Message::Hello(hello(SUPPORTED, "boot-3")?))?,
+        frame_bytes(CURRENT, Message::Observation(booted(0xa3)))?,
+        garbage(),
+        frame_bytes(V2_0, Message::Directive(directive(0xa4, SESSION_EPOCH)))?,
+        frame_bytes(CURRENT, Message::Directive(readable.clone()))?,
+    ];
+    drain_after(
+        "directives among discarded frames",
+        &mut raw,
+        frames,
+        &mut directives,
+        &set([directive_key(&readable)]),
+        directive_key,
+    )
+    .await?;
+    at_least(
+        "the data plane's discards in a session",
+        f.data_plane_session_discards(&directives),
+        counts(1, 1, 3),
+    )?;
+
+    // The control plane before a hello: a directive and an observation are unexpected;
+    // garbage and a 2.0 hello are discarded too; the readable hello arrives.
+    let (mut cp_link, mut raw) = step("connecting", f.control_plane_facing_raw(SUPPORTED)).await?;
+    let readable = hello(SUPPORTED, "boot-4")?;
+    let frames = vec![
+        frame_bytes(CURRENT, Message::Directive(directive(0xa5, SESSION_EPOCH)))?,
+        frame_bytes(CURRENT, Message::Observation(booted(0xa6)))?,
+        garbage(),
+        frame_bytes(V2_0, Message::Hello(hello(&[V2_0], "boot-foreign")?))?,
+        frame_bytes(CURRENT, Message::Hello(readable.clone()))?,
+    ];
+    drain_after(
+        "hellos among discarded frames",
+        &mut raw,
+        frames,
+        &mut Hellos(&mut cp_link),
+        &set([hello_key(&readable)]),
+        hello_key,
+    )
+    .await?;
+    at_least(
+        "the control plane's discards before a session",
+        f.control_plane_discards(&cp_link),
+        counts(1, 1, 2),
+    )?;
+
+    // The control plane in a session: a welcome, a hello and a directive are unexpected;
+    // garbage and a 2.0 observation are discarded too; the readable observation arrives.
+    let (_directives, mut observations, mut raw) =
+        control_plane_session_against_raw(f, SUPPORTED, CURRENT).await?;
+    let readable = booted(0xa7);
+    let frames = vec![
+        frame_bytes(CURRENT, Message::Welcome(welcome(CURRENT, SESSION_EPOCH)))?,
+        frame_bytes(CURRENT, Message::Hello(hello(SUPPORTED, "boot-5")?))?,
+        frame_bytes(CURRENT, Message::Directive(directive(0xa8, SESSION_EPOCH)))?,
+        garbage(),
+        frame_bytes(V2_0, Message::Observation(booted(0xa9)))?,
+        frame_bytes(CURRENT, Message::Observation(readable.clone()))?,
+    ];
+    drain_after(
+        "observations among discarded frames",
+        &mut raw,
+        frames,
+        &mut observations,
+        &set([observation_key(&readable)]),
+        observation_key,
+    )
+    .await?;
+    at_least(
+        "the control plane's discards in a session",
+        f.control_plane_session_discards(&observations),
+        counts(1, 1, 3),
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,8 @@
 //! [`LinkError::Closed`]; and `close` reports the frames it discarded unread.
 //!
 //! Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
-//! and, for each promise, the broken wires of the same file that fail it.
+//! and, for each promise, the broken wires of the same file that fail it (drained before `None`:
+//! `should_fail_the_drain_cases_when_a_close_drops_what_was_queued`).
 
 use std::future::Future;
 
@@ -44,6 +45,8 @@ pub trait WireRx: Send {
     fn recv(&mut self) -> impl Future<Output = Option<Vec<u8>>> + Send;
 
     /// Closes this direction: the peer's sends fail from now on, and the frames accepted but not
-    /// yet received are discarded. Returns how many were discarded.
+    /// yet received are discarded. Returns how many were discarded: at least one when any was,
+    /// exact where the wire can count them (a socket cannot count what its peer has not written
+    /// yet).
     fn close(self) -> impl Future<Output = usize> + Send;
 }

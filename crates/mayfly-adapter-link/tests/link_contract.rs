@@ -1,6 +1,8 @@
 //! The link contract (ver §5) against the in-process transport, and the suite's own tests: a
 //! transport that reorders and duplicates frames passes it (the suite assumes no order), and
-//! each deliberately broken transport fails the cases named for its fault.
+//! each deliberately broken transport fails the cases named for its fault, reordering included
+//! (`ReorderingNoVersionCheckLink`: a case that stopped at the first readable frame would let
+//! it through).
 //!
 //! The doubles are wires (`mayfly_adapter_link::wire::Wire`) under the production endpoints,
 //! built here on their own bounded channels; each raw peer is a plain channel end, so a double
@@ -14,37 +16,53 @@ use std::sync::{Arc, Mutex, PoisonError};
 use mayfly_adapter_link::inproc::{self, ChannelRx, ChannelTx, ChannelWire};
 use mayfly_adapter_link::wire::{Wire, WireRx, WireTx};
 use mayfly_adapter_link::{
-    ControlPlaneLink, DataPlaneLink, DirectiveReceiver, DirectiveSender, ObservationReceiver,
-    ObservationSender,
+    ControlPlaneLink, DataPlaneLink, DirectiveReceiver, DirectiveSender, Discards,
+    ObservationReceiver, ObservationSender,
 };
 use mayfly_protocol::{LinkError, ProtocolVersion};
 use mayfly_testkit_shared::link_contract::{
-    LinkCase, LinkFactory, RawWire, check_link_contract, run_link_contract,
+    DiscardCounts, LinkCase, LinkFactory, RawWire, check_link_contract, run_link_contract,
 };
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------------------------
 // The in-process transport
 
-/// The raw peer of an in-process wire.
+/// The raw peer of an in-process wire; `finish` drops its sending half.
 struct ChannelRaw {
-    tx: ChannelTx,
+    tx: Option<ChannelTx>,
     rx: ChannelRx,
 }
 
 impl RawWire for ChannelRaw {
     async fn send(&mut self, frame: Vec<u8>) -> Result<(), LinkError> {
-        self.tx.send(frame).await
+        match &self.tx {
+            Some(tx) => tx.send(frame).await,
+            None => Err(LinkError::Closed),
+        }
     }
 
     async fn recv(&mut self) -> Option<Vec<u8>> {
         self.rx.recv().await
     }
+
+    async fn finish(&mut self) {
+        self.tx = None;
+    }
 }
 
 fn raw(wire: ChannelWire) -> ChannelRaw {
     let (tx, rx) = wire.split();
-    ChannelRaw { tx, rx }
+    ChannelRaw { tx: Some(tx), rx }
+}
+
+/// The endpoints' counts as the suite reads them.
+const fn counts(d: Discards) -> DiscardCounts {
+    DiscardCounts {
+        version: d.version,
+        malformed: d.malformed,
+        unexpected: d.unexpected,
+    }
 }
 
 struct InprocFactory {
@@ -113,6 +131,22 @@ impl LinkFactory for InprocFactory {
         drop(directives);
         observations.close().await
     }
+
+    fn data_plane_discards(&self, link: &Self::DpLink) -> DiscardCounts {
+        counts(link.discarded())
+    }
+
+    fn data_plane_session_discards(&self, directives: &Self::DpDirectives) -> DiscardCounts {
+        counts(directives.discarded())
+    }
+
+    fn control_plane_discards(&self, link: &Self::CpLink) -> DiscardCounts {
+        counts(link.discarded())
+    }
+
+    fn control_plane_session_discards(&self, observations: &Self::CpObservations) -> DiscardCounts {
+        counts(observations.discarded())
+    }
 }
 
 #[test]
@@ -155,8 +189,14 @@ enum Fault {
     /// `NoVersionCheckLink`: rewrites every received frame's version to 1.0, so the endpoint
     /// admits frames of any version.
     NoVersionCheck,
+    /// `ReorderingNoVersionCheckLink`: `Reorder` and `NoVersionCheck` at once, so the readable
+    /// frame sent last is handed up first and a forbidden one only after it.
+    ReorderNoVersionCheck,
     /// `DeafCloseLink`: a close neither closes nor reports; the peer never sees it.
     DeafClose,
+    /// `LossyCloseLink`: once every sender of a direction is gone, its reader sees `None` at
+    /// once, dropping what was queued instead of draining it first.
+    LossyClose,
     /// `CorruptingLink`: puts every frame on the wire with each byte flipped and flips it back
     /// on receipt, so two doubles understand each other and nothing else does.
     Corrupting,
@@ -234,9 +274,11 @@ impl WireTx for DoubleTx {
                 let flipped = frame.into_iter().map(|b| b ^ FLIP).collect();
                 self.tx.send(flipped).await.map_err(|_| LinkError::Closed)
             }
-            Fault::Reorder | Fault::NoVersionCheck | Fault::DeafClose => {
-                self.tx.send(frame).await.map_err(|_| LinkError::Closed)
-            }
+            Fault::Reorder
+            | Fault::NoVersionCheck
+            | Fault::ReorderNoVersionCheck
+            | Fault::DeafClose
+            | Fault::LossyClose => self.tx.send(frame).await.map_err(|_| LinkError::Closed),
         }
     }
 }
@@ -281,12 +323,14 @@ impl WireRx for DoubleRx {
         match self.fault {
             Fault::Reorder => self.reordered().await,
             Fault::NoVersionCheck => self.rx.recv().await.map(version_blind),
+            Fault::ReorderNoVersionCheck => self.reordered().await.map(version_blind),
+            Fault::LossyClose if self.rx.is_closed() => None,
             Fault::Corrupting => self
                 .rx
                 .recv()
                 .await
                 .map(|frame| frame.into_iter().map(|b| b ^ FLIP).collect()),
-            Fault::SilentDrop | Fault::DeafClose => self.rx.recv().await,
+            Fault::SilentDrop | Fault::DeafClose | Fault::LossyClose => self.rx.recv().await,
         }
     }
 
@@ -304,19 +348,24 @@ impl WireRx for DoubleRx {
     }
 }
 
-/// The raw peer of a double: plain channels, the true encoding.
+/// The raw peer of a double: plain channels, the true encoding; `finish` drops its sender.
 struct PlainRaw {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: Option<mpsc::Sender<Vec<u8>>>,
     rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl RawWire for PlainRaw {
     async fn send(&mut self, frame: Vec<u8>) -> Result<(), LinkError> {
-        self.tx.send(frame).await.map_err(|_| LinkError::Closed)
+        let tx = self.tx.as_ref().ok_or(LinkError::Closed)?;
+        tx.send(frame).await.map_err(|_| LinkError::Closed)
     }
 
     async fn recv(&mut self) -> Option<Vec<u8>> {
         self.rx.recv().await
+    }
+
+    async fn finish(&mut self) {
+        self.tx = None;
     }
 }
 
@@ -356,7 +405,7 @@ impl DoubleFactory {
         (
             self.wire(ours_tx, ours_rx),
             PlainRaw {
-                tx: raw_tx,
+                tx: Some(raw_tx),
                 rx: raw_rx,
             },
         )
@@ -429,6 +478,22 @@ impl LinkFactory for DoubleFactory {
         drop(directives);
         observations.close().await
     }
+
+    fn data_plane_discards(&self, link: &Self::DpLink) -> DiscardCounts {
+        counts(link.discarded())
+    }
+
+    fn data_plane_session_discards(&self, directives: &Self::DpDirectives) -> DiscardCounts {
+        counts(directives.discarded())
+    }
+
+    fn control_plane_discards(&self, link: &Self::CpLink) -> DiscardCounts {
+        counts(link.discarded())
+    }
+
+    fn control_plane_session_discards(&self, observations: &Self::CpObservations) -> DiscardCounts {
+        counts(observations.discarded())
+    }
 }
 
 fn failed_cases(fault: Fault) -> BTreeSet<LinkCase> {
@@ -448,7 +513,7 @@ fn should_pass_the_link_contract_when_frames_arrive_reordered_and_duplicated() {
 }
 
 #[test]
-fn should_fail_delivery_and_backpressure_when_a_full_link_drops_silently() {
+fn should_fail_every_case_past_the_capacity_when_a_full_link_drops_silently() {
     // given
     let fault = Fault::SilentDrop;
 
@@ -456,9 +521,14 @@ fn should_fail_delivery_and_backpressure_when_a_full_link_drops_silently() {
     let failed = failed_cases(fault);
 
     // then
+    // LK-08 sends every golden message, more than the capacity, before the peer reads.
     assert_eq!(
         failed,
-        BTreeSet::from([LinkCase::AtLeastOnce, LinkCase::Backpressure])
+        BTreeSet::from([
+            LinkCase::WireEncoding,
+            LinkCase::AtLeastOnce,
+            LinkCase::Backpressure
+        ])
     );
 }
 
@@ -475,7 +545,27 @@ fn should_fail_the_version_cases_when_a_link_does_not_check_versions() {
         failed,
         BTreeSet::from([
             LinkCase::UnknownMajorDiscarded,
-            LinkCase::SessionVersionHeld
+            LinkCase::SessionVersionHeld,
+            LinkCase::DiscardsCounted,
+        ])
+    );
+}
+
+#[test]
+fn should_fail_the_version_cases_when_a_reordering_link_does_not_check_versions() {
+    // given
+    let fault = Fault::ReorderNoVersionCheck;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(
+        failed,
+        BTreeSet::from([
+            LinkCase::UnknownMajorDiscarded,
+            LinkCase::SessionVersionHeld,
+            LinkCase::DiscardsCounted,
         ])
     );
 }
@@ -500,6 +590,28 @@ fn should_fail_the_close_cases_when_a_link_does_not_report_its_close() {
 }
 
 #[test]
+fn should_fail_the_drain_cases_when_a_close_drops_what_was_queued() {
+    // given
+    let fault = Fault::LossyClose;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(
+        failed,
+        BTreeSet::from([
+            LinkCase::UnknownMajorDiscarded,
+            LinkCase::SessionVersionHeld,
+            LinkCase::MalformedDiscarded,
+            LinkCase::CloseSeenByDataPlane,
+            LinkCase::CloseSeenByControlPlane,
+            LinkCase::DiscardsCounted,
+        ])
+    );
+}
+
+#[test]
 fn should_fail_the_wire_cases_when_a_link_corrupts_its_encoding() {
     // given
     let fault = Fault::Corrupting;
@@ -518,6 +630,7 @@ fn should_fail_the_wire_cases_when_a_link_corrupts_its_encoding() {
             LinkCase::HandshakeInOldestMajor,
             LinkCase::WireEncoding,
             LinkCase::MalformedDiscarded,
+            LinkCase::DiscardsCounted,
         ])
     );
 }

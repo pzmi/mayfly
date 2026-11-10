@@ -110,6 +110,11 @@ mayfly-testkit = [
 # The shared test kit (ADR 0019): plane-neutral test support, the poll helper and the link
 # contract suite (DP-02), which speaks the protocol's types. Its closure is the shared crates
 # only, so control and data crates, both planes' kits and the shared crates may dev-depend on it.
+# For the two crates in its own closure (mayfly-domain, mayfly-protocol) that dev edge is a Cargo
+# dev cycle: use the kit from their integration tests (`tests/`) only, which link the same build
+# of the crate the kit does; in a unit test (`#[cfg(test)]` in `src/`) the kit's copy is another
+# crate, and its types never match `crate::` ones. Not checked here: the compiler refuses the
+# mix, and a type-free helper (the fixture reader in mayfly-protocol/tests/golden.rs) is sound.
 mayfly-testkit-shared = ["mayfly-domain", "mayfly-protocol"]
 # Conformance drives the production crates the Quint models govern, over the testkit, the
 # Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
