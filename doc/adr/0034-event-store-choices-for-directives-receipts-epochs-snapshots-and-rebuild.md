@@ -43,7 +43,8 @@ event, not an outbox row). ES-01F realigns the landed ES-01; ES-02 to ES-12 impl
 ## Alternatives considered
 
 - E2: keep the outbox table, scanned by key with a time filter.
-- E3: no refusal receipts (receipts of accepted commands only), or unbound ones that replay a stale refusal.
+- E3: no refusal receipts (receipts of accepted commands only), or unbound ones that replay a
+  stale refusal.
 - E9: rebuild only at start-up under the owner lease.
 
 ## Amended 2026-11-09 (ES-03; accepted by the owner 2026-11-09)

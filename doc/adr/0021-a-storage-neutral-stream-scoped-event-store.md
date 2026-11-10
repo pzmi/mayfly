@@ -12,9 +12,9 @@ Plan §5.2 sketches the journal around SQLite: one writer connection, an `event_
 global `sequence`, projections rebuilt "from sequence 0" with a global watermark (§5.5). That
 design leans on SQLite's single writer to make the sequence equal commit order. The owner wants
 the journal storage-neutral, so that a PostgreSQL adapter can follow SQLite with no change to the
-port. That calls for a stream-scoped design: per-stream order on a stream head, a global event-id registry,
-command receipts, durable delivery by per-consumer, per-stream checkpoints, and no global journal
-order at all. A global position forces a global writer (one lock, or one
+port. That calls for a stream-scoped design: per-stream order on a stream head, a global event-id
+registry, command receipts, durable delivery by per-consumer, per-stream checkpoints, and no
+global journal order at all. A global position forces a global writer (one lock, or one
 connection) or a gap-tolerant reader that can skip a late commit; both are what a second backend
 cannot afford.
 

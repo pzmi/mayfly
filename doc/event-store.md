@@ -2,9 +2,10 @@
 
 The design of mayfly's event store: a storage-neutral, stream-scoped journal with command
 receipts, an inbox, durable at-least-once delivery, inline projections and snapshots, whose first
-adapter is SQLite and whose second is PostgreSQL. The owner's decisions E1–E9 of 2026-11-09 are applied (§8.3; ADRs 0021, 0034,
-0035). This document owns *what*; [`tasks.md`](tasks.md) owns *order*. It amends plan §5 and
-foundation §6 where they assumed SQLite (§1.4 lists each amendment). ADR 0021 records the decision.
+adapter is SQLite and whose second is PostgreSQL. The owner's decisions E1–E9 of 2026-11-09 are
+applied (§8.3; ADRs 0021, 0034, 0035). This document owns *what*; [`tasks.md`](tasks.md) owns
+*order*. It amends plan §5 and foundation §6 where they assumed SQLite (§1.4 lists each
+amendment). ADR 0021 records the decision.
 
 A bare § is a section of this document; "plan", "fnd" and "ver" are `plan.md`, `foundation.md`
 and `verification.md`.
@@ -99,14 +100,13 @@ claim about throughput: the control plane writes a few events per second.
 
 ### 2.2 Invariants
 
-Each invariant names how it is pinned:
-contract cases (§7.1, ids `JC-`, `DC-`, `SC-`, `PC-`), the `event_store` model invariant and
-scenario (§7.3), store-lab workloads (`SW`, §7.5) and the broken implementations that must fail
-(§7.6). "All stores" means memory, SQLite (all modes) and PostgreSQL.
+Each invariant names how it is pinned: contract cases (§7.1, ids `JC-`, `DC-`, `SC-`, `PC-`),
+the `event_store` model invariant and scenario (§7.3), store-lab workloads (`SW`, §7.5) and the
+broken implementations that must fail (§7.6). "All stores" means memory, SQLite (all modes) and PostgreSQL.
 
-**ES-I1 Atomic unit**. A unit commits all of: every stream's batch and head
-revision and epoch, the event identities, the manifest rows, the receipt, the inbox entry, the
-inline projection rows, the dispatch marks and the snapshot request; or none of them.
+**ES-I1 Atomic unit**. A unit commits all of: every stream's batch and head revision and
+epoch, the event identities, the manifest rows, the receipt, the inbox entry, the inline
+projection rows, the dispatch marks and the snapshot request; or none of them.
 Pinned by JC-10, JC-23, JC-32, PC-03, DC-03, SC-03 on all stores; model `ES_I1_atomicUnit`
 (`batchFailsAfterSecondEvent`, `multiStreamConflict`); SW3; `PartialCommitJournal`.
 
@@ -215,22 +215,21 @@ with the driver checking each waiter's blockers (§7.3), and by JC-22's two-unit
 (units naming the same two streams in opposite order both finish); trivially true on SQLite, where
 the case still runs.
 
-**ES-I17 No global order**.
-Nothing reads the journal in a global order: the port has no read-all, no global position and no
-cursor over time; every consumer and rebuild progresses per stream; no adapter query that feeds a
-decision orders by a time, global position or rowid. Pinned by the port's shape (no such method
-exists), `ARCH-no-global-order` (§4.3) and its negative fixtures.
+**ES-I17 No global order**. Nothing reads the journal in a global order: the port has no read-all,
+no global position and no cursor over time; every consumer and rebuild progresses per stream; no
+adapter query that feeds a decision orders by a time, global position or rowid. Pinned by the
+port's shape (no such method exists), `ARCH-no-global-order` (§4.3) and its negative fixtures.
 
-**ES-I18 Honest outcomes**. Every `append` error except `OutcomeUnknown` means nothing was committed; an outcome the
-store could not learn (the commit's reply was lost) is reported `OutcomeUnknown`, never as success
-or as a definite failure, and is resolved only by reading (receipt, `lookup_event`). Refusals are
-classified by constraint name or SQLSTATE/extended code, never by message text. Pinned by JC-25
-(fault-injecting adapters), JC-09 (refusal order), SW6, SW7; `AckBeforeCommitJournal`.
+**ES-I18 Honest outcomes**. Every `append` error except `OutcomeUnknown` means nothing was
+committed; an outcome the store could not learn (the commit's reply was lost) is reported
+`OutcomeUnknown`, never as success or as a definite failure, and is resolved only by reading
+(receipt, `lookup_event`). Refusals are classified by constraint name or SQLSTATE/extended code,
+never by message text. Pinned by JC-25 (fault-injecting adapters), JC-09 (refusal order), SW6,
+SW7; `AckBeforeCommitJournal`.
 
-**ES-I19 Durability**. A unit reported committed survives
-a crash of the process (SQLite) or of the server (PostgreSQL). Each adapter verifies its
-durability settings from the store itself at open and refuses to open a production store without
-them (§4.1, §4.2). Pinned by JC-26, SW7.
+**ES-I19 Durability**. A unit reported committed survives a crash of the process (SQLite) or of
+the server (PostgreSQL). Each adapter verifies its durability settings from the store itself at
+open and refuses to open a production store without them (§4.1, §4.2). Pinned by JC-26, SW7.
 
 Mapping to mayfly's system invariants: ES-I11 is I16; ES-I6 and ES-I1 carry I12 (a durable record
 precedes the GitHub ack); ES-I14 and ES-I18 carry I10 (an ambiguous effect stays `Unknown`).
@@ -532,8 +531,7 @@ previous generation set is refused (`ProjectionGenerationMoved`, retried like
 `AggregateStore::save` (ES-03) is the only caller of `Journal::append` (`ARCH-single-append`):
 
 1. Read the head; refuse a stream whose epoch exceeds this build's (`StreamEpochUnsupported`)
-   **before** any receipt answer, so a rolled-back build never claims a newer
-   build's outcome.
+   **before** any receipt answer, so a rolled-back build never claims a newer build's outcome.
 2. Read the receipt for `command_id`: same digest → its recorded answer; other digest →
    `CommandIdReused`. Step 1 alone does not keep the promise: a newer build may raise the stream
    and record this command's receipt between the head read and the receipt read (blue-green).
@@ -842,8 +840,8 @@ At start-up, after migrations and before any writer, composition compares `store
 
 Projections rebuild (online, into a shadow generation) on any version mismatch, so N never reads rows N+1 wrote with a meaning N does
 not know, and N+1 rebuilds again on its return. Dispatch marks are written for every registered
-consumer, so N marks N+1's consumers and N+1 finds no gap on its return (a
-release that appended without marking a consumer a newer release registered would have lost
+consumer, so N marks N+1's consumers and N+1 finds no gap on its return (a release that
+appended without marking a consumer a newer release registered would lose that consumer's
 deliveries). Snapshots under unknown keys are ignored.
 
 ### 6.5 The compatibility harness (ES-11, after the first release)
