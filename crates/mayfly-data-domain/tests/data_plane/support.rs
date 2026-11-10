@@ -1,8 +1,7 @@
 //! Builders and names shared by the data-plane tests.
 
 use mayfly_data_domain::{
-    DataPlane, Discard, HostProbe, Ledger, LinkOutcome, LinkStimulus, Receipt, Reobservation,
-    Sizing,
+    DataPlane, Discard, HostProbe, Inventory, Ledger, LinkOutcome, LinkStimulus, Receipt, Sizing,
 };
 use mayfly_domain::{
     AttemptId, Deadline, DirectiveId, Epoch, Generation, HostId, ImageDigest, Millis, OwnedVmName,
@@ -10,7 +9,8 @@ use mayfly_domain::{
 };
 use mayfly_protocol::{
     AttemptRef, BaseName, Capacity, Directive, DirectiveKind, Mode, Nonce, ObservationKind,
-    OwnershipProof, ProtocolVersion, RefusalReason, RunOptions, SecretHandle, Welcome,
+    OwnershipProof, ProtocolVersion, RefusalReason, RunOptions, SecretHandle, VmObservation,
+    Welcome,
 };
 
 pub const GIB: u64 = 1 << 30;
@@ -65,18 +65,35 @@ pub fn proof(n: u128) -> OwnershipProof {
     }
 }
 
-/// A re-observation of `name` with `instance_id`, running.
-pub fn seen(name: OwnedVmName, instance_id: ProviderInstanceId) -> Reobservation {
-    Reobservation {
-        vm_name: name,
+/// `name` as a listing shows it, undescribed: with `instance_id` when the provider reports one.
+pub fn listed_vm(
+    name: &str,
+    instance_id: Option<ProviderInstanceId>,
+    running: bool,
+) -> VmObservation {
+    VmObservation {
+        name: name.to_owned(),
         instance_id,
-        running: true,
+        running,
+        guest: None,
+        memory_bytes: None,
+        disk_bytes: None,
     }
 }
 
-/// The re-observation that matches [`proof`]`(n)` exactly.
-pub fn seen_as_proved(n: u128) -> Reobservation {
-    seen(vm(n), ProviderInstanceId::sample())
+/// A complete listing of exactly `vms`.
+pub fn listing(vms: Vec<VmObservation>) -> Inventory {
+    Inventory::Complete { vms }
+}
+
+/// A complete listing of `name` alone, running, with `instance_id`.
+pub fn seen(name: &OwnedVmName, instance_id: ProviderInstanceId) -> Inventory {
+    listing(vec![listed_vm(&name.to_string(), Some(instance_id), true)])
+}
+
+/// A complete listing that shows exactly [`proof`]`(n)`'s VM, running.
+pub fn seen_as_proved(n: u128) -> Inventory {
+    seen(&vm(n), ProviderInstanceId::sample())
 }
 
 pub fn base() -> BaseName {

@@ -683,11 +683,7 @@ fn should_answer_every_effect_when_it_is_applied_in_its_session() {
         let d = directive(1, EPOCH, kind.clone());
         let first = dp.receive(V1_0, &d, NOW);
         if first == mayfly_data_domain::Receipt::ReObserve {
-            dp.reobserved(
-                EPOCH,
-                d.directive_id,
-                Some(&super::support::seen_as_proved(1)),
-            );
+            dp.reobserved(EPOCH, d.directive_id, &super::support::seen_as_proved(1));
         }
         let done = dp.finish(EPOCH, d.directive_id, Stimulus::Applied(applied(&kind)));
         let _ = writeln!(text, "{:?} {first:?} {done:?}", kind.tag());

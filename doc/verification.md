@@ -545,6 +545,8 @@ an unnamed test is needed to kill it.
 | 25 | Delete without re-reading the instance id | data-plane executor | `VmProvider` contract (`MacBlindProvider`); unit (KER-08); F39 |
 | 26 | Delete a quarantined VM on a timer or a cap | quarantine policy | component (CP-06, I28); F46 |
 | 27 | Resolve `Unknown` without an observation | `Attempt` aggregate / P19 | matrix (KER-04, I10); F47 |
+| 28 | Start a VM while its memory is unknown (drop `not(dp.memUnknown)` from `dpFits`) | `formal/scheduling.qnt` / data-plane ledger | scenario `unknownMemoryStartsNothingTest` and simulation of `step` (`noStartWhileCapacityUnknown`, ADR 0052); unit `ledger.rs::should_refuse_capacity_unknown_and_never_undercount_when_a_running_vm_has_unknown_memory` (DEC-04) |
+| 29 | Read a listed but unproven target as absent (a `DeleteVm` answered `VmDeleted`) | data-plane executor (`reobserve`) | unit `executor.rs::should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id`, `should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed`, `should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs` (DEC-04F, ADR 0053) |
 
 Each core fault-lab scenario additionally has a mutant (from this table or a lab-only one in
 `tools/faultlab/mutants/`) that turns it `FAIL` (VER-04).

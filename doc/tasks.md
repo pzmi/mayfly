@@ -404,6 +404,7 @@ an absent VM is done). `mayfly-protocol` 1.1 (`capacity_unknown`, `listing_incom
 `mayfly-data-domain`'s ledger and executor follow, and the KER-08 notes are removed.
 Accept: the named tests of ADRs 0052 and 0053; the regenerated `matrix/ledger.txt`,
 `directive.txt` and `link.txt`; the affected Apalache relations at their bounded depths.
+Owner decision pending: StopVm on a VM absent from a complete listing — proposal: distinct non-quarantining refusal target_absent.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
@@ -735,6 +736,12 @@ as ignored); the startup use case P1: migration floor and stored-kinds checks, e
 only by observation, classification, `AdmissionOpened{recovery_done}`, then `catch_up`.
 Accept: component tests for each recovery row; safe mode admits nothing and deletes nothing; F35,
 F42, F43 at component level.
+Note (DEC-04F, ADR 0052's correction): the unit that maps `CapacityReported` into the `Host`'s
+`ReportedCapacity` zeroes what each dimension listed in the report's `unknown` can deliver (its
+`total` share, `vm_slots` or `macos_guests`), because `capacity::admissible` reads totals,
+foreign and base use, never `free`; until then the control plane may propose in an unknown
+dimension and be refused `capacity_unknown` by the data plane. Accept adds: a report with an
+unknown dimension admits nothing there (component test).
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
@@ -774,6 +781,9 @@ Note (KER-08 review): `Ledger::apply_inventory` treats a complete listing as the
 every VM absent from it, so the executor serialises inventory listing against VM effects (a
 listing that overlapped an effect is discarded, never applied); `HostProbe::foreign` counts only
 non-`mf-*` VMs, since the ledger counts malformed `mf-*` VMs itself from the inventory.
+Note (DEC-04F): the re-observation before a `StopVm`/`DeleteVm` passes the provider's
+`Inventory` (complete or not) to `DataPlane::reobserved`, which reads absence itself (ADR 0053's
+notes); the executor never builds an "absent" answer of its own.
 
 #### DP-02 In-process link and link contract suite
 Cites: plan §3.3. `mayfly-adapter-link::inproc` with bounded channels and serde round-trip; the

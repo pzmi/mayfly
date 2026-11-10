@@ -304,7 +304,14 @@ memory while it holds, and the invariant `noStartWhileCapacityUnknown` (pinned b
 `crates/mayfly-data-domain/tests/data_plane/ledger.rs::should_refuse_capacity_unknown_and_never_undercount_when_a_running_vm_has_unknown_memory`
 and the `matrix/ledger.txt` rows) states that the data plane starts nothing meanwhile. The
 other unknown dimensions (guest, disk, a listing not read) are pinned by the data plane's
-tables only. Negative controls tried: removing the capacity guard of
+tables only: a model limitation, kept because each further flag doubles the nondeterministic
+state of both relations whose Apalache runs already take about 7.7 and 4 minutes, while the
+ledger's `matrix/ledger.txt` enumerates every dimension (DEC-04F). The invariant is implied by
+`dpFits`' `not(dp.memUnknown)` conjunct, so it is only as strong as that guard: mutant 28
+(verification §9) removes the conjunct, and simulation of `step` then reports `[violation]` of
+`noStartWhileCapacityUnknown` (`vmFactsChange` to unknown, then `dpCreate`) and
+`unknownMemoryStartsNothingTest` fails at its first `expect`; `i33DataPlaneNeverOvercommits`
+alone would not see it, since it reads the same `dpFits`. Negative controls tried: removing the capacity guard of
 `reserve` (mutant 1) makes simulation of `admitStep` report `[violation]` of
 `allocationWithinReport`; reserving every slot at generation 1 (mutant 2) makes it report
 `i02NoSharedSlotGeneration`; dropping the gate guard of `grant` makes simulation of `step`

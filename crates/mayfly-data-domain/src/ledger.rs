@@ -662,8 +662,11 @@ impl Ledger {
     }
 
     /// The `CapacityReported` content now, under the next report id (ADR 0024). Every unknown
-    /// dimension is listed with its causes and reported free zero, so the control plane
-    /// allocates nothing there (ADR 0052). Pinned by
+    /// dimension is listed with its causes and reported free zero (ADR 0052). What keeps the
+    /// host safe is this ledger's own gate, not the report: a directive that needs an unknown
+    /// dimension is refused `capacity_unknown` ([`Ledger::admits`]); the control plane's
+    /// admission reads totals, foreign and base use rather than `free`, so until it zeroes an
+    /// unknown dimension (CP-04's note) it may propose there and be refused. Pinned by
     /// `tests/data_plane/ledger.rs::should_report_totals_used_free_and_foreign_when_capacity_is_reported`
     /// and `should_report_unknown_dimensions_with_free_zero_and_the_vms_to_describe_when_facts_are_missing`.
     pub fn report(&mut self) -> CapacityReport {

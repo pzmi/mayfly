@@ -190,8 +190,9 @@ impl ObservationKind {
     /// `capacity_unknown` refusal is written `insufficient_resources` of the same dimension (a
     /// definite refusal either way), a `listing_incomplete` unknown reason `deadline` (an
     /// unknown outcome either way), and a report's `unknown` dimensions and a listed VM's facts
-    /// are left out; a report's `free` is already zero in every unknown dimension, so a reader
-    /// of 1.0 allocates nothing there (ADR 0052). Pinned by
+    /// are left out; a report's `free` is still zero in every unknown dimension, though a
+    /// control plane that admits from totals rather than `free` may propose there, and the
+    /// data plane refuses it either way (ADR 0052, correction of 2026-11-10). Pinned by
     /// `should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts`.
     #[must_use]
     pub fn written_in(self, version: ProtocolVersion) -> Self {
@@ -408,9 +409,10 @@ pub struct CapacityReport {
     /// What currently constrains the host.
     pub reasons: BTreeSet<CapacityConstraint>,
     /// The dimensions whose free amount the data plane cannot determine, each with why (ADR
-    /// 0052). In each, `used` counts only what is known and `free` is zero, so nothing is
-    /// allocated there until a listing describes it. Empty (and left out) when everything is
-    /// known; from protocol 1.1.
+    /// 0052). In each, `used` counts only what is known and `free` is zero; the data plane
+    /// refuses what needs the dimension (`capacity_unknown`) until a listing describes it, and
+    /// the control plane reads this list to deliver nothing there (CP-04). Empty (and left out)
+    /// when everything is known; from protocol 1.1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unknown: Vec<UnknownCapacity>,
 }

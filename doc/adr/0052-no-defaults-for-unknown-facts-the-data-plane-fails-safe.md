@@ -33,7 +33,8 @@ specified we should fail safe fail early".
 4. **Report it.** `CapacityReported` carries `unknown: [{dimension, causes}]`, the causes
    naming the VMs to describe (`vm_fact_unknown{vm_name}`) or the listing not read yet, and
    reports `free` zero in each unknown dimension, so the control plane allocates nothing there
-   and `mayfly status`/`doctor` can say why.
+   and `mayfly status`/`doctor` can say why. *(Corrected 2026-11-10: the control plane does not
+   read `free`; see the correction below.)*
 5. **Capacity returns on description.** A complete inventory whose `VmObservation`s carry
    `guest`, `memory_bytes` and `disk_bytes` (new optional fields), or the data plane's own
    record of what it created, makes the dimension known again. An incomplete one describes
@@ -46,7 +47,8 @@ specified we should fail safe fail early".
    A frame never uses more than the session's minor (`ObservationKind::written_in`): in a 1.0
    session `capacity_unknown` is written `insufficient_resources` (a definite refusal either
    way) and the new fields are left out, while `free` is already zero. An older build that
-   ignores this is still correct, so it lands in one release.
+   ignores this is still correct, so it lands in one release. *(Corrected 2026-11-10: it is
+   correct because the data plane refuses, not because `free` is zero; see below.)*
 
 ## Consequences
 
@@ -61,7 +63,8 @@ specified we should fail safe fail early".
   each VM (`tart get`: OS, memory, disk) or leaves the fact out; DP-01 reads a complete
   inventory and the image store before its first capacity report. The control plane's
   `RefusalReason` gains `capacity_unknown` where the link adapter maps it (KER-05's `Host`
-  already allocates within `free`); the operator interface shows `unknown`.
+  already allocates within `free` *(corrected 2026-11-10: it does not; see below)*); the
+  operator interface shows `unknown`.
 - `formal/scheduling.qnt`: `dp.memUnknown`, `vmFactsChange`, `dpFits` and `dpReport` follow,
   invariant `noStartWhileCapacityUnknown`, scenario `unknownMemoryStartsNothingTest`.
 - Pinned by `tests/data_plane/ledger.rs`:
@@ -82,3 +85,21 @@ specified we should fail safe fail early".
   larger guess is still a guess, and a VM started outside the pools exceeds it.
 - Reuse `insufficient_resources` for unknown capacity: the operator could not tell a full host
   from one that does not know, and the fix differs.
+
+## Correction 2026-11-10 (planner, DEC-04F): what keeps an unknown dimension unallocated
+
+The decision stands; three sentences above claimed more than the code does. The control
+plane's admission (`mayfly-control-domain`'s `capacity::admissible`, KER-05) reads a report's
+totals, foreign and base use, not `free`, and nothing in the control plane reads `unknown` yet.
+So a zero `free` does not by itself stop the control plane from allocating in an unknown
+dimension, in a 1.1 session or a 1.0 one. What is true today:
+
+- **The data plane refuses.** A directive that needs an unknown dimension is refused
+  `capacity_unknown` (`insufficient_resources` in a 1.0 session), a definite refusal that
+  executes nothing (I33's data-plane half; pinned by `tests/data_plane/ledger.rs` and
+  `executor.rs::should_refuse_insufficient_resources_in_a_1_0_session_when_capacity_is_unknown`).
+  An older build that ignores the new fields is still correct for this reason.
+- **The control plane may propose and be refused.** Until CP-04's unit that maps
+  `CapacityReported` into the `Host`'s `ReportedCapacity` zeroes what each unknown dimension
+  can deliver, the control plane can issue a directive there and read the refusal (CP-03
+  re-reads it next pass). The note on CP-04's card in `doc/tasks.md` records that work.

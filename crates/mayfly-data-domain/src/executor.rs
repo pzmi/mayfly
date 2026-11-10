@@ -15,13 +15,17 @@
 //! directive's target by type: a VM directive names an [`OwnedVmName`] (`mf-`), which a base
 //! name (`mfb-`) never parses as (I05).
 
-use mayfly_domain::{DirectiveId, Epoch, HostId, Millis, OwnedVmName, ProviderInstanceId};
+use mayfly_domain::{
+    DirectiveId, Epoch, HostId, Millis, OwnedVmName, ProviderInstanceId, VmNameClass,
+    classify_vm_name,
+};
 use mayfly_protocol::{
     Directive, DirectiveKind, DirectiveOutcome, DirectiveRef, DirectiveTag, EpochCheck, Mode,
     ObservationKind, OwnershipProof, ProtocolVersion, RefusalReason, SUPPORTED, UnknownReason,
-    VersionRefusal, admit_frame, check_epoch,
+    VersionRefusal, VmObservation, admit_frame, check_epoch,
 };
 
+use crate::inventory::Inventory;
 use crate::ledger::Ledger;
 use crate::link::{self, Link, LinkOutcome, LinkStimulus};
 
@@ -29,16 +33,67 @@ use crate::link::{self, Link, LinkOutcome, LinkStimulus};
 pub const MAX_RUNNER_VERSION: usize = 64;
 
 /// What a re-observation found at a destructive directive's target, right before its effect
-/// (ADR 0026): the listed VM's parsed name (its generation included), its instance id and
-/// whether it runs (ADR 0053: a proven target already stopped answers a `StopVm` `Done`).
+/// (ADR 0026, ADR 0053), read by [`reobserve`] from the provider's [`Inventory`] and never
+/// built by a caller: only a complete listing with nothing in it that may be the target is
+/// [`Reobserved::Absent`], so a listed VM that cannot be proven never reads as deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reobservation {
-    /// The listed name, parsed.
-    pub vm_name: OwnedVmName,
-    /// The provider's instance id of that VM.
-    pub instance_id: ProviderInstanceId,
-    /// Whether the listing shows it running.
-    pub running: bool,
+pub enum Reobserved {
+    /// The listing is complete, nothing listed occupies the target's slot (host and slot, any
+    /// pool, generation or attempt) and no listed `mf-` name fails to parse.
+    Absent,
+    /// The target's exact name is listed once, with this instance id; the proof's generation is
+    /// in the name, so only the instance id is left to compare.
+    Listed {
+        /// The provider's instance id of that VM.
+        instance_id: ProviderInstanceId,
+        /// Whether the listing shows it running (ADR 0053: a proven target already stopped
+        /// answers a `StopVm` `Done`).
+        running: bool,
+    },
+    /// Something listed may be the target and cannot be proven: the exact name without an
+    /// instance id or listed more than once, another VM in the target's slot, or an `mf-` name
+    /// that does not parse (it may be the target misread). Never touched, never absent.
+    Unproven,
+    /// The listing failed, did not parse or did not finish: it says nothing about the target,
+    /// in particular not that it is absent (I25).
+    Incomplete,
+}
+
+/// What `listing` says about `target` (see [`Reobserved`]). Pinned by
+/// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id`,
+/// `should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed`,
+/// `should_refuse_proof_mismatch_when_the_target_name_is_listed_twice`,
+/// `should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs` and
+/// `should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent`.
+#[must_use]
+pub fn reobserve(listing: &Inventory, target: &OwnedVmName) -> Reobserved {
+    let vms = match listing {
+        Inventory::Complete { vms } => vms,
+        Inventory::Incomplete { .. } => return Reobserved::Incomplete,
+    };
+    let text = target.to_string();
+    let exact: Vec<&VmObservation> = vms.iter().filter(|vm| vm.name == text).collect();
+    if let [only] = exact.as_slice() {
+        return only
+            .instance_id
+            .clone()
+            .map_or(Reobserved::Unproven, |instance_id| Reobserved::Listed {
+                instance_id,
+                running: only.running,
+            });
+    }
+    let may_be_target = |vm: &VmObservation| match classify_vm_name(&vm.name) {
+        VmNameClass::WellFormed(name) => {
+            name.host() == target.host() && name.slot() == target.slot()
+        }
+        VmNameClass::MalformedManaged => true,
+        VmNameClass::Foreign => false,
+    };
+    if vms.iter().any(may_be_target) {
+        Reobserved::Unproven
+    } else {
+        Reobserved::Absent
+    }
 }
 
 /// What `Executing` waits for.
@@ -359,40 +414,34 @@ impl DataPlane {
         receipt
     }
 
-    /// The target of the directive `id` admitted under `epoch` was re-observed by a **complete**
-    /// listing as `observed` (`None`: the complete listing does not list it; an incomplete
-    /// listing is [`DataPlane::reobserve_failed`], never `None`, I25). Only the proof's exact
-    /// name, generation and instance id, all three, let the effect run (ADR 0026); a present
-    /// target that differs in any is `ProofMismatch` and is never touched. Idempotent by
-    /// outcome (ADR 0053): a `DeleteVm` whose target is absent is `Done(VmDeleted)`, whether
-    /// this directive, an earlier one or someone else removed it, and a `StopVm` whose proven
-    /// target is stopped is `Done(VmStopped)`; a `StopVm` whose target is absent is still
-    /// `ProofMismatch` (absence is the inventory's fact, not a stop's). Pinned by
+    /// The target of the directive `id` admitted under `epoch` was re-observed in `listing`, the
+    /// provider's inventory read right before the effect; [`reobserve`] reads it, so a caller
+    /// cannot turn "listed but not provable" into "absent". Only the proof's exact name,
+    /// generation and instance id, all three, let the effect run (ADR 0026); anything listed
+    /// that may be the target and is not proven is `ProofMismatch` and is never touched. An
+    /// incomplete listing is `Unknown{listing_incomplete}`, never `Done` (I25). Idempotent by
+    /// outcome (ADR 0053): a `DeleteVm` whose target a complete listing shows absent is
+    /// `Done(VmDeleted)`, whether this directive, an earlier one or someone else removed it,
+    /// and a `StopVm` whose proven target is stopped is `Done(VmStopped)`; a `StopVm` whose
+    /// target is absent is still `ProofMismatch` (absence is the inventory's fact, not a
+    /// stop's). Pinned by
     /// `tests/data_plane/executor.rs::should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`,
+    /// `should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id`,
+    /// `should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed`,
+    /// `should_refuse_proof_mismatch_when_the_target_name_is_listed_twice`,
     /// `should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent`,
+    /// `should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`,
     /// `should_answer_done_when_a_stop_finds_its_proven_target_stopped` and
     /// `should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone`.
-    pub fn reobserved(
-        &mut self,
-        epoch: Epoch,
-        id: DirectiveId,
-        observed: Option<&Reobservation>,
-    ) -> Progress {
+    pub fn reobserved(&mut self, epoch: Epoch, id: DirectiveId, listing: &Inventory) -> Progress {
         self.advance(epoch, id, |entry| {
             let kind = &entry.directive.kind;
-            let matches = proof_of(kind)
-                .zip(observed)
-                .is_some_and(|(proof, seen)| proven(proof, seen));
-            let stopped = observed.is_some_and(|seen| !seen.running);
-            Ok(match kind {
-                DirectiveKind::DeleteVm { .. } if observed.is_none() => {
-                    Stimulus::Satisfied(ObservationKind::VmDeleted)
-                }
-                DirectiveKind::StopVm { .. } if matches && stopped => {
-                    Stimulus::Satisfied(ObservationKind::VmStopped)
-                }
-                DirectiveKind::DeleteVm { .. }
-                | DirectiveKind::StopVm { .. }
+            let Some(proof) = proof_of(kind) else {
+                return Ok(Stimulus::ReObserved { matches: false });
+            };
+            let is_delete = match kind {
+                DirectiveKind::DeleteVm { .. } => true,
+                DirectiveKind::StopVm { .. }
                 | DirectiveKind::PullImage { .. }
                 | DirectiveKind::MaterialiseImage { .. }
                 | DirectiveKind::EvictImage { .. }
@@ -403,17 +452,25 @@ impl DataPlane {
                 | DirectiveKind::ExportDiagnostics { .. }
                 | DirectiveKind::ReportInventory
                 | DirectiveKind::ReportCapacity
-                | DirectiveKind::ReportHostFacts => Stimulus::ReObserved { matches },
+                | DirectiveKind::ReportHostFacts => false,
+            };
+            Ok(match reobserve(listing, &proof.vm_name) {
+                Reobserved::Incomplete => Stimulus::ReObserveFailed,
+                Reobserved::Absent if is_delete => Stimulus::Satisfied(ObservationKind::VmDeleted),
+                Reobserved::Listed {
+                    instance_id,
+                    running: false,
+                } if !is_delete && proven(proof, &instance_id) => {
+                    Stimulus::Satisfied(ObservationKind::VmStopped)
+                }
+                Reobserved::Listed { instance_id, .. } => Stimulus::ReObserved {
+                    matches: proven(proof, &instance_id),
+                },
+                Reobserved::Absent | Reobserved::Unproven => {
+                    Stimulus::ReObserved { matches: false }
+                }
             })
         })
-    }
-
-    /// The target of `id` could not be re-observed (the listing was incomplete): nothing was
-    /// done now, and whether an earlier delivery took effect is not known, so the outcome is
-    /// `Unknown{listing_incomplete}`, never `Done` (I25, ADR 0053). Pinned by
-    /// `tests/data_plane/executor.rs::should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`.
-    pub fn reobserve_failed(&mut self, epoch: Epoch, id: DirectiveId) -> Progress {
-        self.advance(epoch, id, |_| Ok(Stimulus::ReObserveFailed))
     }
 
     /// The effect of `id` under `epoch` ended with `result` ([`Stimulus::Applied`],
@@ -571,13 +628,11 @@ fn consistent(proof: &OwnershipProof, directive: &Directive) -> bool {
         })
 }
 
-/// Whether a re-observed target is the proof's: the same name, the same generation and the
-/// same instance id (ADR 0026). The generation is part of the name; it is compared on its own
-/// too so that the rule reads as the ADR states it.
-fn proven(proof: &OwnershipProof, seen: &Reobservation) -> bool {
-    seen.vm_name == proof.vm_name
-        && seen.vm_name.generation() == proof.generation
-        && seen.instance_id == proof.instance_id
+/// The listed instance id at the proof's exact name proves the target: the name was matched
+/// exactly by [`reobserve`], its generation is the proof's (re-checked here, not only at
+/// admission), and the instance id is the proof's (ADR 0026).
+fn proven(proof: &OwnershipProof, instance_id: &ProviderInstanceId) -> bool {
+    proof.vm_name.generation() == proof.generation && *instance_id == proof.instance_id
 }
 
 /// The proof a destructive directive carries.

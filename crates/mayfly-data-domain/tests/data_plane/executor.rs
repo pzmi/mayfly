@@ -3,18 +3,19 @@
 //! the idempotent destructive directives of ADR 0053.
 
 use mayfly_data_domain::{
-    DataPlane, LinkIgnored, LinkOutcome, LinkStimulus, Misfit, Progress, Receipt, Reobservation,
+    DataPlane, Inventory, LinkIgnored, LinkOutcome, LinkStimulus, Misfit, Progress, Receipt,
     Stimulus, answered_kind, proof_of,
 };
-use mayfly_domain::{Deadline, DirectiveId, Epoch, Generation, Millis, Sample};
+use mayfly_domain::{Deadline, DirectiveId, Epoch, Generation, Millis, ProviderInstanceId, Sample};
 use mayfly_protocol::{
-    DirectiveKind, DirectiveTag, Mode, ObservationKind, RefusalReason, ResourceDimension,
-    UnknownReason, Welcome,
+    DirectiveKind, DirectiveTag, InventoryGap, Mode, ObservationKind, RefusalReason,
+    ResourceDimension, UnknownReason, Welcome,
 };
 
 use super::support::{
     EPOCH, NOW, V1_0, V1_1, applied, base, capacity, directive, every_kind, host, instance, ledger,
-    open, open_at, open_with, proof, roomy, seen, seen_as_proved, unlisted, vm,
+    listed_vm, listing, open, open_at, open_with, other_host, proof, roomy, seen, seen_as_proved,
+    unlisted, vm, vm_on,
 };
 
 fn reply_kind(receipt: &Receipt) -> ObservationKind {
@@ -231,7 +232,7 @@ fn should_refuse_proof_mismatch_when_the_instance_id_changed() {
     let got = dp.reobserved(
         EPOCH,
         d.directive_id,
-        Some(&seen(vm(1), instance("0a:00:00:00:00:02"))),
+        &seen(&vm(1), instance("0a:00:00:00:00:02")),
     );
     let again = dp.receive(V1_0, &d, NOW);
 
@@ -253,13 +254,16 @@ fn should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_
     let observations = [
         (
             "name",
-            seen(vm(2), mayfly_domain::ProviderInstanceId::sample()),
+            seen(&vm(2), mayfly_domain::ProviderInstanceId::sample()),
         ),
         (
             "generation",
-            seen(next_generation, mayfly_domain::ProviderInstanceId::sample()),
+            seen(
+                &next_generation,
+                mayfly_domain::ProviderInstanceId::sample(),
+            ),
         ),
-        ("instance_id", seen(vm(1), instance("0a:00:00:00:00:02"))),
+        ("instance_id", seen(&vm(1), instance("0a:00:00:00:00:02"))),
     ];
     let kinds = [
         DirectiveKind::DeleteVm { proof: proof(1) },
@@ -277,7 +281,7 @@ fn should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_
                 let mut dp = open();
                 let d = directive(1, EPOCH, kind.clone());
                 dp.receive(V1_0, &d, NOW);
-                let progress = dp.reobserved(EPOCH, d.directive_id, Some(observed));
+                let progress = dp.reobserved(EPOCH, d.directive_id, observed);
                 (format!("{:?} {what}", kind.tag()), progress_kind(&progress))
             })
         })
@@ -312,7 +316,7 @@ fn should_check_the_proof_against_its_name_only_when_the_directive_has_no_attemp
     let wrong_instance = dp.reobserved(
         EPOCH,
         unattempted.directive_id,
-        Some(&seen(vm(1), instance("0a:00:00:00:00:02"))),
+        &seen(&vm(1), instance("0a:00:00:00:00:02")),
     );
     let refused_on_its_name = dp.receive(V1_0, &broken, NOW);
 
@@ -345,13 +349,161 @@ fn should_refuse_proof_mismatch_when_a_stop_finds_its_target_gone() {
     dp.receive(V1_0, &d, NOW);
 
     // when
-    let got = dp.reobserved(EPOCH, d.directive_id, None);
+    let got = dp.reobserved(EPOCH, d.directive_id, &listing(vec![]));
 
     // then
     assert_eq!(
         progress_kind(&got),
         refused(RefusalReason::ProofMismatch),
         "an absent VM is not a stopped one: the inventory reports the absence"
+    );
+}
+
+/// A complete listing of VMs none of which may be attempt 1's: a foreign VM, this host's
+/// slot 2 and another host's slot 1.
+fn unrelated_but_complete() -> Inventory {
+    let slot_2 = mayfly_domain::OwnedVmName::new(
+        mayfly_domain::PoolName::sample(),
+        host(),
+        mayfly_domain::Slot::new(2),
+        Generation::FIRST,
+        mayfly_domain::AttemptId::from_u128(7),
+    );
+    listing(vec![
+        listed_vm("macos-dev", Some(instance("0a:00:00:00:00:07")), true),
+        listed_vm(
+            &slot_2.to_string(),
+            Some(instance("0a:00:00:00:00:08")),
+            true,
+        ),
+        listed_vm(
+            &vm_on(other_host(), 1).to_string(),
+            Some(ProviderInstanceId::sample()),
+            false,
+        ),
+    ])
+}
+
+#[test]
+fn should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id() {
+    // given: the exact target listed, running or stopped, without an instance id
+    let listings = [true, false].map(|running| {
+        (
+            running,
+            listing(vec![listed_vm(&vm(1).to_string(), None, running)]),
+        )
+    });
+    let kinds = [DirectiveKind::DeleteVm { proof: proof(1) }, stop(1)];
+
+    // when
+    let got: Vec<(String, ObservationKind)> = kinds
+        .iter()
+        .flat_map(|kind| {
+            listings.iter().map(|(running, observed)| {
+                let mut dp = open();
+                let d = directive(1, EPOCH, kind.clone());
+                dp.receive(V1_0, &d, NOW);
+                let progress = dp.reobserved(EPOCH, d.directive_id, observed);
+                (
+                    format!("{:?} running={running}", kind.tag()),
+                    progress_kind(&progress),
+                )
+            })
+        })
+        .collect();
+
+    // then
+    assert_eq!(got.len(), 4);
+    for (case, kind) in got {
+        assert_eq!(
+            kind,
+            refused(RefusalReason::ProofMismatch),
+            "present but unproven is never deleted, stopped or absent: {case}"
+        );
+    }
+}
+
+#[test]
+fn should_refuse_proof_mismatch_when_the_target_name_is_listed_twice() {
+    // given: the proof's instance id is one of two listings of the exact name
+    let observed = listing(vec![
+        listed_vm(
+            &vm(1).to_string(),
+            Some(ProviderInstanceId::sample()),
+            false,
+        ),
+        listed_vm(
+            &vm(1).to_string(),
+            Some(instance("0a:00:00:00:00:02")),
+            false,
+        ),
+    ]);
+    let kinds = [DirectiveKind::DeleteVm { proof: proof(1) }, stop(1)];
+
+    // when
+    let got: Vec<ObservationKind> = kinds
+        .iter()
+        .map(|kind| {
+            let mut dp = open();
+            let d = directive(1, EPOCH, kind.clone());
+            dp.receive(V1_0, &d, NOW);
+            progress_kind(&dp.reobserved(EPOCH, d.directive_id, &observed))
+        })
+        .collect();
+
+    // then
+    assert_eq!(
+        got,
+        vec![refused(RefusalReason::ProofMismatch); 2],
+        "two VMs under one name prove neither"
+    );
+}
+
+#[test]
+fn should_misfit_when_a_reobservation_arrives_for_a_directive_without_a_proof() {
+    // given
+    let mut dp = open();
+    let d = directive(1, EPOCH, clone(1));
+    dp.receive(V1_0, &d, NOW);
+
+    // when
+    let got = dp.reobserved(EPOCH, d.directive_id, &listing(vec![]));
+
+    // then
+    assert_eq!(got, Progress::Misfit(Misfit::NotReObserving));
+}
+
+#[test]
+fn should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed() {
+    // given: the target is not listed by its name, but an `mf-` VM whose name does not parse is
+    let malformed = format!("{}-", vm(1));
+    let observed = listing(vec![listed_vm(
+        &malformed,
+        Some(ProviderInstanceId::sample()),
+        false,
+    )]);
+    let kinds = [DirectiveKind::DeleteVm { proof: proof(1) }, stop(1)];
+
+    // when
+    let got: Vec<ObservationKind> = kinds
+        .iter()
+        .map(|kind| {
+            let mut dp = open();
+            let d = directive(1, EPOCH, kind.clone());
+            dp.receive(V1_0, &d, NOW);
+            progress_kind(&dp.reobserved(EPOCH, d.directive_id, &observed))
+        })
+        .collect();
+
+    // then
+    assert_eq!(
+        mayfly_domain::classify_vm_name(&malformed),
+        mayfly_domain::VmNameClass::MalformedManaged
+    );
+    assert_eq!(
+        got,
+        vec![refused(RefusalReason::ProofMismatch); 2],
+        "a name that does not parse may be the target: absence is not proven"
     );
 }
 
@@ -368,7 +520,7 @@ fn should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_t
     );
     let first = directive(2, EPOCH, DirectiveKind::DeleteVm { proof: proof(1) });
     dp.receive(V1_0, &first, NOW);
-    dp.reobserved(EPOCH, first.directive_id, Some(&seen_as_proved(1)));
+    dp.reobserved(EPOCH, first.directive_id, &seen_as_proved(1));
     dp.finish(
         EPOCH,
         first.directive_id,
@@ -383,7 +535,11 @@ fn should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_t
 
     // when
     let receipt = dp.receive(V1_0, &resent, NOW);
-    let got = dp.reobserved(Epoch::new(6), resent.directive_id, None);
+    let got = dp.reobserved(
+        Epoch::new(6),
+        resent.directive_id,
+        &unrelated_but_complete(),
+    );
     let repeat = dp.receive(V1_0, &resent, NOW);
 
     // then
@@ -413,10 +569,13 @@ fn should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incom
     let mut older = open();
     current.receive(V1_0, &delete, NOW);
     older.receive(V1_0, &delete, NOW);
+    let incomplete = Inventory::Incomplete {
+        reason: InventoryGap::Unparseable,
+    };
 
     // when
-    let got = current.reobserve_failed(EPOCH, delete.directive_id);
-    let got_in_1_0 = older.reobserve_failed(EPOCH, delete.directive_id);
+    let got = current.reobserved(EPOCH, delete.directive_id, &incomplete);
+    let got_in_1_0 = older.reobserved(EPOCH, delete.directive_id, &incomplete);
 
     // then
     assert_eq!(
@@ -441,23 +600,25 @@ fn should_answer_done_when_a_stop_finds_its_proven_target_stopped() {
     let mut dp = open();
     let d = directive(1, EPOCH, stop(1));
     dp.receive(V1_0, &d, NOW);
-    let stopped = Reobservation {
-        running: false,
-        ..seen_as_proved(1)
-    };
+    let stopped = listing(vec![listed_vm(
+        &vm(1).to_string(),
+        Some(ProviderInstanceId::sample()),
+        false,
+    )]);
     let mut other = open();
     let replaced = directive(1, EPOCH, stop(1));
     other.receive(V1_0, &replaced, NOW);
 
     // when
-    let got = dp.reobserved(EPOCH, d.directive_id, Some(&stopped));
+    let got = dp.reobserved(EPOCH, d.directive_id, &stopped);
     let stopped_but_replaced = other.reobserved(
         EPOCH,
         replaced.directive_id,
-        Some(&Reobservation {
-            running: false,
-            ..seen(vm(1), instance("0a:00:00:00:00:02"))
-        }),
+        &listing(vec![listed_vm(
+            &vm(1).to_string(),
+            Some(instance("0a:00:00:00:00:02")),
+            false,
+        )]),
     );
 
     // then
@@ -507,7 +668,7 @@ fn should_delete_only_when_the_reobserved_instance_id_is_the_proofs() {
     dp.receive(V1_0, &delete, NOW);
 
     // when
-    let go = dp.reobserved(EPOCH, delete.directive_id, Some(&seen_as_proved(1)));
+    let go = dp.reobserved(EPOCH, delete.directive_id, &seen_as_proved(1));
     let done = dp.finish(
         EPOCH,
         delete.directive_id,
@@ -759,7 +920,7 @@ fn should_hold_reservations_and_orphan_late_results_when_the_session_ends() {
     let late = dp.finish(EPOCH, d.directive_id, Stimulus::Applied(applied(&d.kind)));
     let missing = {
         let mut other = open();
-        other.reobserved(EPOCH, DirectiveId::from_u128(9), None)
+        other.reobserved(EPOCH, DirectiveId::from_u128(9), &listing(vec![]))
     };
 
     // then

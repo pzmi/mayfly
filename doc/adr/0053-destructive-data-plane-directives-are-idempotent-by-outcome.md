@@ -49,7 +49,8 @@ same vm, we should say it's done, shouldn't we?"
 - `mayfly-data-domain`: `Reobservation` carries `running`; `Stimulus::Satisfied` takes
   `Executing(ReObserve)` to `Done`; `ReObserveFailed` goes to `Unknown{listing_incomplete}`
   (`matrix/directive.txt`). DP-01 passes `None` to `DataPlane::reobserved` only for a complete
-  listing and calls `reobserve_failed` otherwise.
+  listing and calls `reobserve_failed` otherwise. *(Changed 2026-11-10: `reobserved` takes the
+  inventory itself; see the notes below.)*
 - `formal/lifecycle.qnt`: a delete's success reply is enabled when the world holds no VM
   (`replySucceededWith`); scenarios `deleteOfAbsentVmIsDoneTest` and
   `deleteLostThenAnsweredDeletedTest`. Its inventory already read absence on a complete listing
@@ -68,3 +69,30 @@ same vm, we should say it's done, shouldn't we?"
 - Answer `Done` on any absence, an incomplete listing included: reads absence from a listing
   that says nothing (I25).
 - Treat a stop of an absent VM as done: reports a VM stopped that is not there.
+
+## Notes 2026-11-10 (planner, DEC-04F): who reads absence, and an Unknown sticks to its id
+
+The decision stands; these record how it is carried and one consequence it left implicit.
+
+- **The data plane reads absence, not its caller.** `DataPlane::reobserved` takes the
+  provider's `Inventory` and reads it itself (`executor::reobserve`), instead of an
+  `Option<&Reobservation>` whose `None` meant "absent from a complete listing" with nothing in
+  the type to say the listing was complete. Only a complete listing with nothing that may be
+  the target is absence: a VM in the target's slot (host and slot, any pool, generation or
+  attempt), the exact name without an instance id or listed twice, or an `mf-` name that does
+  not parse is present but unproven, refused `proof_mismatch` and never touched; an incomplete
+  listing is `Unknown{listing_incomplete}`. `reobserve_failed` is gone: an incomplete
+  inventory says it. Pinned by `tests/data_plane/executor.rs`:
+  `should_refuse_proof_mismatch_when_a_listed_target_has_no_instance_id`,
+  `should_refuse_proof_mismatch_when_an_unparseable_mf_name_is_listed`,
+  `should_refuse_proof_mismatch_when_the_target_name_is_listed_twice`,
+  `should_refuse_proof_mismatch_when_the_reobserved_name_generation_or_instance_id_differs`,
+  `should_answer_done_when_a_delete_is_resent_and_a_complete_listing_shows_the_target_absent`
+  (other VMs listed) and
+  `should_answer_unknown_never_done_when_a_delete_reobservation_listing_is_incomplete`.
+- **An `Unknown` outcome sticks to its directive id.** Decision 5's table answers a repeat of
+  the same id in the session with its first outcome, `Unknown{listing_incomplete}` included, so
+  re-sending that id in the session never learns more. The control plane resolves the
+  `Unknown` by observation (a complete inventory, ADR 0025) and, if the effect is still wanted,
+  issues it again under a new directive id; the next session's table is empty, so a re-delivery
+  there executes afresh (decision 1).

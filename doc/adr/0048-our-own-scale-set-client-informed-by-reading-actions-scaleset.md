@@ -5,7 +5,7 @@ Date: 2026-11-10
 ## Status
 
 Accepted (owner, 2026-11-10). Amends ADR 0028 (the registration token as an auth-chain step
-only), marked there; the amendment accepted by the owner, 2026-11-10.
+only), marked there.
 
 ## Context
 
