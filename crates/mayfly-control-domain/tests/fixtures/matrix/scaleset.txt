@@ -1,0 +1,181 @@
+# scaleset: every phase against every command: accepted events or the refusal code
+unconfigured x ensure -> accepted scale_set_epoch_advanced/v1 scale_set_ensured/v1
+unconfigured x ensure_other -> accepted scale_set_epoch_advanced/v1 scale_set_ensured/v1
+unconfigured x begin_open -> refused not_ensured
+unconfigured x opened_first -> refused not_ensured
+unconfigured x opened_second -> refused not_ensured
+unconfigured x loss_expired -> refused not_ensured
+unconfigured x loss_conflicted -> refused not_ensured
+unconfigured x deleted_first -> refused not_ensured
+unconfigured x deleted_second -> refused not_ensured
+unconfigured x message_first -> refused not_ensured
+unconfigured x message_second -> refused not_ensured
+unconfigured x acquire_answer -> accepted, no event
+unconfigured x acquire_nothing -> refused not_acquiring
+unconfigured x capacity_next -> accepted scale_set_epoch_advanced/v1 capacity_applied/v1
+unconfigured x capacity_stale -> accepted, no event
+unconfigured x recovered -> refused not_ensured
+unconfigured x start_closing -> refused not_ensured
+unconfigured x stale_run -> refused not_ensured
+ensured x ensure -> accepted, no event
+ensured x ensure_other -> refused scale_set_mismatch
+ensured x begin_open -> accepted session_opening/v1
+ensured x opened_first -> refused not_opening
+ensured x opened_second -> refused not_opening
+ensured x loss_expired -> refused no_session
+ensured x loss_conflicted -> refused no_session
+ensured x deleted_first -> refused unknown_session
+ensured x deleted_second -> refused unknown_session
+ensured x message_first -> refused no_session
+ensured x message_second -> refused no_session
+ensured x acquire_answer -> accepted, no event
+ensured x acquire_nothing -> refused not_acquiring
+ensured x capacity_next -> accepted capacity_applied/v1
+ensured x capacity_stale -> accepted, no event
+ensured x recovered -> refused not_degraded
+ensured x start_closing -> refused no_session
+ensured x stale_run -> refused stale_run
+opening x ensure -> accepted, no event
+opening x ensure_other -> refused scale_set_mismatch
+opening x begin_open -> accepted, no event
+opening x opened_first -> accepted session_opened/v1
+opening x opened_second -> accepted session_opened/v1
+opening x loss_expired -> accepted session_lost/v1
+opening x loss_conflicted -> accepted session_lost/v1
+opening x deleted_first -> refused unknown_session
+opening x deleted_second -> refused unknown_session
+opening x message_first -> refused no_session
+opening x message_second -> refused no_session
+opening x acquire_answer -> accepted, no event
+opening x acquire_nothing -> refused not_acquiring
+opening x capacity_next -> accepted capacity_applied/v1
+opening x capacity_stale -> refused stale_capacity
+opening x recovered -> refused not_degraded
+opening x start_closing -> refused no_session
+opening x stale_run -> refused stale_run
+active x ensure -> accepted, no event
+active x ensure_other -> refused scale_set_mismatch
+active x begin_open -> refused session_live
+active x opened_first -> accepted, no event
+active x opened_second -> refused session_live
+active x loss_expired -> accepted session_lost/v1
+active x loss_conflicted -> accepted session_lost/v1
+active x deleted_first -> refused unknown_session
+active x deleted_second -> refused unknown_session
+active x message_first -> accepted message_recorded/v1
+active x message_second -> refused session_mismatch
+active x acquire_answer -> accepted, no event
+active x acquire_nothing -> refused not_acquiring
+active x capacity_next -> accepted capacity_applied/v1
+active x capacity_stale -> refused stale_capacity
+active x recovered -> refused not_degraded
+active x start_closing -> accepted closing_started/v1
+active x stale_run -> refused stale_run
+active_reserved x ensure -> accepted, no event
+active_reserved x ensure_other -> refused scale_set_mismatch
+active_reserved x begin_open -> refused session_live
+active_reserved x opened_first -> accepted, no event
+active_reserved x opened_second -> refused session_live
+active_reserved x loss_expired -> accepted session_lost/v1
+active_reserved x loss_conflicted -> accepted session_lost/v1
+active_reserved x deleted_first -> refused unknown_session
+active_reserved x deleted_second -> refused unknown_session
+active_reserved x message_first -> accepted message_recorded/v1
+active_reserved x message_second -> refused session_mismatch
+active_reserved x acquire_answer -> accepted acquire_observed/v1
+active_reserved x acquire_nothing -> refused not_acquiring
+active_reserved x capacity_next -> accepted capacity_applied/v1
+active_reserved x capacity_stale -> refused stale_capacity
+active_reserved x recovered -> refused not_degraded
+active_reserved x start_closing -> accepted closing_started/v1
+active_reserved x stale_run -> refused stale_run
+backoff_stale x ensure -> accepted, no event
+backoff_stale x ensure_other -> refused scale_set_mismatch
+backoff_stale x begin_open -> refused stale_session_pending
+backoff_stale x opened_first -> refused not_opening
+backoff_stale x opened_second -> refused not_opening
+backoff_stale x loss_expired -> refused no_session
+backoff_stale x loss_conflicted -> refused no_session
+backoff_stale x deleted_first -> accepted session_deleted/v1
+backoff_stale x deleted_second -> refused unknown_session
+backoff_stale x message_first -> refused no_session
+backoff_stale x message_second -> refused no_session
+backoff_stale x acquire_answer -> accepted, no event
+backoff_stale x acquire_nothing -> refused not_acquiring
+backoff_stale x capacity_next -> accepted capacity_applied/v1
+backoff_stale x capacity_stale -> refused stale_capacity
+backoff_stale x recovered -> refused not_degraded
+backoff_stale x start_closing -> refused no_session
+backoff_stale x stale_run -> refused stale_run
+backoff x ensure -> accepted, no event
+backoff x ensure_other -> refused scale_set_mismatch
+backoff x begin_open -> accepted session_opening/v1
+backoff x opened_first -> refused not_opening
+backoff x opened_second -> refused not_opening
+backoff x loss_expired -> refused no_session
+backoff x loss_conflicted -> refused no_session
+backoff x deleted_first -> refused unknown_session
+backoff x deleted_second -> refused unknown_session
+backoff x message_first -> refused no_session
+backoff x message_second -> refused no_session
+backoff x acquire_answer -> accepted, no event
+backoff x acquire_nothing -> refused not_acquiring
+backoff x capacity_next -> accepted capacity_applied/v1
+backoff x capacity_stale -> refused stale_capacity
+backoff x recovered -> refused not_degraded
+backoff x start_closing -> refused no_session
+backoff x stale_run -> refused stale_run
+degraded x ensure -> accepted, no event
+degraded x ensure_other -> refused scale_set_mismatch
+degraded x begin_open -> refused session_live
+degraded x opened_first -> accepted, no event
+degraded x opened_second -> refused session_live
+degraded x loss_expired -> accepted session_lost/v1
+degraded x loss_conflicted -> accepted session_lost/v1
+degraded x deleted_first -> refused unknown_session
+degraded x deleted_second -> refused unknown_session
+degraded x message_first -> accepted message_recorded/v1
+degraded x message_second -> refused session_mismatch
+degraded x acquire_answer -> accepted, no event
+degraded x acquire_nothing -> refused not_acquiring
+degraded x capacity_next -> accepted capacity_applied/v1
+degraded x capacity_stale -> refused stale_capacity
+degraded x recovered -> accepted session_recovered/v1
+degraded x start_closing -> accepted closing_started/v1
+degraded x stale_run -> refused stale_run
+closing x ensure -> accepted, no event
+closing x ensure_other -> refused scale_set_mismatch
+closing x begin_open -> refused closing
+closing x opened_first -> accepted, no event
+closing x opened_second -> refused session_live
+closing x loss_expired -> accepted session_lost/v1
+closing x loss_conflicted -> accepted session_lost/v1
+closing x deleted_first -> accepted session_closed/v1
+closing x deleted_second -> refused unknown_session
+closing x message_first -> accepted message_recorded/v1
+closing x message_second -> refused session_mismatch
+closing x acquire_answer -> accepted, no event
+closing x acquire_nothing -> refused not_acquiring
+closing x capacity_next -> accepted capacity_applied/v1
+closing x capacity_stale -> refused stale_capacity
+closing x recovered -> refused not_degraded
+closing x start_closing -> accepted, no event
+closing x stale_run -> refused stale_run
+closed x ensure -> accepted, no event
+closed x ensure_other -> refused scale_set_mismatch
+closed x begin_open -> accepted session_opening/v1
+closed x opened_first -> refused not_opening
+closed x opened_second -> refused not_opening
+closed x loss_expired -> refused no_session
+closed x loss_conflicted -> refused no_session
+closed x deleted_first -> refused unknown_session
+closed x deleted_second -> refused unknown_session
+closed x message_first -> refused no_session
+closed x message_second -> refused no_session
+closed x acquire_answer -> accepted, no event
+closed x acquire_nothing -> refused not_acquiring
+closed x capacity_next -> accepted capacity_applied/v1
+closed x capacity_stale -> refused stale_capacity
+closed x recovered -> refused not_degraded
+closed x start_closing -> refused no_session
+closed x stale_run -> refused stale_run

@@ -469,7 +469,7 @@ report never allocates beyond the newer one; `min_prepared` defaults to 0.
 Cites: plan §7.2. Model first: `formal/scaleset.qnt` (redelivery, ack loss, >50 messages,
 reassignment; invariants: no double reservation per request id, desired derives from latest
 statistics only, ack only after durable record; I12, shared with recovery). `ScaleSet` aggregate (session FSM, cursor,
-statistics, acquired ids) and pure `demand::desired(stats, warm, capacity)`.
+statistics, acquired ids) and pure `demand::desired(stats, deliverable)` (no standby: DEC-01).
 Accept: tests for the mutants "count messages", "add TotalRunningJobs", "ack before record" fail
 the model or the unit tests (ver §9 items 4–7).
 DEC-01 (ADRs 0027–0029, 0040): `PlanAcquire` (I23: acquire only while assigned < deliverable),
@@ -947,9 +947,11 @@ DEC-01: organisation scope (repository scope for tests); scale sets never delete
 (ADR 0040); runner list/get/delete by id for CP-05.
 
 #### GH-04 Listener use case
-Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §9 (ADR 0048). Poll → acquire →
-record (inbox + statistics + desired) → ack; empty poll still reconciles; never blocks on VM
-work; the session id and the last acked message id are journaled for crash recovery.
+Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §6, §9 (ADR 0048). Poll → record
+(inbox + statistics + desired + the acquire plan: `RecordMessage` runs `PlanAcquire` and
+journals it before the call) → ack, and `AcquireJobs` for exactly the event's `acquire` list →
+`RecordAcquireResult` (KER-06); empty poll still reconciles; never blocks on VM work; the session
+id and the last acked message id are journaled for crash recovery.
 Accept: component tests F08, F09, F10, F11, F25, F27 (ver §8.4) on fakes.
 DEC-01: the record step is one unit with `InboxKey { github, message_id }`; ack after commit;
 `DuplicateMessage` acked without a write; `PlanAcquire` before `AcquireJobs` (I23, I32); wire

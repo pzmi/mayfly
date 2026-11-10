@@ -495,6 +495,14 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   offers, acquire_result, job_facts}` (command id = `(session_id, message_id)`), `ApplyCapacity
   {deliverable, revision}`, `StartClosing`, `RecordClosed`. `PlanAcquire{offers}` is a pure
   function (AcquirePolicy + trust classification) the listener calls *before* `AcquireJobs`.
+  *As built (KER-06):* `RecordMessage` runs `PlanAcquire` itself and journals the plan before
+  the call (`doc/github-scaleset.md` §6, §9), so a redelivered offer is never planned twice; the
+  answer is the observation `RecordAcquireResult{requested, acquired}`; `BeginOpen`,
+  `RecordSessionDeleted{session_id}` (only a journaled session) and `RecordSessionRecovered`
+  complete the session FSM; `ApplyCapacity` carries the reported max and the pool's wire mode
+  (ADR 0029). Unknown types degrade the session at `PROTOCOL_DRIFT_THRESHOLD`. The assumptions on
+  facts GH-00 has not settled (A1–A5) are listed in `formal/scaleset.qnt` and
+  `mayfly_control_domain::demand`.
 - **Events:** `ScaleSetEnsured`, `ScaleSetConflicted`, `SessionOpened`, `SessionExpired`,
   `SessionConflicted`, `SessionDegraded`, `SessionRecovered`, `MessageRecorded{message_id,
   statistics_applied: bool, acquired, declined{request_id, reason: no_capacity|tier}, job_facts,

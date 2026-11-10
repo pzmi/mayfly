@@ -1,0 +1,23 @@
+{
+  "session_id": {
+    "high": 13030963525406393826,
+    "low": 11706234098425720870
+  },
+  "message_id": 1043,
+  "statistics": null,
+  "statistics_applied": false,
+  "released": [],
+  "acquire": [],
+  "declined": [],
+  "job_facts": [
+    {
+      "started": {
+        "request_id": 16,
+        "runner_id": null,
+        "runner_name": null
+      }
+    }
+  ],
+  "unknown_types": 1,
+  "desired": 4
+}

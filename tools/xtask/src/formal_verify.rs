@@ -118,6 +118,16 @@ pub const BOUNDED: &[Bound] = &[
         step: "raceStep",
         steps: 12,
     },
+    Bound {
+        file: "scaleset.qnt",
+        step: "step",
+        steps: 6,
+    },
+    Bound {
+        file: "scaleset.qnt",
+        step: "messageStep",
+        steps: 6,
+    },
 ];
 
 /// Seeds of the multi-seed simulation, derived from one printed base seed.

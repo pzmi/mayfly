@@ -1,0 +1,75 @@
+# scaleset: refusal codes, then the outcome of each determinism case
+code acquired_unrequested
+code capacity_conflict
+code closing
+code no_session
+code not_acquiring
+code not_degraded
+code not_ensured
+code not_opening
+code reported_over_deliverable
+code scale_set_mismatch
+code session_live
+code session_mismatch
+code stale_capacity
+code stale_run
+code stale_session_pending
+code unknown_session
+case acquire_answered accepted
+  acquire_observed/v1 {"acquired":[1],"released":[2]}
+case acquired_unrequested refused acquired_unrequested
+case batch_planned_within_deliverable accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[1,2],"declined":[{"request_id":3,"reason":"no_capacity"}],"job_facts":[],"unknown_types":0,"desired":0}
+case begin_open accepted
+  session_opening/v1 {}
+case capacity_conflict refused capacity_conflict
+case closing refused closing
+case closing_session_deleted accepted
+  session_closed/v1 {"session_id":{"high":1,"low":1}}
+case create_conflicted accepted
+  session_lost/v1 {"cause":"conflicted","stale_session":null}
+case degraded_session_recovered accepted
+  session_recovered/v1 {}
+case drain_sends_zero accepted
+  capacity_applied/v1 {"capacity":{"revision":2,"deliverable":2,"reported_max":1,"mode":"draining"},"wire_max":0,"desired":0}
+case ensure_scale_set accepted
+  scale_set_epoch_advanced/v1 {"epoch":1}
+  scale_set_ensured/v1 {"pool":"pool0","github_id":7,"tier":"trusted"}
+case job_started_releases_the_reservation accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":2,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":2,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[1],"acquire":[],"declined":[],"job_facts":[{"assigned":{"request_id":1}},{"started":{"request_id":1,"runner_id":42,"runner_name":null}}],"unknown_types":0,"desired":2}
+case newer_epoch_is_recorded accepted
+  scale_set_epoch_advanced/v1 {"epoch":2}
+  capacity_applied/v1 {"capacity":{"revision":2,"deliverable":1,"reported_max":1,"mode":"paused"},"wire_max":1,"desired":0}
+case no_session refused no_session
+case not_acquiring refused not_acquiring
+case not_degraded refused not_degraded
+case not_ensured refused not_ensured
+case not_opening refused not_opening
+case older_message_keeps_statistics accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":3,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":2}
+case redelivery_in_a_new_session_reserves_nothing_again accepted
+  message_recorded/v1 {"session_id":{"high":2,"low":2},"message_id":1,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[{"request_id":1,"reason":"already_reserved"},{"request_id":2,"reason":"already_reserved"}],"job_facts":[],"unknown_types":0,"desired":0}
+case reopen_after_delete accepted
+  session_opening/v1 {}
+case reported_over_deliverable refused reported_over_deliverable
+case same_scale_set_records_nothing accepted
+case scale_set_mismatch refused scale_set_mismatch
+case session_expired accepted
+  session_lost/v1 {"cause":"expired","stale_session":{"high":1,"low":1}}
+case session_live refused session_live
+case session_mismatch refused session_mismatch
+case session_opened accepted
+  session_opened/v1 {"session_id":{"high":1,"low":1},"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"desired":0}
+case stale_capacity refused stale_capacity
+case stale_run refused stale_run
+case stale_session_deleted accepted
+  session_deleted/v1 {"session_id":{"high":1,"low":1}}
+case stale_session_pending refused stale_session_pending
+case start_closing accepted
+  closing_started/v1 {}
+case unknown_session refused unknown_session
+case unknown_types_degrade_the_session accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":3,"desired":0}
+  session_degraded/v1 {"cause":"protocol_drift"}
+case untrusted_offer_declined accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[{"request_id":4,"reason":"tier"}],"job_facts":[],"unknown_types":0,"desired":0}

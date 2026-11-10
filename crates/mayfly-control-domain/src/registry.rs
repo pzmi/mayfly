@@ -6,6 +6,7 @@ use crate::event::{EventKind, EventSet};
 use crate::host::Host;
 use crate::pool::Pool;
 use crate::registration::RunnerRegistration;
+use crate::scaleset::ScaleSet;
 
 /// Every aggregate of the control plane. An aggregate's events are registered by its
 /// `Event` set, so this list is also the event registry (plan §5.3): the golden harness walks
@@ -21,6 +22,7 @@ impl AggregateRegistry for ControlAggregates {
         visitor.visit::<Pool>();
         visitor.visit::<Host>();
         visitor.visit::<RunnerRegistration>();
+        visitor.visit::<ScaleSet>();
     }
 }
 

@@ -1,0 +1,86 @@
+{
+  "session_id": {
+    "high": 13030963525406393826,
+    "low": 11706234098425720870
+  },
+  "message_id": 1042,
+  "statistics": {
+    "total_available_jobs": 120,
+    "total_acquired_jobs": 3,
+    "total_assigned_jobs": 64,
+    "total_running_jobs": 61,
+    "total_registered_runners": 62,
+    "total_busy_runners": 61,
+    "total_idle_runners": 1
+  },
+  "statistics_applied": true,
+  "released": [
+    7
+  ],
+  "acquire": [
+    11,
+    12
+  ],
+  "declined": [
+    {
+      "request_id": 13,
+      "reason": "no_capacity"
+    },
+    {
+      "request_id": 14,
+      "reason": "tier"
+    },
+    {
+      "request_id": 15,
+      "reason": "held"
+    },
+    {
+      "request_id": 11,
+      "reason": "already_reserved"
+    }
+  ],
+  "job_facts": [
+    {
+      "assigned": {
+        "request_id": 9
+      }
+    },
+    {
+      "started": {
+        "request_id": 7,
+        "runner_id": 4242,
+        "runner_name": "mf-pool0-host0-s0-g1-0000a77e"
+      }
+    },
+    {
+      "completed": {
+        "request_id": 5,
+        "result": "succeeded",
+        "runner_id": 4241
+      }
+    },
+    {
+      "completed": {
+        "request_id": 6,
+        "result": "failed",
+        "runner_id": 4240
+      }
+    },
+    {
+      "completed": {
+        "request_id": 8,
+        "result": "canceled",
+        "runner_id": null
+      }
+    },
+    {
+      "completed": {
+        "request_id": 10,
+        "result": "other",
+        "runner_id": 4239
+      }
+    }
+  ],
+  "unknown_types": 0,
+  "desired": 4
+}

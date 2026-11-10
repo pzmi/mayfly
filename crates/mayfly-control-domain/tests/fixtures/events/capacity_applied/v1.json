@@ -1,0 +1,10 @@
+{
+  "capacity": {
+    "revision": 5,
+    "deliverable": 4,
+    "reported_max": 4,
+    "mode": "open"
+  },
+  "wire_max": 4,
+  "desired": 4
+}

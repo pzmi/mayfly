@@ -1,0 +1,16 @@
+{
+  "session_id": {
+    "high": 13030963525406393826,
+    "low": 11706234098425720870
+  },
+  "statistics": {
+    "total_available_jobs": 120,
+    "total_acquired_jobs": 3,
+    "total_assigned_jobs": 64,
+    "total_running_jobs": 61,
+    "total_registered_runners": 62,
+    "total_busy_runners": 61,
+    "total_idle_runners": 1
+  },
+  "desired": 4
+}

@@ -395,6 +395,16 @@ copied, ADR 0048's rule applies: it ships with the upstream licence notice in
 The owner's live capture in a disposable organisation answers each; the answer replaces the
 [unverified: GH-00] mark here and becomes a fixture.
 
+Until then the `ScaleSet` aggregate and its model (KER-06, `formal/scaleset.qnt`) take the safe
+side of five of them, each named where it is used: **A1** (item 1) message ids increase per scale
+set across sessions, so the statistics cursor survives a new session and no reservation depends
+on a message being recorded once; **A2** (items 3, 6) the acquire budget counts every open
+reservation on top of `totalAssignedJobs` (it may acquire less, never more); **A3** (item 2) a
+409 on create backs off and mayfly deletes only a session it journaled; **A4** (item 3) acquire
+answers the subset it acquired, and a lost answer leaves the ids pending and counted; **A5**
+(item 5) an offer whose `eventName` is missing or unknown is unclassifiable and declined. If the
+capture refutes one, the model changes first.
+
 1. **Message ids**: where they start (0 or 1), whether they are monotonic and gap-free, whether
    they are per session or per scale set, and whether `lastMessageId` acknowledges implicitly.
 2. **Second session**: status and body (`typeName`) of a create while a session lives; how long
