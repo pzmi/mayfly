@@ -384,7 +384,8 @@ Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → S
 `ProcessLost` when a shim is gone), observed from the provider and the shim's lock and
 `exit.json` rather than remembered. As built (KER-08): the state is a pure function of the last
 complete inventory's word and the shim's files, `Unobserved` until a complete inventory speaks
-(I25); a destructive directive is re-observed in `Executing` before its effect; a repeat of a
+(I25); a destructive directive is re-observed in `Executing` before its effect, and so,
+by name, is a `CloneVm` or `StartVm` (DP-01: a re-delivery is answered from the listing); a repeat of a
 directive still executing is answered when it settles. Destructive directives are idempotent by
 outcome (ADR 0053): a `DeleteVm` whose target a complete re-observation does not list is `Done`
 (`VmDeleted`), a `StopVm` of a proven stopped VM is `Done` (`VmStopped`), and a re-observation
@@ -472,6 +473,28 @@ inventory that cannot be read or parsed is `Incomplete` and never read as the ab
 (I25). Image operations live on a separate `ImageStore` port (pull, materialise, evict, list
 bases; DP-07). Providers: **Tart** (v0.x), fake in-memory (testkit), `mayfly-fake-tart` binary
 (e2e and fault lab on Linux), Orchard or direct Virtualization.framework (later, ADR first).
+
+**As built (DP-01).** The ports live in `mayfly-data::ports`. `inventory` returns an
+`Inventory` and no error: a failed, unparseable or unfinished listing *is*
+`Inventory::Incomplete`, so no caller can read an error as an empty list (I25). `start` returns
+`()` (the shim is the adapter's, DP-04), `stop` takes its grace as `Millis`, and `instance_id`
+is not a port call: the re-observation before an effect reads instance ids from a fresh
+`inventory`. Like Tart, `clone_vm` onto an existing name and `start` of a running VM fail, so the
+executor re-observes a `CloneVm` or `StartVm` by name first (ADR 0042 decision 4: a re-delivery
+under a new epoch is a re-observation): a clone whose exact name is listed with an instance id is
+answered `VmCloned` with it, a start of a running VM `VmBooted`, both without the effect.
+`VmError` is `Definite` or `Ambiguous(Ambiguity)`, the ambiguity naming the unknown reason
+(`deadline`, `process_lost`, `host_slept`); `ImageStore` and `GuestTransport` use the same error.
+**An effect's future is never dropped**: at its directive's deadline the executor answers
+`Unknown{deadline}` but keeps its target busy, its slot taken and listings tainted until the
+future completes, so an adapter bounds each call itself and completes only once nothing it
+started still runs (reads may be dropped). `ProcessClock` separates `wall()` (deadlines, read in
+one place; ADR 0020, amendment proposed 2026-11-10) from `monotonic()` (every wait and
+cadence). The executor (`mayfly-data::executor`) runs everything on its own task (no spawn): at
+most `concurrency` directives at once, one per target; a stage that could not start before its
+deadline is refused `deadline_expired`; listings start only while no effect that changes them
+runs, no new such effect starts while a pass is due or running, and a listing an effect
+overlapped anyway is discarded, never applied or reported (`mayfly-data::gate`).
 
 ### 8.2 Tart adapter
 

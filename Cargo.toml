@@ -18,6 +18,7 @@ members = [
     "crates/mayfly-cli",
     "crates/mayfly-testkit",
     "crates/mayfly-testkit-shared",
+    "crates/mayfly-testkit-data",
     "crates/mayfly-conformance",
     "crates/mayfly-fake-tart",
     "crates/mayfly-fake-github",

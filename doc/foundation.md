@@ -46,7 +46,7 @@ from the policy, or listed but absent, fails the checker.
 | **application** (production) | `mayfly-control`, `mayfly-data` | yes |
 | **adapter** (production) | CP: `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`; DP: `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host`; plane-neutral: `mayfly-adapter-link` | yes |
 | **root** (production) | `mayfly-composition`, `mayfly-cli` | yes |
-| **test_only** | `mayfly-testkit`, `mayfly-testkit-shared`, `mayfly-conformance`, `mayfly-fake-tart`, `mayfly-fake-github` | never |
+| **test_only** | `mayfly-testkit`, `mayfly-testkit-shared`, `mayfly-testkit-data`, `mayfly-conformance`, `mayfly-fake-tart`, `mayfly-fake-github` | never |
 | **tool_only** | `xtask`, `mayfly-faultlab` (the package in `tools/faultlab`) | never |
 | **fuzz_only** | `mayfly-fuzz` (own workspace under `fuzz/`) | never |
 
@@ -61,7 +61,7 @@ closure stays; tools and the independent oracles are in none.
 | Plane | Crates |
 |:--|:--|
 | **control** | `mayfly-control-domain`, `mayfly-control`, `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`, `mayfly-testkit` (the control plane's test kit) |
-| **data** | `mayfly-data-domain`, `mayfly-data`, `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host` |
+| **data** | `mayfly-data-domain`, `mayfly-data`, `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host`, `mayfly-testkit-data` (the data plane's test kit) |
 | **shared** | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-link`, `mayfly-testkit-shared` (the shared test kit) |
 | **both** (sees CP and DP) | `mayfly-composition`, `mayfly-cli` (through composition), `mayfly-conformance` |
 
@@ -94,6 +94,7 @@ workspace crates (`[dependencies.normal]`). They are plan §4's diagram written 
 | `mayfly-cli` | `mayfly-composition` |
 | `mayfly-testkit` | `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`, `mayfly-control`, `mayfly-testkit-shared` (ADR 0019; the child-environment probe, ADR 0058) |
 | `mayfly-testkit-shared` | — (no workspace crate; ADR 0019) |
+| `mayfly-testkit-data` | `mayfly-domain`, `mayfly-protocol`, `mayfly-data-domain`, `mayfly-data` (ADR 0019) |
 | `mayfly-conformance` | `mayfly-testkit`, pure and application crates, `mayfly-adapter-sqlite`, `mayfly-adapter-tart`, `mayfly-adapter-link`, `mayfly-composition` |
 | `mayfly-fake-tart`, `mayfly-fake-github`, `xtask`, `mayfly-faultlab` | — (no workspace crate) |
 | `mayfly-fuzz` | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-tart`, `mayfly-adapter-github`, `mayfly-composition` |
@@ -124,8 +125,10 @@ Rules over the table:
    Test support is therefore split per plane: `mayfly-testkit` is the control plane's kit; the
    shared kit `mayfly-testkit-shared` (the poll helper, FND-05; the link contract suite,
    DP-02) depends on the shared crates only (`mayfly-domain`, `mayfly-protocol`), so every
-   plane's tests, and the shared crates', may use it; the data plane's kit (fake provider, `VmProvider` contract suite) is created, with
-   its policy entry, by the first task that needs it (DP-01).
+   plane's tests, and the shared crates', may use it; the data plane's kit `mayfly-testkit-data`
+   (DP-01: the fake provider and the other data-plane fakes; DP-04 adds the `VmProvider`
+   contract suite) depends on the data plane's crates and the shared ones, so only data-plane
+   crates' tests use it.
 4. **Production closure.** No production crate reaches a test_only or tool_only crate by a
    normal or build edge, directly or through any package (`ARCH-production-closure`).
 5. **Build dependencies** are declared in `[dependencies.build]` (`ARCH-undeclared-build-dep`);
@@ -248,6 +251,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-cli` | `clap` (`derive`), `serde_json`, `anyhow` |
 | `mayfly-testkit` | `serde_json` (golden fixtures) |
 | `mayfly-testkit-shared` | `serde_json` (raw link frames), `tokio` (`rt`, `time`, `test-util`: the link suite's paused-clock runtime) |
+| `mayfly-testkit-data` | `tokio` (`sync`: shared fake state, held calls, the fake clock) |
 | `mayfly-fake-tart` | `serde`, `serde_json`, `anyhow` |
 | `mayfly-fake-github` | `axum`, `tokio`, `serde`, `serde_json`, `anyhow` |
 | `xtask` | `cargo_metadata`, `clap`, `syn`, `proc-macro2`, `serde`, `toml`, `tempfile`, a YAML parser, `anyhow` |
@@ -262,7 +266,9 @@ Dev ceilings: `proptest` (pure and application crates), `tempfile`, `tokio` (`rt
    harnesses (KER-03), the in-memory journal and its contract suite (ES-01), control-plane
    fakes (verification §3, §5, §7). It depends on no adapter, so an adapter's own tests can
    run the suites against it without a cycle, and on no data-plane crate (ADR 0019). The
-   data-plane kit of §2.2 rule 3 follows the same shape. `mayfly-testkit-shared` holds what
+   data plane's kit, `mayfly-testkit-data` (DP-01), follows the same shape: `FakeVmProvider`
+   with scripted faults and held calls, the fake image store, guest, host probe and floor,
+   `FakeClock`, `SequentialIds` and an in-memory link for the executor. `mayfly-testkit-shared` holds what
    both planes' tests need and depends on the shared crates only: the bounded `poll` helper
    (verification §2.5, with `poll::within` for a bounded async wait) and, from DP-02, the link
    contract suite (`link_contract`, verification §5).

@@ -14,8 +14,8 @@ use mayfly_protocol::{
 
 use super::support::{
     EPOCH, NOW, V1_0, V1_1, applied, base, capacity, directive, every_kind, host, instance, ledger,
-    listed_vm, listing, open, open_at, open_with, other_host, proof, roomy, seen, seen_as_proved,
-    unlisted, vm, vm_on,
+    listed_vm, listing, open, open_at, open_with, other_host, proof, receive_through, roomy, seen,
+    seen_as_proved, unlisted, vm, vm_on,
 };
 
 fn reply_kind(receipt: &Receipt) -> ObservationKind {
@@ -97,15 +97,18 @@ fn should_execute_once_and_answer_the_first_outcome_when_a_directive_id_repeats(
     altered.kind = clone(2);
 
     // when
-    let receipts = [dp.receive(V1_0, &first, NOW), dp.receive(V1_0, &first, NOW)];
+    let receipts = [
+        receive_through(&mut dp, &first),
+        receive_through(&mut dp, &first),
+    ];
     let done = dp.finish(
         EPOCH,
         first.directive_id,
         Stimulus::Applied(applied(&first.kind)),
     );
     let repeats = [
-        dp.receive(V1_0, &first, NOW),
-        dp.receive(V1_0, &altered, NOW),
+        receive_through(&mut dp, &first),
+        receive_through(&mut dp, &altered),
     ];
 
     // then
@@ -121,7 +124,7 @@ fn should_run_again_as_a_reobservation_when_the_same_id_arrives_in_a_new_session
     // given
     let mut dp = open();
     let first = directive(1, EPOCH, clone(1));
-    dp.receive(V1_0, &first, NOW);
+    receive_through(&mut dp, &first);
     dp.finish(
         EPOCH,
         first.directive_id,
@@ -132,17 +135,158 @@ fn should_run_again_as_a_reobservation_when_the_same_id_arrives_in_a_new_session
 
     // when
     let got = dp.receive(V1_0, &resent, NOW);
+    let reserved = dp
+        .ledger
+        .reservations
+        .get(&(Epoch::new(6), resent.directive_id))
+        .map(|r| r.demand);
+    let answered = dp.reobserved(
+        Epoch::new(6),
+        resent.directive_id,
+        &seen(&vm(1), instance("0a:00:00:00:00:07")),
+    );
 
     // then
-    assert_eq!(got, Receipt::Execute);
+    assert_eq!(got, Receipt::ReObserve);
     assert_eq!(
-        dp.ledger
-            .reservations
-            .get(&(Epoch::new(6), resent.directive_id))
-            .map(|r| r.demand),
+        reserved,
         Some(capacity(0, 0, 0, 0)),
         "the clone is there: the re-run takes nothing more"
     );
+    assert_eq!(
+        progress_kind(&answered),
+        ObservationKind::VmCloned {
+            instance_id: instance("0a:00:00:00:00:07")
+        },
+        "a re-delivered clone that finds its VM answers what it observed (ADR 0042 decision 4)"
+    );
+    assert!(dp.ledger.reservations.is_empty());
+}
+
+#[test]
+fn should_answer_cloned_without_an_effect_when_a_resent_clone_finds_its_vm() {
+    // given: the name listed once with an instance id, twice, without one, absent, or unknown
+    let listings = [
+        seen(&vm(1), instance("0a:01")),
+        listing(vec![
+            listed_vm(&vm(1).to_string(), Some(instance("0a:01")), false),
+            listed_vm(&vm(1).to_string(), Some(instance("0a:02")), false),
+        ]),
+        listing(vec![listed_vm(&vm(1).to_string(), None, false)]),
+        listing(vec![listed_vm(&vm(2).to_string(), None, true)]),
+        mayfly_data_domain::Inventory::Incomplete {
+            reason: mayfly_protocol::InventoryGap::Deadline,
+        },
+    ];
+
+    // when
+    let got: Vec<Progress> = listings
+        .iter()
+        .map(|observed| {
+            let mut dp = open_at(V1_1, Mode::Normal, ledger(roomy()));
+            let d = directive(1, EPOCH, clone(1));
+            dp.receive(V1_0, &d, NOW);
+            dp.reobserved(EPOCH, d.directive_id, observed)
+        })
+        .collect();
+
+    // then
+    assert_eq!(
+        progress_kind(&got[0]),
+        ObservationKind::VmCloned {
+            instance_id: instance("0a:01")
+        }
+    );
+    assert_eq!(
+        progress_kind(&got[1]),
+        refused(RefusalReason::ProofMismatch)
+    );
+    assert_eq!(
+        progress_kind(&got[2]),
+        refused(RefusalReason::ProofMismatch)
+    );
+    assert_eq!(
+        got[3],
+        Progress::Execute,
+        "another VM does not bear on this name"
+    );
+    assert_eq!(
+        progress_kind(&got[4]),
+        ObservationKind::OutcomeUnknown {
+            reason: UnknownReason::ListingIncomplete
+        }
+    );
+}
+
+#[test]
+fn should_answer_booted_without_an_effect_when_a_resent_start_finds_its_vm_running() {
+    // given
+    let start = DirectiveKind::StartVm {
+        vm_name: vm(1),
+        run_options: super::support::run_options(),
+    };
+    let listings = [
+        listing(vec![listed_vm(
+            &vm(1).to_string(),
+            Some(instance("0a:01")),
+            true,
+        )]),
+        listing(vec![listed_vm(
+            &vm(1).to_string(),
+            Some(instance("0a:01")),
+            false,
+        )]),
+        listing(Vec::new()),
+    ];
+
+    // when
+    let got: Vec<Progress> = listings
+        .iter()
+        .map(|observed| {
+            let mut dp = open();
+            dp.ledger.vms.insert(
+                vm(1),
+                mayfly_data_domain::VmUse {
+                    guest: Some(mayfly_protocol::GuestOs::Linux),
+                    running: false,
+                    memory_bytes: None,
+                    disk_bytes: Some(0),
+                },
+            );
+            let d = directive(1, EPOCH, start.clone());
+            dp.receive(V1_0, &d, NOW);
+            dp.reobserved(EPOCH, d.directive_id, observed)
+        })
+        .collect();
+
+    // then
+    assert_eq!(progress_kind(&got[0]), ObservationKind::VmBooted);
+    assert_eq!(got[1], Progress::Execute);
+    assert_eq!(
+        progress_kind(&got[2]),
+        refused(RefusalReason::ProofMismatch),
+        "an absent VM is not started, nor read as started"
+    );
+}
+
+#[test]
+fn should_refuse_deadline_expired_when_a_stage_could_not_start_before_its_deadline() {
+    // given
+    let kinds = [clone(1), DirectiveKind::ReportHostFacts];
+
+    // when
+    let got: Vec<ObservationKind> = kinds
+        .into_iter()
+        .map(|kind| {
+            let mut dp = open();
+            let d = directive(1, EPOCH, kind);
+            dp.receive(V1_0, &d, NOW);
+            progress_kind(&dp.finish(EPOCH, d.directive_id, Stimulus::Expired))
+        })
+        .collect();
+
+    // then
+    assert_eq!(got, vec![refused(RefusalReason::DeadlineExpired); 2]);
 }
 
 #[test]
@@ -174,8 +318,8 @@ fn should_refuse_the_second_clone_when_the_first_reserved_the_last_slot() {
     let mut dp = open_with(Mode::Normal, ledger(probe));
 
     // when
-    let first = dp.receive(V1_0, &directive(1, EPOCH, clone(1)), NOW);
-    let second = dp.receive(V1_0, &directive(2, EPOCH, clone(2)), NOW);
+    let first = receive_through(&mut dp, &directive(1, EPOCH, clone(1)));
+    let second = receive_through(&mut dp, &directive(2, EPOCH, clone(2)));
 
     // then
     assert_eq!(first, Receipt::Execute);
@@ -460,10 +604,14 @@ fn should_refuse_proof_mismatch_when_the_target_name_is_listed_twice() {
 }
 
 #[test]
-fn should_misfit_when_a_reobservation_arrives_for_a_directive_without_a_proof() {
+fn should_misfit_when_a_reobservation_arrives_for_a_directive_that_is_not_reobserved() {
     // given
     let mut dp = open();
-    let d = directive(1, EPOCH, clone(1));
+    let d = directive(
+        1,
+        EPOCH,
+        DirectiveKind::ExportDiagnostics { vm_name: vm(1) },
+    );
     dp.receive(V1_0, &d, NOW);
 
     // when
@@ -843,7 +991,7 @@ fn should_accept_only_its_own_answer_when_an_effect_is_applied() {
     // given
     let mut dp = open();
     let d = directive(1, EPOCH, clone(1));
-    dp.receive(V1_0, &d, NOW);
+    receive_through(&mut dp, &d);
 
     // when
     let wrong = dp.finish(
@@ -875,8 +1023,8 @@ fn should_answer_unknown_and_hold_capacity_when_an_effect_is_ambiguous() {
             .find(|k| k.tag() == DirectiveTag::LaunchRunner)
             .expect("a launch"),
     );
-    dp.receive(V1_0, &start, NOW);
-    dp.receive(V1_0, &launch, NOW);
+    receive_through(&mut dp, &start);
+    receive_through(&mut dp, &launch);
 
     // when
     let clone_unknown = dp.finish(

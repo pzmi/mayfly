@@ -180,6 +180,7 @@ fn should_select_the_foundation_crates_when_repository_purity_and_planes_are_rea
             "mayfly-adapter-tart",
             "mayfly-adapter-guest",
             "mayfly-adapter-host",
+            "mayfly-testkit-data",
         ]),
         sorted(&[
             "mayfly-domain",

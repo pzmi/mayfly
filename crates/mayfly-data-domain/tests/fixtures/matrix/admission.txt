@@ -21,20 +21,20 @@ evict_image x no_room -> execute
 evict_image x other_host -> execute
 evict_image x foreign_proof -> execute
 evict_image x bad_runner_version -> execute
-clone_vm x normal -> execute
+clone_vm x normal -> reobserve
 clone_vm x safe -> reply e5 refused safe_mode
 clone_vm x expired -> reply e5 refused deadline_expired
 clone_vm x no_room -> reply e5 refused insufficient_resources(vm_slots)
 clone_vm x other_host -> reply e5 refused protected_target
-clone_vm x foreign_proof -> execute
-clone_vm x bad_runner_version -> execute
-start_vm x normal -> execute
+clone_vm x foreign_proof -> reobserve
+clone_vm x bad_runner_version -> reobserve
+start_vm x normal -> reobserve
 start_vm x safe -> reply e5 refused safe_mode
 start_vm x expired -> reply e5 refused deadline_expired
 start_vm x no_room -> reply e5 refused insufficient_resources(macos_guests)
 start_vm x other_host -> reply e5 refused protected_target
-start_vm x foreign_proof -> execute
-start_vm x bad_runner_version -> execute
+start_vm x foreign_proof -> reobserve
+start_vm x bad_runner_version -> reobserve
 verify_guest x normal -> execute
 verify_guest x safe -> execute
 verify_guest x expired -> reply e5 refused deadline_expired

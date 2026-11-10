@@ -350,3 +350,46 @@ pub fn applied(kind: &DirectiveKind) -> ObservationKind {
         }),
     }
 }
+
+/// The listing a re-observation of `kind` finds when its effect is to run: a clone's name
+/// absent, a start's VM listed stopped, a stop's or delete's target as proved.
+pub fn effect_listing(kind: &DirectiveKind) -> Inventory {
+    match kind {
+        DirectiveKind::StartVm { vm_name, .. } => listing(vec![listed_vm(
+            &vm_name.to_string(),
+            Some(ProviderInstanceId::sample()),
+            false,
+        )]),
+        DirectiveKind::StopVm { proof, .. } | DirectiveKind::DeleteVm { proof } => {
+            listing(vec![listed_vm(
+                &proof.vm_name.to_string(),
+                Some(proof.instance_id.clone()),
+                true,
+            )])
+        }
+        DirectiveKind::PullImage { .. }
+        | DirectiveKind::MaterialiseImage { .. }
+        | DirectiveKind::EvictImage { .. }
+        | DirectiveKind::CloneVm { .. }
+        | DirectiveKind::VerifyGuest { .. }
+        | DirectiveKind::LaunchRunner { .. }
+        | DirectiveKind::ExportDiagnostics { .. }
+        | DirectiveKind::ReportInventory
+        | DirectiveKind::ReportCapacity
+        | DirectiveKind::ReportHostFacts => listing(Vec::new()),
+    }
+}
+
+/// Receives `d` at [`NOW`] and, when the domain re-observes it first, reports the
+/// [`effect_listing`] so its effect may run: `Execute` then stands for "the effect runs".
+pub fn receive_through(dp: &mut DataPlane, d: &Directive) -> Receipt {
+    let got = dp.receive(V1_0, d, NOW);
+    if got != Receipt::ReObserve {
+        return got;
+    }
+    match dp.reobserved(d.epoch, d.directive_id, &effect_listing(&d.kind)) {
+        mayfly_data_domain::Progress::Execute => Receipt::Execute,
+        mayfly_data_domain::Progress::Reply(reply) => Receipt::Reply(reply),
+        other => panic!("a re-observation for the effect did not let it run: {other:?}"),
+    }
+}

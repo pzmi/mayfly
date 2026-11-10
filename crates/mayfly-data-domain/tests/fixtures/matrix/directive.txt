@@ -1,5 +1,5 @@
 # directive: every phase against every stimulus: the next phase, or the misfit that leaves it unchanged.
-# Every phase is reachable: received on every frame admitted to the table, reobserving for StopVm/DeleteVm, the rest from those.
+# Every phase is reachable: received on every frame admitted to the table, reobserving for CloneVm/StartVm/StopVm/DeleteVm, the rest from those.
 received x admit_reobserve -> executing re_observe
 received x admit_effect -> executing effect
 received x deny_safe_mode -> refused safe_mode
@@ -18,6 +18,7 @@ received x ambiguous_process_lost -> misfit not_running
 received x ambiguous_host_slept -> misfit not_running
 received x ambiguous_stale_epoch -> misfit not_running
 received x ambiguous_listing_incomplete -> misfit not_running
+received x expired -> misfit not_running
 reobserving x admit_reobserve -> misfit not_received
 reobserving x admit_effect -> misfit not_received
 reobserving x deny_safe_mode -> misfit not_received
@@ -36,6 +37,7 @@ reobserving x ambiguous_process_lost -> misfit not_running
 reobserving x ambiguous_host_slept -> misfit not_running
 reobserving x ambiguous_stale_epoch -> misfit not_running
 reobserving x ambiguous_listing_incomplete -> misfit not_running
+reobserving x expired -> refused deadline_expired
 executing x admit_reobserve -> misfit not_received
 executing x admit_effect -> misfit not_received
 executing x deny_safe_mode -> misfit not_received
@@ -54,6 +56,7 @@ executing x ambiguous_process_lost -> unknown process_lost
 executing x ambiguous_host_slept -> unknown host_slept
 executing x ambiguous_stale_epoch -> misfit not_an_effect_outcome
 executing x ambiguous_listing_incomplete -> misfit not_an_effect_outcome
+executing x expired -> refused deadline_expired
 done x admit_reobserve -> misfit settled
 done x admit_effect -> misfit settled
 done x deny_safe_mode -> misfit settled
@@ -72,6 +75,7 @@ done x ambiguous_process_lost -> misfit settled
 done x ambiguous_host_slept -> misfit settled
 done x ambiguous_stale_epoch -> misfit settled
 done x ambiguous_listing_incomplete -> misfit settled
+done x expired -> misfit settled
 refused x admit_reobserve -> misfit settled
 refused x admit_effect -> misfit settled
 refused x deny_safe_mode -> misfit settled
@@ -90,6 +94,7 @@ refused x ambiguous_process_lost -> misfit settled
 refused x ambiguous_host_slept -> misfit settled
 refused x ambiguous_stale_epoch -> misfit settled
 refused x ambiguous_listing_incomplete -> misfit settled
+refused x expired -> misfit settled
 unknown x admit_reobserve -> misfit settled
 unknown x admit_effect -> misfit settled
 unknown x deny_safe_mode -> misfit settled
@@ -108,3 +113,4 @@ unknown x ambiguous_process_lost -> misfit settled
 unknown x ambiguous_host_slept -> misfit settled
 unknown x ambiguous_stale_epoch -> misfit settled
 unknown x ambiguous_listing_incomplete -> misfit settled
+unknown x expired -> misfit settled

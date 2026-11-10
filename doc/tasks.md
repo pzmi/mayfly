@@ -823,6 +823,11 @@ from a local base, then `tart set --random-mac` and MAC read-back; Tart commands
 probe, JSON parsing against version-pinned fixtures; inventory `Incomplete` on any parse or exit
 failure; `HypervisorLimitHit`. **VmProvider contract suite** run against the in-memory fake, the
 fake-tart binary, and (gated by `MAYFLY_REAL_TART_HOME`, macOS only, used by HW-01) real Tart.
+Note (DP-01 review): the executor never drops an effect's future (`mayfly-data::ports`): each
+call carries the adapter's own deadline and its future completes, `Ambiguous(Deadline)` at worst,
+only once what it started is stopped and reaped; a `start` returns only once its shim is settled,
+since `tart run` is never signalled (ADR 0037) and no `Drop` can run `tart stop`. `clone_vm`
+onto an existing name and `start` of a running VM fail `Definite`, as Tart does.
 Accept: contract green on both fakes; hang → deadline → `Ambiguous` + re-inspect; a daemon killed
 and restarted re-adopts a running VM through its shim (F48 at integration level); no signal is ever
 sent to `tart run`.

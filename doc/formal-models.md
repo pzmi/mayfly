@@ -241,8 +241,17 @@ consistency, the fit), which `dpDeliver` folds into one nondeterministic effect;
 two steps, so a repeat while a directive runs (`Pending`) and the reservations held for an
 `Unknown` outcome until a complete inventory; and the VM supervisor (`supervisor::state`: the
 provider's listing × the shim's lock and `exit.json`, `ProcessLost`, ADR 0037), which no model
-states. A two-step `dpDeliver` (start, finish) is the extension to make when DP-01 adds bounded
-concurrency; the supervisor joins `recovery` when CP-04 re-adopts VMs from it.
+states. A two-step `dpDeliver` (start, finish) is the extension to make for the bounded concurrency
+DP-01 added; the supervisor joins `recovery` when CP-04 re-adopts VMs from it. **Not modelled
+either (DP-01, `mayfly-data::executor`)**, each pinned by the executor's component tests
+(`crates/mayfly-data/tests/executor/`): the concurrency bound and one directive per target at a
+time; a stage whose deadline passed while it waited is refused `deadline_expired`; an effect
+still running at its deadline is answered `Unknown{deadline}` and keeps its target, slot and the
+listing gate until it completes; a `CloneVm` or `StartVm` re-observed by name before its effect
+(a re-delivery answered from the listing); the observer's listings serialised against effects,
+no new listing-changing effect while a pass is due or running, an overlapped listing discarded
+(the `gate`); `ReportInventory` answered from the next clean listing or
+`InventoryIncomplete{deadline}`. None of these changes what `dpDeliver` may answer; a two-step model would add them.
 
 ### scheduling
 

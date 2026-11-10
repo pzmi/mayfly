@@ -17,7 +17,8 @@ pub mod supervisor;
 
 pub use executor::{
     DataPlane, Discard, Entry, MAX_RUNNER_VERSION, Misfit, Phase, Progress, Receipt, Reobserved,
-    Reply, Stage, Stimulus, admission, answered_kind, proof_of, reobserve,
+    Reply, Stage, Stimulus, admission, answered_kind, proof_of, reobserve, reobserve_name,
+    reobserves,
 };
 pub use inventory::Inventory;
 pub use ledger::{BaseUse, HostProbe, Ledger, Reservation, Settles, Sizing, VmUse, gaps};

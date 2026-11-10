@@ -1,0 +1,19 @@
+[package]
+name = "mayfly-testkit-data"
+description = "Test-only: the data plane's test kit (ADR 0019): the fake VM provider with scripted faults, fake image store, guest, host probe and floor, a fake clock, sequential ids and an in-memory link for the executor's component tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
+mayfly-data-domain = { version = "0.1.0", path = "../mayfly-data-domain" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
+tokio = { version = "1.54.1", default-features = false, features = ["sync"] }

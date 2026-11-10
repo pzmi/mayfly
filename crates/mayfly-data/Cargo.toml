@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-data"
-description = "Data-plane application: executor, inventory observer and resource monitor, with the ports VmProvider, GuestTransport, HostProbe and ProcessClock."
+description = "Data-plane application: the executor and inventory observer over the ports VmProvider, ImageStore, GuestTransport, HostProbe and ProcessClock."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,12 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-data-domain = { version = "0.1.0", path = "../mayfly-data-domain" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
+
+[dev-dependencies]
+mayfly-testkit-data = { path = "../mayfly-testkit-data" }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }

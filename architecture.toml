@@ -16,7 +16,7 @@ production = [
   "mayfly-composition", "mayfly-cli",
 ]
 test_only = [
-  "mayfly-testkit", "mayfly-testkit-shared", "mayfly-conformance",
+  "mayfly-testkit", "mayfly-testkit-shared", "mayfly-testkit-data", "mayfly-conformance",
   "mayfly-fake-tart", "mayfly-fake-github",
 ]
 tool_only = ["xtask", "mayfly-faultlab"]
@@ -35,6 +35,7 @@ control = [
 data = [
   "mayfly-data-domain", "mayfly-data",
   "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-testkit-data",
 ]
 shared = [
   "mayfly-domain", "mayfly-protocol", "mayfly-adapter-link",
@@ -100,7 +101,7 @@ mayfly-cli = ["mayfly-composition"]
 
 # The control plane's test kit (ADR 0019): its closure stays in the control plane and the
 # shared crates, so control and shared crates may dev-depend on it and data crates may not.
-# Data-plane test support goes to its own kit when DP-01 needs one. It uses the shared kit
+# Data-plane test support is in mayfly-testkit-data, below. It uses the shared kit
 # (the child-environment probe of the secrets contract, ADR 0058).
 mayfly-testkit = [
   "mayfly-domain", "mayfly-protocol",
@@ -116,6 +117,13 @@ mayfly-testkit = [
 # crate, and its types never match `crate::` ones. Not checked here: the compiler refuses the
 # mix, and a type-free helper (the fixture reader in mayfly-protocol/tests/golden.rs) is sound.
 mayfly-testkit-shared = ["mayfly-domain", "mayfly-protocol"]
+# The data plane's test kit (ADR 0019, DP-01): the fake provider, image store, guest, host probe,
+# floor, clock and link the executor's component tests run over. Its closure stays in the data
+# plane and the shared crates, so data crates may dev-depend on it and control crates may not.
+mayfly-testkit-data = [
+  "mayfly-domain", "mayfly-protocol",
+  "mayfly-data-domain", "mayfly-data",
+]
 # Conformance drives the production crates the Quint models govern, over the testkit, the
 # Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
 # dev-depend on it.
@@ -157,6 +165,9 @@ mayfly-adapter-link = { serde_json = ["default"], tokio = ["sync"] }
 # The link contract suite (DP-02) runs each case on its own current-thread runtime with a paused
 # clock (rt, time, test-util), and reads and writes raw JSON frames (ADR 0010).
 mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test-util"] }
+# The data plane's fakes share state between a test and the executor and wake waiters (a held
+# provider call, the fake clock) through Tokio's synchronisation primitives only; no runtime.
+mayfly-testkit-data = { tokio = ["sync"] }
 # The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
 # process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
 # of the file and executable checks, through Tokio.
@@ -179,6 +190,9 @@ mayfly-adapter-sqlite = { tempfile = ["default"] }
 mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io-util", "time", "sync"] }
 mayfly-composition = { tempfile = ["default"] }
 mayfly-control = { serde = ["default", "derive"] }
+# The executor's component tests poll it and their script together on a current-thread runtime
+# (`tokio::join!`), nothing spawned (DP-01).
+mayfly-data = { tokio = ["rt", "macros"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
 mayfly-fake-tart = { tempfile = ["default"] }
 

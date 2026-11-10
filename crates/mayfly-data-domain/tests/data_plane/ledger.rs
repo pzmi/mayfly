@@ -11,8 +11,8 @@ use mayfly_protocol::{
 };
 
 use super::support::{
-    EPOCH, GIB, NOW, V1_0, V1_1, base, capacity, digest, directive, ledger, open, open_at, proof,
-    roomy, run_options, unlisted, vm,
+    EPOCH, GIB, V1_1, base, capacity, digest, directive, ledger, open, open_at, proof,
+    receive_through, roomy, run_options, unlisted, vm,
 };
 
 /// A listed VM the provider does not describe.
@@ -76,7 +76,7 @@ fn with_unknown_clone() -> mayfly_data_domain::DataPlane {
             vm_name: vm(1),
         },
     );
-    dp.receive(V1_0, &d, NOW);
+    receive_through(&mut dp, &d);
     dp.finish(
         EPOCH,
         d.directive_id,
@@ -230,9 +230,9 @@ fn should_refuse_capacity_unknown_when_a_start_targets_a_vm_of_unknown_guest() {
 
     // when
     let demands = [1, 3, 2].map(|n| dp.ledger.demand(&start(n)));
-    let of_unknown_guest = dp.receive(V1_0, &directive(1, EPOCH, start(1)), NOW);
-    let of_unknown_vm = dp.receive(V1_0, &directive(3, EPOCH, start(3)), NOW);
-    let of_linux = dp.receive(V1_0, &directive(2, EPOCH, start(2)), NOW);
+    let of_unknown_guest = receive_through(&mut dp, &directive(1, EPOCH, start(1)));
+    let of_unknown_vm = receive_through(&mut dp, &directive(3, EPOCH, start(3)));
+    let of_linux = receive_through(&mut dp, &directive(2, EPOCH, start(2)));
 
     // then
     assert_eq!(dp.ledger.vms[&vm(1)].guest, None, "never assumed macOS");
@@ -278,8 +278,8 @@ fn should_refuse_capacity_unknown_and_never_undercount_when_a_running_vm_has_unk
     // when
     let used = dp.ledger.used();
     let report = dp.ledger.report();
-    let started = dp.receive(V1_0, &directive(1, EPOCH, start(2)), NOW);
-    let cloned = dp.receive(V1_0, &directive(2, EPOCH, clone), NOW);
+    let started = receive_through(&mut dp, &directive(1, EPOCH, start(2)));
+    let cloned = receive_through(&mut dp, &directive(2, EPOCH, clone));
 
     // then
     assert_eq!(
@@ -535,14 +535,14 @@ fn should_count_a_start_at_the_configured_sizing_when_its_run_options_ask_for_le
 
     // when
     let demand = dp.ledger.demand(&first.kind);
-    let admitted = dp.receive(V1_0, &first, NOW);
+    let admitted = receive_through(&mut dp, &first);
     dp.finish(
         EPOCH,
         first.directive_id,
         Stimulus::Applied(mayfly_protocol::ObservationKind::VmBooted),
     );
     let recorded = dp.ledger.vms[&vm(1)];
-    let over = dp.receive(V1_0, &second, NOW);
+    let over = receive_through(&mut dp, &second);
 
     // then
     assert_eq!(

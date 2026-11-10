@@ -893,6 +893,7 @@ diff --git a/crates/mayfly-domain/src/old.rs b/crates/mayfly-domain/src/old.rs
         ("mayfly-domain", 84),
         ("mayfly-protocol", 95),
         ("mayfly-control-domain", 96),
+        ("mayfly-data", 97),
         ("mayfly-data-domain", 98),
     ];
 }

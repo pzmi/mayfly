@@ -174,11 +174,12 @@ fn should_define_every_pair_when_each_directive_phase_meets_each_stimulus() {
             "ambiguous_listing_incomplete",
             Stimulus::Ambiguous(UnknownReason::ListingIncomplete),
         ),
+        ("expired", Stimulus::Expired),
     ];
     let mut text = String::from(
         "# directive: every phase against every stimulus: the next phase, or the misfit that \
          leaves it unchanged.\n# Every phase is reachable: received on every frame admitted to \
-         the table, reobserving for StopVm/DeleteVm, the rest from those.\n",
+         the table, reobserving for CloneVm/StartVm/StopVm/DeleteVm, the rest from those.\n",
     );
 
     // when
@@ -683,7 +684,11 @@ fn should_answer_every_effect_when_it_is_applied_in_its_session() {
         let d = directive(1, EPOCH, kind.clone());
         let first = dp.receive(V1_0, &d, NOW);
         if first == mayfly_data_domain::Receipt::ReObserve {
-            dp.reobserved(EPOCH, d.directive_id, &super::support::seen_as_proved(1));
+            dp.reobserved(
+                EPOCH,
+                d.directive_id,
+                &super::support::effect_listing(&kind),
+            );
         }
         let done = dp.finish(EPOCH, d.directive_id, Stimulus::Applied(applied(&kind)));
         let _ = writeln!(text, "{:?} {first:?} {done:?}", kind.tag());

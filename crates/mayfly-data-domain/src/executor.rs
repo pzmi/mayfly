@@ -2,8 +2,10 @@
 //! `dpDeliver`).
 //!
 //! Each directive of the open session moves `Received → Executing → Done | Refused | Unknown`
-//! ([`step`]); `Executing` re-observes the target first for a proof-carrying `StopVm` or
-//! `DeleteVm`, which are idempotent by outcome (ADR 0053): a delete whose target a complete
+//! ([`step`]); `Executing` re-observes the target first for a `CloneVm` or `StartVm`, by name
+//! ([`reobserve_name`]: a directive re-delivered under a new epoch is a re-observation by target
+//! name, ADR 0042 decision 4), and for a proof-carrying `StopVm` or `DeleteVm`, which are
+//! idempotent by outcome (ADR 0053): a delete whose target a complete
 //! listing shows absent, and a stop whose proven target is stopped, are `Done` without an
 //! effect; a re-observation that fails is `Unknown{listing_incomplete}`, never `Done` (I25). [`DataPlane::receive`] takes a frame and checks, in this order, the frame's
 //! version ([`mayfly_protocol::admit_frame`]), its epoch ([`mayfly_protocol::check_epoch`]: a
@@ -96,10 +98,61 @@ pub fn reobserve(listing: &Inventory, target: &OwnedVmName) -> Reobserved {
     }
 }
 
+/// What `listing` says about the exact name `target`, for a `CloneVm` or `StartVm` that carries
+/// no proof: [`Reobserved::Listed`] when the name is listed once with an instance id (the name
+/// holds the generation and attempt), [`Reobserved::Absent`] when a complete listing does not
+/// list it, [`Reobserved::Unproven`] when it is listed without an instance id or more than once,
+/// and [`Reobserved::Incomplete`] for an incomplete listing (I25). Other VMs, in the target's
+/// slot or not, do not bear on a clone or start of this exact name. Pinned by
+/// `tests/data_plane/executor.rs::should_answer_cloned_without_an_effect_when_a_resent_clone_finds_its_vm`
+/// and `should_answer_booted_without_an_effect_when_a_resent_start_finds_its_vm_running`.
+#[must_use]
+pub fn reobserve_name(listing: &Inventory, target: &OwnedVmName) -> Reobserved {
+    let vms = match listing {
+        Inventory::Complete { vms } => vms,
+        Inventory::Incomplete { .. } => return Reobserved::Incomplete,
+    };
+    let text = target.to_string();
+    let exact: Vec<&VmObservation> = vms.iter().filter(|vm| vm.name == text).collect();
+    match exact.as_slice() {
+        [] => Reobserved::Absent,
+        [only] => only
+            .instance_id
+            .clone()
+            .map_or(Reobserved::Unproven, |instance_id| Reobserved::Listed {
+                instance_id,
+                running: only.running,
+            }),
+        _ => Reobserved::Unproven,
+    }
+}
+
+/// Whether `kind` is re-observed before its effect: by proof (`StopVm`, `DeleteVm`) or by name
+/// (`CloneVm`, `StartVm`).
+#[must_use]
+pub const fn reobserves(kind: &DirectiveKind) -> bool {
+    match kind {
+        DirectiveKind::CloneVm { .. }
+        | DirectiveKind::StartVm { .. }
+        | DirectiveKind::StopVm { .. }
+        | DirectiveKind::DeleteVm { .. } => true,
+        DirectiveKind::PullImage { .. }
+        | DirectiveKind::MaterialiseImage { .. }
+        | DirectiveKind::EvictImage { .. }
+        | DirectiveKind::VerifyGuest { .. }
+        | DirectiveKind::LaunchRunner { .. }
+        | DirectiveKind::ExportDiagnostics { .. }
+        | DirectiveKind::ReportInventory
+        | DirectiveKind::ReportCapacity
+        | DirectiveKind::ReportHostFacts => false,
+    }
+}
+
 /// What `Executing` waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    /// The target's instance id, re-observed right before a destructive effect (ADR 0026).
+    /// The target, re-observed right before the effect: by proof for a stop or delete
+    /// (ADR 0026), by name for a clone or start (ADR 0042 decision 4).
     ReObserve,
     /// The effect's result.
     Effect,
@@ -145,6 +198,10 @@ pub enum Stimulus {
     Failed,
     /// The effect may or may not have happened (`VmError::Ambiguous`).
     Ambiguous(UnknownReason),
+    /// The deadline passed before the stage could start (it waited for a free slot or its
+    /// target): nothing was done, so it is refused `deadline_expired`, as admission refuses
+    /// an expired directive.
+    Expired,
 }
 
 /// Why a stimulus does not apply to a phase.
@@ -180,9 +237,10 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             Stimulus::ReObserved { .. } | Stimulus::ReObserveFailed | Stimulus::Satisfied(_) => {
                 Err(Misfit::NotReObserving)
             }
-            Stimulus::Applied(_) | Stimulus::Failed | Stimulus::Ambiguous(_) => {
-                Err(Misfit::NotRunning)
-            }
+            Stimulus::Applied(_)
+            | Stimulus::Failed
+            | Stimulus::Ambiguous(_)
+            | Stimulus::Expired => Err(Misfit::NotRunning),
         },
         Phase::Executing(Stage::ReObserve) => match stimulus {
             Stimulus::ReObserved { matches: true } => Ok(Phase::Executing(Stage::Effect)),
@@ -191,6 +249,7 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             }
             Stimulus::ReObserveFailed => Ok(Phase::Unknown(UnknownReason::ListingIncomplete)),
             Stimulus::Satisfied(kind) => applied(kind),
+            Stimulus::Expired => Ok(Phase::Refused(RefusalReason::DeadlineExpired)),
             Stimulus::Admit(_) | Stimulus::Deny(_) => Err(Misfit::NotReceived),
             Stimulus::Applied(_) | Stimulus::Failed | Stimulus::Ambiguous(_) => {
                 Err(Misfit::NotRunning)
@@ -199,6 +258,7 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
         Phase::Executing(Stage::Effect) => match stimulus {
             Stimulus::Applied(kind) => applied(kind),
             Stimulus::Failed => Ok(Phase::Refused(RefusalReason::EffectFailed)),
+            Stimulus::Expired => Ok(Phase::Refused(RefusalReason::DeadlineExpired)),
             Stimulus::Ambiguous(reason) => match reason {
                 UnknownReason::Deadline | UnknownReason::ProcessLost | UnknownReason::HostSlept => {
                     Ok(Phase::Unknown(reason))
@@ -401,7 +461,7 @@ impl DataPlane {
                 answers,
                 kind,
             })),
-            None if proof_of(&directive.kind).is_some() => Receipt::ReObserve,
+            None if phase == Phase::Executing(Stage::ReObserve) => Receipt::ReObserve,
             None => Receipt::Execute,
         };
         session.table.insert(
@@ -415,7 +475,14 @@ impl DataPlane {
     }
 
     /// The target of the directive `id` admitted under `epoch` was re-observed in `listing`, the
-    /// provider's inventory read right before the effect; [`reobserve`] reads it, so a caller
+    /// provider's inventory read right before the effect. A `CloneVm` or `StartVm` is read by
+    /// name ([`reobserve_name`]): a clone whose exact name is listed with an instance id is
+    /// `Done(VmCloned)` with that id and a start of a listed running VM `Done(VmBooted)`, both
+    /// without the effect (a re-delivery under a new epoch, ADR 0042 decision 4); a clone of an
+    /// absent name and a start of a listed stopped VM run the effect; a start of an absent VM,
+    /// and either of a name listed without an instance id or twice, is `ProofMismatch` and never
+    /// touched (as a stop of an absent VM is, ADR 0053). For a `StopVm` or `DeleteVm`,
+    /// [`reobserve`] reads it, so a caller
     /// cannot turn "listed but not provable" into "absent". Only the proof's exact name,
     /// generation and instance id, all three, let the effect run (ADR 0026); anything listed
     /// that may be the target and is not proven is `ProofMismatch` and is never touched. An
@@ -436,6 +503,43 @@ impl DataPlane {
     pub fn reobserved(&mut self, epoch: Epoch, id: DirectiveId, listing: &Inventory) -> Progress {
         self.advance(epoch, id, |entry| {
             let kind = &entry.directive.kind;
+            match kind {
+                DirectiveKind::CloneVm { vm_name, .. } => {
+                    return Ok(match reobserve_name(listing, vm_name) {
+                        Reobserved::Incomplete => Stimulus::ReObserveFailed,
+                        Reobserved::Absent => Stimulus::ReObserved { matches: true },
+                        Reobserved::Listed { instance_id, .. } => {
+                            Stimulus::Satisfied(ObservationKind::VmCloned { instance_id })
+                        }
+                        Reobserved::Unproven => Stimulus::ReObserved { matches: false },
+                    });
+                }
+                DirectiveKind::StartVm { vm_name, .. } => {
+                    return Ok(match reobserve_name(listing, vm_name) {
+                        Reobserved::Incomplete => Stimulus::ReObserveFailed,
+                        Reobserved::Listed { running: true, .. } => {
+                            Stimulus::Satisfied(ObservationKind::VmBooted)
+                        }
+                        Reobserved::Listed { running: false, .. } => {
+                            Stimulus::ReObserved { matches: true }
+                        }
+                        Reobserved::Absent | Reobserved::Unproven => {
+                            Stimulus::ReObserved { matches: false }
+                        }
+                    });
+                }
+                DirectiveKind::PullImage { .. }
+                | DirectiveKind::MaterialiseImage { .. }
+                | DirectiveKind::EvictImage { .. }
+                | DirectiveKind::VerifyGuest { .. }
+                | DirectiveKind::LaunchRunner { .. }
+                | DirectiveKind::ExportDiagnostics { .. }
+                | DirectiveKind::StopVm { .. }
+                | DirectiveKind::DeleteVm { .. }
+                | DirectiveKind::ReportInventory
+                | DirectiveKind::ReportCapacity
+                | DirectiveKind::ReportHostFacts => {}
+            }
             let Some(proof) = proof_of(kind) else {
                 return Ok(Stimulus::ReObserved { matches: false });
             };
@@ -491,7 +595,8 @@ impl DataPlane {
             | Stimulus::ReObserved { .. }
             | Stimulus::ReObserveFailed
             | Stimulus::Failed
-            | Stimulus::Ambiguous(_) => Ok(result),
+            | Stimulus::Ambiguous(_)
+            | Stimulus::Expired => Ok(result),
         })
     }
 
@@ -583,7 +688,11 @@ pub fn admission(
     if kind.needs_resource_fit() {
         ledger.admits(kind)?;
     }
-    Ok(Stage::Effect)
+    Ok(if reobserves(kind) {
+        Stage::ReObserve
+    } else {
+        Stage::Effect
+    })
 }
 
 /// Whether the strings a directive carries are bounded and inert: the only free text the
