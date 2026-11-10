@@ -1,13 +1,15 @@
 //! A foreground `run` records the catchable signals it receives.
 //!
 //! mayfly never signals `tart run` (ADR 0037): it stops a VM only with `tart stop`. The fake makes
-//! that checkable: from before a `run` marks its VM running until the invocation ends, a watcher
-//! thread appends a `signal` record (`SIGTERM`, `SIGINT`, …) to the invocation log for each
-//! signal it receives, then lets the signal do what it does by default (the process dies by it
-//! and the VM with it, as a killed `tart run` takes its VM). SIGKILL and SIGSTOP cannot be
-//! caught; a run killed by one shows as a `run` with no `exit` record and a dead pid.
+//! that checkable: from before any fault acts and before a `run` marks its VM running until the
+//! invocation ends (a hung `run` for as long as it hangs), a watcher thread appends a `signal`
+//! record (`SIGTERM`, `SIGINT`, …) to the invocation log for each signal it receives, then
+//! lets the signal do what it does by default (the process dies by it and the VM with it, as a
+//! killed `tart run` takes its VM). SIGKILL and SIGSTOP cannot be caught; a run killed by one
+//! shows as a `run` with no `exit` record and a dead pid.
 //!
-//! Pinned by `tests/cli/commands.rs::should_record_a_signal_when_a_foreground_run_receives_one`.
+//! Pinned by `tests/cli/commands.rs::should_record_a_signal_when_a_foreground_run_receives_one`
+//! and `tests/cli/commands.rs::should_record_a_signal_when_a_hung_run_receives_one`.
 
 use std::thread::JoinHandle;
 

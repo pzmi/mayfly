@@ -222,6 +222,16 @@ fn drive(
         .map(|i| rule.map(|r| r.id_at(i)).unwrap_or_default())
         .unwrap_or_default();
     let action = rule.map_or(Action::None, |r| r.action);
+    // Watching starts before any fault acts and before the VM is marked running, so a `run`
+    // that hangs, and one a caller sees running, records every signal it could be sent. It ends
+    // when this invocation does; a hung one keeps it for as long as it hangs.
+    let watch = (record_signals && matches!(command, Command::Run { .. }))
+        .then(|| signals::watch(home, inv))
+        .flatten();
+    let hang = |watch: Option<signals::Watch>| {
+        std::mem::forget(watch);
+        Ok(Termination::Hang)
+    };
 
     if let Some(r) = rule.filter(|r| r.delay_ms > 0) {
         record(Event::Fault {
@@ -244,7 +254,7 @@ fn drive(
                     stderr,
                     "fake-tart: hang fault '{rule_id}' is active"
                 ));
-                return Ok(Termination::Hang);
+                return hang(watch);
             }
             Action::FailBeforeEffect => {
                 fault(r, rule_id, "before_effect")?;
@@ -254,10 +264,6 @@ fn drive(
         }
     }
 
-    // Watching starts before the VM is marked running, so once a caller sees it running every
-    // signal it could send is recorded; the watch ends when this invocation does.
-    let _watch = (record_signals && matches!(command, Command::Run { .. }))
-        .then(|| signals::watch(home, inv));
     let mut ctx = Ctx {
         home,
         inv,
@@ -279,7 +285,7 @@ fn drive(
                     stderr,
                     "fake-tart: hang fault '{rule_id}' is active"
                 ));
-                return Ok(Termination::Hang);
+                return hang(watch);
             }
             Action::CrashAfterEffect => {
                 fault(r, rule_id, "after_effect")?;

@@ -98,6 +98,29 @@ fn proven(info: &VmInfo, proof: &OwnershipProof) -> bool {
     info.instance_text() == proof.instance_id.as_str()
 }
 
+/// A proof whose name and generation disagree names no VM this data plane made: refused before
+/// anything is read or done. The control plane builds both from one record, so this never
+/// fires there (pinned by `tests::should_refuse_a_proof_when_its_generation_differs_from_the_name`).
+fn consistent(proof: &OwnershipProof) -> Result<(), VmError> {
+    if proof.generation == proof.vm_name.generation() && proof.slot == proof.vm_name.slot() {
+        Ok(())
+    } else {
+        Err(VmError::Definite)
+    }
+}
+
+/// Tells the registry that a `start` has returned, however it returns.
+struct Returned<'a> {
+    shims: &'a Shims,
+    run_id: &'a str,
+}
+
+impl Drop for Returned<'_> {
+    fn drop(&mut self) {
+        self.shims.returned(self.run_id);
+    }
+}
+
 /// How a settled start ended, read from its shim.
 enum Settled {
     Running,
@@ -157,6 +180,22 @@ impl TartProvider {
         out
     }
 
+    /// Removes the shim directory of a VM that is gone, unless a shim still holds it, so
+    /// [`TartProvider::shims`] stops reporting it.
+    fn forget_shim(&self, vm: &str) {
+        if self.shim(vm).shim != Shim::Alive {
+            let _removed = std::fs::remove_dir_all(shim::dir(&self.config().shims, vm));
+        }
+    }
+
+    /// How many shims this provider started and still holds a process entry for: one per VM
+    /// whose shim lives, none once each has exited and been reaped.
+    #[must_use]
+    pub fn shim_children(&self) -> usize {
+        self.shims.reap();
+        self.shims.len()
+    }
+
     fn next_run_id(&self) -> String {
         let n = self.runs.fetch_add(1, Ordering::Relaxed);
         format!("{}-{}-{n}", std::process::id(), shim::now_ms())
@@ -192,7 +231,7 @@ impl TartProvider {
         if recorded && running && reading.shim == Shim::Alive {
             return Some(Settled::Running);
         }
-        self.shims.exited(vm)?;
+        self.shims.exited(run_id)?;
         // The shim exited: it writes `exit.json` before it exits, so read it once more.
         let reading = shim::read(&dir);
         if let Some(exit) = reading.exit.as_ref().filter(|e| e.run_id == run_id) {
@@ -232,7 +271,7 @@ impl TartProvider {
         while Instant::now() < due {
             let reading = self.shim(vm);
             let ended = reading.exit.as_ref().is_some_and(|e| e.run_id == run_id)
-                || self.shims.exited(vm).is_some();
+                || self.shims.exited(run_id).is_some();
             if ended {
                 break;
             }
@@ -245,7 +284,10 @@ impl TartProvider {
 /// What a run that ended before it was seen settled means.
 fn classify_exit(exit: &ExitRecord, dir: &std::path::Path) -> VmError {
     match (exit.error.as_ref(), exit.code, exit.signal) {
-        (Some(_), _, _) => VmError::Definite,
+        // `tart run` never ran.
+        (Some(error), _, _) if error.starts_with(shim::SPAWN_FAILED) => VmError::Definite,
+        // The shim lost its child: how the run ended is not known.
+        (Some(_), _, _) => VmError::Ambiguous(Ambiguity::ProcessLost),
         (None, Some(0), _) | (None, None, _) => VmError::Ambiguous(Ambiguity::ProcessLost),
         (None, Some(_), _) => {
             let stderr = std::fs::read(dir.join(RUN_STDERR)).unwrap_or_default();
@@ -322,7 +364,7 @@ impl VmProvider for TartProvider {
         let run_id = self.next_run_id();
         let args = ShimArgs {
             tart: self.config().tart.clone(),
-            vm: vm.clone(),
+            vm: name.clone(),
             dir: shim::dir(&self.config().shims, &vm),
             run_id: run_id.clone(),
             log_limit: self.config().run_log_limit,
@@ -330,10 +372,15 @@ impl VmProvider for TartProvider {
         self.shims
             .spawn(&self.config().shim, &args, self.tart.environment())
             .map_err(|_| VmError::Definite)?;
+        let _returned = Returned {
+            shims: &self.shims,
+            run_id: &run_id,
+        };
         Box::pin(self.settle(&vm, &run_id)).await
     }
 
     async fn stop(&self, proof: &OwnershipProof, grace: Millis) -> Result<(), VmError> {
+        consistent(proof)?;
         let vm = proof.vm_name.to_string();
         match self.tart.get(&vm).await {
             Ok(Some(info)) if proven(&info, proof) => {}
@@ -341,10 +388,18 @@ impl VmProvider for TartProvider {
             Err(err) => return Err(before_effect(&err)),
         }
         let grace = Duration::from_millis(grace.get());
-        self.tart
-            .stop(&vm, grace)
-            .await
-            .map_err(|err| effect_failed(&err))?;
+        if let Err(err) = self.tart.stop(&vm, grace).await {
+            if !matches!(err, CallError::Refused { .. }) {
+                return Err(effect_failed(&err));
+            }
+            // Tart refused, but the VM may have stopped since it was re-observed ("is not
+            // running"): a proven, stopped VM is what the stop asked for (ADR 0053).
+            return match self.tart.get(&vm).await {
+                Ok(Some(info)) if proven(&info, proof) && !info.running => Ok(()),
+                Ok(_) => Err(VmError::Definite),
+                Err(err) => Err(after_effect(&err)),
+            };
+        }
         match self.tart.get(&vm).await {
             Ok(Some(info)) if !info.running => Ok(()),
             Ok(_) => Err(VmError::Ambiguous(Ambiguity::ProcessLost)),
@@ -353,21 +408,79 @@ impl VmProvider for TartProvider {
     }
 
     async fn delete(&self, proof: &OwnershipProof) -> Result<(), VmError> {
+        consistent(proof)?;
         let vm = proof.vm_name.to_string();
         match self.tart.get(&vm).await {
             Ok(Some(info)) if proven(&info, proof) => {}
             Ok(Some(_)) => return Err(VmError::Definite),
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                self.forget_shim(&vm);
+                return Ok(());
+            }
             Err(err) => return Err(before_effect(&err)),
         }
-        self.tart
-            .delete(&vm)
-            .await
-            .map_err(|err| effect_failed(&err))?;
-        let dir = shim::dir(&self.config().shims, &vm);
-        if self.shim(&vm).shim != Shim::Alive {
-            let _removed = std::fs::remove_dir_all(dir);
+        if let Err(err) = self.tart.delete(&vm).await {
+            if !matches!(err, CallError::Refused { .. }) {
+                return Err(effect_failed(&err));
+            }
+            // Tart refused, but it may have removed the VM before it failed: absence is what the
+            // delete asked for (ADR 0053); a VM still there was not deleted.
+            return match self.tart.get(&vm).await {
+                Ok(None) => {
+                    self.forget_shim(&vm);
+                    Ok(())
+                }
+                Ok(Some(_)) => Err(VmError::Definite),
+                Err(err) => Err(after_effect(&err)),
+            };
         }
+        self.forget_shim(&vm);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mayfly_domain::{AttemptId, Generation, HostId, PoolName, Sample, Slot};
+
+    use super::*;
+
+    fn proof(slot: u32, generation: u32) -> OwnershipProof {
+        let name = OwnedVmName::new(
+            PoolName::sample(),
+            HostId::sample(),
+            Slot::new(1),
+            Generation::FIRST,
+            AttemptId::from_u128(1),
+        );
+        OwnershipProof {
+            attempt_id: AttemptId::from_u128(1),
+            host_id: HostId::sample(),
+            slot: Slot::new(slot),
+            generation: Generation::new(generation).expect("a generation"),
+            vm_name: name,
+            instance_id: ProviderInstanceId::new("0a:00:00:00:00:01").expect("an instance id"),
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_proof_when_its_generation_differs_from_the_name() {
+        // given
+        let matching = proof(1, 1);
+        let other_generation = proof(1, 2);
+        let other_slot = proof(2, 1);
+
+        // when
+        let checked = [
+            consistent(&matching),
+            consistent(&other_generation),
+            consistent(&other_slot),
+        ];
+
+        // then
+        assert_eq!(
+            checked,
+            [Ok(()), Err(VmError::Definite), Err(VmError::Definite)]
+        );
     }
 }

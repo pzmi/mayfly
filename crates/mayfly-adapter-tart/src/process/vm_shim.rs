@@ -26,12 +26,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use mayfly_domain::OwnedVmName;
 use rustix::fs::{FlockOperation, flock};
 
-use crate::config::{ALLOWED_VARIABLES, NO_AUTO_PRUNE, TART_HOME};
+use crate::config::{NO_AUTO_PRUNE, TART_HOME, allowed};
 use crate::shim::{
-    EXIT, ExitRecord, LOCK, RECORD, RUN_STDERR, RUN_STDOUT, RunRecord, VERSION, now_ms,
-    write_atomically,
+    EXIT, ExitRecord, LOCK, RECORD, RUN_STDERR, RUN_STDOUT, RunRecord, SPAWN_FAILED, VERSION,
+    WAIT_FAILED, now_ms, write_atomically,
 };
 
 /// Usage error.
@@ -54,8 +55,8 @@ const LOCK_WAIT: Duration = Duration::from_secs(2);
 pub struct ShimArgs {
     /// The `tart` executable.
     pub tart: PathBuf,
-    /// The VM.
-    pub vm: String,
+    /// The VM: only a managed name, so the shim can never be pointed at a base or a foreign VM.
+    pub vm: OwnedVmName,
     /// The shim directory.
     pub dir: PathBuf,
     /// This start's run id.
@@ -72,7 +73,7 @@ impl ShimArgs {
             "--tart".into(),
             self.tart.clone().into_os_string(),
             "--vm".into(),
-            self.vm.clone().into(),
+            self.vm.to_string().into(),
             "--dir".into(),
             self.dir.clone().into_os_string(),
             "--run-id".into(),
@@ -120,10 +121,8 @@ impl ShimArgs {
         if !tart.is_absolute() || !dir.is_absolute() {
             return Err("--tart and --dir must be absolute".to_owned());
         }
-        let vm = text(vm, "vm")?;
-        if vm.starts_with('-') || vm.contains('/') {
-            return Err("--vm is not a VM name".to_owned());
-        }
+        let vm = OwnedVmName::parse(&text(vm, "vm")?)
+            .map_err(|_| "--vm is not a managed VM name".to_owned())?;
         Ok(Self {
             tart,
             vm,
@@ -195,9 +194,7 @@ fn stdio_file(path: &Path) -> std::io::Result<File> {
 fn child_environment() -> Vec<(OsString, OsString)> {
     std::env::vars_os()
         .filter(|(name, _)| {
-            name == OsStr::new(TART_HOME)
-                || name == OsStr::new(NO_AUTO_PRUNE)
-                || ALLOWED_VARIABLES.iter().any(|allowed| name == allowed)
+            name == OsStr::new(TART_HOME) || name == OsStr::new(NO_AUTO_PRUNE) || allowed(name)
         })
         .collect()
 }
@@ -225,7 +222,7 @@ fn supervise(args: &ShimArgs, stderr: &mut dyn Write) -> i32 {
     let mut exit = ExitRecord {
         v: VERSION,
         run_id: args.run_id.clone(),
-        vm: args.vm.clone(),
+        vm: args.vm.to_string(),
         code: None,
         signal: None,
         error: None,
@@ -233,10 +230,11 @@ fn supervise(args: &ShimArgs, stderr: &mut dyn Write) -> i32 {
         ended_at_ms: started_at_ms,
         truncations: 0,
     };
+    let vm = args.vm.to_string();
     let spawned = Command::new(&args.tart)
         .env_clear()
         .envs(child_environment())
-        .args(["run", args.vm.as_str(), "--no-graphics"])
+        .args(["run", vm.as_str(), "--no-graphics"])
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(out)
@@ -247,7 +245,7 @@ fn supervise(args: &ShimArgs, stderr: &mut dyn Write) -> i32 {
             let record = RunRecord {
                 v: VERSION,
                 run_id: args.run_id.clone(),
-                vm: args.vm.clone(),
+                vm: args.vm.to_string(),
                 shim_pid: std::process::id(),
                 child_pid: child.id(),
                 started_at_ms,
@@ -255,12 +253,14 @@ fn supervise(args: &ShimArgs, stderr: &mut dyn Write) -> i32 {
             if let Err(err) = write_atomically(&args.dir.join(RECORD), &record) {
                 let _shown = writeln!(stderr, "mayfly vm-shim: cannot write shim.json: {err}");
             }
-            let (code, signal, truncations) = wait(&mut child, &[&stdout_path, &stderr_path], args);
-            exit.code = code;
-            exit.signal = signal;
+            let (ended, truncations) = wait(&mut child, &[&stdout_path, &stderr_path], args);
+            match ended {
+                Some((code, signal)) => (exit.code, exit.signal) = (code, signal),
+                None => exit.error = Some(WAIT_FAILED.to_owned()),
+            }
             exit.truncations = truncations;
         }
-        Err(err) => exit.error = Some(format!("spawn_failed:{:?}", err.kind())),
+        Err(err) => exit.error = Some(format!("{SPAWN_FAILED}:{:?}", err.kind())),
     }
     exit.ended_at_ms = now_ms();
     if let Err(err) = write_atomically(&args.dir.join(EXIT), &exit) {
@@ -270,16 +270,19 @@ fn supervise(args: &ShimArgs, stderr: &mut dyn Write) -> i32 {
     0
 }
 
-/// Waits for `child`, truncating each of `files` that passes the limit; returns its exit code,
-/// signal and the number of truncations. Never signals the child.
-fn wait(child: &mut Child, files: &[&Path], args: &ShimArgs) -> (Option<i32>, Option<i32>, u64) {
+/// The exit code and signal of a child that ended.
+type Ended = (Option<i32>, Option<i32>);
+
+/// Waits for `child`, truncating each of `files` that passes the limit; returns how it ended
+/// (`None` when it cannot be waited for, so its end is unknown) and the number of truncations.
+/// Never signals the child.
+fn wait(child: &mut Child, files: &[&Path], args: &ShimArgs) -> (Option<Ended>, u64) {
     let mut truncations = 0;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return (status.code(), status.signal(), truncations),
+            Ok(Some(status)) => return (Some((status.code(), status.signal())), truncations),
             Ok(None) => {}
-            // The child cannot be waited for (it is not ours any more); its end is unknown.
-            Err(_) => return (None, None, truncations),
+            Err(_) => return (None, truncations),
         }
         for path in files {
             let over = fs::metadata(path).is_ok_and(|m| m.len() > args.log_limit);
@@ -304,7 +307,7 @@ mod tests {
     fn args() -> ShimArgs {
         ShimArgs {
             tart: "/opt/tart".into(),
-            vm: "mf-a".into(),
+            vm: OwnedVmName::parse("mf-pool0-host0-s1-g1-00000001").expect("a managed name"),
             dir: "/var/shims/mf-a".into(),
             run_id: "7-1".into(),
             log_limit: 1024,
@@ -328,8 +331,8 @@ mod tests {
         // given
         let mut relative = args();
         relative.tart = "tart".into();
-        let mut flag_vm = args();
-        flag_vm.vm = "--help".into();
+        let mut base_vm = args().to_args();
+        base_vm[3] = "mfb-base".into();
         let mut twice = args().to_args();
         twice.extend(["--vm".into(), "mf-b".into()]);
         let cases: Vec<Vec<OsString>> = vec![
@@ -337,7 +340,7 @@ mod tests {
             vec!["--vm".into()],
             vec!["--bogus".into(), "x".into()],
             relative.to_args(),
-            flag_vm.to_args(),
+            base_vm,
             twice,
         ];
 

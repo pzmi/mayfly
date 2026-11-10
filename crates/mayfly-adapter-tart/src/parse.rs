@@ -91,12 +91,21 @@ impl VmInfo {
     }
 }
 
-/// Parses `tart list --format json`.
+/// The `Source` values of the pinned versions: a local VM and an entry of the OCI cache.
+pub const SOURCES: &[&str] = &["local", "OCI"];
+
+/// Parses `tart list --format json`. An entry whose `Source` is not one of [`SOURCES`] makes the
+/// whole output unparseable: dropping it would make a listing complete but shorter (I25).
 ///
 /// # Errors
 /// [`Unparseable`] for anything else.
 pub fn list(stdout: &[u8]) -> Result<Vec<ListEntry>, Unparseable> {
-    serde_json::from_slice(stdout).map_err(|_| Unparseable)
+    let entries: Vec<ListEntry> = serde_json::from_slice(stdout).map_err(|_| Unparseable)?;
+    if entries.iter().all(|e| SOURCES.contains(&e.source.as_str())) {
+        Ok(entries)
+    } else {
+        Err(Unparseable)
+    }
 }
 
 /// Parses `tart get --format json`.
@@ -190,6 +199,8 @@ mod tests {
         let string_memory =
             br#"{"OS":"darwin","Memory":"1","Disk":1,"MACAddress":"a","Running":false}"#;
         let list_object = br#"{"Name":"x"}"#;
+        let other_source = br#"[{"Source":"remote","Name":"x","Running":false}]"#;
+        let lower_oci = br#"[{"Source":"oci","Name":"x","Running":false}]"#;
         let truncated = b"[{\"Source\": \"local\", \"Na";
 
         // when
@@ -199,10 +210,12 @@ mod tests {
             list(list_object).is_err(),
             list(truncated).is_err(),
             list(b"").is_err(),
+            list(other_source).is_err(),
+            list(lower_oci).is_err(),
         ];
 
         // then
-        assert_eq!(refused, [true; 5]);
+        assert_eq!(refused, [true; 7]);
     }
 
     #[test]

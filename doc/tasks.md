@@ -942,6 +942,11 @@ digest and runner version through boot-once and runner install via `tart exec`, 
 unreferenced base, list bases) with its contract suite on the fake and fake-tart; base deletion
 refused by identity; single-flight pull per host.
 Accept: contract green on fake and fake-tart; `TagPullStore` and `BaseEvictingStore` fail it.
+Note (DP-04 review): `TartProvider::clone_vm` checks only that the base is a local Tart VM named
+`mfb-…` (`tart get`), not that the service owns it (ADR 0039: "local, service-owned"); the record
+of which bases this deployment materialised is DP-07's, and so is the check that `CloneVm` names
+one of them. DP-06/DP-07 also decide how a base listed by `tart list` is counted, so its disk is
+not counted twice (once as an image base, once as a stopped VM in the inventory).
 
 #### NET-01 Softnet privilege model
 Cites: ADR 0032, plan §8.2, §13. Design and ADR choosing between Tart's softnet behind a narrow

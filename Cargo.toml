@@ -42,6 +42,9 @@ categories = ["development-tools", "command-line-utilities"]
 unsafe_code = "forbid"
 unused_must_use = "deny"
 missing_docs = "warn"
+# `cfg(coverage)` is set by cargo-llvm-cov for the coverage stage (the Tart adapter passes
+# LLVM_PROFILE_FILE to its children only then).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

@@ -42,8 +42,8 @@ use crate::provider::{FakeVm, FakeVmProvider, Fault, Op};
 /// The longest a whole case may take before it is reported as hung.
 pub const CASE_BOUND: Duration = Duration::from_secs(120);
 
-/// The names a child may receive (ADR 0058 rule 2, plan §8.2): the allowlist (with
-/// `LLVM_PROFILE_FILE`, instrumentation only), `TART_HOME` and `TART_NO_AUTO_PRUNE`.
+/// The names a child may receive (ADR 0058 rule 2, plan §8.2): the allowlist, `TART_HOME` and
+/// `TART_NO_AUTO_PRUNE`, and `LLVM_PROFILE_FILE`, which only a coverage build passes.
 pub const CHILD_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -135,7 +135,9 @@ pub enum ProviderCase {
     DeleteTouchesOnlyTarget,
     /// VP-11: a hung clone, start, stop or delete ends at the provider's deadline as
     /// `Ambiguous(Deadline)`, never `Definite` or success, and a listing taken next re-inspects
-    /// the target exactly as it is; a hung listing is `Incomplete(Deadline)`.
+    /// the target exactly as it is; a hung listing is `Incomplete(Deadline)`. A start that passed
+    /// its deadline sent no signal to its run process (ADR 0037: only the provider's stop ends
+    /// it).
     HangIsAmbiguous,
     /// VP-12: a listing that fails or does not parse is `Incomplete`, never a shorter list (I25).
     ListingFailureIncomplete,
@@ -146,7 +148,7 @@ pub enum ProviderCase {
     /// instance id, and stops it with its proof (ADR 0037's re-adoption, at the port).
     RestartReadopts,
     /// VP-15: no signal ever reaches a VM's run process: stops go through the provider's own
-    /// stop, across a restart too (ADR 0037).
+    /// stop, across a restart too (ADR 0037); VP-11 checks the same after a start's deadline.
     NoSignalToRun,
     /// VP-16: every child gets a cleared environment plus the allowlist (ADR 0058): a variable
     /// of the test's own environment reaches none, and no child gets a name outside
@@ -618,6 +620,11 @@ async fn hang_is_ambiguous<W: ProviderWorld>(w: &mut W) -> Check {
     let ran = w.provider().start(&vm(2), &options()).await;
     ambiguous_deadline("start", &ran)?;
     reinspect(w, &vm(2).to_string()).await?;
+    eq(
+        "signals to run processes after a start passed its deadline",
+        &w.signals_to_runs(),
+        &Vec::new(),
+    )?;
 
     let id = started(w, 3).await?;
     w.hang_next(Op::Stop);

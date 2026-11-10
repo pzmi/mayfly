@@ -724,3 +724,27 @@ fn should_record_no_signal_when_a_foreground_run_is_stopped_by_tart_stop() {
     assert_eq!(status.code(), Some(0));
     assert!(fake.events("signal").is_empty());
 }
+
+#[test]
+fn should_record_a_signal_when_a_hung_run_receives_one() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    fake.faults("[[rule]]\ncommand = \"run\"\naction = \"hang\"\n");
+    let mut runner = fake.spawn(&["run", "vm1"]);
+    let mut stderr = BufReader::new(runner.stderr.take().expect("stderr"));
+    let mut line = String::new();
+    stderr.read_line(&mut line).expect("the hang line");
+    assert!(line.contains("hang fault"), "{line}");
+    let pid =
+        rustix::process::Pid::from_raw(i32::try_from(runner.id()).expect("pid")).expect("a pid");
+
+    // when
+    rustix::process::kill_process(pid, rustix::process::Signal::INT).expect("send SIGINT");
+    runner.wait().expect("reap run");
+
+    // then
+    let signals = fake.events("signal");
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0]["signal"], "SIGINT");
+}

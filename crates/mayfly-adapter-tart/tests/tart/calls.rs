@@ -181,3 +181,87 @@ fn should_accept_the_pinned_version_and_refuse_another_when_probing() {
     assert_eq!(pinned, Ok("2.28.0".to_owned()));
     assert_eq!(other, Err(ProbeError::Unsupported("9.9.9".to_owned())));
 }
+
+fn started(fake: &Fake) -> (TartProvider, mayfly_domain::ProviderInstanceId) {
+    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    let provider = TartProvider::new(fake.config());
+    let options = mayfly_data::RunOptions {
+        resources: mayfly_domain::Resources::new(START_MEMORY, 0),
+    };
+    let id = runtime().block_on(async {
+        let id = provider.clone_vm(&base(), &vm(1)).await.expect("clone");
+        provider.start(&vm(1), &options).await.expect("start");
+        id
+    });
+    (provider, id)
+}
+
+#[test]
+fn should_answer_done_when_tart_stop_fails_after_the_vm_stopped() {
+    // given
+    let fake = Fake::new();
+    let (provider, id) = started(&fake);
+    fake.faults("[[rule]]\ncommand = \"stop\"\naction = \"fail_after_effect\"\nexit_code = 2\n");
+
+    // when
+    let stopped = runtime().block_on(provider.stop(&proof(1, &id), Millis::new(5_000)));
+
+    // then
+    assert_eq!(stopped, Ok(()));
+    assert_eq!(fake.exists(&vm(1).to_string()), Some(false));
+}
+
+#[test]
+fn should_refuse_definite_when_tart_stop_fails_and_the_vm_still_runs() {
+    // given
+    let fake = Fake::new();
+    let (provider, id) = started(&fake);
+    fake.faults("[[rule]]\ncommand = \"stop\"\naction = \"fail_before_effect\"\n");
+
+    // when
+    let stopped = runtime().block_on(provider.stop(&proof(1, &id), Millis::new(5_000)));
+
+    // then
+    assert_eq!(stopped, Err(mayfly_data::VmError::Definite));
+    assert_eq!(fake.exists(&vm(1).to_string()), Some(true));
+}
+
+#[test]
+fn should_answer_done_when_tart_delete_fails_after_removing_the_vm() {
+    // given
+    let fake = Fake::new();
+    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    let provider = TartProvider::new(fake.config());
+    let runtime = runtime();
+    let id = runtime
+        .block_on(provider.clone_vm(&base(), &vm(1)))
+        .expect("clone");
+    fake.faults("[[rule]]\ncommand = \"delete\"\naction = \"fail_after_effect\"\n");
+
+    // when
+    let deleted = runtime.block_on(provider.delete(&proof(1, &id)));
+
+    // then
+    assert_eq!(deleted, Ok(()));
+    assert_eq!(fake.exists(&vm(1).to_string()), None);
+}
+
+#[test]
+fn should_refuse_definite_when_tart_delete_fails_and_the_vm_remains() {
+    // given
+    let fake = Fake::new();
+    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    let provider = TartProvider::new(fake.config());
+    let runtime = runtime();
+    let id = runtime
+        .block_on(provider.clone_vm(&base(), &vm(1)))
+        .expect("clone");
+    fake.faults("[[rule]]\ncommand = \"delete\"\naction = \"fail_before_effect\"\n");
+
+    // when
+    let deleted = runtime.block_on(provider.delete(&proof(1, &id)));
+
+    // then
+    assert_eq!(deleted, Err(mayfly_data::VmError::Definite));
+    assert_eq!(fake.exists(&vm(1).to_string()), Some(false));
+}

@@ -37,6 +37,14 @@ pub const RUN_STDERR: &str = "run.stderr";
 /// The shim's own stderr.
 pub const SHIM_LOG: &str = "shim.log";
 
+/// `exit.json`'s `error` when `tart run` could not be spawned (followed by `:<kind>`): it never
+/// ran.
+pub const SPAWN_FAILED: &str = "spawn_failed";
+
+/// `exit.json`'s `error` when the shim could not wait for `tart run`: its end is unknown, and
+/// the reading is `Lost`, not `Exited`.
+pub const WAIT_FAILED: &str = "wait_failed";
+
 /// The records' schema version.
 pub const VERSION: u32 = 1;
 
@@ -71,7 +79,7 @@ pub struct ExitRecord {
     pub code: Option<i32>,
     /// The signal that ended it.
     pub signal: Option<i32>,
-    /// Why it never ran (`tart run` could not be spawned), if so.
+    /// [`SPAWN_FAILED`] when `tart run` never ran, [`WAIT_FAILED`] when its end is unknown.
     pub error: Option<String>,
     /// When it was spawned (or the spawn failed), milliseconds since the Unix epoch.
     pub started_at_ms: u64,
@@ -101,10 +109,18 @@ pub fn dir(shims: &Path, vm: &str) -> PathBuf {
 /// Reads `dir` as the supervisor sees it.
 #[must_use]
 pub fn read(dir: &Path) -> ShimReading {
+    // The lock first: the shim writes `exit.json` before it releases the lock, so a free lock
+    // read before `exit.json` never misses an exit that had been written.
+    let held = lock_held(&dir.join(LOCK));
     let run = read_json::<RunRecord>(&dir.join(RECORD));
     let exit = read_json::<ExitRecord>(&dir.join(EXIT));
-    let shim = match lock_held(&dir.join(LOCK)) {
+    let lost_child = exit
+        .as_ref()
+        .is_some_and(|e| e.error.as_deref() == Some(WAIT_FAILED));
+    let shim = match held {
         Some(true) => Shim::Alive,
+        // The shim could not wait for its child: how the run ended is unknown.
+        Some(false) | None if lost_child => Shim::Lost,
         Some(false) | None if exit.is_some() => Shim::Exited,
         Some(false) => Shim::Lost,
         None => Shim::NeverStarted,
@@ -229,6 +245,23 @@ mod tests {
 
         // then
         assert_eq!(reading.shim, Shim::Alive);
+    }
+
+    #[test]
+    fn should_read_lost_when_the_shim_could_not_wait_for_its_child() {
+        // given
+        let root = tempfile::tempdir().expect("tempdir");
+        File::create(root.path().join(LOCK)).expect("lock file");
+        let mut exit = exit_record();
+        exit.code = None;
+        exit.error = Some(WAIT_FAILED.to_owned());
+        write_atomically(&root.path().join(EXIT), &exit).expect("exit");
+
+        // when
+        let reading = read(root.path());
+
+        // then
+        assert_eq!(reading.shim, Shim::Lost);
     }
 
     #[test]

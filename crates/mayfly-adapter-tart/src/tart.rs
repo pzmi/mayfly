@@ -119,6 +119,13 @@ impl TartCli {
         Ok(entries.into_iter().filter(ListEntry::is_local).collect())
     }
 
+    /// The seconds `tart stop --timeout` is given for `grace`. Pinned by
+    /// `tests::should_round_a_grace_up_to_whole_seconds_when_stopping`.
+    #[must_use]
+    pub fn stop_seconds(grace: Duration) -> u64 {
+        grace.as_secs() + u64::from(grace.subsec_nanos() > 0)
+    }
+
     /// `tart get <name> --format json`; `None` when Tart says the VM does not exist.
     ///
     /// # Errors
@@ -185,7 +192,8 @@ impl TartCli {
     /// # Errors
     /// [`CallError`].
     pub async fn stop(&self, name: &str, grace: Duration) -> Result<(), CallError> {
-        let seconds = grace.as_secs();
+        // Rounded up: a sub-second grace is one second, never `--timeout 0` (an immediate kill).
+        let seconds = Self::stop_seconds(grace);
         let deadline = grace.saturating_add(self.config.deadlines.stop);
         self.call(
             args(&["stop", name, "--timeout", &seconds.to_string()]),
@@ -203,5 +211,22 @@ impl TartCli {
         self.call(args(&["delete", name]), self.config.deadlines.delete)
             .await
             .map(drop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_round_a_grace_up_to_whole_seconds_when_stopping() {
+        // given
+        let graces = [0, 1, 999, 1_000, 1_001, 30_000].map(Duration::from_millis);
+
+        // when
+        let seconds = graces.map(TartCli::stop_seconds);
+
+        // then
+        assert_eq!(seconds, [0, 1, 1, 1, 2, 30]);
     }
 }

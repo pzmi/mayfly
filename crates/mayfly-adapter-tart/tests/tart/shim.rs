@@ -94,6 +94,67 @@ fn should_read_alive_then_exited_when_the_shim_runs_and_tart_stop_ends_the_run()
     assert_eq!(runs[0]["pid"], serde_json::json!(run.child_pid));
 }
 
+#[test]
+fn should_reap_and_forget_the_shim_when_its_vm_has_stopped() {
+    // given
+    let fake = Fake::new();
+    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    let provider = TartProvider::new(fake.config());
+    let runtime = runtime();
+    let id = runtime.block_on(clone_and_start(&provider));
+    let name = vm(1).to_string();
+    let while_running = provider.shim_children();
+    let shim_pid = provider.shim(&name).run.expect("shim.json").shim_pid;
+
+    // when
+    runtime
+        .block_on(provider.stop(&proof(1, &id), Millis::new(5_000)))
+        .expect("stop");
+    wait_until(SHIM_EXIT, "the shim to exit after its VM stopped", || {
+        provider.shim(&name).shim == Shim::Exited
+    });
+    wait_until(SHIM_EXIT, "the registry to reap the exited shim", || {
+        provider.shim_children() == 0
+    });
+
+    // then
+    assert_eq!(while_running, 1);
+    assert_eq!(
+        rustix::process::waitpid(
+            rustix::process::Pid::from_raw(i32::try_from(shim_pid).expect("pid")),
+            rustix::process::WaitOptions::NOHANG
+        )
+        .map(|status| status.is_some()),
+        Err(rustix::io::Errno::CHILD),
+        "the shim is reaped: no longer a child of this process, so not a zombie"
+    );
+}
+
+#[test]
+fn should_stop_reporting_the_shim_when_its_vm_is_deleted() {
+    // given
+    let fake = Fake::new();
+    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    let provider = TartProvider::new(fake.config());
+    let runtime = runtime();
+    let id = runtime.block_on(clone_and_start(&provider));
+    let name = vm(1).to_string();
+    runtime
+        .block_on(provider.stop(&proof(1, &id), Millis::new(5_000)))
+        .expect("stop");
+    wait_until(SHIM_EXIT, "the shim to exit after its VM stopped", || {
+        provider.shim(&name).shim == Shim::Exited
+    });
+
+    // when
+    runtime
+        .block_on(provider.delete(&proof(1, &id)))
+        .expect("delete");
+
+    // then
+    assert!(provider.shims().is_empty(), "{:?}", provider.shims());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn should_give_tart_run_files_for_stdio_never_a_pipe_when_the_shim_starts_it() {
@@ -163,9 +224,11 @@ fn should_refuse_definite_when_tart_run_exits_non_zero_at_once() {
     assert_eq!(started, Err(VmError::Definite));
 }
 
-/// Not a test of its own: run with [`DAEMON_ROLE`] set by
-/// [`should_readopt_a_running_vm_through_its_shim_when_the_daemon_is_killed_and_restarted`], it
-/// is the daemon that starts a VM and is then killed. Without the variable it does nothing.
+/// A sub-process entry, not a test of its own: the re-adoption test below runs this test
+/// executable again with only this test selected and [`DAEMON_ROLE`] set, and this process is
+/// then the daemon that starts a VM and is killed. A helper binary would need a `[[bin]]` in a
+/// production crate; re-running the test executable keeps the helper test-only. Without the
+/// variable (every ordinary run) it returns at once.
 #[test]
 fn should_start_a_vm_then_wait_to_be_killed_when_run_as_the_daemon() {
     // given

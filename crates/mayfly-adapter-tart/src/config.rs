@@ -15,18 +15,28 @@ pub const TART_HOME: &str = "TART_HOME";
 /// The variables a child may receive besides `TART_HOME` and [`NO_AUTO_PRUNE`] (ADR 0058 rule
 /// 2): the names composition may pass in [`TartConfig::environment`], with values it read from
 /// the daemon's environment less every `env:` secret. A name outside this list is dropped.
-/// `LLVM_PROFILE_FILE` is instrumentation only: a coverage build's children write their profiles
-/// where the run collects them instead of into their working directory, `/`; a release daemon
-/// never has it.
-pub const ALLOWED_VARIABLES: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "TMPDIR",
-    "LLVM_PROFILE_FILE",
-];
+pub const ALLOWED_VARIABLES: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
+
+/// Instrumentation a child may also receive, in a coverage build only (`cfg(coverage)`, set by
+/// cargo-llvm-cov): its children write their profiles where the run collects them instead of
+/// into their working directory, `/`. Empty in every other build, so a release daemon passes
+/// nothing but [`ALLOWED_VARIABLES`].
+#[cfg(coverage)]
+pub const INSTRUMENTATION_VARIABLES: &[&str] = &["LLVM_PROFILE_FILE"];
+
+/// Instrumentation a child may also receive: none outside a coverage build.
+#[cfg(not(coverage))]
+pub const INSTRUMENTATION_VARIABLES: &[&str] = &[];
+
+/// Whether a child may receive `name` from composition (besides `TART_HOME` and
+/// [`NO_AUTO_PRUNE`], which the adapter sets).
+#[must_use]
+pub fn allowed(name: &std::ffi::OsStr) -> bool {
+    ALLOWED_VARIABLES
+        .iter()
+        .chain(INSTRUMENTATION_VARIABLES)
+        .any(|allowed| name == *allowed)
+}
 
 /// The program that runs as a VM's shim: `mayfly vm-shim` in production (ADR 0037).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +124,7 @@ impl TartConfig {
         let mut out: Vec<(OsString, OsString)> = self
             .environment
             .iter()
-            .filter(|(name, _)| ALLOWED_VARIABLES.iter().any(|allowed| name == allowed))
+            .filter(|(name, _)| allowed(name))
             .cloned()
             .collect();
         out.push((TART_HOME.into(), self.tart_home.clone().into_os_string()));
