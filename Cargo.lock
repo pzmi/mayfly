@@ -445,6 +445,10 @@ version = "0.1.0"
 [[package]]
 name = "mayfly-data-domain"
 version = "0.1.0"
+dependencies = [
+ "mayfly-domain",
+ "mayfly-protocol",
+]
 
 [[package]]
 name = "mayfly-domain"

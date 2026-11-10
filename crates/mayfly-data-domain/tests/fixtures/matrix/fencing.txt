@@ -1,0 +1,65 @@
+# fencing: a frame (epoch, version) of directive 7 against each session state and the table's entry for 7: the receipt.
+# Before a session opens there is no table, so only the absent entry is shown there; the open session is at e5, v1.0.
+idle x e4 v1.0 absent -> discard not_entered
+idle x e5 v1.0 absent -> discard not_entered
+idle x e6 v1.0 absent -> discard not_entered
+awaiting x e4 v1.0 absent -> discard not_entered
+awaiting x e5 v1.0 absent -> discard not_entered
+awaiting x e6 v1.0 absent -> discard not_entered
+entering(e5) x e4 v1.0 absent -> discard not_entered
+entering(e5) x e5 v1.0 absent -> discard not_entered
+entering(e5) x e6 v1.0 absent -> discard not_entered
+open(e5) x e4 v1.0 absent -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 absent -> discard version minor_above_session
+open(e5) x e4 v2.0 absent -> discard version major_mismatch
+open(e5) x e5 v1.0 absent -> execute
+open(e5) x e5 v1.1 absent -> discard version minor_above_session
+open(e5) x e5 v2.0 absent -> discard version major_mismatch
+open(e5) x e6 v1.0 absent -> discard not_entered
+open(e5) x e6 v1.1 absent -> discard version minor_above_session
+open(e5) x e6 v2.0 absent -> discard version major_mismatch
+open(e5) x e4 v1.0 executing -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 executing -> discard version minor_above_session
+open(e5) x e4 v2.0 executing -> discard version major_mismatch
+open(e5) x e5 v1.0 executing -> pending
+open(e5) x e5 v1.1 executing -> discard version minor_above_session
+open(e5) x e5 v2.0 executing -> discard version major_mismatch
+open(e5) x e6 v1.0 executing -> discard not_entered
+open(e5) x e6 v1.1 executing -> discard version minor_above_session
+open(e5) x e6 v2.0 executing -> discard version major_mismatch
+open(e5) x e4 v1.0 reobserving -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 reobserving -> discard version minor_above_session
+open(e5) x e4 v2.0 reobserving -> discard version major_mismatch
+open(e5) x e5 v1.0 reobserving -> pending
+open(e5) x e5 v1.1 reobserving -> discard version minor_above_session
+open(e5) x e5 v2.0 reobserving -> discard version major_mismatch
+open(e5) x e6 v1.0 reobserving -> discard not_entered
+open(e5) x e6 v1.1 reobserving -> discard version minor_above_session
+open(e5) x e6 v2.0 reobserving -> discard version major_mismatch
+open(e5) x e4 v1.0 done -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 done -> discard version minor_above_session
+open(e5) x e4 v2.0 done -> discard version major_mismatch
+open(e5) x e5 v1.0 done -> reply e5 applied inventory
+open(e5) x e5 v1.1 done -> discard version minor_above_session
+open(e5) x e5 v2.0 done -> discard version major_mismatch
+open(e5) x e6 v1.0 done -> discard not_entered
+open(e5) x e6 v1.1 done -> discard version minor_above_session
+open(e5) x e6 v2.0 done -> discard version major_mismatch
+open(e5) x e4 v1.0 refused -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 refused -> discard version minor_above_session
+open(e5) x e4 v2.0 refused -> discard version major_mismatch
+open(e5) x e5 v1.0 refused -> reply e5 refused safe_mode
+open(e5) x e5 v1.1 refused -> discard version minor_above_session
+open(e5) x e5 v2.0 refused -> discard version major_mismatch
+open(e5) x e6 v1.0 refused -> discard not_entered
+open(e5) x e6 v1.1 refused -> discard version minor_above_session
+open(e5) x e6 v2.0 refused -> discard version major_mismatch
+open(e5) x e4 v1.0 unknown -> reply e5 unknown stale_epoch
+open(e5) x e4 v1.1 unknown -> discard version minor_above_session
+open(e5) x e4 v2.0 unknown -> discard version major_mismatch
+open(e5) x e5 v1.0 unknown -> reply e5 unknown deadline
+open(e5) x e5 v1.1 unknown -> discard version minor_above_session
+open(e5) x e5 v2.0 unknown -> discard version major_mismatch
+open(e5) x e6 v1.0 unknown -> discard not_entered
+open(e5) x e6 v1.1 unknown -> discard version minor_above_session
+open(e5) x e6 v2.0 unknown -> discard version major_mismatch

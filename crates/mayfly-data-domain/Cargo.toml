@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-data-domain"
-description = "Pure data-plane domain: the directive executor state machine, fencing and the VM supervisor state machine."
+description = "Pure data-plane domain: the directive executor state machine, fencing, the resource ledger and the VM supervisor state machine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,7 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }

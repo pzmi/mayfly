@@ -1,0 +1,93 @@
+# admission: every directive kind (attempt 1's VM: cloned and stopped, not yet cloned for the clone) against each condition, received in a fresh session: the receipt.
+# no_room: a host with nothing (mutant 24: refused whatever the control plane allocated); other_host: the VM or proof names host9; foreign_proof: the proof names attempt 2's VM (delete) or generation 2 (stop) for attempt 1's directive; a condition that does not apply to a kind leaves it as normal.
+pull_image x normal -> execute
+pull_image x safe -> reply e5 refused safe_mode
+pull_image x expired -> reply e5 refused deadline_expired
+pull_image x no_room -> reply e5 refused insufficient_resources(disk)
+pull_image x other_host -> execute
+pull_image x foreign_proof -> execute
+pull_image x bad_runner_version -> execute
+materialise_image x normal -> execute
+materialise_image x safe -> reply e5 refused safe_mode
+materialise_image x expired -> reply e5 refused deadline_expired
+materialise_image x no_room -> reply e5 refused insufficient_resources(disk)
+materialise_image x other_host -> execute
+materialise_image x foreign_proof -> execute
+materialise_image x bad_runner_version -> reply e5 refused effect_failed
+evict_image x normal -> execute
+evict_image x safe -> reply e5 refused safe_mode
+evict_image x expired -> reply e5 refused deadline_expired
+evict_image x no_room -> execute
+evict_image x other_host -> execute
+evict_image x foreign_proof -> execute
+evict_image x bad_runner_version -> execute
+clone_vm x normal -> execute
+clone_vm x safe -> reply e5 refused safe_mode
+clone_vm x expired -> reply e5 refused deadline_expired
+clone_vm x no_room -> reply e5 refused insufficient_resources(vm_slots)
+clone_vm x other_host -> reply e5 refused protected_target
+clone_vm x foreign_proof -> execute
+clone_vm x bad_runner_version -> execute
+start_vm x normal -> execute
+start_vm x safe -> reply e5 refused safe_mode
+start_vm x expired -> reply e5 refused deadline_expired
+start_vm x no_room -> reply e5 refused insufficient_resources(macos_guests)
+start_vm x other_host -> reply e5 refused protected_target
+start_vm x foreign_proof -> execute
+start_vm x bad_runner_version -> execute
+verify_guest x normal -> execute
+verify_guest x safe -> execute
+verify_guest x expired -> reply e5 refused deadline_expired
+verify_guest x no_room -> execute
+verify_guest x other_host -> reply e5 refused protected_target
+verify_guest x foreign_proof -> execute
+verify_guest x bad_runner_version -> execute
+launch_runner x normal -> execute
+launch_runner x safe -> reply e5 refused safe_mode
+launch_runner x expired -> reply e5 refused deadline_expired
+launch_runner x no_room -> execute
+launch_runner x other_host -> reply e5 refused protected_target
+launch_runner x foreign_proof -> execute
+launch_runner x bad_runner_version -> execute
+export_diagnostics x normal -> execute
+export_diagnostics x safe -> execute
+export_diagnostics x expired -> reply e5 refused deadline_expired
+export_diagnostics x no_room -> execute
+export_diagnostics x other_host -> reply e5 refused protected_target
+export_diagnostics x foreign_proof -> execute
+export_diagnostics x bad_runner_version -> execute
+stop_vm x normal -> reobserve
+stop_vm x safe -> reply e5 refused safe_mode
+stop_vm x expired -> reply e5 refused deadline_expired
+stop_vm x no_room -> reobserve
+stop_vm x other_host -> reply e5 refused protected_target
+stop_vm x foreign_proof -> reply e5 refused proof_mismatch
+stop_vm x bad_runner_version -> reobserve
+delete_vm x normal -> reobserve
+delete_vm x safe -> reply e5 refused safe_mode
+delete_vm x expired -> reply e5 refused deadline_expired
+delete_vm x no_room -> reobserve
+delete_vm x other_host -> reply e5 refused protected_target
+delete_vm x foreign_proof -> reply e5 refused proof_mismatch
+delete_vm x bad_runner_version -> reobserve
+report_inventory x normal -> execute
+report_inventory x safe -> execute
+report_inventory x expired -> reply e5 refused deadline_expired
+report_inventory x no_room -> execute
+report_inventory x other_host -> execute
+report_inventory x foreign_proof -> execute
+report_inventory x bad_runner_version -> execute
+report_capacity x normal -> execute
+report_capacity x safe -> execute
+report_capacity x expired -> reply e5 refused deadline_expired
+report_capacity x no_room -> execute
+report_capacity x other_host -> execute
+report_capacity x foreign_proof -> execute
+report_capacity x bad_runner_version -> execute
+report_host_facts x normal -> execute
+report_host_facts x safe -> execute
+report_host_facts x expired -> reply e5 refused deadline_expired
+report_host_facts x no_room -> execute
+report_host_facts x other_host -> execute
+report_host_facts x foreign_proof -> execute
+report_host_facts x bad_runner_version -> execute

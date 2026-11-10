@@ -200,12 +200,12 @@ model's guards. Safety only: liveness (a session eventually opens) is not claime
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
-| `i09NoStaleEpochExecutes` | I09: no frame of an epoch older than the floor executes | `formal-verify`; `crates/mayfly-protocol/src/handshake.rs::should_fence_frames_by_the_session_epoch_when_a_directive_arrives`; later the fencing matrix (KER-08) and the link contract (DP-02) |
-| `executesAtMostOncePerEpoch` | each directive id executes at most once per epoch, under re-sends and duplicates | `formal-verify`; later KER-08 and the link contract |
+| `i09NoStaleEpochExecutes` | I09: no frame of an epoch older than the floor executes | `formal-verify`; `crates/mayfly-protocol/src/handshake.rs::should_fence_frames_by_the_session_epoch_when_a_directive_arrives`; the data plane's fencing table `crates/mayfly-data-domain/tests/data_plane/matrix.rs::should_fence_every_frame_when_it_meets_each_session_state_and_table_entry` and `executor.rs::should_answer_unknown_stale_epoch_and_execute_nothing_when_a_frame_is_of_an_older_session` (mutant 13); later the link contract (DP-02) |
+| `executesAtMostOncePerEpoch` | each directive id executes at most once per epoch, under re-sends and duplicates | `formal-verify`; `crates/mayfly-data-domain/tests/data_plane/executor.rs::should_execute_once_and_answer_the_first_outcome_when_a_directive_id_repeats` (mutant 17); later the link contract |
 | `refusedMeansNothingHappened` | a definite refusal names an (epoch, directive) that never executes; an applied answer one that did (ADR 0042) | `formal-verify`; `staleFrameIsNeverRefusedTest`; the golden `observation/v1.unknown-stale-epoch.json` |
 | `i17EpochsIncrease` | sessions are entered at strictly increasing epochs, the floor equals the open session's epoch and never exceeds what was minted | `formal-verify`; `handshake.rs::should_mint_above_the_journal_and_the_floor_when_a_session_opens`, `should_enter_only_above_the_floor_when_a_welcome_arrives` |
 | `i18InboxFence` | the inbox applies no answer older than the newest it applied | `formal-verify`; `olderAnswerIgnoredTest`; the `Attempt` epoch fence (KER-04) |
-| `i29SafeModeHoldsKinds` | in a safe session no held kind executes | `formal-verify`; `directive.rs::should_hold_exactly_the_effect_kinds_when_in_safe_mode` |
+| `i29SafeModeHoldsKinds` | in a safe session no held kind executes | `formal-verify`; `directive.rs::should_hold_exactly_the_effect_kinds_when_in_safe_mode`; `crates/mayfly-data-domain/tests/data_plane/executor.rs::should_refuse_held_kinds_and_run_the_rest_when_the_session_is_safe` |
 | `versionNegotiated` | a session exists only in a major both peers speak; no frame of another major executes | `formal-verify`; `version.rs` tests; `tests/golden.rs::should_refuse_every_fixture_when_its_major_is_unknown` |
 
 Tests (`quint test`, stage `formal-test`, all deterministic): `handshakeAndExecuteTest`,
@@ -218,6 +218,22 @@ ADR 0042) violates `refusedMeansNothingHappened` on the reconnect path of
 reach the 12-step path); entering a welcome at the floor (`>=` for `>`) makes Apalache report
 `[violation]` of `i17EpochsIncrease` at 5 steps; dropping the safe-mode hold makes simulation
 and Apalache report `[violation]` of `i29SafeModeHoldsKinds`.
+
+**The data plane's executor (KER-08)** implements this model's `dpWelcome` and `dpDeliver` in
+`mayfly-data-domain` (`link::step`, `DataPlane::receive`): discard a frame of another version
+or of a session not entered, answer an older session's frame `OutcomeUnknown{stale_epoch}`,
+answer a repeated id from the session's table, refuse a held kind in safe mode, then execute.
+The proof re-checked against the re-observed instance id is `lifecycle`'s (`replyProofRefused`:
+a stop or delete runs only while the provider holds the recorded instance), and the fit is
+`scheduling`'s `dpFits`. **Not modelled** (each pinned by the data plane's unit tables only,
+fixtures `crates/mayfly-data-domain/tests/fixtures/matrix/*.txt`): the order of the admission
+checks after the table (deadline, bounded strings, `protected_target`, the proof's own
+consistency, the fit), which `dpDeliver` folds into one nondeterministic effect; execution as
+two steps, so a repeat while a directive runs (`Pending`) and the reservations held for an
+`Unknown` outcome until a complete inventory; and the VM supervisor (`supervisor::state`: the
+provider's listing × the shim's lock and `exit.json`, `ProcessLost`, ADR 0037), which no model
+states. A two-step `dpDeliver` (start, finish) is the extension to make when DP-01 adds bounded
+concurrency; the supervisor joins `recovery` when CP-04 re-adopts VMs from it.
 
 ### scheduling
 
@@ -255,7 +271,7 @@ one (model and code now check only the dimensions a VM uses).
 | `generationsMonotonic` | a slot's generation only grows; a lease's is its slot's last | the same |
 | `i03StartsWithinCapacity` | I03: every reservation fit the last applied report, every lease counted; every start fit the data plane's ledger | `formal-verify`; `tests/capacity.rs::should_admit_within_every_reported_limit_when_inputs_are_random` (mutant 1), `tests/host/properties.rs::should_allocate_within_the_last_report_when_commands_are_random` |
 | `allocationWithinReport` | the same, and an older report never replaces a newer one | `tests/host/rules.rs::should_never_allocate_beyond_the_newer_report_when_a_stale_one_arrives` |
-| `i33DataPlaneNeverOvercommits` | I33: the data plane starts nothing that does not fit its ledger, whatever the host allocated | `formal-verify`; the data plane's own tests arrive with KER-08 (mutant 24) |
+| `i33DataPlaneNeverOvercommits` | I33: the data plane starts nothing that does not fit its ledger, whatever the host allocated | `formal-verify`; `crates/mayfly-data-domain/tests/data_plane/executor.rs::should_refuse_insufficient_resources_whatever_the_cp_allocated_when_a_clone_does_not_fit` (mutant 24), `should_refuse_the_second_clone_when_the_first_reserved_the_last_slot`; the tables `matrix/admission.txt` and `matrix/ledger.txt` |
 | `macosGuestsAtMostTwo` | G3: at most two running macOS guests, foreign included; no reservation counts a third | `tests/host/rules.rs::should_admit_two_macos_guests_at_most_when_foreign_guests_run`, `tests/capacity.rs::should_never_admit_a_third_macos_guest_when_inputs_are_random` |
 | `i07NeverAdvertiseMore` | I07: a pool's `reported_max` is within what it can deliver | `tests/capacity.rs::should_fit_every_carve_out_together_when_inputs_are_random` |
 | `i24CarveOutsFitTheHost` | I24: the carve-outs fit the host's free capacity together | the same |

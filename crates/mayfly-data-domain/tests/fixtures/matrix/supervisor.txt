@@ -1,0 +1,146 @@
+# supervisor: every combination of listing (from the last complete inventory) and shim files, its state; then each against every observation: the new facts, the new state and the signal.
+# Every combination is reachable: the listing and the shim are observed independently, in any order, also across a restart.
+unlisted_yet/never_started => unobserved
+unlisted_yet/alive => running
+unlisted_yet/exited => stopped
+unlisted_yet/lost => process_lost
+absent/never_started => absent
+absent/alive => absent
+absent/exited => absent
+absent/lost => absent
+stopped/never_started => present
+stopped/alive => running
+stopped/exited => stopped
+stopped/lost => process_lost
+running/never_started => process_lost
+running/alive => running
+running/exited => process_lost
+running/lost => process_lost
+unlisted_yet/never_started x Inventory(Absent) -> absent/never_started absent None
+unlisted_yet/never_started x Inventory(Stopped) -> stopped/never_started present None
+unlisted_yet/never_started x Inventory(Running) -> running/never_started process_lost Some(ProcessLost)
+unlisted_yet/never_started x InventoryIncomplete -> unlisted_yet/never_started unobserved None
+unlisted_yet/never_started x Shim(NeverStarted) -> unlisted_yet/never_started unobserved None
+unlisted_yet/never_started x Shim(Alive) -> unlisted_yet/alive running None
+unlisted_yet/never_started x Shim(Exited) -> unlisted_yet/exited stopped None
+unlisted_yet/never_started x Shim(Lost) -> unlisted_yet/lost process_lost Some(ProcessLost)
+unlisted_yet/alive x Inventory(Absent) -> absent/alive absent Some(Vanished)
+unlisted_yet/alive x Inventory(Stopped) -> stopped/alive running None
+unlisted_yet/alive x Inventory(Running) -> running/alive running None
+unlisted_yet/alive x InventoryIncomplete -> unlisted_yet/alive running None
+unlisted_yet/alive x Shim(NeverStarted) -> unlisted_yet/never_started unobserved None
+unlisted_yet/alive x Shim(Alive) -> unlisted_yet/alive running None
+unlisted_yet/alive x Shim(Exited) -> unlisted_yet/exited stopped Some(ObservedStopped)
+unlisted_yet/alive x Shim(Lost) -> unlisted_yet/lost process_lost Some(ProcessLost)
+unlisted_yet/exited x Inventory(Absent) -> absent/exited absent Some(Vanished)
+unlisted_yet/exited x Inventory(Stopped) -> stopped/exited stopped None
+unlisted_yet/exited x Inventory(Running) -> running/exited process_lost Some(ProcessLost)
+unlisted_yet/exited x InventoryIncomplete -> unlisted_yet/exited stopped None
+unlisted_yet/exited x Shim(NeverStarted) -> unlisted_yet/never_started unobserved None
+unlisted_yet/exited x Shim(Alive) -> unlisted_yet/alive running None
+unlisted_yet/exited x Shim(Exited) -> unlisted_yet/exited stopped None
+unlisted_yet/exited x Shim(Lost) -> unlisted_yet/lost process_lost Some(ProcessLost)
+unlisted_yet/lost x Inventory(Absent) -> absent/lost absent Some(Vanished)
+unlisted_yet/lost x Inventory(Stopped) -> stopped/lost process_lost None
+unlisted_yet/lost x Inventory(Running) -> running/lost process_lost None
+unlisted_yet/lost x InventoryIncomplete -> unlisted_yet/lost process_lost None
+unlisted_yet/lost x Shim(NeverStarted) -> unlisted_yet/never_started unobserved None
+unlisted_yet/lost x Shim(Alive) -> unlisted_yet/alive running None
+unlisted_yet/lost x Shim(Exited) -> unlisted_yet/exited stopped None
+unlisted_yet/lost x Shim(Lost) -> unlisted_yet/lost process_lost None
+absent/never_started x Inventory(Absent) -> absent/never_started absent None
+absent/never_started x Inventory(Stopped) -> stopped/never_started present None
+absent/never_started x Inventory(Running) -> running/never_started process_lost Some(ProcessLost)
+absent/never_started x InventoryIncomplete -> absent/never_started absent None
+absent/never_started x Shim(NeverStarted) -> absent/never_started absent None
+absent/never_started x Shim(Alive) -> absent/alive absent None
+absent/never_started x Shim(Exited) -> absent/exited absent None
+absent/never_started x Shim(Lost) -> absent/lost absent None
+absent/alive x Inventory(Absent) -> absent/alive absent None
+absent/alive x Inventory(Stopped) -> stopped/alive running None
+absent/alive x Inventory(Running) -> running/alive running None
+absent/alive x InventoryIncomplete -> absent/alive absent None
+absent/alive x Shim(NeverStarted) -> absent/never_started absent None
+absent/alive x Shim(Alive) -> absent/alive absent None
+absent/alive x Shim(Exited) -> absent/exited absent None
+absent/alive x Shim(Lost) -> absent/lost absent None
+absent/exited x Inventory(Absent) -> absent/exited absent None
+absent/exited x Inventory(Stopped) -> stopped/exited stopped None
+absent/exited x Inventory(Running) -> running/exited process_lost Some(ProcessLost)
+absent/exited x InventoryIncomplete -> absent/exited absent None
+absent/exited x Shim(NeverStarted) -> absent/never_started absent None
+absent/exited x Shim(Alive) -> absent/alive absent None
+absent/exited x Shim(Exited) -> absent/exited absent None
+absent/exited x Shim(Lost) -> absent/lost absent None
+absent/lost x Inventory(Absent) -> absent/lost absent None
+absent/lost x Inventory(Stopped) -> stopped/lost process_lost Some(ProcessLost)
+absent/lost x Inventory(Running) -> running/lost process_lost Some(ProcessLost)
+absent/lost x InventoryIncomplete -> absent/lost absent None
+absent/lost x Shim(NeverStarted) -> absent/never_started absent None
+absent/lost x Shim(Alive) -> absent/alive absent None
+absent/lost x Shim(Exited) -> absent/exited absent None
+absent/lost x Shim(Lost) -> absent/lost absent None
+stopped/never_started x Inventory(Absent) -> absent/never_started absent Some(Vanished)
+stopped/never_started x Inventory(Stopped) -> stopped/never_started present None
+stopped/never_started x Inventory(Running) -> running/never_started process_lost Some(ProcessLost)
+stopped/never_started x InventoryIncomplete -> stopped/never_started present None
+stopped/never_started x Shim(NeverStarted) -> stopped/never_started present None
+stopped/never_started x Shim(Alive) -> stopped/alive running None
+stopped/never_started x Shim(Exited) -> stopped/exited stopped None
+stopped/never_started x Shim(Lost) -> stopped/lost process_lost Some(ProcessLost)
+stopped/alive x Inventory(Absent) -> absent/alive absent Some(Vanished)
+stopped/alive x Inventory(Stopped) -> stopped/alive running None
+stopped/alive x Inventory(Running) -> running/alive running None
+stopped/alive x InventoryIncomplete -> stopped/alive running None
+stopped/alive x Shim(NeverStarted) -> stopped/never_started present None
+stopped/alive x Shim(Alive) -> stopped/alive running None
+stopped/alive x Shim(Exited) -> stopped/exited stopped Some(ObservedStopped)
+stopped/alive x Shim(Lost) -> stopped/lost process_lost Some(ProcessLost)
+stopped/exited x Inventory(Absent) -> absent/exited absent Some(Vanished)
+stopped/exited x Inventory(Stopped) -> stopped/exited stopped None
+stopped/exited x Inventory(Running) -> running/exited process_lost Some(ProcessLost)
+stopped/exited x InventoryIncomplete -> stopped/exited stopped None
+stopped/exited x Shim(NeverStarted) -> stopped/never_started present None
+stopped/exited x Shim(Alive) -> stopped/alive running None
+stopped/exited x Shim(Exited) -> stopped/exited stopped None
+stopped/exited x Shim(Lost) -> stopped/lost process_lost Some(ProcessLost)
+stopped/lost x Inventory(Absent) -> absent/lost absent Some(Vanished)
+stopped/lost x Inventory(Stopped) -> stopped/lost process_lost None
+stopped/lost x Inventory(Running) -> running/lost process_lost None
+stopped/lost x InventoryIncomplete -> stopped/lost process_lost None
+stopped/lost x Shim(NeverStarted) -> stopped/never_started present None
+stopped/lost x Shim(Alive) -> stopped/alive running None
+stopped/lost x Shim(Exited) -> stopped/exited stopped None
+stopped/lost x Shim(Lost) -> stopped/lost process_lost None
+running/never_started x Inventory(Absent) -> absent/never_started absent Some(Vanished)
+running/never_started x Inventory(Stopped) -> stopped/never_started present None
+running/never_started x Inventory(Running) -> running/never_started process_lost None
+running/never_started x InventoryIncomplete -> running/never_started process_lost None
+running/never_started x Shim(NeverStarted) -> running/never_started process_lost None
+running/never_started x Shim(Alive) -> running/alive running None
+running/never_started x Shim(Exited) -> running/exited process_lost None
+running/never_started x Shim(Lost) -> running/lost process_lost None
+running/alive x Inventory(Absent) -> absent/alive absent Some(Vanished)
+running/alive x Inventory(Stopped) -> stopped/alive running None
+running/alive x Inventory(Running) -> running/alive running None
+running/alive x InventoryIncomplete -> running/alive running None
+running/alive x Shim(NeverStarted) -> running/never_started process_lost Some(ProcessLost)
+running/alive x Shim(Alive) -> running/alive running None
+running/alive x Shim(Exited) -> running/exited process_lost Some(ProcessLost)
+running/alive x Shim(Lost) -> running/lost process_lost Some(ProcessLost)
+running/exited x Inventory(Absent) -> absent/exited absent Some(Vanished)
+running/exited x Inventory(Stopped) -> stopped/exited stopped None
+running/exited x Inventory(Running) -> running/exited process_lost None
+running/exited x InventoryIncomplete -> running/exited process_lost None
+running/exited x Shim(NeverStarted) -> running/never_started process_lost None
+running/exited x Shim(Alive) -> running/alive running None
+running/exited x Shim(Exited) -> running/exited process_lost None
+running/exited x Shim(Lost) -> running/lost process_lost None
+running/lost x Inventory(Absent) -> absent/lost absent Some(Vanished)
+running/lost x Inventory(Stopped) -> stopped/lost process_lost None
+running/lost x Inventory(Running) -> running/lost process_lost None
+running/lost x InventoryIncomplete -> running/lost process_lost None
+running/lost x Shim(NeverStarted) -> running/never_started process_lost None
+running/lost x Shim(Alive) -> running/alive running None
+running/lost x Shim(Exited) -> running/exited process_lost None
+running/lost x Shim(Lost) -> running/lost process_lost None

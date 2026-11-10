@@ -482,8 +482,9 @@ any base name, VM supervisor FSM derived from observations (shim alive, `exit.js
 `ProcessLost`), inventory `Complete | Incomplete` (I25), and the **resource ledger** (pure: totals,
 used by ours and foreign VMs, in-flight reservations, fit check per directive, `CapacityReported`
 content) with refusal `insufficient_resources` (I33).
-Accept: exhaustive matrices; stale epoch refused; delete without matching proof or with a changed
-instance id refused; a directive that does not fit is refused whatever the CP sent (mutant 24).
+Accept: exhaustive matrices; stale epoch never executed (answered `Unknown{stale_epoch}`,
+ADR 0042); delete without matching proof or with a changed instance id refused; a directive that
+does not fit is refused whatever the CP sent (mutant 24).
 
 #### KER-09 Registration model and `RunnerRegistration` aggregate
 Cites: dm §6.5, P10–P14, ADRs 0028, 0029, 0038. Model first: `formal/registration.qnt` (I19, I20,

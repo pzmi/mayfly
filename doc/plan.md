@@ -363,7 +363,10 @@ Rules (each pinned by a test and by `formal/lifecycle.qnt`):
 The **data plane** has its own small FSM per directive (`Received → Executing → Done |
 Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → Stopped`, plus
 `ProcessLost` when a shim is gone), observed from the provider and the shim's lock and
-`exit.json` rather than remembered.
+`exit.json` rather than remembered. As built (KER-08): the state is a pure function of the last
+complete inventory's word and the shim's files, `Unobserved` until a complete inventory speaks
+(I25); a destructive directive is re-observed in `Executing` before its effect; a repeat of a
+directive still executing is answered when it settles.
 
 ## 7. GitHub integration
 
