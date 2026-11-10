@@ -57,7 +57,7 @@ cargo xtask architecture   # crate/plane policy and its negative fixtures
 cargo xtask list-checks    # every check, machine-readable
 cargo xtask doctor [--all]  # pinned tools `check` needs (--all: every pinned tool): run it first when local and CI disagree
 cargo xtask check --only formal-typecheck,formal-test   # Quint typecheck and scenario tests (in `check`)
-cargo xtask formal-verify  # Apalache bounded verification + long simulation (needs Java: weekly/on formal/ changes)
+cargo xtask formal-verify [--model <name>]  # Apalache bounded verification + long simulation (needs Java; CI runs it weekly and by hand only, one job per model)
 cargo xtask adr new "<title>" [--number N]   # and `cargo xtask adr index --fix`
 cargo xtask land <sha> --push origin main    # orchestrator only (D4)
 ```
@@ -213,7 +213,11 @@ reviewable.
 - Linux, 4 CPUs and 15 GB RAM: **at most two concurrent lanes**, each with
   `CARGO_BUILD_JOBS=2` and its own `CARGO_TARGET_DIR` under the session scratchpad, deleted when
   the lane is done. **Build on disk, not `/dev/shm`**: `/dev/shm` is RAM shared by every lane, and
-  three lane targets there once exhausted memory and got a compiler killed.
+  three lane targets there once exhausted memory and got a compiler killed. Disk is limited too:
+  lanes and `land` build with `CARGO_INCREMENTAL=0` (incremental caches once filled the disk).
+- **The sandbox runs as root; CI does not.** A test that touches file ownership, modes or
+  permissions must also pass as a non-root user (root passes every ownership check): run it once
+  under `setpriv --reuid=<uid> --regid=<gid> --clear-groups` before committing (SEC-02H).
 - No macOS, no Tart. Docker only for the PostgreSQL contract stage and the store lab (images
   from `mirror.gcr.io`, pinned by digest; ADR 0035): start `dockerd` first, and a missing daemon
   fails the stage closed. Provider tests use the in-memory fake and `mayfly-fake-tart`;
