@@ -15,6 +15,11 @@ mod inflight;
 pub mod ports;
 
 pub use executor::{Config, EnterError, Executor, Ports, SessionEnd, StartError, Stats};
+/// The types the ports name, so an adapter implements them through this crate alone.
+pub use mayfly_data_domain::{Inventory, Shim};
+pub use mayfly_protocol::{
+    BaseName, GuestOs, InventoryGap, OwnershipProof, RunOptions, VmObservation,
+};
 pub use ports::{
     Ambiguity, Diagnostics, FloorFailed, FloorStore, GuestAnswer, GuestTransport, HostProbe,
     ImageListing, ImageStore, ObservationIds, ProbeFailed, ProcessClock, VmError, VmProvider,

@@ -1,7 +1,9 @@
 //! `FakeVmProvider`: an in-memory provider with scripted faults (ver §7.1).
 //!
 //! VMs live in a map by listed name, foreign names included. Like Tart, it refuses (`Definite`)
-//! a clone onto a name that exists and a start of a VM that runs. Each call is logged by [`Op`]; the
+//! a clone onto a name that exists and a start of a VM that runs; once a base is registered
+//! ([`FakeVmProvider::allow_base`]) it also refuses a clone from any base not registered, as Tart
+//! refuses a clone from a base that is not local (ADR 0039). Each call is logged by [`Op`]; the
 //! next call of an op can carry a [`Fault`] (failed before acting, or ambiguous with or without
 //! its effect applied, or an incomplete listing) and can be held until the test releases it
 //! ([`FakeVmProvider::hold_next`]); a held call that is never released stands for a hung
@@ -9,7 +11,7 @@
 //! one held while an effect runs returns what existed before that effect, as a real listing
 //! taken before a clone would.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mayfly_data::{Ambiguity, VmError, VmProvider};
@@ -132,6 +134,7 @@ struct State {
     holds: BTreeMap<Op, VecDeque<Held>>,
     log: Vec<Op>,
     cloned: u32,
+    bases: Option<BTreeSet<String>>,
     clone_guest: Option<GuestOs>,
     clone_disk_bytes: Option<u64>,
 }
@@ -162,6 +165,38 @@ impl FakeVmProvider {
     /// Puts `vm` under `name` (any text: foreign and malformed names too).
     pub fn seed(&self, name: &str, vm: FakeVm) {
         self.lock().vms.insert(name.to_owned(), vm);
+    }
+
+    /// Registers `base` as a local base and lists it as a stopped VM, as Tart does; from the
+    /// first registration on, a clone from any other base is refused.
+    pub fn allow_base(&self, base: &BaseName, instance_id: ProviderInstanceId) {
+        let mut state = self.lock();
+        state
+            .bases
+            .get_or_insert_with(BTreeSet::new)
+            .insert(base.as_str().to_owned());
+        let vm = FakeVm {
+            instance_id: Some(instance_id),
+            running: false,
+            guest: state.clone_guest,
+            memory_bytes: None,
+            disk_bytes: state.clone_disk_bytes,
+        };
+        state.vms.insert(base.as_str().to_owned(), vm);
+    }
+
+    /// Removes `name` with no check: what a broken provider's own deletes do in the contract's
+    /// tests.
+    pub fn remove(&self, name: &str) {
+        self.lock().vms.remove(name);
+    }
+
+    /// Marks `name` running or not with no check: what a broken provider's own stops do in the
+    /// contract's tests.
+    pub fn set_running(&self, name: &str, running: bool) {
+        if let Some(vm) = self.lock().vms.get_mut(name) {
+            vm.running = running;
+        }
     }
 
     /// Changes the instance id listed for `name`: another VM now holds the name.
@@ -278,12 +313,17 @@ impl VmProvider for FakeVmProvider {
 
     async fn clone_vm(
         &self,
-        _base: &BaseName,
+        base: &BaseName,
         name: &OwnedVmName,
     ) -> Result<ProviderInstanceId, VmError> {
         let name = name.to_string();
+        let base = base.as_str().to_owned();
         self.effect(Op::Clone, move |state| {
-            if state.vms.contains_key(&name) {
+            let local = state
+                .bases
+                .as_ref()
+                .is_none_or(|bases| bases.contains(&base));
+            if state.vms.contains_key(&name) || !local {
                 return Err(VmError::Definite);
             }
             state.cloned += 1;

@@ -50,6 +50,13 @@ pub(crate) enum Command {
         name: String,
         timeout: u64,
     },
+    Set {
+        name: String,
+        random_mac: bool,
+        cpu: Option<u64>,
+        memory: Option<u64>,
+        disk_size: Option<u64>,
+    },
     Delete {
         names: Vec<String>,
     },
@@ -73,6 +80,7 @@ impl Command {
             Self::List { .. } => "list",
             Self::Get { .. } => "get",
             Self::Stop { .. } => "stop",
+            Self::Set { .. } => "set",
             Self::Delete { .. } => "delete",
             Self::Exec { .. } => "exec",
         }
@@ -88,6 +96,7 @@ impl Command {
             | Self::Ip { name, .. }
             | Self::Get { name, .. }
             | Self::Stop { name, .. }
+            | Self::Set { name, .. }
             | Self::Exec { name, .. } => vec![name],
             Self::Pull { reference } => vec![reference],
             Self::Delete { names } => names.iter().map(String::as_str).collect(),
@@ -182,6 +191,17 @@ const STOP_FLAGS: &[Flag] = &[Flag {
     short: Some('t'),
     takes_value: true,
 }];
+const SET_FLAGS: &[Flag] = &[
+    switch("--random-mac"),
+    switch("--random-serial"),
+    switch("--display-refit"),
+    switch("--no-display-refit"),
+    option("--cpu"),
+    option("--memory"),
+    option("--display"),
+    option("--disk"),
+    option("--disk-size"),
+];
 const CREATE_FLAGS: &[Flag] = &[
     switch("--linux"),
     option("--disk-size"),
@@ -415,6 +435,20 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, Fail> {
                 timeout: number(&p, "--timeout", 30)?,
             })
         }
+        "set" => {
+            let p = parse(rest, SET_FLAGS, false)?;
+            exactly(&p, 1, "name")?;
+            let optional = |long: &str| -> Result<Option<u64>, Fail> {
+                p.value(long).map(|_| number(&p, long, 0)).transpose()
+            };
+            Ok(Command::Set {
+                name: p.positionals[0].clone(),
+                random_mac: p.has("--random-mac"),
+                cpu: optional("--cpu")?,
+                memory: optional("--memory")?,
+                disk_size: optional("--disk-size")?,
+            })
+        }
         "delete" => {
             let p = parse(rest, NO_FLAGS, false)?;
             if p.positionals.is_empty() {
@@ -511,6 +545,16 @@ mod tests {
                 },
             ),
             (
+                vec!["set", "vm1", "--random-mac", "--memory", "4096"],
+                Command::Set {
+                    name: "vm1".into(),
+                    random_mac: true,
+                    cpu: None,
+                    memory: Some(4096),
+                    disk_size: None,
+                },
+            ),
+            (
                 vec!["delete", "a", "b"],
                 Command::Delete {
                     names: vec!["a".into(), "b".into()],
@@ -573,6 +617,9 @@ mod tests {
             vec!["list", "--source", "remote"],
             vec!["list", "extra"],
             vec!["delete"],
+            vec!["set"],
+            vec!["set", "vm1", "--memory", "lots"],
+            vec!["set", "vm1", "--bogus"],
             vec!["exec", "vm1"],
             vec!["exec"],
         ];

@@ -6,7 +6,7 @@
 //! [[rule]]
 //! id = "stop-hangs-once"         # optional, unique; names the rule's counters (default rule-<index>)
 //! command = "stop"               # optional: "--version", create, pull, clone, run, ip, list, get,
-//!                                #   stop, delete or exec; absent matches every command
+//!                                #   stop, set, delete or exec; absent matches every command
 //! vm = "mf-demo-1"               # optional: exact VM name the command acts on (see Command::targets)
 //! arg0 = "/usr/local/bin/x"      # optional, exec only: the program the guest is asked to run
 //! skip = 0                       # optional: matching invocations that pass before the rule may fire
@@ -158,6 +158,7 @@ const COMMANDS: &[&str] = &[
     "list",
     "get",
     "stop",
+    "set",
     "delete",
     "exec",
 ];

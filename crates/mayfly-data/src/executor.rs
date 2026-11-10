@@ -364,7 +364,7 @@ async fn bounded<C: ProcessClock, F: Future>(clock: &C, due: Millis, work: F) ->
 fn outcome<T>(result: Result<T, VmError>, applied: impl FnOnce(T) -> ObservationKind) -> Stimulus {
     match result {
         Ok(value) => Stimulus::Applied(applied(value)),
-        Err(VmError::Definite) => Stimulus::Failed,
+        Err(VmError::Definite | VmError::HypervisorLimit) => Stimulus::Failed,
         Err(VmError::Ambiguous(cause)) => Stimulus::Ambiguous(cause.reason()),
     }
 }
@@ -1075,5 +1075,22 @@ impl Core {
                     .finish(key.0, key.1, Stimulus::Ambiguous(UnknownReason::Deadline));
             self.answer(run, progress);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_answer_a_hypervisor_refusal_as_a_definite_failure_when_a_start_meets_the_limit() {
+        // given
+        let refused: Result<(), VmError> = Err(VmError::HypervisorLimit);
+
+        // when
+        let stimulus = outcome(refused, |()| ObservationKind::HypervisorLimitHit);
+
+        // then
+        assert_eq!(stimulus, Stimulus::Failed);
     }
 }

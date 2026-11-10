@@ -118,11 +118,14 @@ mayfly-testkit = [
 # mix, and a type-free helper (the fixture reader in mayfly-protocol/tests/golden.rs) is sound.
 mayfly-testkit-shared = ["mayfly-domain", "mayfly-protocol"]
 # The data plane's test kit (ADR 0019, DP-01): the fake provider, image store, guest, host probe,
-# floor, clock and link the executor's component tests run over. Its closure stays in the data
-# plane and the shared crates, so data crates may dev-depend on it and control crates may not.
+# floor, clock and link the executor's component tests run over, and the VmProvider contract
+# suite (DP-04), which reuses the shared kit's child-environment probe (ADR 0058). Its closure
+# stays in the data plane and the shared crates, so data crates may dev-depend on it and control
+# crates may not.
 mayfly-testkit-data = [
   "mayfly-domain", "mayfly-protocol",
   "mayfly-data-domain", "mayfly-data",
+  "mayfly-testkit-shared",
 ]
 # Conformance drives the production crates the Quint models govern, over the testkit, the
 # Tart adapter included (fnd section 2.2). It sees both planes, so no plane crate may
@@ -169,8 +172,15 @@ mayfly-adapter-link = { serde_json = ["default"], tokio = ["sync"] }
 # clock (rt, time, test-util), and reads and writes raw JSON frames (ADR 0010).
 mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test-util"] }
 # The data plane's fakes share state between a test and the executor and wake waiters (a held
-# provider call, the fake clock) through Tokio's synchronisation primitives only; no runtime.
-mayfly-testkit-data = { tokio = ["sync"] }
+# provider call, the fake clock) through Tokio's synchronisation primitives; the VmProvider
+# contract (DP-04) runs each case on its own current-thread runtime (rt), bounded by a timer
+# (time).
+mayfly-testkit-data = { tokio = ["sync", "rt", "time"] }
+# The Tart adapter (DP-04, plan section 8.2): each `tart` child awaited with its deadline and its
+# stdout and stderr read together through Tokio (rt, process, io-util, time, macros for join!);
+# the process-group kill, `setsid` and the shim's flock(2) through rustix; Tart's JSON through
+# serde.
+mayfly-adapter-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["rt", "process", "io-util", "time", "macros"] }
 # The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
 # process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
 # of the file and executable checks, through Tokio.
@@ -185,7 +195,9 @@ mayfly-adapter-github = { aws-lc-rs = ["default"], base64 = ["default"], reqwest
 # The configuration is TOML read as a raw table (plan section 11); the state-dir lock is flock(2)
 # through rustix, safe, with no libc (plan section 13).
 mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
-mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], toml = ["default"] }
+# signal-hook records the catchable signals a foreground `run` receives (DP-04), so a test can
+# prove mayfly never signals `tart run` (ADR 0037).
+mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], signal-hook = ["iterator"], toml = ["default"] }
 # The fake GitHub (GH-02, GH-01): an axum HTTP/1.1 server on Tokio; RS256 checked with
 # aws-lc-rs's UnparsedPublicKey through the fake's own JWT and PEM code; synthetic PKCS#1 test
 # keys generated at run time by the rsa crate (another implementation than the provider);
@@ -213,6 +225,8 @@ mayfly-control = { serde = ["default", "derive"] }
 mayfly-data = { tokio = ["rt", "macros"] }
 mayfly-testkit = { serde = ["default", "derive"], tempfile = ["default"] }
 mayfly-fake-tart = { tempfile = ["default"] }
+# The Tart adapter's tests: tempdir state and fake homes, the fake's JSON log.
+mayfly-adapter-tart = { tempfile = ["default"], serde_json = ["default"] }
 # The client's tests run on a paused current-thread runtime (ver §3.2).
 mayfly-adapter-github = { tokio = ["default", "rt", "macros", "test-util", "time", "sync"] }
 mayfly-fake-github = { tokio = ["default", "macros", "rt", "net", "sync"] }

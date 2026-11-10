@@ -18,3 +18,6 @@ path = "src/bin/mayfly.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-composition = { version = "0.1.0", path = "../mayfly-composition" }

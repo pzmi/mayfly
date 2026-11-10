@@ -100,6 +100,13 @@ pub const CATALOG: &[Check] = &[
         false,
     ),
     row(
+        "real-tart",
+        "integration",
+        "cargo xtask test --only real-tart --real-tart-home <DIR>",
+        "DP-04",
+        false,
+    ),
+    row(
         "formal-typecheck",
         "formal",
         "npx --prefix formal --no -- quint typecheck <every formal/*.qnt>",

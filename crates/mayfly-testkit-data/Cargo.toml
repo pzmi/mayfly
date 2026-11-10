@@ -16,4 +16,5 @@ mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
 mayfly-data-domain = { version = "0.1.0", path = "../mayfly-data-domain" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
-tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
+mayfly-testkit-shared = { version = "0.1.0", path = "../mayfly-testkit-shared" }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "rt", "time"] }

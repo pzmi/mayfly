@@ -1242,6 +1242,14 @@ SEC-02: also runs the generic `SecretProvider` contract (SP-01..SP-08) on the re
 (`KeychainProvider::system`, a disposable item in a test keychain), and confirms what ADR 0058
 assumes of `security -w`: its trailing line break, exit 44 for an absent item, 36/51 for a locked
 keychain, and hex output for a non-printable password.
+DP-04: the workflow runs `cargo xtask test --only real-tart --real-tart-home <DIR>` (feature
+`real-tart` of `mayfly-adapter-tart`, `tests/real_tart.rs`; the home holds only a local base
+`mfb-contract`), which runs VP-01..VP-10 and VP-13..VP-15 (VP-11, VP-12 and VP-16 need injected
+faults or an environment log: fake-tart only). It also confirms what the adapter assumed and the
+fixtures in `crates/mayfly-adapter-tart/tests/fixtures/tart-<version>/` pin: the `--version`
+string, the `list`/`get` JSON shapes, `Memory` in MiB and `Disk` in GiB (counted 1024³), exit 2
+with "does not exist", the hypervisor-limit wording of `tart run`, `tart set --memory` before a
+run, and that `tart run` under the shim keeps its VM when the daemon is killed.
 
 #### HW-02 (owner) Live GitHub scale set
 Disposable repository and GitHub App with the permissions of ADR 0045's list (verified here, with the reason for each); gated live test of GH-03/GH-04;

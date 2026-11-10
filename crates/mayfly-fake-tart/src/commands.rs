@@ -8,7 +8,7 @@
 //! `Commands/List.swift` (`Source`, `Name`, `Disk`, `Size`, `Accessed`, `Running`, `State`),
 //! `Commands/Get.swift` (`OS`, `CPU`, `Memory`, `Disk`, `DiskFormat`, `Size`, `Display`,
 //! `MACAddress`, `Running`, `State`), `Commands/IP.swift`, `Commands/Stop.swift`,
-//! `Commands/Delete.swift`, `Commands/Clone.swift`. **Unknown, marked as such:** how
+//! `Commands/Delete.swift`, `Commands/Clone.swift`, `Commands/Set.swift`. **Unknown, marked as such:** how
 //! `HumanReadableByteCount` encodes `Disk` and `Size` (the fake prints whole gigabytes as numbers
 //! in `list`, and `Size` as a three-decimal string in `get`, which is what `Get.swift`'s closure
 //! formats), the pretty-printing whitespace (Foundation's differs from serde_json's), and the
@@ -119,6 +119,13 @@ pub(crate) fn execute(command: &Command, ctx: &mut Ctx<'_>) -> Result<Done, Fail
         } => list(ctx, *format, source.as_deref(), *quiet),
         Command::Get { name, format } => get(ctx, name, *format),
         Command::Stop { name, timeout } => stop(ctx, name, *timeout),
+        Command::Set {
+            name,
+            random_mac,
+            cpu,
+            memory,
+            disk_size,
+        } => set(ctx, name, *random_mac, (*cpu, *memory, *disk_size)),
         Command::Delete { names } => delete(ctx, names),
         Command::Exec {
             name,
@@ -419,6 +426,35 @@ fn stop(ctx: &Ctx<'_>, name: &str, timeout: u64) -> Result<Done, Fail> {
     {
         kill_hard(pid);
     }
+    Ok(Done::quiet())
+}
+
+/// `set`: changes what the next boot gets (`Set.swift`); a running VM keeps its current run.
+/// `--random-mac` draws a new MAC from the allocation counter, so it differs from every MAC the
+/// home has handed out; `--disk-size` may only grow the disk, as in Tart.
+fn set(
+    ctx: &Ctx<'_>,
+    name: &str,
+    random_mac: bool,
+    (cpu, memory, disk_size): (Option<u64>, Option<u64>, Option<u64>),
+) -> Result<Done, Fail> {
+    let _lock = ctx.home.lock()?;
+    let mut vm = local_vm(ctx.home, name)?;
+    if let Some(size) = disk_size
+        && size < vm.disk_gb
+    {
+        return Err(Fail::generic(
+            "the new disk size must be larger than the current one",
+        ));
+    }
+    if random_mac {
+        vm.mac = pseudo_mac(name, next_counter(ctx.home)?);
+    }
+    vm.cpu = cpu.unwrap_or(vm.cpu);
+    vm.memory_mb = memory.unwrap_or(vm.memory_mb);
+    vm.disk_gb = disk_size.unwrap_or(vm.disk_gb);
+    ctx.home.write_vm(&vm)?;
+    ctx.effect("vm_set", name)?;
     Ok(Done::quiet())
 }
 

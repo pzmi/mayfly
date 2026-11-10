@@ -9,6 +9,7 @@
 //! | `stdin`  | `len`, `sha256` | after an `exec -i` has read stdin; the content is never stored |
 //! | `fault`  | `rule`, `action`, `phase` (`before_effect`, `after_effect`) | at the moment a fault takes effect |
 //! | `effect` | `kind`, `vm` | when the command has changed state |
+//! | `signal` | `signal` (`SIGTERM`, `SIGINT`, …) | when a foreground `run` receives a catchable signal, before it acts on it |
 //! | `exit`   | `code` | last, when the process exits by itself |
 //!
 //! A hang or a crash writes `fault` and no `exit`; that absence is how the lab tells them from a
@@ -59,6 +60,9 @@ pub(crate) enum Event {
     Effect {
         kind: String,
         vm: String,
+    },
+    Signal {
+        signal: String,
     },
     Exit {
         code: i32,

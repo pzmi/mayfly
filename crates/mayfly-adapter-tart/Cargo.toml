@@ -10,3 +10,23 @@ publish = false
 
 [lints]
 workspace = true
+
+[features]
+# The VmProvider contract against real Tart (`tests/real_tart.rs`, macOS only), run by
+# `cargo xtask test --only real-tart --real-tart-home <DIR>` in the hardware lane (HW-01).
+real-tart = []
+
+[dependencies]
+mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "io-util", "time", "macros"] }
+
+[dev-dependencies]
+mayfly-testkit-data = { path = "../mayfly-testkit-data" }
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "io-util", "time", "macros"] }

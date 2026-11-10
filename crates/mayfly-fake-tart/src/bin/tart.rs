@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         stdin: &mut stdin.lock(),
         stdout: &mut stdout.lock(),
         stderr: &mut stderr.lock(),
+        record_signals: true,
     });
     match termination {
         Termination::Exit(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),

@@ -1,0 +1,38 @@
+[
+  {
+    "Source": "local",
+    "Name": "mfb-0123456789ab-r2-330-0",
+    "Disk": 50,
+    "Size": 22,
+    "Accessed": "2026-11-09T10:00:00Z",
+    "Running": false,
+    "State": "stopped"
+  },
+  {
+    "Source": "local",
+    "Name": "mf-macos-h1-s1-g1-0a1b2c3d",
+    "Disk": 50,
+    "Size": 23,
+    "Accessed": "2026-11-09T10:05:00Z",
+    "Running": true,
+    "State": "running"
+  },
+  {
+    "Source": "local",
+    "Name": "someone-elses-vm",
+    "Disk": 20,
+    "Size": 9,
+    "Accessed": "2026-11-01T08:00:00Z",
+    "Running": false,
+    "State": "stopped"
+  },
+  {
+    "Source": "OCI",
+    "Name": "ghcr.io/example/macos@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "Disk": 50,
+    "Size": 22,
+    "Accessed": "2026-11-09T09:00:00Z",
+    "Running": false,
+    "State": "stopped"
+  }
+]

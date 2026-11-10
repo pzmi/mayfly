@@ -632,3 +632,95 @@ fn should_fail_an_exec_when_the_vm_stops_during_the_job() {
     assert_eq!(status.code(), Some(1));
     assert!(rest.contains("control socket"), "{rest}");
 }
+
+#[test]
+fn should_draw_a_new_mac_and_resize_when_set_is_given_random_mac_and_memory() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    let before: Value =
+        serde_json::from_str(&fake.tart(&["get", "vm1", "--format", "json"]).stdout())
+            .expect("get json");
+
+    // when
+    let set = fake.tart(&["set", "vm1", "--random-mac", "--memory", "4096"]);
+    let after: Value =
+        serde_json::from_str(&fake.tart(&["get", "vm1", "--format", "json"]).stdout())
+            .expect("get json");
+    let base: Value =
+        serde_json::from_str(&fake.tart(&["get", "base", "--format", "json"]).stdout())
+            .expect("get json");
+
+    // then
+    assert_eq!(set.code(), Some(0), "{}", set.stderr());
+    assert_ne!(after["MACAddress"], before["MACAddress"]);
+    assert_ne!(after["MACAddress"], base["MACAddress"]);
+    assert_eq!(after["Memory"], json!(4096));
+    assert_eq!(
+        fake.events("effect").last().expect("effect")["kind"],
+        "vm_set"
+    );
+}
+
+#[test]
+fn should_refuse_set_when_the_vm_does_not_exist_or_the_disk_would_shrink() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+
+    // when
+    let absent = fake.tart(&["set", "nope", "--random-mac"]);
+    let shrink = fake.tart(&["set", "vm1", "--disk-size", "1"]);
+
+    // then
+    assert_eq!(absent.code(), Some(2), "{}", absent.stderr());
+    assert_eq!(shrink.code(), Some(1), "{}", shrink.stderr());
+}
+
+#[test]
+fn should_record_a_signal_when_a_foreground_run_receives_one() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    let mut runner = fake.spawn(&["run", "vm1"]);
+    assert_eq!(fake.tart(&["ip", "vm1", "--wait", "30"]).code(), Some(0));
+    let pid =
+        rustix::process::Pid::from_raw(i32::try_from(runner.id()).expect("pid")).expect("a pid");
+
+    // when
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).expect("send SIGTERM");
+    let status = runner.wait().expect("reap run");
+
+    // then
+    let signals = fake.events("signal");
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0]["signal"], "SIGTERM");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(15),
+        "the signal then does what it does by default"
+    );
+    assert!(
+        fake.tart(&["get", "vm1", "--format", "json"])
+            .stdout()
+            .contains("\"State\": \"stopped\"")
+    );
+}
+
+#[test]
+fn should_record_no_signal_when_a_foreground_run_is_stopped_by_tart_stop() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    let mut runner = fake.spawn(&["run", "vm1"]);
+    assert_eq!(fake.tart(&["ip", "vm1", "--wait", "30"]).code(), Some(0));
+
+    // when
+    let stop = fake.tart(&["stop", "vm1"]);
+    let status = runner.wait().expect("reap run");
+
+    // then
+    assert_eq!(stop.code(), Some(0));
+    assert_eq!(status.code(), Some(0));
+    assert!(fake.events("signal").is_empty());
+}

@@ -99,6 +99,38 @@ fn platform_stage(developer_cases: Option<&str>) -> Stage {
     nextest_stage("platform-tests", None, developer_cases, &["xtask"])
 }
 
+/// The variable the `real-tart` stage hands the hardware test its `TART_HOME` through; set only
+/// here, never typed as a command prefix.
+pub const REAL_TART_HOME: &str = "MAYFLY_REAL_TART_HOME";
+
+/// The `real-tart` stage (DP-04, HW-01): the `VmProvider` contract against real Tart, in the
+/// dedicated `home`, through the `real-tart` feature of `mayfly-adapter-tart` (whose test target
+/// exists only on macOS with the feature on). Serial: real VMs share the host. Not part of
+/// [`stages`] or `check`; reached only as `cargo xtask test --only real-tart --real-tart-home
+/// <DIR>` by the hardware workflow. Pinned by
+/// `should_hand_the_home_to_the_real_tart_stage_when_given`.
+fn real_tart_stage(home: &std::path::Path) -> Stage {
+    Stage::new(
+        "real-tart",
+        "cargo",
+        &[
+            "nextest",
+            "run",
+            "--workspace",
+            "--locked",
+            "--profile",
+            "serial",
+            "--features",
+            "mayfly-adapter-tart/real-tart",
+            "-E",
+            "binary(real_tart)",
+        ],
+    )
+    .needs("cargo-nextest")
+    .env(REAL_TART_HOME, &home.to_string_lossy())
+    .deny_stderr("ignoring unknown configuration key")
+}
+
 /// The stages to run: all, or only the one named by `--only`. An unknown name is an error
 /// that lists the valid ones, never an empty green run.
 fn select(all: Vec<Stage>, only: Option<&str>) -> Result<Vec<Stage>, String> {
@@ -114,8 +146,17 @@ fn select(all: Vec<Stage>, only: Option<&str>) -> Result<Vec<Stage>, String> {
 }
 
 /// Runs `test` (or one of its stages) and returns the exit code.
-pub fn run(only: Option<&str>) -> i32 {
-    let all = if only == Some("platform-tests") {
+pub fn run(only: Option<&str>, real_tart_home: Option<&std::path::Path>) -> i32 {
+    let all = if only == Some("real-tart") {
+        let Some(home) = real_tart_home.filter(|home| home.is_absolute()) else {
+            eprintln!("xtask: --only real-tart needs --real-tart-home <absolute DIR>");
+            return 2;
+        };
+        vec![real_tart_stage(home)]
+    } else if real_tart_home.is_some() {
+        eprintln!("xtask: --real-tart-home is only for --only real-tart");
+        return 2;
+    } else if only == Some("platform-tests") {
         vec![platform_stage(
             std::env::var("PROPTEST_CASES").ok().as_deref(),
         )]
@@ -135,6 +176,41 @@ pub fn run(only: Option<&str>) -> i32 {
 mod tests {
     use super::*;
     use crate::catalog;
+
+    #[test]
+    fn should_hand_the_home_to_the_real_tart_stage_when_given() {
+        // given
+        let home = std::path::Path::new("/Users/runner/tart-home");
+
+        // when
+        let stage = real_tart_stage(home);
+
+        // then
+        assert_eq!(stage.name, "real-tart");
+        let crate::process::Action::Command { args, env, .. } = &stage.action else {
+            panic!("a command stage");
+        };
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == REAL_TART_HOME && value == "/Users/runner/tart-home")
+        );
+        assert!(args.iter().any(|a| a == "mayfly-adapter-tart/real-tart"));
+        assert!(catalog::all_rows().iter().any(|row| row.id == "real-tart"));
+    }
+
+    #[test]
+    fn should_refuse_when_real_tart_has_no_home_or_the_home_is_given_alone() {
+        // given
+        let home = std::path::Path::new("/tmp/home");
+
+        // when
+        let without_home = run(Some("real-tart"), None);
+        let relative = run(Some("real-tart"), Some(std::path::Path::new("home")));
+        let alone = run(None, Some(home));
+
+        // then
+        assert_eq!((without_home, relative, alone), (2, 2, 2));
+    }
 
     #[test]
     fn should_run_unit_integration_and_doctests_when_test_is_built() {

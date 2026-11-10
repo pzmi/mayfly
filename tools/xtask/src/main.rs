@@ -46,7 +46,10 @@ fn main() -> ExitCode {
     }
     let code = match &cli.command {
         Command::Quick => quick::run(),
-        Command::Test { only } => test::run(only.as_deref()),
+        Command::Test {
+            only,
+            real_tart_home,
+        } => test::run(only.as_deref(), real_tart_home.as_deref()),
         Command::Check { only } => check::run(only),
         Command::Coverage { changed_since } => coverage::command(changed_since.as_deref()),
         Command::Security => security::run(),

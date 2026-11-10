@@ -1,0 +1,12 @@
+{
+  "OS": "linux",
+  "CPU": 2,
+  "Memory": 4096,
+  "Disk": 20,
+  "DiskFormat": "asif",
+  "Size": "9.871",
+  "Display": "1024x768",
+  "MACAddress": "8A:3F:00:11:22:33",
+  "Running": false,
+  "State": "stopped"
+}

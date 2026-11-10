@@ -56,6 +56,12 @@ pub enum VmError {
     /// It may or may not have happened. Answered `Unknown`, never success and never a refusal
     /// (I10, ADR 0025).
     Ambiguous(Ambiguity),
+    /// Nothing happened: the hypervisor refused another running macOS guest (a `start` only,
+    /// domain-model §9.2). Definite like [`VmError::Definite`] and answered `effect_failed` the
+    /// same way (pinned by `executor::tests::should_answer_a_hypervisor_refusal_as_a_definite_failure_when_a_start_meets_the_limit`);
+    /// kept apart so the refusal can be reported as `HypervisorLimitHit`, which the executor
+    /// does not emit yet.
+    HypervisorLimit,
 }
 
 /// The VM provider (plan §8.1; Tart in DP-04).

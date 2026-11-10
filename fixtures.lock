@@ -300,3 +300,8 @@ e0d8a3bd896740d1c9202bb3f3b457b0bf9f54adf9006162934add36761da9f4  crates/mayfly-
 baf1d6a49bef38cf2a0ce8d78fffbcac9a1c42ec9bf13d5b8262433640e27991  crates/mayfly-protocol/tests/fixtures/welcome/v1.cp-clock.json
 bad984df0223361bb4efcf2667784565970cd768ff626ae97b9956e2e0124380  crates/mayfly-protocol/tests/fixtures/welcome/v1.json
 7732aaf486b01e6172532ddd76408a0b49c2fa90934b4adba2b30fff18b07693  crates/mayfly-protocol/tests/fixtures/welcome/v1.safe.json
+e73aadb07f08277d727693e083effa2ecfca45b5f492944e2353163afba09ef3  crates/mayfly-adapter-tart/tests/fixtures/tart-2.28.0/get-running.json
+d2dc35631be07efdc924ecd6333312538de99369d89b28bc4b6e0cc3167df456  crates/mayfly-adapter-tart/tests/fixtures/tart-2.28.0/get-stopped-linux.json
+1a606f0a10e79ec03916d93015fd844ad6da215ab9662c3ae6268e30ac785a3c  crates/mayfly-adapter-tart/tests/fixtures/tart-2.28.0/list.json
+e12e83890270d4bf3d66736d212cc6e41cbd2f5300e1b12a53f8c53f51ac0724  crates/mayfly-adapter-tart/tests/fixtures/tart-2.28.0/run-hypervisor-limit.stderr
+b5938630eab389e91cfd685dd3ed4315e297886d169eed2cdc9b0fa7cb31efeb  crates/mayfly-adapter-tart/tests/fixtures/tart-2.28.0/version.txt

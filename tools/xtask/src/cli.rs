@@ -33,6 +33,10 @@ pub enum Command {
         /// Run only this stage (a `test` stage id such as `browser`), not the others.
         #[arg(long, value_name = "STAGE")]
         only: Option<String>,
+        /// The dedicated `TART_HOME` the `real-tart` stage runs the VmProvider contract in
+        /// (macOS, hardware lane, HW-01); required by `--only real-tart`, refused otherwise.
+        #[arg(long, value_name = "DIR")]
+        real_tart_home: Option<PathBuf>,
     },
     /// Line coverage of the in-process suites against `coverage-floor.toml`, then the
     /// changed-line gate.

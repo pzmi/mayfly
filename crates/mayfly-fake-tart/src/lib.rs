@@ -8,7 +8,8 @@
 //!
 //! # Surface
 //!
-//! `--version`, `clone <src> <name> [--overwrite]`, `run <name> [--no-graphics ...]`,
+//! `--version`, `clone <src> <name> [--overwrite]`, `set <name> [--random-mac] [--memory N] ...`,
+//! `run <name> [--no-graphics ...]`,
 //! `ip <name> [--wait N]`, `list [--format json] [--source local|oci] [-q]`, `get <name> [--format
 //! json]`, `stop <name> [-t N]`, `delete <name>...`, `exec [-i] <name> [--] <argv>`, plus two
 //! seeding commands real Tart also has: `create <name>` (an empty local VM, the base to clone) and
@@ -20,7 +21,9 @@
 //! `TART_HOME` is required and must be absolute; a directory with a `vms`, `cache` or `tmp` entry
 //! and no fake marker is refused, so the fake cannot be pointed at a real Tart home (exit 99, the
 //! fake's own code). See `home` for the layout and `faults` for the fault file. Every invocation
-//! and fault hit is appended to `invocations.jsonl` (see `log`).
+//! and fault hit is appended to `invocations.jsonl` (see `log`), and so is every catchable signal
+//! a foreground `run` receives (see `signals`): mayfly never signals `tart run` (ADR 0037), and
+//! the log is how a test proves it.
 //!
 //! # Process model of `run` (owner decision OD1, domain-model §9.2)
 //!
@@ -46,6 +49,7 @@ mod fail;
 mod faults;
 mod home;
 mod log;
+mod signals;
 mod timefmt;
 mod vm;
 mod wait;
@@ -88,6 +92,10 @@ pub struct Invocation<'a> {
     pub stdout: &'a mut dyn Write,
     /// The standard error.
     pub stderr: &'a mut dyn Write,
+    /// Whether a foreground `run` records the catchable signals it receives (`signal` log
+    /// records). Only the binary sets it: a handler is process-wide, and an in-process caller's
+    /// signals are its own.
+    pub record_signals: bool,
 }
 
 /// Runs one invocation to its end.
@@ -99,12 +107,18 @@ pub fn run(invocation: Invocation<'_>) -> Termination {
         stdin,
         stdout,
         stderr,
+        record_signals,
     } = invocation;
     let home = match Home::open(env.get("TART_HOME").map(String::as_str)) {
         Ok(home) => home,
         Err(fail) => return emit_fail(stderr, &fail),
     };
-    match drive(&home, argv, env, pid, stdin, stdout, stderr) {
+    let streams = Streams {
+        stdin,
+        stdout,
+        stderr,
+    };
+    match drive(&home, argv, env, pid, streams, record_signals) {
         Ok(termination) => termination,
         Err(fail) => emit_fail(stderr, &fail),
     }
@@ -150,15 +164,26 @@ fn allocate(
     Ok((inv, picked))
 }
 
+/// The invocation's standard streams.
+struct Streams<'a> {
+    stdin: &'a mut dyn Read,
+    stdout: &'a mut dyn Write,
+    stderr: &'a mut dyn Write,
+}
+
 fn drive(
     home: &Home,
     argv: Vec<String>,
     env: BTreeMap<String, String>,
     pid: u32,
-    stdin: &mut dyn Read,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
+    streams: Streams<'_>,
+    record_signals: bool,
 ) -> Result<Termination, Fail> {
+    let Streams {
+        stdin,
+        stdout,
+        stderr,
+    } = streams;
     let parsed = parse_command(&argv);
     let (inv, picked) = allocate(home, &parsed)?;
     let record = |event: Event| home.append_log(&Record::new(inv, now_ms(), event));
@@ -229,6 +254,10 @@ fn drive(
         }
     }
 
+    // Watching starts before the VM is marked running, so once a caller sees it running every
+    // signal it could send is recorded; the watch ends when this invocation does.
+    let _watch = (record_signals && matches!(command, Command::Run { .. }))
+        .then(|| signals::watch(home, inv));
     let mut ctx = Ctx {
         home,
         inv,
