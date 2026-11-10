@@ -984,6 +984,9 @@ Accept: session expiry, 409 on open, 429, ack after a lost response, partial acq
 collision and busy-runner removal cases.
 DEC-01: organisation scope (repository scope for tests); scale sets never deleted by the client
 (ADR 0040); runner list/get/delete by id for CP-05.
+Note (GH-02 review): `messageQueueUrl` receives the queue token, so it passes the same rule as the
+Actions service URL and the configured bases (`credential_base_problem`: https, or http only to
+loopback; no query, fragment or user info) before any call, refused as protocol drift otherwise.
 
 #### GH-04 Listener use case
 Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §6, §9 (ADR 0048). Poll → record

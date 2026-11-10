@@ -4,6 +4,15 @@
 
 [graph]
 all-features = true
+# The targets mayfly ships on (plan section 1; Windows is not evaluated, D2). Without this list
+# cargo-deny also counts dependencies that exist only for other targets, such as
+# `webpki-root-certs`, which `rustls-platform-verifier` uses on wasm32 alone (ADR 0064).
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
 
 [advisories]
 # A vulnerability or a yanked crate fails the stage at any depth. `unmaintained` is a scope

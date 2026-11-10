@@ -41,9 +41,23 @@ const CROSS_CHECK_ARGS: &[&str] = &[
 /// Linux host does not have; a lint links nothing, so `libsqlite3-sys` is told to take its
 /// "system library" path instead, which compiles no C and uses the same pre-generated bindings
 /// of the bundled version. Every Rust line is still linted for the target. The bundled build
-/// itself is compiled and tested natively by the `macos` CI job (ES-02, ADR 0008). Pinned by
-/// `should_skip_only_the_c_build_of_sqlite_when_cross_check_runs`.
-const CROSS_CHECK_ENV: &[(&str, &str)] = &[("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")];
+/// itself is compiled and tested natively by the `macos` CI job (ES-02, ADR 0008).
+///
+/// `aws-lc-sys` (under `aws-lc-rs`, the GitHub client's TLS and JWT crypto, ADR 0064) has no
+/// such path: its build script always compiles C and assembly, which for the target needs the
+/// SDK's headers. The lint links
+/// nothing, so `true` stands in for the target's C compiler and archiver: the build script
+/// succeeds without objects, and every Rust line of `aws-lc-rs` and its dependents is still
+/// linted.
+/// The stand-in is target-wide: every `cc`-based build script compiled for
+/// `aarch64-apple-darwin` in this stage gets it, not only `aws-lc-sys`'s, so no C of any crate is
+/// checked here; the `macos` CI job is the native check that compiles and tests that C. Pinned by
+/// `should_skip_only_the_c_builds_of_sqlite_and_aws_lc_when_cross_check_runs`.
+const CROSS_CHECK_ENV: &[(&str, &str)] = &[
+    ("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1"),
+    ("CC_aarch64_apple_darwin", "true"),
+    ("AR_aarch64_apple_darwin", "true"),
+];
 
 /// The `cross-check` stage body: `cargo` with [`CROSS_CHECK_ARGS`]. A missing rustup target
 /// fails with the command that installs it, never a skip (D15); this is a preflight rather
@@ -96,7 +110,7 @@ pub fn stages() -> Vec<Stage> {
         .collect();
     stages.push(Stage::in_process(
         "cross-check",
-        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; bundled SQLite's C source not compiled)",
+        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
         run_cross_check,
     ));
     stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
@@ -746,7 +760,7 @@ jobs:
     }
 
     #[test]
-    fn should_skip_only_the_c_build_of_sqlite_when_cross_check_runs() {
+    fn should_skip_only_the_c_builds_of_sqlite_and_aws_lc_when_cross_check_runs() {
         // given
         let env = CROSS_CHECK_ENV;
 
@@ -754,9 +768,18 @@ jobs:
         let listed = catalog::find("cross-check").map(|c| c.command);
 
         // then
-        assert_eq!(env, [("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")]);
+        assert_eq!(
+            env,
+            [
+                ("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1"),
+                ("CC_aarch64_apple_darwin", "true"),
+                ("AR_aarch64_apple_darwin", "true"),
+            ]
+        );
         assert!(
-            listed.is_some_and(|l| l.contains("bundled SQLite's C source not compiled")),
+            listed.is_some_and(
+                |l| l.contains("the C sources of bundled SQLite and aws-lc not compiled")
+            ),
             "{listed:?}"
         );
     }

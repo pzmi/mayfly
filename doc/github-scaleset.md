@@ -48,7 +48,8 @@ App private key ──sign──▶ App JWT ──▶ installation token ──�
    [scaleset: client.go, fetchAccessToken]. Lifetime one hour [docs]. Its format is not fixed
    length; mayfly never validates a token by shape [docs]. The reference client uses it once,
    as a step of the admin-token refresh, and does not cache it [scaleset: client.go,
-   getRunnerRegistrationToken]; mayfly also uses it for the App permission probe (ADR 0045, GH-02).
+   getRunnerRegistrationToken]; mayfly also reads the `permissions` its answer lists for the App
+   permission probe (ADR 0045, GH-02) [docs].
 3. **Registration token.** `POST {api}/orgs/{org}/actions/runners/registration-token` (repository
    scope: `/repos/{owner}/{repo}/...`), `Authorization: Bearer <installation token>`, empty body;
    201 with `token` and `expires_at` [scaleset: client.go, getRunnerRegistrationToken,
@@ -62,6 +63,10 @@ App private key ──sign──▶ App JWT ──▶ installation token ──�
    `token` (a JWT) [scaleset: client.go, getActionsServiceAdminConnection]. Both fields are
    required. The token's expiry is read from its `exp` claim without verifying the signature;
    a token without `exp` is refused [scaleset: client.go, actionsServiceAdminTokenExpiresAt].
+   mayfly also refuses a token that expires within the 60 s refresh margin, and a service URL
+   that is not `https` (plain `http` only to loopback, for the fake) or carries a query, a
+   fragment or user info: the admin token is sent to it (GH-02). Which hosts the service URL may
+   name is not stated anywhere we read, so no host is required (section 12, item 14).
    This one exchange also retries 401 and 403, because a freshly minted registration token is not
    always usable at once [scaleset: client.go, getActionsServiceAdminConnectionRequest]. Lifetime
    [unverified: GH-00].
@@ -449,3 +454,6 @@ capture refutes one, the model changes first.
     `statistics`; the default runner group's id.
 13. **Permissions**: the minimal App permission list that makes the whole chain work, with the
     reason for each (ADR 0045).
+14. **Service hosts**: the domains the runner-registration exchange's `url` and a session's
+    `messageQueueUrl` use on github.com, so the client can refuse any other host when the API
+    base is `api.github.com` (GH-02 accepts any host that passes the https rule).

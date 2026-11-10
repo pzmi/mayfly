@@ -242,7 +242,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-data-domain` | `thiserror` |
 | `mayfly-control`, `mayfly-data` | `tokio` (`sync`), `tokio-util`, `tracing`, `thiserror`, `serde_json` (control only: event and receipt payloads) |
 | `mayfly-adapter-sqlite` | `rusqlite` (`bundled`), `serde_json`, `tokio` (`sync`, `rt`), `tracing`, `thiserror` |
-| `mayfly-adapter-github` | `reqwest` (`rustls-tls`, `json`), a JWT crate (RS256), `serde`, `serde_json`, `tokio`, `url`, `tracing`, `thiserror` |
+| `mayfly-adapter-github` | `reqwest` (`rustls-no-provider`), `rustls` (`aws_lc_rs`), `rustls-platform-verifier`, `rustls-pki-types`, `aws-lc-rs` (TLS provider and RS256, no JWT crate: ADR 0064), `base64`, `zeroize`, `serde`, `serde_json`, `tokio`, `url`, `tracing`, `thiserror` |
 | `mayfly-adapter-secrets` | `rustix` (`fs`, `process`), `tokio` (`rt`, `process`, `io-util`, `time`); the Keychain through `/usr/bin/security`, no binding crate (ADR 0058) |
 | `mayfly-adapter-tart`, `mayfly-adapter-guest` | `tokio` (`process`, `io-util`, `time`), `rustix` (`process`), `serde`, `serde_json`, `tracing`, `thiserror` |
 | `mayfly-adapter-host` | `rustix` or `sysinfo` (DP-06 decides), `thiserror` |
@@ -253,7 +253,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-testkit-shared` | `serde_json` (raw link frames), `tokio` (`rt`, `time`, `test-util`: the link suite's paused-clock runtime) |
 | `mayfly-testkit-data` | `tokio` (`sync`: shared fake state, held calls, the fake clock) |
 | `mayfly-fake-tart` | `serde`, `serde_json`, `anyhow` |
-| `mayfly-fake-github` | `axum`, `tokio`, `serde`, `serde_json`, `anyhow` |
+| `mayfly-fake-github` | `axum`, `tokio`, `serde`, `serde_json`, `aws-lc-rs` (RS256 check), `rsa` (run-time test keys, ADR 0064), `base64`, `anyhow` |
 | `xtask` | `cargo_metadata`, `clap`, `syn`, `proc-macro2`, `serde`, `toml`, `tempfile`, a YAML parser, `anyhow` |
 | `mayfly-faultlab` | `serde`, `serde_json`, `rusqlite`, `rustix` (`process`), `clap`, `toml`, `tempfile`, `anyhow` |
 

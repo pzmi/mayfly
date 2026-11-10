@@ -56,7 +56,7 @@ pub const CATALOG: &[Check] = &[
     row(
         "cross-check",
         "static",
-        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; bundled SQLite's C source not compiled)",
+        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
         "FND-04",
         true,
     ),
