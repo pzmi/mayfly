@@ -1,0 +1,75 @@
+# registration: refusal codes, then the outcome of each determinism case
+code already_consumed
+code already_requested
+code busy_refused
+code issue_not_unknown
+code no_deregistration_pending
+code no_issue_pending
+code no_runner_id
+code not_consumed
+code not_delivered
+code not_issued
+code not_requested
+code presumed_leaked
+code runner_id_mismatch
+code runner_name_mismatch
+code scale_set_degraded
+code stale_run
+code terminal
+case already_consumed refused already_consumed
+case already_requested refused already_requested
+case busy_refused refused busy_refused
+case busy_withdraws_the_retirement accepted
+  deregistration_refused_busy/v1 {"retirement":"000000000000000000000000000000e1"}
+case confirm_online accepted
+  registration_connected/v1 {"runner_id":4242}
+case deregister_after_the_job accepted
+  deregistration_requested/v1 {"reason":{"retirement":{"retirement":"000000000000000000000000000000e2"}}}
+case deregister_for_retirement accepted
+  deregistration_requested/v1 {"reason":{"retirement":{"retirement":"000000000000000000000000000000e1"}}}
+case deregister_leaked accepted
+  deregistration_requested/v1 {"reason":"presumed_leaked"}
+case issue_not_unknown refused issue_not_unknown
+case mint_refused_is_absent accepted
+  registration_absent/v1 {}
+case newer_epoch_is_recorded accepted
+  registration_epoch_advanced/v1 {"epoch":2}
+  registration_delivered/v1 {}
+case no_deregistration_pending refused no_deregistration_pending
+case no_issue_pending refused no_issue_pending
+case no_runner_id refused no_runner_id
+case not_consumed refused not_consumed
+case not_delivered refused not_delivered
+case not_found accepted
+  registration_deregistered/v1 {"answer":"not_found"}
+case not_issued refused not_issued
+case not_requested refused not_requested
+case not_seen_online_presumed_leaked accepted
+  registration_presumed_leaked/v1 {"reason":"not_seen_online"}
+case pending_deregistration_records_nothing accepted
+case presumed_leaked refused presumed_leaked
+case reaper_finds_by_name accepted
+  registration_found_by_name/v1 {"runner_id":4242}
+case reaper_finds_nothing accepted
+  registration_absent/v1 {}
+case record_completed accepted
+  registration_completed/v1 {"result":"failed"}
+case record_consumed accepted
+  registration_consumed/v1 {"request_id":1}
+case record_delivered accepted
+  registration_delivered/v1 {}
+case record_issue_unknown accepted
+  registration_issue_unknown/v1 {}
+case record_issued accepted
+  registration_issued/v1 {"runner_id":4242}
+case removed accepted
+  registration_deregistered/v1 {"answer":"removed"}
+case request_registration accepted
+  registration_epoch_advanced/v1 {"epoch":1}
+  registration_requested/v1 {"attempt_id":"00000000000000000000000000000001","runner_name":"mf-pool0-host0-s0-g1-00000001","scale_set":7}
+case runner_id_mismatch refused runner_id_mismatch
+case runner_name_mismatch refused runner_name_mismatch
+case same_job_records_nothing accepted
+case scale_set_degraded refused scale_set_degraded
+case stale_run refused stale_run
+case terminal refused terminal

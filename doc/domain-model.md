@@ -468,7 +468,7 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
 | I18 | An aggregate refuses a command whose `run_epoch` is lower than the highest it has accepted. | every aggregate |
 | I19 | A registration is deregistered only by a journaled `runner_id`; a runner name is issued at most once, ever. | `RunnerRegistration` |
 | I20 | Every issued registration reaches a terminal state or is on the reaper's list (bounded liveness). | `RunnerRegistration` + reaper |
-| I21 | A registered-idle runner is deregistered before its VM is stopped; a busy refusal (422) cancels that retirement. | retirement policy P11 + `Attempt` |
+| I21 | A registered-idle runner is deregistered before its VM is stopped; a busy refusal (409 on the Actions-service path, 422 on REST: `doc/github-scaleset.md` §7) cancels that retirement. | retirement policy P11 + `Attempt` |
 | I22 | A JIT config is minted only after an activation grant and a guest verification of *this* attempt in the current epoch, and is delivered at most once; a delivery `Unknown` or an orphaned handle means presumed leaked and the attempt never serves a job. | `Attempt`, `RunnerRegistration`, broker |
 | I23 | Acquisition stops when assigned ≥ deliverable: mayfly never holds jobs it cannot serve. | `ScaleSet` (AcquirePolicy) |
 | I24 | Σ `reported_max` over the scale sets a host serves ≤ that host's deliverable (refines I07). | capacity policy + `ScaleSet` |
@@ -607,7 +607,7 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
 - **Commands:** `StartAttempt` (from `SlotReserved`), `IssueNext` (saga), `RecordObservation{obs}`,
   `BeginActivation{grant_ref}`, `RecordJitHandle{handle_id, registration_ref}`, `BindJob`,
   `RequestRetirement{reason}`, `ConfirmRetirement` (after deregistration or when no registration),
-  `WithdrawRetirement` (422), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
+  `WithdrawRetirement` (busy), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
   `ResolveQuarantine{disposition}`, `Close`. (No `AssertOutcome`: OD10, ADR 0025.)
 - **Events:** `AttemptStarted`, `DirectiveIssued`, `DirectiveRefused{reason}`,
   `DirectiveOutcomeUnknown`, `DirectiveObservedNotApplied` (a complete inventory shows an
@@ -674,7 +674,7 @@ Quarantined --case resolved--> Deleting | Lost
 - **Commands:** `RequestRegistration{attempt_id, runner_name}` (refused while the scale set is
   Degraded: passed as input), `RecordIssued{runner_id}`, `RecordIssueUnknown`,
   `RecordDelivered`, `RecordConsumed{request_id}`, `RecordCompleted{result}`,
-  `PresumeLeaked{reason}`, `RequestDeregistration{reason}`, `RecordDeregistration{204|404|422}`,
+  `PresumeLeaked{reason}`, `RequestDeregistration{reason}`, `RecordDeregistration{204|404|busy}`,
   `RecordFoundByName{runner_id}|RecordAbsent` (reaper).
 - **Events:** `RegistrationRequested`, `RegistrationIssued`, `RegistrationIssueUnknown`,
   `RegistrationDelivered`, `RegistrationConnected`, `RegistrationConsumed`,
@@ -686,6 +686,26 @@ Quarantined --case resolved--> Deleting | Lost
 - **Must not protect:** stop/delete ordering of the VM (P11 sequences Attempt after this stream),
   unrecognised registrations at GitHub (no stream; `UnrecognisedRegistrations` read model, report
   only, never deleted).
+- **As built (KER-09, `formal/registration.qnt`):** `PresumedLeaked` and
+  `DeregistrationRequested` are overlays on the phase (`leaked`, `deregistration`), not phases: a
+  leaked runner may still connect and take a job, and a removal may be pending in any phase that
+  holds a runner id. `RecordConnected{runner_id}` is the online confirmation of ADR 0038 (only
+  the issued id confirms; not seen by the deadline → `PresumeLeaked{not_seen_online}`).
+  `RecordFoundByName` records `RegistrationFoundByName` (the id journaled, presumed leaked:
+  mayfly never held that config); `RecordAbsent` also takes a definite refusal of the mint.
+  `RequestDeregistration` names its reason (`retirement{event}`, `presumed_leaked`, `not_live`);
+  a busy answer (`DeregistrationRefusedBusy`) is final for the retirement it served, even after
+  the job ends (a counterexample of the model's first draft), and a later retirement asks again.
+  P11's choice is the pure `registration::retirement_step` (deregister, confirm, withdraw, wait):
+  confirm only when no runner of the registration can be registered with its config in the VM
+  (nothing issued, an unknown issue, absent, deregistered). The run epoch is fenced by
+  `RegistrationEpochAdvanced` (I18). A busy removal is named busy, never by its code. A busy
+  answer cancels only the retirement its request served (a stale request of retirement A answered
+  busy cancels A, not a later B). `RecordDelivered` is refused once the registration is presumed
+  leaked (`presumed_leaked`, I22). Limitation: `RecordAbsent` after an unknown issue is terminal
+  and trusts one listing by name, so a runner GitHub lists only later is on no reaper list through
+  this stream (P14 still reports it as unjournaled, never deleting it); CP-05 takes a second
+  listing after a grace period before recording it.
 
 ### 6.6 `Image` [Image]
 
@@ -784,7 +804,7 @@ literally (F25).
 | P8 | `Observation` from the DP | route to the attempt/placement stream: `RecordObservation`; inventory: per owned VM, delta only; unrecognised `mf-*`/foreign → `ForeignVmReported` (first sighting per run) | CP inbox | `observation_id` | — | — | stale epoch/generation → `StaleObservationIgnored` (sampled), still audited when it reports a consumed JIT; incomplete inventory → no change (I25) |
 | P9 | `AttemptPrepared` ∧ shortfall > 0 for its pool | `GrantActivation` (Host) → `BeginActivation` (fresh `VerifyGuest` through `tart exec`) → on `GuestVerified` in Activating: `RequestRegistration` → mint JIT → `RecordIssued` → broker `issue` → `RecordJitHandle` + `LaunchRunner{handle}` (DP checks lock PID = shim child, then `tart exec -i` on stdin: ADR 0038) → GitHub shows the runner id online, else P13 | ATT activation manager | `attempt_id`; runner name = `vm_name` (re-mint impossible by I19) | grant: next pass; mint: once, never retried with the same name | JIT delivery deadline T_jit (≈ 2 min) | grant refused → stays Prepared; mint `Unknown` → P10; delivery `Unknown` / deadline → P13 |
 | P10 | `RegistrationIssueUnknown` | list runners by `runner_name`; `RecordFoundByName{runner_id}` → `RequestDeregistration`, or `RecordAbsent`; attempt `RequestRetirement{jit_lost}` | REG reaper | `runner_name` | GitHub budget | — | GitHub unreachable → stays on reaper list (I20), alert after T_reap |
-| P11 | `RetirementRequested` on an attempt holding a registration | `RequestDeregistration` → 204/404 → `ConfirmRetirement`; 422 → `WithdrawRetirement` | ATT↔REG | `(attempt_id, retirement event_id)` | GitHub budget | T_dereg | GitHub down → retirement waits; never stop before the answer (I21); hysteresis H_idle before choosing a victim |
+| P11 | `RetirementRequested` on an attempt holding a registration | `RequestDeregistration` → 204/404 → `ConfirmRetirement`; busy → `WithdrawRetirement` | ATT↔REG | `(attempt_id, retirement event_id)` | GitHub budget | T_dereg | GitHub down → retirement waits; never stop before the answer (I21); hysteresis H_idle before choosing a victim |
 | P12 | `MessageRecorded.JobStarted` / `.JobCompleted` | find registration by runner name (projection) → `BindJob` + `RecordConsumed`; on completion `RecordCompleted{result}`, then `RequestRetirement{job_done}` once `RunnerExited` or grace G expires (then probe) | DEM→ATT/REG | `request_id` | — | grace G | unknown runner name → `UnrecognisedRegistrations`; a JobStarted for a registration already completed → audit, ignore |
 | P13 | `RunnerLaunchUnknown`, `JitHandleOrphaned`, identity doubt after delivery, redaction violation | `PresumeLeaked` → `RequestDeregistration` (if journaled id); attempt `RequestRetirement{jit_presumed_leaked}` or `Quarantine` | REG/SEC | `attempt_id` | GitHub budget | — | deregistration impossible → stays on reaper list; attempt never relaunched (I22) |
 | P14 | `RunStarted`, daily timer, `mayfly doctor`, `SessionOpened` after a long outage | list our scale set's runners; journaled + non-live → `RequestDeregistration`; our name shape, unjournaled → report only | REG reaper | `(run_no, day)` | GitHub budget, ≤ 1 listing per hour | — | report, never delete by name pattern |

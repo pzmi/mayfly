@@ -209,7 +209,7 @@ Invariant ids (plan §1, §6, §8–§10):
 | I18 | An aggregate refuses a command whose `run_epoch` is lower than the highest it has accepted. |
 | I19 | A registration is deregistered only by a journaled `runner_id`; a runner name is issued at most once, ever. |
 | I20 | Every issued registration reaches a terminal state or is on the reaper's list (bounded liveness). |
-| I21 | A registered-idle runner is deregistered before its VM is stopped; a busy refusal (422) cancels that retirement. |
+| I21 | A registered-idle runner is deregistered before its VM is stopped; a busy refusal (409 on the Actions-service path, 422 on REST: `doc/github-scaleset.md` §7) cancels that retirement. |
 | I22 | A JIT config is minted only after an activation grant and a guest verification of this attempt in the current epoch, delivered at most once; a delivery `Unknown` or orphaned handle means presumed leaked and the attempt never serves a job. |
 | I23 | Acquisition stops when assigned ≥ deliverable. |
 | I24 | Σ `reported_max` over the scale sets a host serves ≤ that host's deliverable (refines I07). |
@@ -234,7 +234,7 @@ I14 reads "image revision" for "image generation".
 | recovery | `formal/recovery.qnt` | startup use case and decision table (plan §10), crash at every await | I04, I05, I09, I10, I11, I12, I17, I25, I29, I31 | `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | KER-07 |
 | scaleset | `formal/scaleset.qnt` | `ScaleSet` aggregate, listener, demand (plan §7.2) | I07, I12, I13, I23, I32 | `noDoubleReservationPerRequest`, `desiredFromLatestStatistics` | KER-06 |
 | link | `formal/link.qnt` | CP↔DP protocol: handshake and version negotiation, at-least-once, duplicates, reordering, fencing, held kinds in safe mode (plan §3.2, ADR 0042) | I09, I17 (the floor), I18 (the inbox), I29 | `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `versionNegotiated` | KER-02 |
-| registration | `formal/registration.qnt` | `RunnerRegistration` aggregate, reaper, deregister-before-stop, 422 race, issue unknown | I19, I20, I21, I22 (registration half) | `noRemintAfterUnknown`, `deregisterBeforeStop` | KER-09 |
+| registration | `formal/registration.qnt` | `RunnerRegistration` aggregate, reaper, deregister-before-stop, the busy race, issue unknown | I19, I20, I21, I22 (registration half) | `noRemintAfterUnknown`, `deregisterBeforeStop` | KER-09 |
 | event_store | `formal/event_store.qnt` | the journal, receipts, inbox, delivery, snapshots, online rebuild (event-store §7.3) | I16 via ES-I11; ES-I1..ES-I8, ES-I12, ES-I14..ES-I16 | the ES invariants | ES-06 |
 
 I15 is not model-checkable: it is pinned by security tests (SEC-01: no host path, socket or key
@@ -622,7 +622,7 @@ fail.
 | I18 | link | run-epoch determinism cases (KER-03) | F43 | 23 |
 | I19 | registration | `RunnerRegistration` unit (KER-09); `RunnerRegistry` contract | F07, F32 | — |
 | I20 | registration | reaper component (CP-05) | F07, F32 | — |
-| I21 | registration | 422 race (KER-09) | F12, F33 | 21 |
+| I21 | registration | busy race and `retirement_step` (KER-09) | F12, F33 | 21 |
 | I22 | lifecycle, registration | activation matrix (KER-04); `GuestTransport` contract (DP-05) | F32, F39 | 20 |
 | I23 | scaleset | `PlanAcquire` unit (KER-06) | F41 | 19 |
 | I24 | scheduling | carve-out property (KER-05) | F11, F41 | — |

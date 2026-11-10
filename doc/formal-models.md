@@ -91,7 +91,9 @@ then, a model's task records the one it tried.
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); simulation about 3 min per seed and relation | KER-05 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
-The planned models are listed in verification §6.1: `scaleset` (KER-06) and `registration` (KER-09).
+| registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed | KER-09 |
+
+The planned model listed in verification §6.1 is `scaleset` (KER-06).
 
 ### Simulation budget
 
@@ -399,6 +401,65 @@ VM runs (`busyNeverRetiredWhileRunning`), presuming leaked an Activating attempt
 GitHub shows busy, the pre-KER-07F row (`busyNeverRetiredWhileRunning`); and simulation reports
 deleting the unrecorded `mf-*` VM (`i04UnrecognisedNeverDeleted`). Simulation runs at about 60 traces of 40 steps
 per second (TypeScript evaluator, 4-CPU sandbox).
+
+### registration
+
+Two attempts, each with its registration stream (`regs`) and the retirement side of its
+`Attempt` (`atts`: retirement requested or confirmed, the VM running, a launch of unknown
+outcome). The world is GitHub's runner list (`gh`, keyed by runner id; a runner's id is its
+attempt's number, since a name is minted at most once), whether a runner process lives in each VM
+(`vmRunner`) and whether GitHub answers (`ghUp`). A foreign runner of our name shape that mayfly
+never journaled is listed from the start. The mint answers (`mintAnswered`), is lost with or
+without effect (`mintLost`: `IssueUnknown`, never minted again) or is refused (`mintRefused`:
+absent); the reaper lists by name (`reaperByName`: found, journaled and presumed leaked, or
+absent). Delivery succeeds (`deliver`) or has an unknown outcome (`deliverUnknown`, after which P13
+presumes the registration leaked); the runner connects (`runnerConnects`) and the confirmation
+reads the issued id online (`confirmOnline`, else `presumeLeaked`). GitHub gives an online idle
+runner its one job (`jobStarts`, also while a removal is in flight) and removes the ephemeral
+runner when it completes (`jobCompletes`). P11 is `retirementStep(reg, retirement)`, the pure
+`registration::retirement_step` of the aggregate: a busy answer for this retirement withdraws it;
+nothing issued, an unknown issue (the config never left the control plane), absent or
+deregistered confirms; a pending mint or removal waits; otherwise deregister first. The removal
+(`deregisterCall`) is by the journaled id: removed, not found (the service already removed it),
+busy, or a lost reply that leaves the request pending. A busy removal is named busy, never by its
+code (409 on the Actions-service path, 422 on REST: `doc/github-scaleset.md` §7). `stopVm` stops
+the VM only after a confirmed retirement. `step` offers every stimulus for either attempt and
+GitHub outages; `raceStep` is the biased relation: one attempt, GitHub up, every mint answered,
+so a walk delivers and connects a runner and meets its retirement, a job starting during the
+removal, busy answers, lost replies, an unknown launch and the leak path.
+
+Simulation of `raceStep` found that the first draft let job evidence clear a busy refusal, so the
+same retirement went on to deregister the finished runner and stop the VM after GitHub had
+answered busy for it (`i21BusyCancelsRetirement`); a busy answer is now final for the retirement
+it served, recorded per retirement (`busyRetirementStaysCancelledAfterTheJobTest`). The Rust
+property test then found that keeping only the last busy retirement forgot an earlier one; the
+aggregate keeps the set.
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `i19OnlyJournaledIdsDeregistered` | I19: a runner is removed only by an id a registration journaled; the foreign runner stays | `tests/registration/rules.rs::should_refuse_a_deregistration_when_no_runner_id_is_journaled` |
+| `i19NameIssuedOnce` | I19: a runner name is minted at most once | `tests/registration/rules.rs::should_never_issue_a_runner_name_twice_when_any_command_follows`, `should_refuse_a_runner_name_when_it_is_not_the_attempts_vm_name` |
+| `noRemintAfterUnknown`, `issueUnknownLeavesOnlyOnObservation` | an unknown issue is never minted again and leaves `IssueUnknown` only on the reaper's listing | `tests/registration/rules.rs::should_leave_an_unknown_issue_only_on_the_reapers_observation_when_every_command_is_tried` |
+| `i20SettledOrOnReaperList` | I20: once its VM is stopped, a registration is settled or on the reaper's list | `formal-verify`; the reaper's component tests arrive with CP-05 |
+| `deregisterBeforeStop` | I21: no VM is stopped while its runner is still listed | `tests/registration/rules.rs::should_never_confirm_a_retirement_when_a_runner_may_still_be_registered` (mutant 21) |
+| `i21BusyCancelsRetirement` | I21: a busy answer is final for its retirement | `tests/registration/rules.rs::should_withdraw_the_retirement_when_github_answered_busy_for_it`, `should_refuse_the_same_retirement_when_github_answered_busy` |
+| `i22IssuedAndDeliveredOnce` | I22 (registration half): one mint and one launch per registration, none once leaked, and the online confirmation names the issued id | `tests/registration/rules.rs::should_confirm_only_the_issued_runner_id_when_a_runner_is_seen_online`, `should_stay_leaked_and_deregister_when_a_delivery_is_presumed_leaked` |
+
+Every invariant is also asserted on the aggregate over every accepted transition two stimuli deep
+from every matrix state (`tests/registration/properties.rs`).
+
+Tests (`quint test`, all deterministic): `happyPathTest`, `idleRunnerDeregisteredBeforeStopTest`,
+`busyAnswerWithdrawsRetirementTest`, `busyRetirementStaysCancelledAfterTheJobTest`,
+`lostRemovalReplyIsRetriedTest`, `issueUnknownFoundByNameTest`, `issueUnknownAbsentTest`,
+`issueUnknownWaitsForGitHubTest`, `deliveryUnknownPresumedLeakedTest`,
+`notSeenOnlinePresumedLeakedTest`, `reaperSparesTheForeignRunnerTest`, `nameIssuedOnceTest`, and
+`mutant21StopBeforeDeregisterViolatesTest`: mutant 21 (verification §9) as the action
+`confirmRetirementStopFirst`, kept out of every step relation, which stops the VM before the
+runner is deregistered and violates `deregisterBeforeStop`. Negative controls tried in simulation:
+confirming a retirement without P11's step (mutant 21) makes `raceStep` and `step` report
+`deregisterBeforeStop`; a reaper that sends an unknown issue back to `Requested` makes `step`
+report `noRemintAfterUnknown`; dropping the "not leaked" guard of delivery makes `step` report
+`i22IssuedAndDeliveredOnce`.
 
 ## Promoting a counterexample
 

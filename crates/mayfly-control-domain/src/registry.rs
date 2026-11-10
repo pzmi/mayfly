@@ -5,6 +5,7 @@ use crate::attempt::Attempt;
 use crate::event::{EventKind, EventSet};
 use crate::host::Host;
 use crate::pool::Pool;
+use crate::registration::RunnerRegistration;
 
 /// Every aggregate of the control plane. An aggregate's events are registered by its
 /// `Event` set, so this list is also the event registry (plan §5.3): the golden harness walks
@@ -19,6 +20,7 @@ impl AggregateRegistry for ControlAggregates {
         visitor.visit::<Attempt>();
         visitor.visit::<Pool>();
         visitor.visit::<Host>();
+        visitor.visit::<RunnerRegistration>();
     }
 }
 

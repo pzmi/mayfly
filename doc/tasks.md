@@ -488,7 +488,8 @@ does not fit is refused whatever the CP sent (mutant 24).
 
 #### KER-09 Registration model and `RunnerRegistration` aggregate
 Cites: dm §6.5, P10–P14, ADRs 0028, 0029, 0038. Model first: `formal/registration.qnt` (I19, I20,
-I21, I22's registration half; deregister-before-stop, the 422 race, issue unknown; model-local
+I21, I22's registration half; deregister-before-stop, the busy race (409 on the Actions-service
+path, 422 on REST: `doc/github-scaleset.md` §7), issue unknown; model-local
 `noRemintAfterUnknown`, `deregisterBeforeStop`). The aggregate with its matrix, goldens and
 determinism cases; the online confirmation after delivery (runner id seen online, else presumed
 leaked).
@@ -719,7 +720,8 @@ F42, F43 at component level.
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
 registration, record issued/unknown, deregister-before-stop with the 422 race, the online
 confirmation after delivery, the reaper (run start, long outage, daily, `doctor`; ≤ 1 listing/hour;
-only journaled ids; unrecognised reported).
+only journaled ids; unrecognised reported). After an unknown issue, record `RecordAbsent` only
+after a second listing by name past a grace period (GitHub's listing may lag a lost mint; KER-09).
 Accept: F06, F07, F32 component tests; only journaled ids deleted; unrecognised reported; no
 name-pattern deletion (`NameGuessingRegistry` fails the contract).
 
