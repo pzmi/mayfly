@@ -1,14 +1,18 @@
 //! The invariants of `formal/scaleset.qnt`, asserted on the Rust aggregate over random command
 //! sequences from an open session: a check of the code, where the model's invariants check the
-//! model. "Latest statistics" is tracked here independently of the aggregate, by the model's
-//! keys (a message's is `2 * id`, a session open's `2 * highest id recorded + 1`, A1).
+//! model. "Latest statistics" is tracked here independently of the aggregate, in message-id
+//! order (a fresh message's key is `2 * id`, a session open's `2 * highest id recorded + 1`, A1):
+//! the order the aggregate claims. Whether that order is GitHub's own is the model's question
+//! (`desiredFromLatestStatistics` compares with GitHub's jobs; A6). A message at or below the
+//! session's floor must apply nothing, and one A1 does not explain must degrade the session.
 
 use std::collections::BTreeSet;
 
 use mayfly_control_domain::attempt::RunnerRequestId;
 use mayfly_control_domain::demand::{self, EventName, Offer, Statistics, TrustClass, WireMode};
 use mayfly_control_domain::scaleset::{
-    LossCause, MessageItem, Phase, ScaleSetCommand, ScaleSetEvent, ScaleSetState, SessionId,
+    DegradedCause, LossCause, MessageItem, MessageOrigin, Phase, ScaleSetCommand, ScaleSetEvent,
+    ScaleSetState, SessionId,
 };
 use proptest::prelude::*;
 
@@ -147,7 +151,35 @@ fn broken(
     }
     for event in events {
         match event {
+            ScaleSetEvent::MessageRecorded(m) if m.origin != MessageOrigin::Fresh => {
+                let floor = before.session_floor.map(|f| f.0);
+                if floor.is_none_or(|f| m.message_id.0 > f) {
+                    return Some(
+                        "a message above the floor read as from an earlier session".into(),
+                    );
+                }
+                let unchanged = !m.statistics_applied
+                    && m.acquire.is_empty()
+                    && m.released.is_empty()
+                    && m.declined.is_empty()
+                    && m.unknown_types == 0
+                    && after.desired == before.desired
+                    && after.drift == before.drift
+                    && after.reserved() == before.reserved()
+                    && after.statistics == before.statistics;
+                if !unchanged {
+                    return Some("redeliveryAppliesNothing".to_owned());
+                }
+                let live = matches!(before.phase, Phase::Active | Phase::Degraded(_));
+                let flagged = after.phase == Phase::Degraded(DegradedCause::MessageIdsRegressed);
+                if m.origin == MessageOrigin::IdRegressed && live && !flagged {
+                    return Some("a1RefutationIsFlagged".to_owned());
+                }
+            }
             ScaleSetEvent::MessageRecorded(m) => {
+                if before.session_floor.is_some_and(|f| m.message_id <= f) {
+                    return Some("a message at or below the floor applied as fresh".to_owned());
+                }
                 if let Some(stats) = m.statistics {
                     let key = 2 * m.message_id.0;
                     if tracker.latest.is_none_or(|(k, _)| key > k) {
@@ -171,6 +203,9 @@ fn broken(
                     }
                     if after.capacity.mode != WireMode::Open {
                         return Some("ADR 0029: acquired while held".to_owned());
+                    }
+                    if before.phase != Phase::Active {
+                        return Some("P21: planned while degraded or closing".to_owned());
                     }
                 }
             }

@@ -17,9 +17,19 @@ use crate::registration::{JobResult, RunnerId, ScaleSetId};
 /// `tests/scaleset/rules.rs::should_degrade_the_session_when_unknown_types_reach_the_threshold`.
 pub const PROTOCOL_DRIFT_THRESHOLD: u32 = 3;
 
+/// Consecutive creates answered 409 (`LossCause::Conflicted`, A3) after which the scale set
+/// escalates to the operator with `SessionConflictEscalated`: a session mayfly has no record of
+/// is blocking the pool longer than an abandoned one should live. The creates go on backing off
+/// (the session may still end on its own) and mayfly never deletes it. A tuning value the owner
+/// may change; GH-00's capture (item 2: how long an abandoned session blocks a new one) informs
+/// it. Pinned by
+/// `tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict`.
+pub const SESSION_CONFLICT_ESCALATION: u32 = 5;
+
 /// A message's `messageId`. Assumed to increase per scale set, across sessions (A1,
 /// `doc/github-scaleset.md` §12 item 1): the statistics cursor is kept across sessions, so an
-/// older message's statistics never replace newer ones.
+/// older message's statistics never replace newer ones, and a session's floor (the cursor at its
+/// open) tells a message recorded in an earlier session from a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MessageId(pub u64);
@@ -72,6 +82,25 @@ pub enum LossCause {
 pub enum DegradedCause {
     /// Unknown message types reached [`PROTOCOL_DRIFT_THRESHOLD`] (R7).
     ProtocolDrift,
+    /// A message at or below the session's floor that A1 does not explain: GitHub's ids did not
+    /// increase across sessions (A1 refuted, or not delivered oldest first). Nothing it carried
+    /// was applied; the operator decides (`MessageOrigin::IdRegressed`).
+    MessageIdsRegressed,
+}
+
+/// Where a recorded message stands against the session's floor (A1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    /// Above the floor: a message this stream has not recorded; it applies in full.
+    Fresh,
+    /// The stream's last record (its id is the floor), redelivered as the session's first
+    /// message because its ack was lost: recorded so it can be acked, it applies nothing again
+    /// (no statistics, no plan, no release, no drift).
+    Redelivered,
+    /// At or below the floor otherwise: A1 does not explain it, so it applies nothing and the
+    /// session is degraded (`DegradedCause::MessageIdsRegressed`).
+    IdRegressed,
 }
 
 /// The session's phase (plan §7.2): `Unconfigured → Ensured → Opening → Active ⇄ Backoff |
@@ -178,10 +207,19 @@ pub struct ScaleSetState {
     pub stale_session: Option<SessionId>,
     /// The highest message id recorded, in any session (A1).
     pub cursor: Option<MessageId>,
+    /// The cursor when the live session opened: a message at or below it was recorded in an
+    /// earlier session, or A1 does not hold ([`MessageOrigin`]).
+    pub session_floor: Option<MessageId>,
+    /// A message was recorded in the live session.
+    pub session_recorded: bool,
+    /// Creates answered 409 since a session last opened (A3,
+    /// [`SESSION_CONFLICT_ESCALATION`]).
+    pub open_conflicts: u32,
     /// A message's statistics replace the latest ones only when its id is above this one: the
     /// message they came from, or, after a session opened, the cursor at the opening (whose
-    /// statistics are newer than every message recorded before it). `formal/scaleset.qnt`
-    /// orders the same way by its keys.
+    /// statistics are newer than every message recorded before it). A message emitted before
+    /// the open but recorded after it is above it too: no id tells it apart, and its older
+    /// statistics apply until the backlog is consumed (A6, `doc/github-scaleset.md` §12).
     pub statistics_after: Option<MessageId>,
     /// The latest statistics applied: a session's initial ones, or a newer message's.
     pub statistics: Option<Statistics>,
@@ -210,6 +248,9 @@ impl ScaleSetState {
             session: None,
             stale_session: None,
             cursor: None,
+            session_floor: None,
+            session_recorded: false,
+            open_conflicts: 0,
             statistics_after: None,
             statistics: None,
             capacity: Capacity::NONE,
@@ -224,6 +265,29 @@ impl ScaleSetState {
     #[must_use]
     pub fn reserved(&self) -> BTreeSet<RunnerRequestId> {
         self.acquiring.union(&self.acquired).copied().collect()
+    }
+
+    /// Whether offers are planned: only in an active session. A degraded session freezes
+    /// minting (P21) and a closing one ends; both decline offers as held. Pinned by
+    /// `tests/scaleset/rules.rs::should_plan_no_offer_when_the_session_is_degraded_or_closing`.
+    #[must_use]
+    pub const fn plans_offers(&self) -> bool {
+        match self.phase {
+            Phase::Active => true,
+            Phase::Unconfigured
+            | Phase::Ensured
+            | Phase::Opening
+            | Phase::Backoff(_)
+            | Phase::Degraded(_)
+            | Phase::Closing
+            | Phase::Closed => false,
+        }
+    }
+
+    /// Whether repeated 409s on create were escalated to the operator.
+    #[must_use]
+    pub const fn conflict_escalated(&self) -> bool {
+        self.open_conflicts >= SESSION_CONFLICT_ESCALATION
     }
 
     /// The `maxCapacity` to send on the next poll ([`crate::demand::wire_max`]).

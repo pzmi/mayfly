@@ -4,6 +4,7 @@
     "low": 11706234098425720870
   },
   "message_id": 1042,
+  "origin": "fresh",
   "statistics": {
     "total_available_jobs": 120,
     "total_acquired_jobs": 3,
@@ -29,6 +30,10 @@
     {
       "request_id": 14,
       "reason": "tier"
+    },
+    {
+      "request_id": 16,
+      "reason": "unclassifiable"
     },
     {
       "request_id": 15,

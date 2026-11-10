@@ -45,6 +45,7 @@ fn budget(deliverable: u32, assigned: u32) -> Budget {
     Budget {
         tier: TrustTier::Trusted,
         capacity: capacity(deliverable, WireMode::Open),
+        frozen: false,
         assigned: Some(assigned),
         reserved: BTreeSet::new(),
     }
@@ -178,7 +179,10 @@ fn should_decline_untrusted_and_unclassifiable_offers_when_the_pool_is_trusted()
     assert_eq!(classes[9], TrustClass::Unclassifiable);
     assert_eq!(
         decisions,
-        vec![OfferDecision::Decline(DeclineReason::Tier); 2]
+        vec![
+            OfferDecision::Decline(DeclineReason::Tier),
+            OfferDecision::Decline(DeclineReason::Unclassifiable)
+        ]
     );
 }
 
@@ -277,6 +281,24 @@ fn should_acquire_nothing_when_paused_draining_or_in_safe_mode() {
     }
 }
 
+/// P21 and the KER-06 review (LOW6): a degraded or closing session plans no offer, whatever
+/// the budget; the offer is declined as held.
+#[test]
+fn should_acquire_nothing_when_the_session_is_frozen() {
+    // given
+    let mut budget = budget(10, 0);
+    budget.frozen = true;
+    // when
+    let plan = demand::plan_acquire(&budget, &pushes(2));
+    // then
+    assert!(plan.acquire.is_empty());
+    assert!(
+        plan.declined
+            .iter()
+            .all(|d| d.reason == DeclineReason::Held)
+    );
+}
+
 #[test]
 fn should_acquire_nothing_when_no_statistics_were_ever_received() {
     // given
@@ -321,12 +343,14 @@ proptest! {
         assigned in 0u32..6,
         reserved in prop::collection::btree_set(0u64..8, 0..4),
         mode in modes(),
+        frozen in any::<bool>(),
         offers in prop::collection::vec((0u64..8, event_names()), 0..20),
     ) {
         // given
         let budget = Budget {
             tier: TrustTier::Trusted,
             capacity: Capacity { revision: 1, deliverable, reported_max: deliverable, mode },
+            frozen,
             assigned: Some(assigned),
             reserved: reserved.iter().copied().map(RunnerRequestId).collect(),
         };
@@ -342,6 +366,7 @@ proptest! {
             let open = budget.reserved.len() + taken.len();
             prop_assert!(assigned as usize + open <= deliverable as usize, "I23");
             prop_assert_eq!(mode, WireMode::Open, "acquired while held");
+            prop_assert!(!frozen, "acquired while the session is frozen");
         }
         for id in &plan.acquire {
             let trusted = offers

@@ -168,7 +168,8 @@ states are plan §7.2's `Unconfigured → Ensured → Opening → Active ⇄ Bac
   `typeName`, and how long an abandoned session lives before a new create succeeds are
   [unverified: GH-00]. mayfly's assumption until then: 409 on create means "a session exists";
   mayfly deletes the session id it journaled (if any) and retries with backoff, and never
-  steals a session it has no record of.
+  steals a session it has no record of; five 409s in a row are escalated to the operator
+  (`SessionConflictEscalated`), and the retries go on.
 - **Refresh.** On 401 from poll, ack or acquire, the session is refreshed with a PATCH and the
   call retried once; a refresh is skipped when another caller already replaced the expired
   session, so concurrent expiries refresh once [scaleset: session_client.go, GetMessage,
@@ -366,7 +367,10 @@ redelivered and recognised by its inbox key, acked without a write. If it dies b
 nothing was recorded and the redelivery is handled afresh. If it dies holding a session, the next
 start deletes the journaled session, opens a new one, and recomputes demand from that session's
 statistics (plan §7.2 step 5). Acquires are journaled before the call, so a redelivered offer is
-not re-planned past what was already planned (I23).
+not re-planned past what was already planned (I23); a message recorded before the restart and
+redelivered in the new session applies nothing again (section 12, A1), and one emitted before
+the restart but recorded after it applies its older statistics until the backlog is consumed
+(A6).
 
 ## 10. The fake and the contract
 
@@ -396,13 +400,28 @@ The owner's live capture in a disposable organisation answers each; the answer r
 [unverified: GH-00] mark here and becomes a fixture.
 
 Until then the `ScaleSet` aggregate and its model (KER-06, `formal/scaleset.qnt`) take the safe
-side of five of them, each named where it is used: **A1** (item 1) message ids increase per scale
-set across sessions, so the statistics cursor survives a new session and no reservation depends
-on a message being recorded once; **A2** (items 3, 6) the acquire budget counts every open
+side of six of them, each named where it is used: **A1** (item 1) message ids increase per scale
+set across sessions and are redelivered oldest first, so the statistics cursor survives a new
+session, no reservation depends on a message being recorded once, and a message at or below a
+session's floor (the cursor at its open) applies nothing; the only such message A1 explains is
+the stream's last record redelivered as the session's first, and any other degrades the session
+(`message_ids_regressed`) so the operator sees A1 refuted instead of mayfly going on silently
+(a restarted id that happens to equal the floor, as the session's first message, cannot be told
+from that redelivery); **A2** (items 3, 6) the acquire budget counts every open
 reservation on top of `totalAssignedJobs` (it may acquire less, never more); **A3** (item 2) a
-409 on create backs off and mayfly deletes only a session it journaled; **A4** (item 3) acquire
-answers the subset it acquired, and a lost answer leaves the ids pending and counted; **A5**
-(item 5) an offer whose `eventName` is missing or unknown is unclassifiable and declined. If the
+409 on create backs off, mayfly deletes only a session it journaled, and the fifth 409 in a row
+is escalated to the operator (`SessionConflictEscalated`) while the creates go on; **A4** (item 3)
+acquire answers the subset it acquired, and a lost answer leaves the ids pending and counted;
+**A5** (item 5) an offer whose `eventName` is missing or unknown is unclassifiable and declined
+(`unclassifiable`, apart from an untrusted trigger's `tier`); **A6** (items 1, 5) a message's
+statistics are the scale set's when the message was emitted, and a create answers no message id,
+so a message emitted before a session opened but recorded after it (a crash before its record,
+or a backlog queued while no session was live) cannot be told from a newer one: statistics are
+ordered by message id only, and such a message's older statistics replace the opening's until
+the backlog is consumed. That stays within I23, because every acquisition remains a counted
+reservation until a message at least as new releases it (A2), and it converges, because every
+change of the count emits a job event; keeping the opening's statistics instead would never
+converge. If the capture shows that statistics are read at delivery, A6 goes away. If the
 capture refutes one, the model changes first.
 
 1. **Message ids**: where they start (0 or 1), whether they are monotonic and gap-free, whether

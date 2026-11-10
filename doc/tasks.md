@@ -478,6 +478,15 @@ and unclassifiable offers declined), per-scale-set carve-out input with a revisi
 min(deliverable, assigned)` (no standby), initial statistics authoritative, unknown message types
 (R7), the wire behaviour of pause, drain and safe mode; stream `scaleset-<pool>`. Mutants add
 "acquire every offer" (19).
+Note (KER-06F, the KER-06 review): "initial statistics authoritative" holds until the session
+records a message above its floor. No id tells a message emitted before the open from a newer
+one, so its older statistics apply until the backlog is consumed (A6, `doc/github-scaleset.md`
+§12): within I23 by A2, and the model now checks desired against GitHub's own count once the
+stream has seen everything (keeping the opening's statistics never converges, mutant
+`OPEN_WINS`). A message at or below the floor applies nothing; one A1 does not explain degrades
+the session (`message_ids_regressed`); the fifth 409 in a row is escalated
+(`SESSION_CONFLICT_ESCALATION`, owner-tunable); unclassifiable offers are declined
+`unclassifiable`; a degraded or closing session plans no offer.
 
 #### KER-07 Recovery model and decision table
 Cites: plan §10, dm §11.3, ADRs 0025, 0026, 0037. Model first: `formal/recovery.qnt` (crash at every

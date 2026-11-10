@@ -485,15 +485,17 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
 ### 6.1 `ScaleSet` [Demand]
 
 - **Stream:** `scaleset-<pool>` (one scale set per pool, OD14). Lifetime: the pool's; small state.
-- **State:** `phase ∈ {Unconfigured, Ensured, Opening, Active, Backoff{until, cause}, Degraded{cause},
-  Closing, Closed}`; `github_id`; `session_id`; `cursor` (highest recorded message id);
-  `statistics` + `statistics_message_id`; `deliverable` (last capacity input) and `reported_max`;
-  `desired`; `acquired_unbound` (request ids acquired, no `JobStarted` yet); `tier`; highest
-  `run_epoch`.
-- **Commands:** `EnsureScaleSet`, `RecordSessionOpened{session_id, statistics}`,
-  `RecordSessionLoss{expired|conflicted|degraded, cause}`, `RecordMessage{message_id, statistics,
-  offers, acquire_result, job_facts}` (command id = `(session_id, message_id)`), `ApplyCapacity
-  {deliverable, revision}`, `StartClosing`, `RecordClosed`. `PlanAcquire{offers}` is a pure
+- **State:** `phase ∈ {Unconfigured, Ensured, Opening, Active, Backoff{cause}, Degraded{cause},
+  Closing, Closed}`; `github_id`; `session_id` and a journaled `stale_session`; `cursor` (highest
+  recorded message id) and the session's `floor` (the cursor at its open); `statistics` + the id
+  they are ordered by; the capacity input (`deliverable`, `reported_max`, wire mode, revision);
+  `desired`; reservations (`acquiring`: planned, answer not observed; `acquired`: no `JobStarted`
+  or `JobCompleted` yet); `drift`; 409s since the last open; `tier`; highest `run_epoch`.
+- **Commands:** `EnsureScaleSet`, `BeginOpen`, `RecordSessionOpened{session_id, statistics}`,
+  `RecordSessionLoss{cause: expired|conflicted|failed|restarted}`, `RecordSessionDeleted
+  {session_id}`, `RecordMessage{session_id, message_id, statistics, items}` (command id =
+  `(session_id, message_id)`), `RecordAcquireResult{requested, acquired}`, `ApplyCapacity
+  {revision, deliverable, reported_max, mode}`, `RecordSessionRecovered`, `StartClosing`. `PlanAcquire{offers}` is a pure
   function (AcquirePolicy + trust classification) the listener calls *before* `AcquireJobs`.
   *As built (KER-06):* `RecordMessage` runs `PlanAcquire` itself and journals the plan before
   the call (`doc/github-scaleset.md` §6, §9), so a redelivered offer is never planned twice; the
@@ -501,19 +503,29 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `RecordSessionDeleted{session_id}` (only a journaled session) and `RecordSessionRecovered`
   complete the session FSM; `ApplyCapacity` carries the reported max and the pool's wire mode
   (ADR 0029). Unknown types degrade the session at `PROTOCOL_DRIFT_THRESHOLD`. The assumptions on
-  facts GH-00 has not settled (A1–A5) are listed in `formal/scaleset.qnt` and
-  `mayfly_control_domain::demand`.
-- **Events:** `ScaleSetEnsured`, `ScaleSetConflicted`, `SessionOpened`, `SessionExpired`,
-  `SessionConflicted`, `SessionDegraded`, `SessionRecovered`, `MessageRecorded{message_id,
-  statistics_applied: bool, acquired, declined{request_id, reason: no_capacity|tier}, job_facts,
-  desired}`, `ReportedMaxChanged{value, reason}`, `ClosingStarted`, `SessionClosed`.
-  Job facts inside `MessageRecorded` are `JobStarted{request_id, runner_name, runner_id}` and
-  `JobCompleted{request_id, runner_name, result}`; they are facts for policies, not state here.
+  facts GH-00 has not settled (A1–A6) are listed in `formal/scaleset.qnt`,
+  `doc/github-scaleset.md` §12 and `mayfly_control_domain::demand`.
+- **Events** (as built, KER-06 and its review fix KER-06F): `ScaleSetEpochAdvanced`,
+  `ScaleSetEnsured`, `SessionOpenRequested`, `SessionOpened{session_id, statistics, desired}`,
+  `SessionLost{cause: expired|conflicted|failed|restarted, stale_session}`,
+  `SessionConflictEscalated{conflicts}`, `SessionDeleted`, `MessageRecorded{session_id,
+  message_id, origin: fresh|redelivered|id_regressed, statistics, statistics_applied: bool,
+  released, acquire, declined{request_id, reason: no_capacity|tier|unclassifiable|held|
+  already_reserved}, job_facts, unknown_types, desired}`, `AcquireObserved{acquired, released}`,
+  `CapacityApplied{capacity, wire_max, desired}`, `SessionDegraded{cause: protocol_drift|
+  message_ids_regressed}`, `SessionRecovered`, `ClosingStarted`, `SessionClosed`. The design's
+  `SessionExpired`, `SessionConflicted` and `ScaleSetConflicted` are `SessionLost{cause}`, and
+  `ReportedMaxChanged` is `CapacityApplied`. Job facts inside `MessageRecorded` are
+  `JobAssigned{request_id}`, `JobStarted{request_id, runner_id, runner_name}` and
+  `JobCompleted{request_id, result, runner_id}`; they are facts for policies, and release a
+  reservation, nothing more.
 - **Protects alone:** I12 (record before ack: ack is issued by the listener only after this
   command's receipt), I13 for demand (a message applies once; statistics from an older message
   never replace newer: `statistics_applied = false`), I23 (`PlanAcquire` budget =
   `deliverable − assigned`, using the latest statistics plus `acquired_unbound`), I32 (offers whose
-  tier ≠ pool tier are declined, never acquired), `desiredFromLatestStatistics`.
+  tier ≠ pool tier are declined, never acquired), `desiredFromLatestStatistics`; a message from
+  an earlier session applies nothing, and one A1 does not explain degrades the session; a
+  degraded or closing session plans no offer (P21).
 - **Must not protect:** that a slot exists for each desired runner (Fleet), that runners exist
   (Attempt), cross-scale-set sums (I24: capacity policy computes per-scale-set deliverable carve-
   outs and sends them with a revision), token validity (ACL).

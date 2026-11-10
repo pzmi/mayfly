@@ -181,6 +181,44 @@ fn deleted() -> Vec<Step> {
     )
 }
 
+/// Messages 1 and 3 recorded in the first session, then a restart: the second session opens
+/// with the floor at 3.
+fn reopened_at_three() -> Vec<Step> {
+    then(
+        active(),
+        [
+            message(FIRST, 1, assigned(0), vec![]),
+            message(FIRST, 3, assigned(0), vec![]),
+            ScaleSetCommand::RecordSessionLoss {
+                cause: LossCause::Restarted,
+            },
+            ScaleSetCommand::RecordSessionDeleted { session_id: FIRST },
+            ScaleSetCommand::BeginOpen,
+            opened(OTHER),
+        ],
+    )
+}
+
+/// Four creates in a row answered 409, the fifth in flight.
+fn conflicted_four_times() -> Vec<Step> {
+    let conflict = || {
+        [
+            ScaleSetCommand::RecordSessionLoss {
+                cause: LossCause::Conflicted,
+            },
+            ScaleSetCommand::BeginOpen,
+        ]
+    };
+    then(
+        opening(),
+        conflict()
+            .into_iter()
+            .chain(conflict())
+            .chain(conflict())
+            .chain(conflict()),
+    )
+}
+
 fn at_epoch_two() -> Vec<Step> {
     let mut path = active();
     path.push(at(2, capacity(2, 2, 2, WireMode::Open)));
@@ -248,6 +286,8 @@ fn paths() -> Vec<Vec<Step>> {
         degraded(),
         closing(),
         deleted(),
+        reopened_at_three(),
+        conflicted_four_times(),
         at_epoch_two(),
     ]
 }
@@ -282,6 +322,28 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
                 assigned(0),
                 vec![offer(4, EventName::PullRequestTarget)],
             ),
+        ),
+        accepted(
+            "unclassifiable_offer_declined",
+            active(),
+            message(FIRST, 1, assigned(0), vec![offer(5, EventName::Unknown)]),
+        ),
+        accepted(
+            "degraded_session_plans_nothing",
+            degraded(),
+            message(FIRST, 2, assigned(0), vec![offer(6, EventName::Push)]),
+        ),
+        accepted(
+            "message_below_the_floor_degrades_the_session",
+            reopened_at_three(),
+            message(OTHER, 1, assigned(1), vec![offer(7, EventName::Push)]),
+        ),
+        accepted(
+            "fifth_conflict_in_a_row_escalates",
+            conflicted_four_times(),
+            ScaleSetCommand::RecordSessionLoss {
+                cause: LossCause::Conflicted,
+            },
         ),
         accepted(
             "older_message_keeps_statistics",

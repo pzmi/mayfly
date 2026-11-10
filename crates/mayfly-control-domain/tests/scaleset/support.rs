@@ -201,7 +201,8 @@ fn active_then(more: &[ScaleSetCommand]) -> ScaleSetState {
     reach(path)
 }
 
-/// One state per phase, and the overlays: reservations open, a stale session pending.
+/// One state per phase, and the overlays: reservations open, a reopened session with a floor,
+/// a stale session pending.
 pub fn matrix_states() -> Vec<(&'static str, ScaleSetState)> {
     vec![
         ("unconfigured", ScaleSet::initial()),
@@ -218,6 +219,16 @@ pub fn matrix_states() -> Vec<(&'static str, ScaleSetState)> {
         (
             "active_reserved",
             active_then(&[message(FIRST, 1, Some(assigned(0)), vec![push(1), push(2)])]),
+        ),
+        (
+            "active_reopened",
+            active_then(&[
+                message(FIRST, 3, Some(assigned(0)), vec![]),
+                loss(LossCause::Restarted),
+                deleted(FIRST),
+                ScaleSetCommand::BeginOpen,
+                opened(SECOND, assigned(0)),
+            ]),
         ),
         ("backoff_stale", active_then(&[loss(LossCause::Expired)])),
         (
@@ -271,6 +282,14 @@ pub fn stimuli() -> Vec<(&'static str, Step)> {
         (
             "message_second",
             auto(message(SECOND, 9, Some(assigned(1)), vec![push(3)])),
+        ),
+        (
+            "message_second_at_floor",
+            auto(message(SECOND, 3, Some(assigned(1)), vec![push(3)])),
+        ),
+        (
+            "message_second_below_floor",
+            auto(message(SECOND, 1, Some(assigned(1)), vec![push(3)])),
         ),
         ("acquire_answer", auto(result(&[1, 2], &[1]))),
         ("acquire_nothing", auto(result(&[], &[]))),

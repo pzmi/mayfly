@@ -17,8 +17,10 @@
 //! - [`trust`] and [`admits`]: the offer's trust class (ADR 0027) and whether the pool's tier
 //!   takes it (I32).
 //! - [`decide_offer`] and [`plan_acquire`]: `PlanAcquire`. In order: an offer the pool's tier does
-//!   not admit is declined (I32); a request id already reserved is never reserved again; nothing
-//!   is acquired while paused, draining or in safe mode (ADR 0029); otherwise it is acquired only
+//!   not admit is declined (I32: `tier` for an untrusted trigger, `unclassifiable` for one the
+//!   classifier cannot tell, A5); a request id already reserved is never reserved again; nothing
+//!   is acquired while paused, draining or in safe mode (ADR 0029), nor while the session is
+//!   degraded or closing ([`Budget::frozen`], P21); otherwise it is acquired only
 //!   while the assigned jobs plus every open reservation stay below deliverable (I23, mutant 19:
 //!   `tests/demand.rs::should_acquire_only_while_assigned_is_below_deliverable_when_offers_exceed_it`).
 //!
@@ -230,9 +232,15 @@ pub const fn admits(tier: TrustTier, class: TrustClass) -> bool {
 pub enum DeclineReason {
     /// Assigned plus open reservations reached deliverable (I23).
     NoCapacity,
-    /// The pool's tier does not admit it (I32).
+    /// The pool's tier does not admit its trigger (I32).
     Tier,
-    /// The pool is paused, draining or in safe mode (ADR 0029).
+    /// Its trigger is missing or unknown, so it cannot be classified (A5, ADR 0027); declined
+    /// apart from `Tier` so the operator can tell a payload GH-00 has not captured from an
+    /// untrusted trigger. Pinned by
+    /// `tests/demand.rs::should_decline_untrusted_and_unclassifiable_offers_when_the_pool_is_trusted`.
+    Unclassifiable,
+    /// The pool is paused, draining or in safe mode (ADR 0029), or the session is degraded or
+    /// closing ([`Budget::frozen`]).
     Held,
     /// Its request id is reserved already: a redelivery, a second session's copy or a repeat
     /// offer is never reserved twice.
@@ -255,6 +263,8 @@ pub struct Budget {
     pub tier: TrustTier,
     /// The capacity input's mode and deliverable.
     pub capacity: Capacity,
+    /// The session plans nothing: it is degraded (minting frozen, P21) or closing.
+    pub frozen: bool,
     /// The latest statistics' `totalAssignedJobs`; `None` before any statistics: nothing is
     /// acquired blind.
     pub assigned: Option<u32>,
@@ -273,14 +283,21 @@ pub enum OfferDecision {
 }
 
 /// `PlanAcquire` for one offer against `budget` (I32, then no double reservation, then the
-/// mode, then I23). Pure; [`plan_acquire`] folds it over a batch.
+/// mode and the session, then I23). Pure; [`plan_acquire`] folds it over a batch.
 #[must_use]
 pub fn decide_offer(budget: &Budget, offer: &Offer) -> OfferDecision {
-    if !admits(budget.tier, trust(offer)) {
-        return OfferDecision::Decline(DeclineReason::Tier);
+    let class = trust(offer);
+    if !admits(budget.tier, class) {
+        return OfferDecision::Decline(match class {
+            TrustClass::Unclassifiable => DeclineReason::Unclassifiable,
+            TrustClass::Trusted | TrustClass::Untrusted => DeclineReason::Tier,
+        });
     }
     if budget.reserved.contains(&offer.request_id) {
         return OfferDecision::Decline(DeclineReason::AlreadyReserved);
+    }
+    if budget.frozen {
+        return OfferDecision::Decline(DeclineReason::Held);
     }
     match budget.capacity.mode {
         WireMode::Open => {}

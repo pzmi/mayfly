@@ -7,7 +7,8 @@
 use mayfly_control_domain::attempt::RunnerRequestId;
 use mayfly_control_domain::demand::{DeclineReason, EventName, WireMode};
 use mayfly_control_domain::scaleset::{
-    LossCause, MessageItem, PROTOCOL_DRIFT_THRESHOLD, Phase, ScaleSetCommand, ScaleSetEvent,
+    DegradedCause, LossCause, MessageItem, MessageOrigin, PROTOCOL_DRIFT_THRESHOLD, Phase,
+    SESSION_CONFLICT_ESCALATION, ScaleSetCommand, ScaleSetEvent, ScaleSetState,
 };
 
 use super::support::{
@@ -62,7 +63,7 @@ fn should_record_every_message_when_a_session_is_live_in_any_mode() {
 }
 
 /// A1: a message redelivered in a later session has a new receipt key and is recorded again;
-/// its offers are already reserved and are not reserved a second time.
+/// its offers are not reserved a second time.
 #[test]
 fn should_reserve_a_request_once_when_a_message_is_recorded_again_in_a_new_session() {
     // given: message 1 planned 1 and 2 in the first session; its ack was lost; restart
@@ -90,13 +91,119 @@ fn should_reserve_a_request_once_when_a_message_is_recorded_again_in_a_new_sessi
     .expect("recorded again");
     // then
     let m = recorded(&events);
+    assert_eq!(m.origin, MessageOrigin::Redelivered);
     assert!(m.acquire.is_empty());
-    assert!(
-        m.declined
-            .iter()
-            .all(|d| d.reason == DeclineReason::AlreadyReserved)
-    );
     assert_eq!(after.acquiring, ids(&[1, 2]));
+}
+
+/// The state after message 1 (`items`) was recorded in the first session, `between` happened,
+/// and a restart opened the second session with `opening` assigned.
+fn reopened_after(
+    items: Vec<MessageItem>,
+    between: &[ScaleSetCommand],
+    opening: u32,
+) -> ScaleSetState {
+    let mut path = vec![message(FIRST, 1, Some(assigned(0)), items)];
+    path.extend_from_slice(between);
+    path.extend([
+        loss(LossCause::Restarted),
+        deleted(FIRST),
+        ScaleSetCommand::BeginOpen,
+        opened(SECOND, assigned(opening)),
+    ]);
+    reach_from(active(), path)
+}
+
+/// MED5 of the KER-06 review (A1, A4): offer 1 was planned in the first session and its acquire
+/// answer released it (not acquired); the message, its ack lost, is redelivered in the second
+/// session. It is recorded and applies nothing: offer 1 is not planned again for a job the
+/// stream already handled, and its older statistics stay unapplied.
+#[test]
+fn should_apply_nothing_when_a_message_from_an_earlier_session_is_redelivered() {
+    // given
+    let state = reopened_after(vec![push(1)], &[result(&[1], &[])], 1);
+    // when
+    let (after, events) = apply(
+        &state,
+        auto(message(SECOND, 1, Some(assigned(0)), vec![push(1)])),
+    )
+    .expect("recorded");
+    // then
+    let m = recorded(&events);
+    assert_eq!(m.origin, MessageOrigin::Redelivered);
+    assert!(m.acquire.is_empty() && m.declined.is_empty() && !m.statistics_applied);
+    assert_eq!((after.reserved(), after.desired), (ids(&[]), 1));
+    assert_eq!(after.phase, Phase::Active);
+}
+
+/// LOW10 of the KER-06 review: a redelivered message's unknown types were counted when it was
+/// first recorded; they are not counted into the new session's drift again.
+#[test]
+fn should_count_no_drift_again_when_a_redelivered_message_carries_unknown_types() {
+    // given
+    let unknown = vec![MessageItem::Unknown; (PROTOCOL_DRIFT_THRESHOLD - 1) as usize];
+    let state = reopened_after(unknown.clone(), &[], 0);
+    // when
+    let (after, events) =
+        apply(&state, auto(message(SECOND, 1, Some(assigned(0)), unknown))).expect("recorded");
+    // then
+    assert_eq!(recorded(&events).unknown_types, 0);
+    assert_eq!((after.drift, after.phase), (0, Phase::Active));
+}
+
+/// MED2 of the KER-06 review (A1 refuted): the second session's first message has an id below
+/// the cursor the first session left: the ids did not increase across sessions. Nothing it
+/// carries applies (statistics, offers) and the session is degraded for the operator; the next
+/// message at or below the floor keeps it so, never silently continuing.
+#[test]
+fn should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor() {
+    // given: messages 1 and 3 recorded in the first session, so the second's floor is 3
+    let state = reopened_after(vec![], &[message(FIRST, 3, Some(assigned(0)), vec![])], 0);
+    // when
+    let (degraded, events) = apply(
+        &state,
+        auto(message(SECOND, 1, Some(assigned(1)), vec![push(7)])),
+    )
+    .expect("recorded");
+    let (still, later) = apply(
+        &degraded,
+        auto(message(SECOND, 2, Some(assigned(1)), vec![push(8)])),
+    )
+    .expect("recorded");
+    // then
+    let m = recorded(&events);
+    assert_eq!(m.origin, MessageOrigin::IdRegressed);
+    assert!(m.acquire.is_empty() && !m.statistics_applied);
+    assert_eq!(
+        degraded.phase,
+        Phase::Degraded(DegradedCause::MessageIdsRegressed)
+    );
+    assert_eq!((degraded.desired, degraded.reserved()), (0, ids(&[])));
+    assert_eq!(recorded(&later).origin, MessageOrigin::IdRegressed);
+    assert_eq!(still.phase, degraded.phase);
+}
+
+/// A6 (MED1 of the KER-06 review): message 2 was emitted before the restart, when nothing was
+/// assigned, but recorded only after the second session opened with the two acquired jobs
+/// assigned. No id tells it from a newer message, so its older statistics apply; the budget
+/// still counts both acquisitions as reservations (A2), so the offer it carries is declined and
+/// nothing is acquired past deliverable (I23).
+#[test]
+fn should_stay_within_deliverable_when_a_message_emitted_before_the_open_is_recorded_after_it() {
+    // given: 1 and 2 acquired in the first session; deliverable 2
+    let state = reopened_after(vec![push(1), push(2)], &[result(&[1, 2], &[1, 2])], 2);
+    // when
+    let (after, events) = apply(
+        &state,
+        auto(message(SECOND, 2, Some(assigned(0)), vec![push(3)])),
+    )
+    .expect("recorded");
+    // then
+    let m = recorded(&events);
+    assert!(m.statistics_applied);
+    assert_eq!(after.desired, 0);
+    assert!(m.acquire.is_empty());
+    assert_eq!(m.declined[0].reason, DeclineReason::NoCapacity);
 }
 
 /// desiredFromLatestStatistics (A1): an older message's statistics never replace newer ones.
@@ -233,8 +340,74 @@ fn should_decline_untrusted_offers_when_a_message_is_recorded() {
     )
     .expect("ok");
     // then
-    assert_eq!(recorded(&events).acquire, vec![RunnerRequestId(3)]);
+    let m = recorded(&events);
+    assert_eq!(m.acquire, vec![RunnerRequestId(3)]);
+    assert_eq!(
+        m.declined.iter().map(|d| d.reason).collect::<Vec<_>>(),
+        vec![DeclineReason::Tier, DeclineReason::Unclassifiable]
+    );
     assert_eq!(after.reserved(), ids(&[3]));
+}
+
+/// LOW6 of the KER-06 review (P21): a degraded session freezes minting and a closing one ends;
+/// both still record, release and apply statistics, but plan no offer (declined as held).
+#[test]
+fn should_plan_no_offer_when_the_session_is_degraded_or_closing() {
+    // given
+    let degraded = reach_from(
+        active(),
+        [message(
+            FIRST,
+            1,
+            None,
+            vec![MessageItem::Unknown; PROTOCOL_DRIFT_THRESHOLD as usize],
+        )],
+    );
+    let closing = reach_from(active(), [ScaleSetCommand::StartClosing]);
+    for state in [degraded, closing] {
+        // when
+        let (after, events) = apply(
+            &state,
+            auto(message(FIRST, 2, Some(assigned(0)), vec![push(1)])),
+        )
+        .expect("recorded");
+        // then
+        let m = recorded(&events);
+        assert!(m.acquire.is_empty(), "{:?}", state.phase);
+        assert_eq!(m.declined[0].reason, DeclineReason::Held);
+        assert_eq!(after.reserved(), ids(&[]));
+    }
+}
+
+/// MED3 of the KER-06 review (A3): a lost create left a session mayfly has no record of, and
+/// every create answers 409. The `SESSION_CONFLICT_ESCALATION`th in a row is escalated, once;
+/// the creates go on; a session that opens resets the count.
+#[test]
+fn should_escalate_once_when_creates_keep_answering_conflict() {
+    // given
+    let mut state = reach([super::support::ensure(), ScaleSetCommand::BeginOpen]);
+    let mut escalations = Vec::new();
+    // when
+    for _ in 0..=SESSION_CONFLICT_ESCALATION {
+        let (lost, events) = apply(&state, auto(loss(LossCause::Conflicted))).expect("lost");
+        escalations.push(
+            events
+                .iter()
+                .any(|e| matches!(e, ScaleSetEvent::SessionConflictEscalated(_))),
+        );
+        state = reach_from(lost, [ScaleSetCommand::BeginOpen]);
+    }
+    let reopened = reach_from(state.clone(), [opened(FIRST, assigned(0))]);
+    // then
+    let at = (SESSION_CONFLICT_ESCALATION - 1) as usize;
+    assert_eq!(
+        escalations.iter().filter(|e| **e).count(),
+        1,
+        "{escalations:?}"
+    );
+    assert!(escalations[at]);
+    assert!(state.conflict_escalated());
+    assert!(!reopened.conflict_escalated());
 }
 
 /// ADR 0029: pause sends the live runners, drain and safe mode 0; none acquires; the session

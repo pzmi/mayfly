@@ -1,0 +1,24 @@
+{
+  "session_id": {
+    "high": 13030963525406393826,
+    "low": 11706234098425720870
+  },
+  "message_id": 1,
+  "origin": "id_regressed",
+  "statistics": {
+    "total_available_jobs": 2,
+    "total_acquired_jobs": 0,
+    "total_assigned_jobs": 4,
+    "total_running_jobs": 4,
+    "total_registered_runners": 4,
+    "total_busy_runners": 4,
+    "total_idle_runners": 0
+  },
+  "statistics_applied": false,
+  "released": [],
+  "acquire": [],
+  "declined": [],
+  "job_facts": [],
+  "unknown_types": 0,
+  "desired": 4
+}

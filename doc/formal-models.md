@@ -92,7 +92,7 @@ then, a model's task records the one it tried.
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed | KER-09 |
-| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409 (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession` | `step`, `messageStep` | 6 steps each | about 2.5 min for `step`, 1.5 min for `messageStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-06); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation | KER-06 |
+| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted) (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation | KER-06 |
 
 ### Simulation budget
 
@@ -495,39 +495,68 @@ one `pull_request_target`; the first batch holds two offers (`CAP = 2` stands fo
 50), the third waits, so the backlog is truncated.
 
 `poll` answers the oldest unacknowledged message (a recorded one whose ack was lost included);
-`record` is `RecordMessage`: the receipt, the statistics if the message is newer than the latest
-(by key: a message's is `2 * id`, a session open's `2 * (highest id recorded) + 1`), then the
-batch folded in arrival order through `itemStep`, where an offer goes through `offerStep`
-(`demand::decide_offer`: tier, no second reservation, held modes, then the budget
-`assigned + open reservations < deliverable`) and `JobStarted`/`JobCompleted` release a
-reservation; `ack` deletes after the record (a lost ack leaves it queued); `acquireCall` acquires
+`record` is `RecordMessage`: the receipt; a message at or below the session's floor (the cursor
+at its open) applies nothing, and unless it is the stream's last record redelivered as the
+session's first message it degrades the session (A1 refuted); any other message applies its
+statistics if its id is above the cursor, then the batch folded in arrival order through
+`itemStep`, where an offer goes through `offerStep` (`demand::decide_offer`: tier, no second
+reservation, held modes and a degraded session, then the budget `assigned + open reservations <
+deliverable`) and `JobStarted`/`JobCompleted` release a reservation; `ack` deletes after the record (a lost ack leaves it queued); `acquireCall` acquires
 the pending ids still available while open (a lost answer leaves them pending). GitHub's side
 adds `JobAssigned` for each acquisition, starts runners, finishes jobs, requeues an acquired job
 as canceled-then-offered under the same request id (reassignment, the harder case), and sends
-unknown types. Sessions end on their own (`sessionEnds`: an expired token, or an abandoned
-session timing out), are lost by the listener (`sessionLoss`) or a restart, deleted only when
-journaled (`deleteStale`), and re-opened (`openSession`: a 409 while another lives, else the new
-session's initial statistics recompute desired); `openLost` leaves a session mayfly has no
-record of. `applyCapacity` is `ApplyCapacity` with a mode: open, paused, draining or safe;
+unknown types, and once (`idsRestart`, A1 refuted) numbers a later session's batch from 1 again.
+Sessions end on their own (`sessionEnds`: an expired token, or an abandoned session timing
+out), are lost by the listener (`sessionLoss`) or a restart, deleted only when journaled
+(`deleteStale`), and re-opened (`openSession`: a 409 while another lives, counted and escalated
+at `CONFLICT_LIMIT` in a row, else the new session's initial statistics recompute desired and
+the cursor becomes its floor); `openLost` leaves a session mayfly has no record of. `applyCapacity` is `ApplyCapacity` with a mode: open, paused, draining or safe;
 `journalToggles` makes the journal unwritable, which stops polling. `step` offers every stimulus;
 `messageStep` is the biased relation without session churn, capacity changes or outages, so a
 walk goes deep into redelivery, lost acks and acquire answers, truncation and reassignment.
 
-The model states the safe side of five facts `doc/github-scaleset.md` §12 leaves to GH-00, named
-A1–A5 in its header and in `mayfly_control_domain::demand`: ids increase per scale set across
-sessions and a message may be redelivered in a later session (A1); a message's statistics may not
-count mayfly's latest acquisitions, so the budget counts every open reservation on top (A2); a
-409 on create backs off and only a journaled session is deleted (A3); acquire answers a subset and
-a lost answer leaves its ids pending (A4); an unclassifiable offer is declined (A5).
+The model states the safe side of six facts `doc/github-scaleset.md` §12 leaves to GH-00, named
+A1–A6 in its header: ids increase per scale set across sessions and a message may be redelivered
+in a later session, oldest first; a message at or below a session's floor applies nothing, and
+one A1 does not explain degrades the session (A1); a message's statistics may not count mayfly's
+latest acquisitions, so the budget counts every open reservation on top (A2); a 409 on create
+backs off, persistent 409s are escalated, and only a journaled session is deleted (A3); acquire
+answers a subset and a lost answer leaves its ids pending (A4); an unclassifiable offer is
+declined (A5); a message emitted before an open and recorded after it cannot be told from a newer
+one, so statistics are ordered by message id only and such a message's older statistics apply
+until the backlog is consumed (A6).
 
-Simulation found nothing in the model itself. Two negative controls tried in simulation: `record`
-as mutant 19 (acquire every offer) makes `messageStep` report a violation at once; resetting the
+`desiredFromLatestStatistics` reads "latest" from GitHub, not from the stream: desired is
+`min(deliverable, totalAssignedJobs)` of the applied statistics, and those are GitHub's own count
+(`statsOf(jobs)`) whenever the stream has seen everything GitHub emitted (`quiescent`: no job
+event waits for a message, every emitted message is recorded). KER-06's version compared the
+stream with a ghost keyed by the ids the stream itself had recorded, so it could not see a
+message emitted before an open and recorded after it (the KER-06 review's MED1). The
+deterministic `crashBeforeRecordThenReopenConvergesTest` walks that path: the older statistics
+apply, I23 holds because the acquisitions are still reservations (A2), and once the backlog is
+recorded desired is GitHub's count again. The alternative the review suggested, keeping the
+opening's statistics until a message is known to be newer, is the model-local mutant `OPEN_WINS`:
+nothing in a message or a create answer tells mayfly where the backlog ends, so it never
+converges after a change at GitHub (`mutantOpenWinsNeverConvergesTest`); simulation does not
+reach that state (quiescence after a change is rare in a random walk), the deterministic test
+does.
+
+Simulation found nothing in the model itself. Negative controls tried in simulation: `record` as
+mutant 19 (acquire every offer) makes `messageStep` report a violation at once; resetting the
 statistics cursor at each session open (a per-session cursor, the alternative to A1) makes
-`step` report `desiredFromLatestStatistics`, because a message redelivered in a new session then
-replaces the opening's newer statistics with its older ones. The Rust property test then found
-that an envelope without statistics must not move the statistics' floor
+`step` report `desiredFromLatestStatistics`; `record` as the model-local mutant `REAPPLY` (KER-06's
+rule: a redelivered message folded like a new one) makes `step` report a violation within 3000
+samples. The Rust property test then found that an envelope without statistics must not move the
+statistics' floor
 (`should_apply_statistics_when_only_a_newer_message_without_statistics_was_recorded`); the model's
 messages all carry statistics, so the aggregate keeps the floor apart from the cursor.
+
+Coverage of the bounded run: both relations start from `init`, an Active session whose first
+message is queued, not from `Ensured`. At 6 steps `step` reaches the crash before a record and
+the reopen that records it (poll, restart, delete, open, poll, record) and the 409 escalation
+(restart, delete, lost create, two 409s), but not a redelivery after a lost ack in a new session
+(8 steps) nor the A1 refutation (9); `messageStep` has no session churn at all. Those paths are
+covered by the deterministic tests above and by simulation (50 steps), not by Apalache's bound.
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
@@ -535,8 +564,11 @@ messages all carry statistics, so the aggregate keeps the floor apart from the c
 | `noDoubleReservationPerRequest` | a request id is reserved at most once, whatever redelivery in a later session, a repeat offer or a reassignment shows | `tests/scaleset/rules.rs::should_reserve_a_request_once_when_a_message_is_recorded_again_in_a_new_session`, `should_reserve_a_requeued_job_once_when_its_completion_precedes_the_offer`; `tests/demand.rs::should_never_reserve_a_request_twice_when_it_is_offered_again` |
 | `i23AcquireBelowDeliverable` | I23: acquisition only while assigned < deliverable, checked against GitHub's own count at the plan | `tests/demand.rs::should_acquire_only_while_assigned_is_below_deliverable_when_offers_exceed_it` (mutant 19), `tests/scaleset/rules.rs::should_acquire_only_while_assigned_is_below_deliverable_when_a_batch_exceeds_it` |
 | `i32TrustedOnly` | I32: only offers the pool's tier admits are reserved | `tests/demand.rs::should_decline_untrusted_and_unclassifiable_offers_when_the_pool_is_trusted`, `tests/scaleset/rules.rs::should_decline_untrusted_offers_when_a_message_is_recorded` |
-| `desiredFromLatestStatistics` | desired = min(deliverable, `totalAssignedJobs`) of the newest statistics: never a count of messages, never plus running jobs, never an older message's | `tests/demand.rs::should_take_demand_from_statistics_when_a_batch_shows_fewer_jobs_than_assigned` (mutant 5), `should_not_add_running_jobs_when_desired_is_computed` (mutant 6); `tests/scaleset/rules.rs::should_keep_newer_statistics_when_an_older_message_is_recorded`, `should_recompute_desired_from_initial_statistics_when_a_session_opens` |
-| `i07WireWithinDeliverable`, `heldAcquiresNothing` | I07 and ADR 0029: the wire max never exceeds deliverable and is 0 while draining or in safe mode; nothing is acquired while paused, draining or in safe mode; no poll while the journal is unwritable | `tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`, `should_acquire_nothing_when_paused_draining_or_in_safe_mode`; `tests/scaleset/rules.rs::should_acquire_nothing_and_send_the_mode_wire_max_when_held` |
+| `desiredFromLatestStatistics` | desired = min(deliverable, `totalAssignedJobs`) of the applied statistics (never a count of messages, never plus running jobs), and the applied statistics are GitHub's own once the stream has seen everything GitHub emitted (A6) | `tests/demand.rs::should_take_demand_from_statistics_when_a_batch_shows_fewer_jobs_than_assigned` (mutant 5), `should_not_add_running_jobs_when_desired_is_computed` (mutant 6); `tests/scaleset/rules.rs::should_keep_newer_statistics_when_an_older_message_is_recorded`, `should_recompute_desired_from_initial_statistics_when_a_session_opens`, `should_stay_within_deliverable_when_a_message_emitted_before_the_open_is_recorded_after_it`; the model (`OPEN_WINS`) |
+| `redeliveryAppliesNothing` | A1: a message recorded in an earlier session and redelivered applies nothing again (no statistics, plan, release or drift) | `tests/scaleset/rules.rs::should_apply_nothing_when_a_message_from_an_earlier_session_is_redelivered`, `should_count_no_drift_again_when_a_redelivered_message_carries_unknown_types`; the model (`REAPPLY`) |
+| `a1RefutationIsFlagged` | a message emitted anew under an id at or below the session's floor is never dropped silently: the session is degraded (except a restarted id equal to the floor as the session's first message, which reads as the redelivery) | `tests/scaleset/rules.rs::should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor` |
+| `persistentConflictsAreFlagged` | A3: `CONFLICT_LIMIT` creates in a row answered 409 are escalated to the operator | `tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict` |
+| `i07WireWithinDeliverable`, `heldAcquiresNothing` | I07 and ADR 0029: the wire max never exceeds deliverable and is 0 while draining or in safe mode; nothing is planned or acquired while paused, draining or in safe mode, nor planned while the session is degraded (P21); no poll while the journal is unwritable | `tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`, `should_acquire_nothing_when_paused_draining_or_in_safe_mode`, `should_acquire_nothing_when_the_session_is_frozen`; `tests/scaleset/rules.rs::should_acquire_nothing_and_send_the_mode_wire_max_when_held`, `should_plan_no_offer_when_the_session_is_degraded_or_closing` |
 | `messageAppliesOnce` | I13 for demand: a message applies once per receipt | the model (mutant 7); the receipt store's inbox dedupe (ES-01) |
 | `acquireUnknownLeavesOnlyOnObservation` | a pending acquisition leaves only on an acquire answer or a job fact | `tests/scaleset/rules.rs::should_keep_acquisitions_pending_when_no_observation_names_them` |
 | `neverStealsASession` | A3: only a journaled session is deleted | `tests/scaleset/rules.rs::should_refuse_to_delete_a_session_when_mayfly_holds_no_record_of_it`, `should_refuse_a_create_when_a_journaled_session_is_not_deleted` |
@@ -547,7 +579,10 @@ random command sequences (`tests/scaleset/properties.rs`).
 Tests (`quint test`, all deterministic): `acquireWithinDeliverableTest`,
 `declinedPastDeliverableAndTierTest`, `truncatedBacklogDemandFromStatisticsTest`,
 `redeliveryAfterLostAckIsDuplicateTest`, `redeliveryInNewSessionReservesOnceTest`,
-`sessionConflictBacksOffTest`, `sessionExpiryReopensWithInitialStatisticsTest`,
+`crashBeforeRecordThenReopenConvergesTest`, `changeAfterOpenReachesDesiredTest`,
+`redeliveryCountsNoDriftTwiceTest`, `a1RefutedDegradesTheSessionTest`,
+`a1RefutedAtTheFloorReadsAsARedeliveryTest`, `persistentConflictsEscalateTest`,
+`degradedSessionPlansNothingTest`, `sessionConflictBacksOffTest`, `sessionExpiryReopensWithInitialStatisticsTest`,
 `unknownTypesDegradeTheSessionTest`, `drainSendsZeroAndAcquiresNothingTest`,
 `pauseSendsRunnersAndAcquiresNothingTest`, `safeModeRecordsButNeverAcquiresTest`,
 `requeuedJobIsReservedOnceAgainTest`, `lostAcquireAnswerStaysPendingTest`, and the curated
@@ -555,7 +590,10 @@ mutants of verification §9, each an action or a `recordWith` variant kept out o
 relation: `mutant4AckBeforeRecordViolatesTest` (`i12RecordBeforeAck`),
 `mutant5CountMessagesViolatesTest` and `mutant6AddRunningViolatesTest`
 (`desiredFromLatestStatistics`), `mutant7IgnoreInboxViolatesTest` (`messageAppliesOnce`) and
-`mutant19AcquireEveryViolatesTest` (`i23AcquireBelowDeliverable`, then `i32TrustedOnly`).
+`mutant19AcquireEveryViolatesTest` (`i23AcquireBelowDeliverable`, then `i32TrustedOnly`); and
+two model-local mutants of the KER-06 review: `mutantOpenWinsNeverConvergesTest`
+(`desiredFromLatestStatistics`) and `mutantReapplyCountsDriftTwiceTest`
+(`redeliveryAppliesNothing`).
 
 ## Promoting a counterexample
 

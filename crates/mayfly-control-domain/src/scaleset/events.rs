@@ -5,7 +5,7 @@
 use mayfly_domain::{Epoch, PoolName};
 use serde::{Deserialize, Serialize};
 
-use super::state::{DegradedCause, JobFact, LossCause, MessageId, SessionId};
+use super::state::{DegradedCause, JobFact, LossCause, MessageId, MessageOrigin, SessionId};
 use crate::attempt::RunnerRequestId;
 use crate::demand::{Capacity, Declined, Statistics};
 use crate::event::DomainEvent;
@@ -44,13 +44,13 @@ impl DomainEvent for ScaleSetEnsured {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// A session create is about to be sent.
+/// A session create was decided and is about to be sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct SessionOpening {}
+pub struct SessionOpenRequested {}
 
-impl DomainEvent for SessionOpening {
-    const EVENT_TYPE: &'static str = "session_opening";
+impl DomainEvent for SessionOpenRequested {
+    const EVENT_TYPE: &'static str = "session_open_requested";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -87,6 +87,21 @@ impl DomainEvent for SessionLost {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// Creates answered 409 [`super::SESSION_CONFLICT_ESCALATION`] times in a row since a session
+/// last opened: a session mayfly has no record of blocks the pool. Loud for the operator; the
+/// creates go on backing off and the session is never deleted (A3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionConflictEscalated {
+    /// The 409s in a row so far.
+    pub conflicts: u32,
+}
+
+impl DomainEvent for SessionConflictEscalated {
+    const EVENT_TYPE: &'static str = "session_conflict_escalated";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// A journaled stale session was deleted (204, or 404: it had ended).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -102,7 +117,9 @@ impl DomainEvent for SessionDeleted {
 
 /// One polled message, in one unit: the statistics (applied only when newer than every message
 /// recorded, A1), the acquire plan (journaled before the call), the declined offers, the job
-/// facts, the unknown types counted and the new desired count (plan §7.2 step 3).
+/// facts, the unknown types counted and the new desired count (plan §7.2 step 3). A message
+/// that is not [`MessageOrigin::Fresh`] is recorded so it can be acked and applies nothing: its
+/// lists are empty, its unknown types 0 and desired unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MessageRecorded {
@@ -110,6 +127,8 @@ pub struct MessageRecorded {
     pub session_id: SessionId,
     /// Its id.
     pub message_id: MessageId,
+    /// Where it stands against the session's floor (A1).
+    pub origin: MessageOrigin,
     /// Its statistics, when the envelope carried them.
     pub statistics: Option<Statistics>,
     /// Whether they replaced the latest ones (false for an older message's).
@@ -220,12 +239,14 @@ event_set! {
         ScaleSetEpochAdvanced(ScaleSetEpochAdvanced),
         /// See [`ScaleSetEnsured`].
         ScaleSetEnsured(ScaleSetEnsured),
-        /// See [`SessionOpening`].
-        SessionOpening(SessionOpening),
+        /// See [`SessionOpenRequested`].
+        SessionOpenRequested(SessionOpenRequested),
         /// See [`SessionOpened`].
         SessionOpened(SessionOpened),
         /// See [`SessionLost`].
         SessionLost(SessionLost),
+        /// See [`SessionConflictEscalated`].
+        SessionConflictEscalated(SessionConflictEscalated),
         /// See [`SessionDeleted`].
         SessionDeleted(SessionDeleted),
         /// See [`MessageRecorded`].

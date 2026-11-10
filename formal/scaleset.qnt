@@ -9,7 +9,7 @@
  *
  * The world is GitHub: each job's status (`jobs`), job events not yet in a message (`buffer`),
  * the messages it emitted (`msgs`, ids increasing), the unacknowledged ones (`queue`, redelivered
- * until deleted) and the live session (`ghSession`). The journal is the stream's state (`ss`) and
+ * until deleted), the live session (`ghSession`) and whether its ids restarted (`idsRestarted`). The journal is the stream's state (`ss`) and
  * the listener's inbox receipts (`inbox`, keyed `(session, message)`). The listener holds at
  * most one message (`inHand`).
  *
@@ -17,9 +17,15 @@
  * safe side:
  *
  * - A1 (§12 item 1): message ids increase per scale set, across sessions; a message is
- *   redelivered until acked, also in a later session. So the statistics cursor persists across
- *   sessions, and dedupe by `(session, message)` receipt alone may record a message twice in
- *   two sessions: no reservation may depend on a message being recorded once.
+ *   redelivered until acked, also in a later session, oldest first. So the statistics cursor
+ *   persists across sessions, and dedupe by `(session, message)` receipt alone may record a
+ *   message twice in two sessions. A session keeps the cursor at its open as its floor: a message
+ *   at or below the floor was recorded in an earlier session and applies nothing (no statistics,
+ *   no plan, no release, no drift); only the stream's last record, redelivered as the session's
+ *   first, is explained by A1. Any other message at or below the floor refutes A1 (ids restarted
+ *   or went back): the session is degraded for the operator, never silently continued
+ *   (`idsRestart` is that world; `a1RefutationIsFlagged`). One case cannot be told apart: a
+ *   restarted id that equals the floor, as the session's first message, reads as the redelivery.
  * - A2 (§12 items 3, 6): a message's statistics may or may not count the jobs mayfly acquired
  *   since. The acquire budget counts every unbound reservation on top of `totalAssignedJobs`,
  *   so it may count a job twice (acquire less), never once too few (acquire more).
@@ -30,10 +36,19 @@
  *   answer or a job fact names them.
  * - A5 (§12 item 5): an offer whose `eventName` is missing or unknown is unclassifiable and
  *   declined like an untrusted one (`TRUST` gives each job its class).
+ * - A6 (§12 items 1, 5): a message's statistics are GitHub's when it was emitted, and a session's
+ *   create answers no message id, so a message emitted before an open but recorded after it (a
+ *   crash before its record, or a backlog queued while no session was live) cannot be told from
+ *   one emitted after it. Statistics are ordered by message id only, and such a message's older
+ *   statistics replace the opening's until the backlog is consumed. That is safe for I23 (every
+ *   acquisition stays a reservation until a message at least as new releases it, A2) and
+ *   converges: every change of GitHub's count emits a job event, so once every message is
+ *   recorded the statistics are GitHub's own (`desiredFromLatestStatistics`). Keeping the
+ *   opening's statistics instead (mutant `OPEN_WINS`) never converges.
  *
  * Every message here carries statistics. The Rust aggregate also takes an envelope without
  * them; it keeps the statistics' floor (`statistics_after`) apart from the cursor so that such a
- * message orders statistics exactly as this model's keys do.
+ * message orders statistics exactly as this model's cursor does.
  *
  * `CAP = 2` stands for the service's 50 messages per batch: a backlog larger than a batch is
  * truncated, which is why demand never counts job messages. Ghost state (`g`) records history
@@ -55,6 +70,8 @@ module scaleset {
   pure val CAP = 2
   /// Unknown message types per session before it is `Degraded{protocol_drift}`.
   pure val DRIFT_THRESHOLD = 2
+  /// Consecutive 409s on create before the scale set escalates them to the operator (A3).
+  pure val CONFLICT_LIMIT = 2
   pure val DELIVERABLES = 0.to(2)
   pure val NONE = 0
 
@@ -97,6 +114,10 @@ module scaleset {
   pure val ACQUIRE_EVERY = "acquireEvery"
   /// Mutant 7: the inbox receipt is ignored, a redelivery applies again.
   pure val IGNORE_INBOX = "ignoreInbox"
+  /// Model-local: a message from before the session is folded like a new one (KER-06's rule).
+  pure val REAPPLY = "reapply"
+  /// Model-local: a message's statistics never replace the session's opening ones.
+  pure val OPEN_WINS = "openWins"
 
   // ---- state --------------------------------------------------------------------------------
 
@@ -113,6 +134,13 @@ module scaleset {
     stale: int,
     // the highest message id recorded, in any session (A1): the statistics' cursor
     cursor: int,
+    // the cursor when the live session opened: a message at or below it is from before (A1)
+    floor: int,
+    // a message was recorded in the live session
+    sessionRecorded: bool,
+    // 409s on create since the last session opened, and whether they were escalated (A3)
+    conflicts: int,
+    conflictAlert: bool,
     // the latest statistics applied
     stats: Stats,
     deliverable: int,
@@ -142,11 +170,15 @@ module scaleset {
     polledUnwritable: bool,
     // a session was ever opened (desired is defined from then on)
     opened: bool,
-    // the newest statistics recorded: a message's key is 2 * id, a session open's is
-    // 2 * (highest id recorded before it) + 1 (A1)
-    latest: Stats,
-    latestKey: int,
     recordedIds: Set[int],
+    // the ids GitHub reused (A1 refuted) whose new message is not recorded yet
+    reusedUnrecorded: Set[int],
+    // a message GitHub emitted anew was dropped with no flag for the operator
+    silentlyDropped: bool,
+    // a message already recorded in an earlier session changed the stream again
+    reappliedEarlier: bool,
+    // 409s answered to creates since the last successful one (GitHub's side)
+    consecutive409: int,
     applied: Set[(int, int)],
     // the last poll's maxCapacity, and what it was sent under
     sentMax: int,
@@ -160,6 +192,8 @@ module scaleset {
   var nextMsg: int
   var queue: Set[int]
   var ghSession: int
+  /// GitHub numbered a later session's messages from 1 again (A1 refuted; at most once here)
+  var idsRestarted: bool
   var nextSession: int
   var journalWritable: bool
   var inHand: int
@@ -210,20 +244,24 @@ module scaleset {
     held: bool,
   }
 
+  /// Whether offers may be planned: the pool is open and the session active (a degraded session
+  /// freezes minting, P21; `demand::Budget::frozen`).
+  pure def planning(s: SS): bool = s.mode == OPEN and s.phase == ACTIVE
+
   /// `demand::decide_offer` (`PlanAcquire` for one offer): I32 first (only the pool's tier),
   /// then no second reservation of a request id, then nothing while held (pause, drain, safe
-  /// mode), then I23: acquire only while assigned plus every unbound reservation (A2) is below
+  /// mode, a degraded session), then I23: acquire only while assigned plus every unbound reservation (A2) is below
   /// deliverable.
   pure def offerStep(s: SS, assigned: int, how: str, a: Acc, r: int): Acc = {
     val reserved = a.acquiring.union(a.acquired)
     val take = { ...a, acquiring: a.acquiring.union(Set(r)), take: a.take.union(Set(r)),
       dup: a.dup or reserved.contains(r), untrusted: a.untrusted or TRUST.get(r) != TRUSTED,
-      held: a.held or s.mode != OPEN }
+      held: a.held or not(planning(s)) }
     val decline = { ...a, declined: a.declined.union(Set(r)) }
     if (how == ACQUIRE_EVERY) take
     else if (TRUST.get(r) != TRUSTED) decline
     else if (reserved.contains(r)) a
-    else if (s.mode != OPEN) decline
+    else if (not(planning(s))) decline
     else if (assigned + reserved.size() < s.deliverable) take
     else decline
   }
@@ -254,6 +292,7 @@ module scaleset {
   action keepWorld = all {
     jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
     ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+    idsRestarted' = idsRestarted,
   }
 
   action keepListener = all { inHand' = inHand, inHandRecorded' = inHandRecorded }
@@ -264,6 +303,7 @@ module scaleset {
   action world(j: int -> str, b: List[Item], gs: int, ns: int): bool = all {
     jobs' = j, buffer' = b, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
     ghSession' = gs, nextSession' = ns, journalWritable' = journalWritable,
+    idsRestarted' = idsRestarted,
     keepListener, keepJournal,
     g' = ghostAfter(g, "world", ss, ss),
   }
@@ -284,20 +324,23 @@ module scaleset {
       nextMsg' = 2,
       queue' = Set(1),
       ghSession' = 1,
+      idsRestarted' = false,
       nextSession' = 2,
       journalWritable' = true,
       inHand' = NONE,
       inHandRecorded' = false,
       ss' = {
-        phase: ACTIVE, session: 1, stale: NONE, cursor: NONE, stats: stats0, deliverable: 2,
-        reportedMax: 2, mode: OPEN, desired: 0, acquiring: Set(), acquired: Set(), drift: 0,
+        phase: ACTIVE, session: 1, stale: NONE, cursor: NONE, floor: NONE, sessionRecorded: false,
+        conflicts: 0, conflictAlert: false, stats: stats0, deliverable: 2, reportedMax: 2,
+        mode: OPEN, desired: 0, acquiring: Set(), acquired: Set(), drift: 0,
       },
       inbox' = Set(),
       g' = {
         lastKind: "init", pendingLeftBy: "", ackedUnrecorded: false, doubleReserved: false,
         overAcquired: false, untrustedReserved: false, acquiredWhileHeld: false,
         stoleSession: false, appliedTwice: false, polledUnwritable: false, opened: true,
-        latest: stats0, latestKey: 1, recordedIds: Set(), applied: Set(), sentMax: 0,
+        recordedIds: Set(), reusedUnrecorded: Set(), silentlyDropped: false,
+        reappliedEarlier: false, consecutive409: 0, applied: Set(), sentMax: 0,
         sentDeliverable: 0, sentMode: OPEN,
       },
     }
@@ -317,6 +360,7 @@ module scaleset {
       nextMsg' = nextMsg + 1,
       queue' = queue.union(Set(nextMsg)),
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
       keepListener, keepJournal,
       g' = ghostAfter(g, "world", ss, ss),
     }
@@ -349,6 +393,32 @@ module scaleset {
     world(jobs, buffer.append({ kind: UNKNOWN_TYPE, req: NONE }), ghSession, nextSession),
   }
 
+  /// A1 refuted: a later session numbers its messages from 1 again, so GitHub emits the next
+  /// batch under an id the stream recorded already (once, to keep the state small).
+  action idsRestart = {
+    val n = minOf(CAP, buffer.length())
+    all {
+      buffer.length() > 0,
+      ghSession >= 2,
+      ss.cursor >= 1,
+      not(idsRestarted),
+      not(queue.contains(1)),
+      // id 1 is used (the stream recorded past it); a receipt `(session, 1)` would hide the new
+      // message from the aggregate altogether, a case this model leaves out
+      not(inbox.contains((ghSession, 1))),
+      jobs' = jobs,
+      buffer' = buffer.slice(n, buffer.length()),
+      msgs' = msgs.set(1, { items: buffer.slice(0, n), stats: statsOf(jobs) }),
+      nextMsg' = nextMsg,
+      queue' = queue.union(Set(1)),
+      ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = true,
+      keepListener, keepJournal,
+      g' = { ...ghostAfter(g, "world", ss, ss),
+        reusedUnrecorded: g.reusedUnrecorded.union(Set(1)) },
+    }
+  }
+
   /// The live session ends at GitHub: its token expired, or an abandoned session timed out (A3).
   action sessionEnds = all {
     ghSession != NONE,
@@ -358,7 +428,7 @@ module scaleset {
   /// The journal becomes unwritable (safe mode with an unwritable journal), or writable again.
   action journalToggles = all {
     jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
-    ghSession' = ghSession, nextSession' = nextSession,
+    ghSession' = ghSession, nextSession' = nextSession, idsRestarted' = idsRestarted,
     journalWritable' = not(journalWritable),
     keepListener, keepJournal,
     g' = ghostAfter(g, "world", ss, ss),
@@ -368,31 +438,35 @@ module scaleset {
 
   /// Create a session (`BeginOpen`, then the answer). With no live session GitHub answers one,
   /// and `RecordSessionOpened{statistics}` recomputes desired from its initial statistics (plan
-  /// §7.2 step 5). With one alive, 409 (A3): `RecordSessionLoss{conflicted}`, still in Backoff.
+  /// §7.2 step 5); the cursor becomes the session's floor. With one alive, 409 (A3):
+  /// `RecordSessionLoss{conflicted}`, still in Backoff; the `CONFLICT_LIMIT`th in a row is
+  /// escalated to the operator (`SessionConflictEscalated`) and the creates go on backing off.
   action openSession = {
     val stats0 = statsOf(jobs)
-    val key = 2 * maxOf(g.recordedIds) + 1
     val opened = { ...ss, phase: ACTIVE, session: nextSession, stats: stats0, drift: 0,
-      desired: minOf(ss.deliverable, stats0.assigned) }
+      desired: minOf(ss.deliverable, stats0.assigned), floor: ss.cursor, sessionRecorded: false,
+      conflicts: 0, conflictAlert: false }
+    val conflicted = { ...ss, phase: BACKOFF, conflicts: ss.conflicts + 1,
+      conflictAlert: ss.conflictAlert or ss.conflicts + 1 >= CONFLICT_LIMIT }
     all {
       journalWritable,
       ss.phase == ENSURED or ss.phase == BACKOFF,
       ss.stale == NONE,
       nextSession <= MAX_SESSION,
       jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
-      journalWritable' = journalWritable,
+      journalWritable' = journalWritable, idsRestarted' = idsRestarted,
       keepListener,
       inbox' = inbox,
       if (ghSession == NONE) all {
         ghSession' = nextSession,
         nextSession' = nextSession + 1,
         ss' = opened,
-        g' = { ...ghostAfter(g, "observation", ss, opened), opened: true, latest: stats0, latestKey: key },
+        g' = { ...ghostAfter(g, "observation", ss, opened), opened: true, consecutive409: 0 },
       } else all {
         ghSession' = ghSession,
         nextSession' = nextSession,
-        ss' = { ...ss, phase: BACKOFF },
-        g' = ghostAfter(g, "observation", ss, { ...ss, phase: BACKOFF }),
+        ss' = conflicted,
+        g' = { ...ghostAfter(g, "observation", ss, conflicted), consecutive409: g.consecutive409 + 1 },
       },
     }
   }
@@ -417,7 +491,7 @@ module scaleset {
       journalWritable,
       s != NONE,
       jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
-      nextSession' = nextSession, journalWritable' = journalWritable,
+      nextSession' = nextSession, journalWritable' = journalWritable, idsRestarted' = idsRestarted,
       ghSession' = ghAfter,
       keepListener,
       ss' = { ...ss, stale: NONE },
@@ -489,30 +563,42 @@ module scaleset {
       polledUnwritable: g.polledUnwritable or not(journalWritable) },
   }
 
-  /// `RecordMessage{session, message, statistics, items}`, in one unit: the inbox receipt, the
-  /// statistics if newer than the cursor (A1), job facts, the acquire plan (planned ids become
-  /// `acquiring`, journaled before the call) and declined offers, unknown types, desired. A
-  /// receipt that exists already is a `DuplicateMessage`: nothing more is written.
+  /// `RecordMessage{session, message, statistics, items}`, in one unit: the inbox receipt; a
+  /// message at or below the session's floor is from before the session (A1) and applies
+  /// nothing, and unless it is the stream's last record redelivered first, it degrades the
+  /// session (A1 refuted); any other message applies its statistics if newer than the cursor
+  /// (A1, A6), then job facts, the acquire plan (planned ids become `acquiring`, journaled before
+  /// the call) and declined offers, unknown types, desired. A receipt that exists already is a
+  /// `DuplicateMessage`: nothing more is written.
   action recordWith(how: str): bool = {
     val key = (ss.session, inHand)
     val m = msgs.get(inHand)
     val duplicate = inbox.contains(key) and how != IGNORE_INBOX
-    val newer = inHand > ss.cursor
+    val earlier = inHand <= ss.floor and how != REAPPLY
+    val explained = inHand == ss.floor and not(ss.sessionRecorded)
+    val regressed = earlier and not(explained)
+    val newer = not(earlier) and inHand > ss.cursor and how != OPEN_WINS
     val stats = if (newer) m.stats else ss.stats
-    val acc = m.items.foldl(initAcc(ss), (a, it) => itemStep(ss, stats.assigned, how, a, it))
+    val folded = m.items.foldl(initAcc(ss), (a, it) => itemStep(ss, stats.assigned, how, a, it))
+    val acc = if (earlier) initAcc(ss) else folded
     val drift = ss.drift + acc.unknown
+    val degrades = ss.phase == ACTIVE and (drift >= DRIFT_THRESHOLD or regressed)
     val after = {
       ...ss,
-      cursor: if (newer) inHand else ss.cursor,
+      cursor: if (inHand > ss.cursor) inHand else ss.cursor,
       stats: stats,
       acquiring: acc.acquiring,
       acquired: acc.acquired,
       drift: drift,
-      phase: if (ss.phase == ACTIVE and drift >= DRIFT_THRESHOLD) DEGRADED else ss.phase,
-      desired: desiredOf(how, ss.deliverable, stats, acc.assignedItems),
+      phase: if (degrades) DEGRADED else ss.phase,
+      desired: if (earlier) ss.desired else desiredOf(how, ss.deliverable, stats, acc.assignedItems),
+      sessionRecorded: true,
     }
     val ghAssigned = assignedSet(jobs)
-    val newestKey = 2 * inHand
+    // ghost: GitHub's truth about the content, whatever its id says
+    val recordedBefore = g.recordedIds.contains(inHand) and not(g.reusedUnrecorded.contains(inHand))
+    val changed = newer or acc.take != Set() or acc.unknown > 0 or acc.acquiring != ss.acquiring
+      or acc.acquired != ss.acquired
     all {
       journalWritable,
       listening(ss),
@@ -538,8 +624,10 @@ module scaleset {
           appliedTwice: g.appliedTwice or g.applied.contains(key),
           applied: g.applied.union(Set(key)),
           recordedIds: g.recordedIds.union(Set(inHand)),
-          latest: if (newestKey > g.latestKey) m.stats else g.latest,
-          latestKey: if (newestKey > g.latestKey) newestKey else g.latestKey,
+          reusedUnrecorded: g.reusedUnrecorded.exclude(Set(inHand)),
+          reappliedEarlier: g.reappliedEarlier or (recordedBefore and changed),
+          silentlyDropped: g.silentlyDropped or
+            (not(recordedBefore) and earlier and not(explained) and after.phase != DEGRADED),
         },
       },
     }
@@ -556,6 +644,7 @@ module scaleset {
     jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg,
     queue' = if (lost) queue else queue.exclude(Set(inHand)),
     ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+    idsRestarted' = idsRestarted,
     inHand' = NONE, inHandRecorded' = false,
     keepJournal,
     g' = { ...ghostAfter(g, "listener", ss, ss),
@@ -579,6 +668,7 @@ module scaleset {
       buffer' = got.fold(buffer, (b, r) => b.append({ kind: ASSIGNED, req: r })),
       msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
       keepListener,
       inbox' = inbox,
       ss' = if (recorded) after else ss,
@@ -619,6 +709,7 @@ module scaleset {
       jobFinishes(r),
       jobRequeued(r),
       unknownTypeQueued,
+      idsRestart,
       sessionEnds,
       journalToggles,
       openSession,
@@ -677,11 +768,36 @@ module scaleset {
     ss.acquiring.union(ss.acquired).forall(r => TRUST.get(r) == TRUSTED),
   }
 
-  /// desiredFromLatestStatistics: desired = min(deliverable, totalAssignedJobs) of the newest
-  /// statistics recorded (A1): never a count of messages, never plus running jobs, never an older
-  /// message's.
-  val desiredFromLatestStatistics =
-    g.opened implies ss.desired == minOf(ss.deliverable, g.latest.assigned)
+  /// GitHub's side has nothing the stream has not seen: no job event waits for a message and
+  /// every message emitted is recorded (with ids as A1 states them).
+  val quiescent = and {
+    buffer == NO_ITEMS,
+    MSG_IDS.forall(i => i >= nextMsg or g.recordedIds.contains(i)),
+    not(idsRestarted),
+  }
+
+  /// desiredFromLatestStatistics: desired = min(deliverable, totalAssignedJobs) of the statistics
+  /// applied (never a count of messages, never plus running jobs), and those statistics are
+  /// GitHub's own, read from its jobs, whenever the stream has seen everything GitHub emitted.
+  /// Between, a message emitted before an open may apply older statistics than the opening's
+  /// (A6), which I23 tolerates.
+  val desiredFromLatestStatistics = and {
+    g.opened implies ss.desired == minOf(ss.deliverable, ss.stats.assigned),
+    quiescent implies ss.stats.assigned == statsOf(jobs).assigned,
+  }
+
+  /// A1: a message recorded in an earlier session and redelivered applies nothing again: no
+  /// statistics, no plan, no release, no drift (only its receipt and the cursor's floor).
+  val redeliveryAppliesNothing = not(g.reappliedEarlier)
+
+  /// A1 refuted: a message GitHub emitted anew under an id at or below the session's floor is
+  /// never dropped silently; the session is degraded. The one case it cannot tell apart, a
+  /// restarted id equal to the floor as the session's first message, is excluded (A1).
+  val a1RefutationIsFlagged = not(g.silentlyDropped)
+
+  /// A3: creates answered 409 `CONFLICT_LIMIT` times in a row are escalated to the operator.
+  val persistentConflictsAreFlagged =
+    g.consecutive409 >= CONFLICT_LIMIT implies ss.conflictAlert
 
   /// I07 and ADR 0029: the maxCapacity sent never exceeds deliverable, and is 0 while draining
   /// or in safe mode.
@@ -720,6 +836,9 @@ module scaleset {
     messageAppliesOnce,
     acquireUnknownLeavesOnlyOnObservation,
     neverStealsASession,
+    redeliveryAppliesNothing,
+    a1RefutationIsFlagged,
+    persistentConflictsAreFlagged,
   }
 
   // ---- scenarios ----------------------------------------------------------------------------
@@ -765,9 +884,9 @@ module scaleset {
       .then(ack(false)).expect(queue == Set() and allInvariants)
   }
 
-  // A1: the message is redelivered in a new session, so its receipt key is new; its offers are
-  // already reserved and are not reserved again, and its older statistics do not replace the
-  // new session's initial ones.
+  // A1: the message is redelivered in a new session, so its receipt key is new; it is the
+  // stream's last record, at the session's floor, so it is recorded and applies nothing: its
+  // offers are not planned again and its older statistics do not replace the opening's.
   run redeliveryInNewSessionReservesOnceTest = {
     init.then(poll).then(record).then(ack(true))
       .then(restart).expect(ss.phase == BACKOFF and ss.stale == 1 and ghSession == 1)
@@ -776,7 +895,93 @@ module scaleset {
       .then(poll).expect(inHand == 1)
       .then(record)
       .expect(inbox.contains((2, 1)) and ss.acquiring == Set(1, 2) and ss.cursor == 1)
+      .expect(ss.floor == 1 and ss.phase == ACTIVE)
       .expect(noDoubleReservationPerRequest and desiredFromLatestStatistics and allInvariants)
+  }
+
+  // A6, MED1 of the KER-06 review: the daemon crashes holding message 2, emitted before the
+  // acquisition its predecessor planned; the new session opens with 2 assigned, then message 2
+  // is recorded and its older statistics (0 assigned) replace the opening's, since no id tells
+  // it from a message emitted after the open. I23 holds throughout (the acquisitions are still
+  // reservations, A2); once the backlog is recorded the statistics are GitHub's own again.
+  run crashBeforeRecordThenReopenConvergesTest = {
+    init.then(handle).then(emit)
+      .expect(msgs.get(2).stats.assigned == 0)
+      .then(acquireCall(false)).expect(statsOf(jobs).assigned == 2)
+      .then(poll).expect(inHand == 2)
+      .then(restart).expect(inHand == NONE and ss.cursor == 1)
+      .then(deleteStale).then(openSession)
+      .expect(ss.stats.assigned == 2 and ss.desired == 2 and ss.floor == 1)
+      .then(poll).expect(inHand == 2)
+      .then(record)
+      .expect(ss.stats.assigned == 0 and ss.desired == 0 and ss.acquired == Set(1, 2))
+      .expect(allInvariants)
+      .then(ack(false)).then(emit).then(handle)
+      .expect(quiescent and ss.stats.assigned == 2 and ss.desired == 2 and allInvariants)
+  }
+
+  // A6: after an open, a change at GitHub reaches the stream only through messages; recording
+  // them brings desired to GitHub's own count.
+  run changeAfterOpenReachesDesiredTest = {
+    init.then(handle).then(acquireCall(false))
+      .then(restart).then(deleteStale).then(openSession).expect(ss.desired == 2)
+      .then(runnerStarts(1)).then(jobFinishes(1))
+      .then(emit).then(emit).then(emit)
+      .then(handle).then(handle).then(handle)
+      .expect(quiescent and statsOf(jobs).assigned == 1 and ss.desired == 1 and allInvariants)
+  }
+
+  // MED5 and LOW10: a message with an unknown type recorded in session 1, its ack lost, is
+  // redelivered in session 2 after a restart: it counts no drift and plans nothing again.
+  run redeliveryCountsNoDriftTwiceTest = {
+    init.then(unknownTypeQueued).then(emit).then(handle)
+      .then(poll).then(record).expect(ss.drift == 1)
+      .then(ack(true)).then(restart).then(deleteStale).then(openSession)
+      .expect(ss.drift == 0 and ss.floor == 2)
+      .then(poll).expect(inHand == 2)
+      .then(record).expect(ss.drift == 0 and ss.phase == ACTIVE and allInvariants)
+  }
+
+  // A1 refuted: session 2 numbers its messages from 1 again; message 1 is below the floor (2)
+  // and was never recorded: it applies nothing and the session is degraded for the operator.
+  run a1RefutedDegradesTheSessionTest = {
+    init.then(handle).then(emit).then(handle).expect(ss.cursor == 2)
+      .then(restart).then(deleteStale).then(openSession).expect(ss.floor == 2)
+      .then(unknownTypeQueued).then(idsRestart).expect(queue == Set(1))
+      .then(poll).then(record)
+      .expect(ss.phase == DEGRADED and ss.drift == 0 and ss.cursor == 2 and allInvariants)
+  }
+
+  // A1's limit: a restarted id equal to the floor, as the session's first message, reads as the
+  // redelivery of the stream's last record; it applies nothing, and the session goes on.
+  run a1RefutedAtTheFloorReadsAsARedeliveryTest = {
+    init.then(handle).then(restart).then(deleteStale).then(openSession).expect(ss.floor == 1)
+      .then(idsRestart).then(poll).then(record)
+      .expect(ss.phase == ACTIVE and ss.acquiring == Set(1, 2) and allInvariants)
+  }
+
+  // A3, MED3: a lost create leaves a session mayfly has no record of; creates answer 409; at
+  // `CONFLICT_LIMIT` in a row the scale set escalates to the operator, keeps backing off and
+  // never deletes it; once it ends, a create succeeds and the count starts again.
+  run persistentConflictsEscalateTest = {
+    init.then(restart).then(deleteStale).then(openLost)
+      .then(openSession).expect(ss.conflicts == 1 and not(ss.conflictAlert))
+      .then(openSession).expect(ss.conflicts == 2 and ss.conflictAlert and ss.phase == BACKOFF)
+      .expect(allInvariants)
+      .then(sessionEnds).then(openSession)
+      .expect(ss.phase == ACTIVE and ss.conflicts == 0 and not(ss.conflictAlert) and allInvariants)
+  }
+
+  // LOW6 (P21): a degraded session records and releases but plans no offer: job 1, requeued and
+  // offered again within budget, is declined as held.
+  run degradedSessionPlansNothingTest = {
+    init.then(applyCapacity(1, 1, OPEN)).then(handle).then(acquireCall(false))
+      .then(unknownTypeQueued).then(emit).then(unknownTypeQueued).then(jobRequeued(1))
+      .then(emit).then(emit)
+      .then(handle).then(handle).expect(ss.phase == DEGRADED)
+      .then(applyCapacity(2, 2, OPEN)).then(handle)
+      .expect(ss.acquired == Set() and ss.acquiring == Set() and jobs.get(1) == J_AVAILABLE)
+      .expect(allInvariants)
   }
 
   // A3: a create whose answer was lost leaves a session mayfly has no record of; the next
@@ -865,6 +1070,7 @@ module scaleset {
     jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg,
     queue' = queue.exclude(Set(inHand)),
     ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+    idsRestarted' = idsRestarted,
     inHand' = NONE, inHandRecorded' = false,
     keepJournal,
     g' = { ...ghostAfter(g, "listener", ss, ss),
@@ -898,6 +1104,30 @@ module scaleset {
   run mutant7IgnoreInboxViolatesTest = {
     init.then(poll).then(record).then(ack(true)).then(poll).then(recordWith(IGNORE_INBOX))
       .expect(not(messageAppliesOnce) and not(allInvariants))
+  }
+
+  // Model-local mutant OPEN_WINS (the opening's statistics are never replaced in a session): a
+  // change after the open never reaches desired.
+  action handleOpenWins = poll.then(recordWith(OPEN_WINS)).then(ack(false))
+
+  run mutantOpenWinsNeverConvergesTest = {
+    init.then(handle).then(acquireCall(false))
+      .then(restart).then(deleteStale).then(openSession)
+      .then(runnerStarts(1)).then(jobFinishes(1))
+      .then(emit).then(emit).then(emit)
+      .then(handleOpenWins).then(handleOpenWins).then(handleOpenWins)
+      .expect(quiescent and ss.desired == 2)
+      .expect(not(desiredFromLatestStatistics) and not(allInvariants))
+  }
+
+  // Model-local mutant REAPPLY (KER-06's rule: a message from before the session is folded like
+  // a new one) counts the redelivered unknown type again.
+  run mutantReapplyCountsDriftTwiceTest = {
+    init.then(unknownTypeQueued).then(emit).then(handle)
+      .then(poll).then(record).then(ack(true))
+      .then(restart).then(deleteStale).then(openSession)
+      .then(poll).then(recordWith(REAPPLY))
+      .expect(ss.drift == 1 and not(redeliveryAppliesNothing) and not(allInvariants))
   }
 
   // Mutant 19 (acquire every offer) violates I23 past deliverable and I32 on an untrusted offer.
