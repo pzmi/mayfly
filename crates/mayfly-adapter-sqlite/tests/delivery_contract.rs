@@ -1,4 +1,4 @@
-//! Integration level: the delivery contract (DC-01..DC-27) against a real SQLite file in a
+//! Integration level: the delivery contract (DC-01..DC-28) against a real SQLite file in a
 //! tempdir, in the five modes the journal contract runs (`doc/event-store.md` §7.1): fresh,
 //! reopened between steps, two writer connections, two handles on one file, and crash-injected.
 //! A lower level cannot fail for these reasons: the marks, leases and fences are rows of the

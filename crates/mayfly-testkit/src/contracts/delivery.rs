@@ -8,7 +8,8 @@
 //! by step (named on each case). They drive the production `DeliveryWorker` of
 //! `mayfly_control::delivery` where a case is about a drain, and the ledger directly where it is
 //! about one transaction (a claim, an advance, a release), so a broken worker step can be pinned
-//! as well as a broken ledger (`HeadTrustingWorker`, `doc/event-store.md` §7.6).
+//! as well as a broken ledger (`HeadTrustingWorker`, `doc/event-store.md` §7.6); a broken worker
+//! the suite can drive itself is a [`SuiteWorker`] (`check_delivery_contract_with`).
 //!
 //! **Time.** Lease expiry and `retry_after` are judged by the store clock, which the factory
 //! owns and the suite advances ([`DeliveryFactory::clock`]); no case sleeps. A lease
@@ -160,6 +161,7 @@ cases! {
     RetryAfterHonoured => "DC-25", "retry_after_honoured", "DC-25: a release with `retry_after` is not claimable before the store clock passes it.";
     SlowHandleCut => "DC-26", "slow_handle_cut", "DC-26: a `handle` slower than the lease is cut at its deadline and released with a backoff, never redelivered round after round under a dead lease.";
     ClaimedWhenReached => "DC-27", "claimed_when_reached", "DC-27: a drain claims each stream when it reaches it: slow streams early in a round waste no later claim.";
+    FailingStreamNoStarvation => "DC-28", "failing_stream_no_starvation", "DC-28: a stream that keeps failing is handled once per drain and never keeps a later stream waiting: discovery walks the stream space round-robin from the last claim.";
 }
 
 impl Display for DeliveryCase {
@@ -215,11 +217,32 @@ impl Display for DeliveryContractReport {
     }
 }
 
+/// The worker the suite drives: the production `DeliveryWorker`, or a negative control the
+/// suite's own tests run to show a case is not vacuous (`doc/event-store.md` §7.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SuiteWorker {
+    /// The production worker, with its deadline on each `handle`.
+    #[default]
+    Production,
+    /// A worker without the deadline on `handle`: its deadline never fires, so a `handle`
+    /// slower than the lease runs to its end and its advance finds the lease gone (the worker
+    /// before ES-05F; DC-26 must catch it).
+    WithoutHandleDeadline,
+}
+
 /// Runs every case against stores from `factory`.
 pub async fn check_delivery_contract<F: DeliveryFactory>(factory: &F) -> DeliveryContractReport {
+    check_delivery_contract_with(factory, SuiteWorker::Production).await
+}
+
+/// Runs every case against stores from `factory`, draining with `worker`.
+pub async fn check_delivery_contract_with<F: DeliveryFactory>(
+    factory: &F,
+    worker: SuiteWorker,
+) -> DeliveryContractReport {
     let mut report = DeliveryContractReport::default();
     for &case in DeliveryCase::ALL {
-        if let Err(detail) = check_case(factory, case).await {
+        if let Err(detail) = check_case_with(factory, case, worker).await {
             report.failures.push(DeliveryFailure { case, detail });
         }
     }
@@ -240,6 +263,18 @@ pub fn run_delivery_contract<F: DeliveryFactory>(factory: &F) {
 /// # Errors
 /// What was expected and what the store did, at the first check that failed.
 pub async fn check_case<F: DeliveryFactory>(factory: &F, case: DeliveryCase) -> Check {
+    check_case_with(factory, case, SuiteWorker::Production).await
+}
+
+/// Runs one case, draining with `worker`.
+///
+/// # Errors
+/// What was expected and what the store did, at the first check that failed.
+pub async fn check_case_with<F: DeliveryFactory>(
+    factory: &F,
+    case: DeliveryCase,
+    worker: SuiteWorker,
+) -> Check {
     match case {
         DeliveryCase::NoConsumerNoMark => no_consumer_no_mark(factory).await,
         DeliveryCase::EveryConsumerMarked => every_consumer_marked(factory).await,
@@ -266,8 +301,9 @@ pub async fn check_case<F: DeliveryFactory>(factory: &F, case: DeliveryCase) -> 
         DeliveryCase::LostStreamOthersGoOn => lost_stream_others_go_on(factory).await,
         DeliveryCase::ForeignConsumerMarked => foreign_consumer_marked(factory).await,
         DeliveryCase::RetryAfterHonoured => retry_after_honoured(factory).await,
-        DeliveryCase::SlowHandleCut => slow_handle_cut(factory).await,
+        DeliveryCase::SlowHandleCut => slow_handle_cut(factory, worker).await,
         DeliveryCase::ClaimedWhenReached => claimed_when_reached(factory).await,
+        DeliveryCase::FailingStreamNoStarvation => failing_stream_no_starvation(factory).await,
     }
 }
 
@@ -1339,7 +1375,7 @@ impl Consumer for Sluggish {
     }
 }
 
-async fn slow_handle_cut<F: DeliveryFactory>(factory: &F) -> Check {
+async fn slow_handle_cut<F: DeliveryFactory>(factory: &F, under_test: SuiteWorker) -> Check {
     let (store, c) = registered(factory).await?;
     let (s1, s2) = (stream("attempt-dc1"), stream("attempt-dc2"));
     append(&store.journal, &s1, None, &[2701]).await?;
@@ -1350,7 +1386,11 @@ async fn slow_handle_cut<F: DeliveryFactory>(factory: &F) -> Check {
         slow_now: Mutex::new(true),
         clock: factory.clock(),
     };
-    let worker = timed_worker::<F>(&store, 16, Timer::Hand(factory.clock()));
+    let timer = match under_test {
+        SuiteWorker::Production => Timer::Hand(factory.clock()),
+        SuiteWorker::WithoutHandleDeadline => Timer::Never,
+    };
+    let worker = timed_worker::<F>(&store, 16, timer);
     let report = io("drain", worker.drain(&sluggish, None).await)?;
     let failed: Vec<StreamId> = report.failed.iter().map(|(s, _)| s.clone()).collect();
     eq(
@@ -1439,4 +1479,45 @@ async fn claimed_when_reached<F: DeliveryFactory>(factory: &F) -> Check {
         )?;
     }
     Ok(())
+}
+
+async fn failing_stream_no_starvation<F: DeliveryFactory>(factory: &F) -> Check {
+    let (store, _) = registered(factory).await?;
+    let (s1, s2, s3) = (
+        stream("attempt-dc1"),
+        stream("attempt-dc2"),
+        stream("attempt-dc3"),
+    );
+    for (s, id) in [(&s1, 2901), (&s2, 2902), (&s3, 2903)] {
+        append(&store.journal, s, None, &[id]).await?;
+    }
+    // The lowest stream always fails, and each delivery lets the store clock pass more than the
+    // largest backoff (400 ms) but less than a lease: the failing stream is claimable again
+    // after every later delivery. A discovery that restarts from the lowest key would hand it
+    // back before the third stream; a worker that took it again would handle it every time
+    // the walk came round.
+    let ticking = Ticking {
+        recorder: Recorder::default(),
+        step: Millis::new(TTL.get() / 2),
+        clock: factory.clock(),
+    };
+    ticking.recorder.fail(&s1, 0, true);
+    let report = io("drain", worker::<F>(&store, 16).drain(&ticking, None).await)?;
+    eq(
+        "revisions of the later streams",
+        &(
+            ticking.recorder.revisions(&s2),
+            ticking.recorder.revisions(&s3),
+        ),
+        &(vec![0], vec![0]),
+    )?;
+    eq(
+        "deliveries of the failing stream in one drain",
+        &ticking.recorder.revisions(&s1),
+        &vec![0],
+    )?;
+    let failed: Vec<StreamId> = report.failed.iter().map(|(s, _)| s.clone()).collect();
+    eq("streams failed", &failed, &vec![s1])?;
+    eq("streams lost", &report.lost, &Vec::new())?;
+    eq("delivered", &report.delivered, &2)
 }

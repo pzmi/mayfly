@@ -714,6 +714,15 @@ relation), which samples and proves nothing.
 | `directivesFromJournal` | a directive is sent only for a committed `DirectiveIssued` event, and only committed events are delivered (ADR 0034) | `crashBeforeReactorsTest`, `directiveInUnitTest` |
 | `reactorsNeverReplayed` | the after-commit kick runs at most once per commit and never for a replay; a crash before it loses only the kick. Structural in the relations (only `apply` sets a kick; `kick` and `crash` clear them); the negative world shows it is not vacuous | `crashBeforeReactorsTest`, `zeroEventAcceptanceTest`, negative world `replayingRestartViolatesTest` |
 
+Fairness of delivery is not modelled (ES-05G). Every invariant above is a safety property; neither
+`relayStep` nor `deliveryOnlyStep` states that a marked stream is eventually delivered, nor that a
+stream that keeps failing (`failHandle` again and again) leaves the other streams' claims free, and
+the model has no fairness condition on `claim` (it picks any claimable stream, so it also admits
+the starving schedule). The code's discovery is round-robin from the last stream claimed, and a
+drain handles a stream it gave up on at most once; DC-28 pins that, with `CursorlessLedger` as its
+negative control. A temporal property (`claim` weakly fair per stream) would need Apalache's
+liveness checking or a lasso search, which the bounded runs above do not do, so it is left out.
+
 Tests (`quint test`, all deterministic): one per scenario of event-store §7.3 that the model
 expresses before ES-08 (`lostRaceTest`, `noStreamVersusEmptyTest`, `independentStreamsTest`,
 `independentHeldWritersTest`, `batchFailsAfterSecondEventTest`, `rollbackTest`,

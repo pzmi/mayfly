@@ -129,6 +129,15 @@ impl<C: StoreClock> MemoryLedger<C> {
         })
     }
 
+    /// Forgets where `consumer`'s next discovery starts, so it starts again from the lowest
+    /// key: for broken ledgers built over this one (the `CursorlessLedger` DC-28 must catch).
+    pub fn forget_cursor(&self, consumer: &ConsumerName) {
+        self.cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(consumer);
+    }
+
     /// Removes the mark of `(consumer, stream)` whatever its revision, judging nothing: for
     /// broken ledgers built over this one (the `ClearAllMarksLedger` DC-08 must catch).
     pub fn clear_mark(&self, consumer: &ConsumerName, stream: &StreamId) {

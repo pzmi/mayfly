@@ -15,7 +15,9 @@
 //!   releases the claim with a jittered backoff (`retry_after`) and leaves the checkpoint: the
 //!   same event comes again, never the next (DC-18). A lost lease ends that claim, not the drain
 //!   (DC-23). A drain claims each stream when it reaches it, so a slow stream wastes no other
-//!   claim (DC-27).
+//!   claim (DC-27), and handles a stream it gave up on at most once, ending when the
+//!   round-robin discovery comes back round to it, so a failing stream never keeps later ones
+//!   waiting (DC-28).
 //! - **Waking.** [`DeliveryWorker::catch_up`] at start-up and on a coarse timer of the
 //!   supervision tree; [`Kicks`], the after-commit notification, for latency. A kick carries no
 //!   obligation and is never replayed: a lost kick loses nothing, the mark is durable (§5.5).
@@ -27,7 +29,7 @@
 //!
 //! Implementations of [`DeliveryLedger`]: `mayfly_testkit::delivery::MemoryLedger` (over
 //! `MemoryJournal`) and the SQLite adapter's `SqliteLedger`; both pass the delivery contract,
-//! `mayfly_testkit::contracts::delivery` (DC-01..DC-27), whose own tests show the broken
+//! `mayfly_testkit::contracts::delivery` (DC-01..DC-28), whose own tests show the broken
 //! ledgers of `doc/event-store.md` §7.6 failing named cases.
 
 mod kicks;
@@ -90,7 +92,7 @@ impl<C: Clock> DeliveryTimer for C {
 /// here reads the journal in a global order (ES-I17): marks are found by `(consumer, stream_id)`
 /// key, and `retry_at` is a filter, never an order.
 ///
-/// Pinned by `crates/mayfly-testkit/src/contracts/delivery.rs` (DC-01..DC-27), run on memory by
+/// Pinned by `crates/mayfly-testkit/src/contracts/delivery.rs` (DC-01..DC-28), run on memory by
 /// `crates/mayfly-testkit/tests/delivery_contract.rs` and on SQLite, in the journal contract's
 /// five modes, by `crates/mayfly-adapter-sqlite/tests/delivery_contract.rs`.
 pub trait DeliveryLedger: Send + Sync {

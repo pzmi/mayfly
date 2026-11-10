@@ -696,6 +696,11 @@ short of its mark; migration 0003 (floor 2) refuses lowering a dispatch mark, wh
 CP-04 picks the production store clock on SQLite: one that does not step forward (a forward step
 ends leases early, which costs only duplicates), and RT-02's supervision passes the runtime clock
 as the worker's `DeliveryTimer`.
+Note (ES-05G, the review of ES-05F; event-store §3.4 "As built (ES-05G)"): a drain handles a
+stream it gave up on (failed, cut, short read, lost) at most once and returns when discovery comes
+back round to it (DC-28, `CursorlessLedger`); the short-read ERROR has its own book; the worker's
+books evict the least recently touched entry; a worker without its `handle` deadline is DC-26's
+negative control. The ES-09 PostgreSQL ledger keeps the round-robin cursor DC-28 requires.
 
 #### ES-07 Event-store conformance driver
 Cites: event-store §7.3, ver §6.2. Driver over memory (`step`) and SQLite (`implStepSerial`, two

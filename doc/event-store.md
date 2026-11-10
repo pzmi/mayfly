@@ -196,7 +196,7 @@ after each SW run, and JC-19 (store errors carry codes and ids only).
 the head and never moves back; every committed event is delivered at least once; within a claim a
 stream's events are delivered in revision order; a lease that expired or was taken over cannot move
 the checkpoint, clear a mark or start an effect; each takeover hands out a strictly higher fence.
-Pinned by DC-01..DC-27; model `ES_I14_durableDelivery` (`bootstrapAfterWrites`,
+Pinned by DC-01..DC-28; model `ES_I14_durableDelivery` (`bootstrapAfterWrites`,
 `markDuringProcessing`, `staleWorkerFenced`, `workerCrashRedelivers`, `retireThenRegister`); SW9;
 `UnfencedLedger`, `ClearAllMarksLedger`.
 
@@ -442,6 +442,31 @@ drained or is lost, and are capped at 1,024 entries. (5) Migration 0003 adds the
 `stream_dispatch_mark_never_falls` (an update that lowers a mark or moves its row aborts). It
 refuses only what no build does, so its floor stays 2: a build at version 2 runs on a store at 3
 unchanged.
+
+**As built (ES-05G, the review of ES-05F).** (1) *Fairness across a failing stream.* The review
+read the lazy claim as starving later streams behind a low stream that keeps failing; it does not
+quite: both ledgers already go on round-robin from the last stream claimed (rule 6 below), and a
+release sets `retry_at` from the store time *after* the failed or cut `handle`, not from the
+claim. What remained was that nothing pinned the round-robin (a ledger restarting discovery from
+the lowest key passed every case) and that a drain handled a failing stream again every time the
+walk came back round to it once its backoff had passed, up to `claim_limit * max_rounds` (1,024)
+times a drain, at up to the handle deadline (20 s) each. A drain now gives up on a stream for the
+rest of the drain once it failed, was cut, read short or was lost; when discovery hands it back,
+the walk of the stream space is complete, so the drain releases that claim untouched and returns.
+DC-28 pins both halves: the lowest of three streams always fails and every delivery lets the
+store clock pass the largest backoff; the later two are delivered in that one drain and the
+failing one is handled once. `CursorlessLedger` (discovery from the lowest key) fails it, and so
+did the ES-05F worker (the failing stream handled twice). Fairness is a liveness property the
+model does not state (`doc/formal-models.md`, event_store). (2) *The worker's books.* The ERROR
+`delivery_mark_beyond_journal` was keyed on the failure count being 1, so a short read after a
+handler failure, or after its count was evicted, went unreported; it now has its own book of
+reported streams, cleared when the stream advances or is drained to its mark. Both books (failure
+counts, reported short reads) evict the least recently touched entry at 1,024, where the failure
+counts evicted the smallest key, so the low-key streams lost their backoff escalation first. (3)
+*Negative controls.* A worker without the `handle` deadline (`SuiteWorker::WithoutHandleDeadline`
+of the contract, a deadline that never fires) fails exactly DC-26; `GreedyClaimLedger` fails
+DC-23 as well as DC-27 (and DC-28) because its first claim hands DC-23's drain the second
+stream's lease too, which runs out while the slow stream is handled.
 
 **Raising the floor after the first release.** Until the first tagged release no store exists
 outside development, so ES-05 could raise the floor to 2 in one step. From the first release on,
@@ -920,7 +945,9 @@ DC-24 a consumer registered by another build is marked by this one. DC-25 a rele
 `retry_after` is not claimable before the store clock passes it. DC-26 a `handle` slower than the
 lease is cut at its deadline and released with a backoff, never redelivered round after round
 under a dead lease. DC-27 a drain claims each stream when it reaches it: slow streams early in a
-round waste no later claim (ES-05F).
+round waste no later claim (ES-05F). DC-28 a stream that keeps failing is handled once per drain
+and never keeps a later stream waiting: discovery walks the stream space round-robin from the last
+claim (ES-05G).
 
 **Snapshots (SC).** SC-01 a request on crossing the interval; SC-02 one request per stream, target
 only rising; SC-03 a refused unit leaves no request; SC-04 no snapshot: load whole; SC-05 snapshot
@@ -1116,7 +1143,9 @@ then a fix.
 | `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08, DC-13, DC-18 |
 | `HeadTrustingWorker` (advances to the head, not the delivered revision) | contract | DC-08, DC-13, DC-18; negative world `headTrustingReader` |
 | `SkippingLedger` (moves past a failing event after N tries) | contract | DC-18 |
-| `GreedyClaimLedger` (a claim takes every claimable stream whatever its limit) | contract | DC-23, DC-27 |
+| `GreedyClaimLedger` (a claim takes every claimable stream whatever its limit) | contract | DC-23, DC-27, DC-28 |
+| `CursorlessLedger` (discovery restarts from the lowest key at every claim) | contract | DC-28 |
+| A worker without its `handle` deadline (`SuiteWorker::WithoutHandleDeadline`) | contract | DC-26 |
 | `BlindSnapshotUpsert`, `ResealingSnapshots` | contract | SC-09, SC-08 |
 | `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01 |
 

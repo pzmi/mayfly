@@ -1,5 +1,5 @@
 //! The delivery contract's own tests (ver §5): `MemoryLedger` passes it, and each deliberately
-//! broken ledger of `doc/event-store.md` §7.6 fails the cases named for its fault. Each test
+//! broken ledger (or worker) of `doc/event-store.md` §7.6 fails the cases named for its fault. Each test
 //! pins the exact set of failed cases, which must include the ones §7.6 names: a change that
 //! lets a broken ledger through, or makes it fail for an unrelated reason, shows here.
 
@@ -12,7 +12,8 @@ use mayfly_domain::Millis;
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::FakeClock;
 use mayfly_testkit::contracts::delivery::{
-    ClockHand, DeliveryFactory, DeliveryStore, check_delivery_contract,
+    ClockHand, DeliveryFactory, DeliveryStore, SuiteWorker, check_delivery_contract,
+    check_delivery_contract_with,
 };
 use mayfly_testkit::contracts::journal::InjectedFault;
 use mayfly_testkit::delivery::{MemoryDeliveryFactory, MemoryLedger};
@@ -36,6 +37,10 @@ enum Flaw {
     /// worker holds a whole round's leases before it reaches them (the batch claim ES-05F
     /// removed from the worker).
     GreedyClaim,
+    /// `CursorlessLedger`: every claim's discovery starts again from the lowest key instead of
+    /// going on round-robin from the last stream claimed, so a low stream that keeps failing is
+    /// handed back before any later one.
+    Cursorless,
 }
 
 /// A memory ledger with `flaw`. Clones share the store and the skip counts.
@@ -80,6 +85,9 @@ impl DeliveryLedger for Flawed {
         } else {
             limit
         };
+        if self.flaw == Flaw::Cursorless {
+            self.inner.forget_cursor(consumer);
+        }
         self.inner.claim(consumer, ttl, limit, only).await
     }
 
@@ -116,7 +124,9 @@ impl DeliveryLedger for Flawed {
                     .map_or(to, |h| h.revision);
                 self.inner.advance(claim, head, ttl).await
             }
-            Flaw::Skipping | Flaw::GreedyClaim => self.inner.advance(claim, to, ttl).await,
+            Flaw::Skipping | Flaw::GreedyClaim | Flaw::Cursorless => {
+                self.inner.advance(claim, to, ttl).await
+            }
         }
     }
 
@@ -309,6 +319,38 @@ fn should_fail_the_round_cases_when_a_claim_takes_more_than_its_limit() {
     // when
     let failed = failed_with(flaw);
 
+    // then: every case where a delivery lets the store clock run while later streams wait.
+    // DC-23's drain claims one stream at a time, but this ledger hands it both streams with the
+    // first claim; the slow stream lets the clock pass the lease, so the other stream's lease,
+    // taken at the same instant, has run out before the drain reaches it, and it is lost
+    // instead of drained. DC-27 is that case on purpose; in DC-28 each delivery takes half a
+    // lease, so the third stream's lease, taken with the first, runs out the same way.
+    assert_eq!(failed, ["DC-23", "DC-27", "DC-28"]);
+}
+
+#[test]
+fn should_fail_the_starvation_case_when_discovery_restarts_from_the_lowest_key() {
+    // given
+    let flaw = Flaw::Cursorless;
+
+    // when
+    let failed = failed_with(flaw);
+
     // then
-    assert_eq!(failed, ["DC-23", "DC-27"]);
+    assert_eq!(failed, ["DC-28"]);
+}
+
+#[test]
+fn should_fail_the_slow_handle_case_when_the_worker_has_no_handle_deadline() {
+    // given
+    let factory = MemoryDeliveryFactory::new();
+
+    // when
+    let report = block_on(check_delivery_contract_with(
+        &factory,
+        SuiteWorker::WithoutHandleDeadline,
+    ));
+
+    // then
+    assert_eq!(report.failed_ids(), ["DC-26"]);
 }
