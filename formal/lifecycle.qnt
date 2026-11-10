@@ -137,6 +137,14 @@ module lifecycle {
     autoDelete: bool,
     // instance ids the provider reported
     providerInstances: Set[int],
+    // a LaunchRunner was issued and not refused: a runner of the attempt's registration may be
+    // registered in the VM (its config may have reached the launcher)
+    runnerMayLive: bool,
+    // a retirement was confirmed: P11 had the deregistration's answer (`ConfirmRetirement`)
+    deregistered: bool,
+    // retired outside quarantine with the VM running (so its stop follows) while such a runner
+    // may be registered and idle in it, before the deregistration answered (I21)
+    stopBeforeDeregister: bool,
   }
 
   var a: Attempt
@@ -174,7 +182,8 @@ module lifecycle {
     if (x.phase == RESERVED or x.phase == CLONING) CLONE_VM
     else if (x.phase == BOOTING) START_VM
     else if (x.phase == VERIFYING) VERIFY_GUEST
-    else if (x.phase == BACKOFF) stageDirective(x.stage)
+    // a retirement waiting for its deregistration does not retry the stage (KER-04G)
+    else if (x.phase == BACKOFF) (if (x.retireRequested) NO_DIRECTIVE else stageDirective(x.stage))
     else if (x.phase == ACTIVATING)
       if (x.freshEpoch != x.epoch) VERIFY_GUEST
       else if (x.jit == "issued") LAUNCH_RUNNER
@@ -214,11 +223,17 @@ module lifecycle {
   pure def quarantineVanished(x: Attempt): Attempt =
     { ...quarantine(x), vmRunning: false, vanished: true }
 
-  /// A stage directive failed definitely (refused, or observed not applied).
-  pure def stageFailed(x: Attempt): Attempt =
-    if (x.tries < BUDGET)
+  /// A stage directive failed definitely (refused, or observed not applied). Once the budget is
+  /// spent the attempt retires, but one holding a registration (a JIT was issued: the activate
+  /// stage) requests its retirement and waits in Backoff for the deregistration, as a policy's
+  /// request would (I21, KER-04G).
+  pure def stageFailed(x: Attempt): Attempt = {
+    val backoff =
       { ...x, phase: BACKOFF, stage: pendingStage(x), pending: NO_DIRECTIVE, unknown: false }
+    if (x.tries < BUDGET) backoff
+    else if (x.jit != "none") { ...backoff, retireRequested: true }
     else retire(x)
+  }
 
   /// The pending directive did not take effect.
   pure def notApplied(x: Attempt): Attempt =
@@ -245,6 +260,18 @@ module lifecycle {
     done: g0.done or after.phase == RETIRING or after.phase == FINISHED
       or (before.phase != DELETED and after.phase == DELETED),
     quarantined: g0.quarantined or after.phase == QUARANTINED,
+    // retiring a running VM commits to its stop (diagnostics, then StopVm): that decision is
+    // where deregister-before-stop is kept or lost, so it is checked there, at the bounded
+    // depth Apalache reaches (KER-04G)
+    stopBeforeDeregister: g0.stopBeforeDeregister or and {
+      before.phase != RETIRING,
+      after.phase == RETIRING,
+      after.vmRunning,
+      not(g0.quarantined),
+      g0.runnerMayLive,
+      not(before.runnerExited),
+      not(g0.deregistered),
+    },
   }
 
   action commit(kind: str, after: Attempt, ghost: Ghost): bool = all {
@@ -315,6 +342,7 @@ module lifecycle {
         doubleIssue: false, launches: 0, jobsBound: Set(), illegalMint: false, leaked: false,
         served: false, done: false, servedAfterDone: false, quarantined: false,
         operatorResolved: false, autoDelete: false, providerInstances: Set(),
+        runnerMayLive: false, deregistered: false, stopBeforeDeregister: false,
       },
     }
   }
@@ -356,6 +384,7 @@ module lifecycle {
           clones: if (d == CLONE_VM) g.clones + 1 else g.clones,
           autoDelete: g.autoDelete
             or (d == DELETE_VM and g.quarantined and not(g.operatorResolved)),
+          runnerMayLive: g.runnerMayLive or d == LAUNCH_RUNNER,
         }),
     }
   }
@@ -430,7 +459,9 @@ module lifecycle {
   action replyRefused = all {
     not(idle(a)),
     not(w.applied),
-    commit("observation", notApplied(a), g),
+    commit("observation", notApplied(a),
+      // a launch refused definitely never reached the launcher: no runner in the VM
+      { ...g, runnerMayLive: g.runnerMayLive and a.pending != LAUNCH_RUNNER }),
   }
 
   /// `DirectiveRefused{proof_mismatch}` for a stop, a delete, a launch or a start whose
@@ -657,11 +688,13 @@ module lifecycle {
     bindJobWith(job)
   }
 
-  /// `RequestRetirement{reason}`: a registered runner waits for its deregistration (I21).
+  /// `RequestRetirement{reason}`: a registered runner waits for its deregistration (I21),
+  /// whether activating, listening or backing off from a failed fresh verification (KER-04G:
+  /// Backoff retired at once and skipped the deregistration).
   action requestRetirement = all {
     canRequestRetirement(a),
     commit("command",
-      if (Set(ACTIVATING, LISTENING).contains(a.phase) and a.jit != "none")
+      if (Set(ACTIVATING, LISTENING, BACKOFF).contains(a.phase) and a.jit != "none")
         { ...a, retireRequested: true }
       else retire(a),
       g),
@@ -675,7 +708,7 @@ module lifecycle {
     idle(a),
     a.retireRequested,
     not(terminal(a)),
-    commit("command", retire(a), g),
+    commit("command", retire(a), { ...g, deregistered: true }),
   }
 
   /// `WithdrawRetirement` after GitHub answered 422 (busy).
@@ -901,6 +934,15 @@ module lifecycle {
   val retryKeepsNameAndGeneration =
     g.cloneTargets.forall(t => t == (a.name, a.generation))
 
+  /// I21 (attempt half, KER-04G): deregister before stop. While a runner of the attempt's
+  /// registration may be registered and idle in the VM (a launch was sent and not refused, and
+  /// the runner was not seen exiting), the attempt retires with its VM running, which commits
+  /// to stopping it, only after P11 had the deregistration's answer (`ConfirmRetirement`);
+  /// `registration.qnt`'s `deregisterBeforeStop` states when that answer may confirm.
+  /// Quarantine stops are outside it: they are the safety action of KER-04F, taken unless a
+  /// job is live, and an operator's resolution ends one.
+  val i21DeregisterBeforeStop = not(g.stopBeforeDeregister)
+
   // Every invariant of the model, so a new one cannot be left out of a stage.
   val allInvariants = and {
     i06CompletedNeverServesAgain,
@@ -910,6 +952,7 @@ module lifecycle {
     timeoutNeverAdvances,
     i13NoDuplicateClones,
     i14OneJob,
+    i21DeregisterBeforeStop,
     i22JitMintedOnceAfterGrantAndVerification,
     i30GuestNeverDecidesOwnership,
     quarantineTerminal,
@@ -1181,6 +1224,69 @@ module lifecycle {
       .expect(a.phase == RETIRING and not(a.retireRequested) and allInvariants)
   }
 
+  /// A launch of unknown outcome (a runner may be registered in the VM), then a restart, whose
+  /// fresh verification is refused: Backoff in the activate stage with the registration held.
+  action toBackoffHoldingRegistration =
+    prepareAtOnceWith(1, true).then(recordJitHandle).then(issueNext).then(replyLaunchUnknown)
+      .then(adopt).then(issueNext).then(replyRefused)
+
+  // KER-04G/I21: a retirement requested in Backoff while the registration is held waits for
+  // the deregistration like one in Activating or Listening; no stop before its confirmation.
+  // Before KER-04G the request retired at once and the stop followed (a violation of
+  // `i21DeregisterBeforeStop`).
+  run retirementInBackoffWaitsForDeregistrationTest = {
+    initWith(1, 1).then(toBackoffHoldingRegistration)
+      .expect(a.phase == BACKOFF and a.stage == "activate" and a.jit == "taken"
+        and not(a.retireRequested))
+      .then(requestRetirement)
+      .expect(a.phase == BACKOFF and a.retireRequested)
+      // a retirement waiting for its deregistration does not retry the stage, nor ask twice
+      .expect(not(canIssueNext(a)) and not(canRequestRetirement(a)))
+      .then(confirmRetirement).expect(a.phase == RETIRING and not(a.retireRequested))
+      .then(issueNext).expect(a.pending == EXPORT_DIAGNOSTICS).then(ok)
+      .then(issueNext).expect(a.pending == STOP_VM and allInvariants)
+  }
+
+  // KER-04G/I21: an activation whose budget is spent while the registration is held does not
+  // retire at once: it requests the retirement and waits for the deregistration.
+  run stageFailureHoldingRegistrationWaitsForDeregistrationTest = {
+    initWith(1, 1).then(toBackoffHoldingRegistration)
+      .then(issueNext).expect(a.phase == ACTIVATING and a.tries == BUDGET)
+      .then(replyRefused)
+      .expect(a.phase == BACKOFF and a.stage == "activate" and a.retireRequested)
+      .expect(not(canIssueNext(a)))
+      .then(confirmRetirement).expect(a.phase == RETIRING)
+      .then(issueNext).then(ok)
+      .then(issueNext).expect(a.pending == STOP_VM and allInvariants)
+  }
+
+  // KER-04G, negative controls of `i21DeregisterBeforeStop`: a launch refused definitely
+  // leaves no runner in the VM, and a runner that exited can take no job there, so either
+  // retirement stops the VM at once without a violation.
+  run stopAfterRefusedLaunchNeedsNoDeregistrationTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, true)).then(recordJitHandle).then(issueNext)
+      .then(replyRefused).expect(a.phase == RETIRING and not(g.runnerMayLive))
+      .then(issueNext).then(ok)
+      .then(issueNext).expect(a.pending == STOP_VM and i21DeregisterBeforeStop)
+  }
+
+  run stopAfterRunnerExitedNeedsNoDeregistrationTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, true)).then(recordJitHandle).then(issueNext)
+      .then(ok).then(runnerExited).then(requestRetirement).expect(a.phase == RETIRING)
+      .then(issueNext).then(ok)
+      .then(issueNext).expect(a.pending == STOP_VM and i21DeregisterBeforeStop)
+  }
+
+  // KER-04G, positive control of `i21DeregisterBeforeStop`: the invariant flags a retirement
+  // that skips the deregistration (forced here by retiring a listening runner directly, which
+  // no action allows; before KER-04G `requestRetirement` in Backoff did the same).
+  run stopBeforeDeregistrationIsFlaggedTest = {
+    initWith(1, 1).then(prepareAtOnceWith(1, true)).then(recordJitHandle).then(issueNext)
+      .then(ok).expect(a.phase == LISTENING)
+      .then(commit("command", retire(a), g))
+      .expect(a.phase == RETIRING and not(i21DeregisterBeforeStop))
+  }
+
   // VER-01F: a clone whose lost reply took effect, and whose VM someone then removed, is
   // cloned afresh by its re-delivery: the reply carries the new VM's instance id.
   run cloneAnsweredAfterRemovalTest = {
@@ -1330,6 +1436,21 @@ module lifecycle_traces {
     replaced(1, true), s("replyTargetAbsent"), s("resolveQuarantine"), s("quarantineCommand"),
   ])
 
+  // KER-04G: deregister before stop in Backoff (I21), see `i21DeregisterBeforeStop`.
+  /// A launch of unknown outcome, a restart, and its fresh verification refused: Backoff in the
+  /// activate stage with the registration held.
+  pure val TO_BACKOFF_HOLDING_REGISTRATION = [
+    prepare(true), s("recordJitHandle"), ISSUE, s("replyLaunchUnknown"), s("adopt"), ISSUE,
+    s("replyRefused"),
+  ]
+  /// A retirement requested there waits for the deregistration; its confirmation stops the VM.
+  pure val RETIREMENT_IN_BACKOFF_WAITS_FOR_DEREGISTRATION = TO_BACKOFF_HOLDING_REGISTRATION
+    .concat([s("requestRetirement"), s("confirmRetirement"), ISSUE, OK, ISSUE])
+  /// The activation's budget spent there requests the retirement instead of retiring at once.
+  pure val STAGE_FAILURE_HOLDING_REGISTRATION_WAITS_FOR_DEREGISTRATION =
+    TO_BACKOFF_HOLDING_REGISTRATION
+      .concat([ISSUE, s("replyRefused"), s("confirmRetirement"), ISSUE, OK, ISSUE])
+
   action tinit = {
     nondet name = Set(1).oneOf()
     nondet generation = Set(1).oneOf()
@@ -1396,5 +1517,9 @@ module lifecycle_traces {
   action confirmRetirementAfterExit = script(CONFIRM_RETIREMENT_AFTER_EXIT)
   action cloneAnsweredAfterRemoval = script(CLONE_ANSWERED_AFTER_REMOVAL)
   action requarantineAfterVanished = script(REQUARANTINE_AFTER_VANISHED)
+  action retirementInBackoffWaitsForDeregistration =
+    script(RETIREMENT_IN_BACKOFF_WAITS_FOR_DEREGISTRATION)
+  action stageFailureHoldingRegistrationWaitsForDeregistration =
+    script(STAGE_FAILURE_HOLDING_REGISTRATION_WAITS_FOR_DEREGISTRATION)
 
 }

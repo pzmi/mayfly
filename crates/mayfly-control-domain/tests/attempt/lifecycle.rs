@@ -8,11 +8,12 @@ use mayfly_control_domain::attempt::{
 };
 use mayfly_control_domain::{Actor, Rejection};
 
+use super::support::Step;
 use super::support::{
-    OPERATOR, SAGA, activating, apply, at, booting, busy, cloning, directive, doubted, event,
-    facts, finished, handle, instance, issue, jit_issued, listening, observe, observe_in, prepared,
-    quarantined, reach, retiring, saga, stimuli, stopped, then, unknown_clone, vanished,
-    verified_activation, verifying,
+    OPERATOR, SAGA, activating, apply, at, backoff_holding_registration, booting, busy, cloning,
+    directive, doubted, event, facts, finished, handle, instance, issue, jit_issued, listening,
+    observe, observe_in, prepared, quarantined, reach, retiring, saga, stimuli, stopped, then,
+    unknown_clone, vanished, verified_activation, verifying,
 };
 
 fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
@@ -1143,6 +1144,162 @@ fn should_retire_when_a_retirement_is_confirmed_after_the_runner_exited() {
         (retired.phase, retired.retire_reason),
         (Phase::Retiring, Some(RetireReason::JitPresumedLeaked))
     );
+}
+
+fn request_in_epoch_2(reason: RetireReason) -> Step {
+    at(2, SAGA, AttemptCommand::RequestRetirement { reason })
+}
+
+#[test]
+fn should_wait_for_the_deregistration_when_a_retirement_is_requested_in_backoff_holding_a_registration()
+ {
+    // given
+    let (backoff, _) = reach(&backoff_holding_registration());
+    // when
+    let requested = apply(&backoff, request_in_epoch_2(RetireReason::Surplus));
+    // then: no AttemptRetired, so no stop is issued before P11's deregistration answers
+    assert!(matches!(
+        (backoff.phase, backoff.jit),
+        (
+            Phase::Backoff {
+                stage: Stage::Activate,
+                ..
+            },
+            Jit::Taken(..)
+        )
+    ));
+    let (waiting, events) = requested.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::RetirementRequested(..)]
+    ));
+    assert!(matches!(waiting.phase, Phase::Backoff { .. }));
+    assert_eq!(waiting.retirement_requested, Some(RetireReason::Surplus));
+}
+
+#[test]
+fn should_refuse_a_second_request_when_a_retirement_waits_in_backoff() {
+    // given
+    let (backoff, _) = reach(&backoff_holding_registration());
+    let (waiting, _) = apply(&backoff, request_in_epoch_2(RetireReason::Surplus))
+        .unwrap_or_else(|r| panic!("{r:?}"));
+    // when
+    let again = apply(&waiting, request_in_epoch_2(RetireReason::Drain));
+    // then
+    assert_eq!(code(again), Some("already_retiring"));
+}
+
+#[test]
+fn should_not_retry_the_stage_when_a_retirement_waits_in_backoff() {
+    // given
+    let (backoff, _) = reach(&backoff_holding_registration());
+    let (waiting, _) = apply(&backoff, request_in_epoch_2(RetireReason::Surplus))
+        .unwrap_or_else(|r| panic!("{r:?}"));
+    // when
+    let retried = apply(&waiting, at(2, SAGA, issue(7)));
+    // then: the stage is retried only once the retirement is withdrawn
+    assert_eq!(code(retried), Some("nothing_to_issue"));
+    let (withdrawn, _) = apply(&waiting, at(2, SAGA, AttemptCommand::WithdrawRetirement))
+        .unwrap_or_else(|r| panic!("{r:?}"));
+    let (_, events) = apply(&withdrawn, at(2, SAGA, issue(7))).unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        issued_kind(&events),
+        Some(DirectiveKind::VerifyGuest)
+    ));
+}
+
+#[test]
+fn should_request_the_retirement_when_the_activation_budget_is_spent_holding_a_registration() {
+    // given: the second fresh verification (the budget is 2) is refused
+    let (retrying, _) = reach(&then_in_epoch_2(backoff_holding_registration(), issue(7)));
+    // when
+    let spent = apply(
+        &retrying,
+        at(
+            2,
+            SAGA,
+            observe_in(
+                2,
+                Fact::DirectiveRefused {
+                    directive_id: directive(7),
+                    reason: RefusalReason::EffectFailed,
+                },
+            ),
+        ),
+    );
+    // then: it backs off and waits for the deregistration instead of retiring at once
+    let (waiting, events) = spent.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AttemptEvent::DirectiveRefused(..),
+            AttemptEvent::AttemptBackedOff(..),
+            AttemptEvent::RetirementRequested(..)
+        ]
+    ));
+    assert_eq!(
+        waiting.retirement_requested,
+        Some(RetireReason::StageFailed)
+    );
+    let (retired, _) = apply(&waiting, at(2, SAGA, AttemptCommand::ConfirmRetirement))
+        .unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!(
+        (retired.phase, retired.retire_reason),
+        (Phase::Retiring, Some(RetireReason::StageFailed))
+    );
+}
+
+/// Negative control of the two tests above: without a registration (no JIT issued), a spent
+/// activation retires at once and a retirement requested in Backoff does too, as before.
+#[test]
+fn should_retire_at_once_when_the_activation_budget_is_spent_without_a_registration() {
+    // given: a fresh verification refused twice before any JIT was issued
+    let refused = |n| {
+        observe(Fact::DirectiveRefused {
+            directive_id: directive(n),
+            reason: RefusalReason::EffectFailed,
+        })
+    };
+    let (backoff, _) = reach(&then(activating(), [issue(4), refused(4)]));
+    let (retrying, _) = reach(&then(activating(), [issue(4), refused(4), issue(5)]));
+    // when
+    let requested = apply(
+        &backoff,
+        saga(AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        }),
+    );
+    let spent = apply(&retrying, saga(refused(5)));
+    // then
+    assert!(matches!(
+        (backoff.phase, backoff.jit),
+        (
+            Phase::Backoff {
+                stage: Stage::Activate,
+                ..
+            },
+            Jit::None
+        )
+    ));
+    let (_, events) = requested.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::AttemptRetired(..)]
+    ));
+    let (retired, events) = spent.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AttemptEvent::DirectiveRefused(..),
+            AttemptEvent::AttemptRetired(..)
+        ]
+    ));
+    assert_eq!(retired.retire_reason, Some(RetireReason::StageFailed));
+}
+
+fn then_in_epoch_2(mut path: Vec<Step>, body: AttemptCommand) -> Vec<Step> {
+    path.push(at(2, SAGA, body));
+    path
 }
 
 #[test]

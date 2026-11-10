@@ -321,6 +321,60 @@ fn launched_after_restart() -> Vec<Step> {
     path
 }
 
+/// An observation in run epoch 2, after an adoption.
+fn observe_after_restart(fact: Fact) -> Step {
+    at(
+        2,
+        SAGA,
+        AttemptCommand::RecordObservation(Observation {
+            observation_id: ObservationId::from_u128(0x0BA),
+            epoch: Epoch::new(2),
+            generation: Generation::FIRST,
+            fact,
+        }),
+    )
+}
+
+/// A launch of unknown outcome (a runner may be registered in the VM), a restart, and the
+/// fresh verification of the new epoch refused: Backoff in the activate stage with the
+/// registration held (KER-04G).
+fn backoff_holding_registration() -> Vec<Step> {
+    let mut path = then(
+        jit_issued(),
+        [
+            issue(5),
+            observe(Fact::RunnerLaunchUnknown {
+                directive_id: directive(5),
+            }),
+        ],
+    );
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    ));
+    path.push(at(2, SAGA, issue(6)));
+    path.push(observe_after_restart(Fact::DirectiveRefused {
+        directive_id: directive(6),
+        reason: RefusalReason::EffectFailed,
+    }));
+    path
+}
+
+fn retirement_waiting_in_backoff() -> Vec<Step> {
+    let mut path = backoff_holding_registration();
+    path.push(at(
+        2,
+        SAGA,
+        AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        },
+    ));
+    path
+}
+
 fn adopted() -> Vec<Step> {
     let mut path = prepared();
     path.push(at(
@@ -408,6 +462,8 @@ pub(super) fn paths() -> Vec<Vec<Step>> {
         doubted(),
         adopted(),
         launched_after_restart(),
+        backoff_holding_registration(),
+        retirement_waiting_in_backoff(),
     ]
 }
 
@@ -461,6 +517,43 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             AttemptCommand::RequestRetirement {
                 reason: RetireReason::Surplus,
             },
+        ),
+        case(
+            "retirement_in_backoff_waits_for_deregistration",
+            backoff_holding_registration(),
+            at(
+                2,
+                SAGA,
+                AttemptCommand::RequestRetirement {
+                    reason: RetireReason::Surplus,
+                },
+            ),
+            Expect::Accepted,
+        ),
+        case(
+            "spent_activation_holding_registration_requests_retirement",
+            {
+                let mut path = backoff_holding_registration();
+                path.push(at(2, SAGA, issue(7)));
+                path
+            },
+            observe_after_restart(Fact::DirectiveRefused {
+                directive_id: directive(7),
+                reason: RefusalReason::EffectFailed,
+            }),
+            Expect::Accepted,
+        ),
+        case(
+            "second_retirement_refused_while_one_waits_in_backoff",
+            retirement_waiting_in_backoff(),
+            at(
+                2,
+                SAGA,
+                AttemptCommand::RequestRetirement {
+                    reason: RetireReason::Drain,
+                },
+            ),
+            Expect::Refused,
         ),
         accepted(
             "withdraw_retirement_when_github_says_busy",

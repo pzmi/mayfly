@@ -784,6 +784,23 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
   - *An Unknown stop that a listing shows stopped* is `VmStopped`, the stop's success: the
     count of tries restarts for the delete.
   - *A vanished case ends with its resolution*: a later quarantine has its own reason.
+- **Behaviour decided by KER-04G** (deregister before stop in Backoff, I21; `doc/formal-models.md`,
+  lifecycle, `i21DeregisterBeforeStop`):
+  - *Backoff holds the registration too.* A fresh verification refused after the JIT was issued
+    (typically after a restart) leaves the attempt in `Backoff(activate)` with its registration
+    held and a runner possibly registered in the VM (a launch answered or of unknown outcome).
+    `RequestRetirement` there records `RetirementRequested` and waits for P11's deregistration,
+    as in Activating and Listening; it no longer retires at once (which skipped the
+    deregistration and issued the stop). A request while one waits is refused
+    `already_retiring` in every phase, Finished and Backoff included.
+  - *A spent activation budget requests the retirement.* With the registration held, the last
+    refused fresh verification records `AttemptBackedOff` and `RetirementRequested{stage_failed}`
+    instead of `AttemptRetired{stage_failed}`; the confirmation retires it with that reason.
+  - *No retry while the retirement waits.* The saga issues nothing in a Backoff whose retirement
+    waits; a busy answer (`WithdrawRetirement`) lets it retry the stage.
+  - *Outside it:* a quarantine's automatic stop (KER-04F: unless a job is live) and an
+    operator's resolution are not gated on the deregistration; a definitely refused launch and an
+    exited runner leave no idle runner in the VM, so their retirement stops at once.
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
   nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per
@@ -800,7 +817,7 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
 ```text
 Reserved → Cloning → Booting → Verifying → Prepared
 Prepared → Activating → Listening → Busy → Finished
-Prepared|Listening --RetirementRequested--> (Listening: wait deregistration) → Retiring
+Prepared|Activating|Listening|Backoff --RetirementRequested--> (registration held: wait deregistration) → Retiring
 Finished|stage failure (budget spent)|Retiring → (diagnostics) → Deleting → Deleted
 Cloning|Booting|Verifying|Activating → Backoff{n} → same stage (same name, generation)
 any state ↔ pending.Unknown overlay (no transition until observed)

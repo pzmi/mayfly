@@ -243,7 +243,11 @@ pub fn issuable(state: &AttemptState) -> Result<Option<DirectiveKind>, AttemptRe
         Phase::Reserved | Phase::Cloning => Some(DirectiveKind::CloneVm),
         Phase::Booting => Some(DirectiveKind::StartVm),
         Phase::Verifying => Some(DirectiveKind::VerifyGuest),
-        Phase::Backoff { stage, .. } => Some(stage_directive(stage)),
+        // a retirement waiting for its deregistration does not retry the stage (KER-04G)
+        Phase::Backoff { stage, .. } => match state.retirement_requested {
+            Some(..) => None,
+            None => Some(stage_directive(stage)),
+        },
         Phase::Activating => activation_directive(state),
         Phase::Retiring => cleanup_directive(state)?,
         Phase::Deleting => {
@@ -530,30 +534,32 @@ fn decide_bind_job(state: &AttemptState, request_id: RunnerRequestId) -> Decisio
 // ---- retirement, quarantine, adoption, close ------------------------------------------------
 
 /// A runner that holds a registration (a JIT was issued) waits for its deregistration before
-/// its VM is stopped (I21); anything else retires at once. A busy attempt is never retired.
+/// its VM is stopped (I21), whether activating, listening or backing off from a failed fresh
+/// verification; anything else retires at once. A request while one waits is refused wherever
+/// it waits: retiring at once there would skip that deregistration (KER-04G; pinned by
+/// `tests/attempt/lifecycle.rs::should_wait_for_the_deregistration_when_a_retirement_is_requested_in_backoff_holding_a_registration`
+/// and `should_refuse_a_second_request_when_a_retirement_waits_in_backoff`). A busy attempt is
+/// never retired.
 fn decide_request_retirement(state: &AttemptState, reason: RetireReason) -> Decision {
     let retired = AttemptEvent::AttemptRetired(AttemptRetired { reason });
+    if state.retirement_requested.is_some() {
+        return Err(AttemptRejection::AlreadyRetiring);
+    }
     match state.phase {
         Phase::Reserved
         | Phase::Cloning
         | Phase::Booting
         | Phase::Verifying
         | Phase::Prepared
-        | Phase::Finished
-        | Phase::Backoff { .. } => Ok(vec![retired]),
-        Phase::Activating | Phase::Listening => {
-            if state.retirement_requested.is_some() {
-                return Err(AttemptRejection::AlreadyRetiring);
+        | Phase::Finished => Ok(vec![retired]),
+        Phase::Activating | Phase::Listening | Phase::Backoff { .. } => match state.jit {
+            Jit::None => Ok(vec![retired]),
+            Jit::Issued(..) | Jit::Taken(..) | Jit::Orphaned(..) => {
+                Ok(vec![AttemptEvent::RetirementRequested(
+                    RetirementRequested { reason },
+                )])
             }
-            match state.jit {
-                Jit::None => Ok(vec![retired]),
-                Jit::Issued(..) | Jit::Taken(..) | Jit::Orphaned(..) => {
-                    Ok(vec![AttemptEvent::RetirementRequested(
-                        RetirementRequested { reason },
-                    )])
-                }
-            }
-        }
+        },
         Phase::Busy => Err(AttemptRejection::Busy),
         Phase::Retiring | Phase::Deleting => Err(AttemptRejection::AlreadyRetiring),
         Phase::Deleted | Phase::Lost => Err(AttemptRejection::Terminal),
@@ -1077,21 +1083,36 @@ fn cleanup_refused(state: &AttemptState) -> Vec<AttemptEvent> {
 }
 
 /// A stage that failed backs off with the same name and generation while its budget lasts,
-/// then retires the attempt (U2).
+/// then retires the attempt (U2). An attempt that holds a registration (a JIT was issued: the
+/// activate stage) does not retire at once when its budget is spent: it backs off and requests
+/// its retirement, which waits for the deregistration like a policy's request (I21, KER-04G;
+/// pinned by
+/// `tests/attempt/lifecycle.rs::should_request_the_retirement_when_the_activation_budget_is_spent_holding_a_registration`).
 fn stage_failed(state: &AttemptState, stage: Stage) -> Vec<AttemptEvent> {
     let budget = state
         .identity
         .as_ref()
         .map_or(1, |identity| identity.retry_budget);
+    let backed_off = AttemptEvent::AttemptBackedOff(AttemptBackedOff {
+        stage,
+        n: state.tries,
+    });
     if state.tries < budget {
-        vec![AttemptEvent::AttemptBackedOff(AttemptBackedOff {
-            stage,
-            n: state.tries,
-        })]
-    } else {
-        vec![AttemptEvent::AttemptRetired(AttemptRetired {
+        return vec![backed_off];
+    }
+    match state.jit {
+        Jit::None => vec![AttemptEvent::AttemptRetired(AttemptRetired {
             reason: RetireReason::StageFailed,
-        })]
+        })],
+        Jit::Issued(..) | Jit::Taken(..) | Jit::Orphaned(..) => match state.retirement_requested {
+            Some(..) => vec![backed_off],
+            None => vec![
+                backed_off,
+                AttemptEvent::RetirementRequested(RetirementRequested {
+                    reason: RetireReason::StageFailed,
+                }),
+            ],
+        },
     }
 }
 

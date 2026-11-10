@@ -3,7 +3,7 @@
 //! model's invariants check the model.
 
 use mayfly_control_domain::attempt::{
-    AttemptCommand, AttemptEvent, AttemptState, DirectiveKind, Jit, Outcome, Phase,
+    AttemptCommand, AttemptEvent, AttemptState, DirectiveKind, DirectiveTag, Jit, Outcome, Phase,
 };
 
 use super::support::{apply, matrix_states, stimuli};
@@ -68,6 +68,27 @@ fn broken(
     }
     if before.identity.is_some() && after.identity != before.identity {
         return Some("retryKeepsNameAndGeneration: the identity changed");
+    }
+    // I21 (KER-04G): a runner of the registration may be registered in the VM (a launch was
+    // answered or is of unknown outcome) and was not seen exiting: retiring the running VM
+    // (which commits to its stop) waits for the deregistration's `ConfirmRetirement`
+    let retired = events
+        .iter()
+        .any(|e| matches!(e, AttemptEvent::AttemptRetired(..)));
+    let runner_may_live = matches!(before.jit, Jit::Taken(..))
+        || (matches!(before.jit, Jit::Orphaned(..))
+            && !matches!(
+                before.pending.map(|p| p.tag),
+                Some(DirectiveTag::LaunchRunner)
+            ));
+    if retired
+        && runner_may_live
+        && !before.runner_exited
+        && after.vm_running
+        && !matches!(before.phase, Phase::Quarantined { .. })
+        && !matches!(stimulus, AttemptCommand::ConfirmRetirement)
+    {
+        return Some("I21: retired before the deregistration answered");
     }
     if matches!(before.phase, Phase::Quarantined { .. })
         && issued

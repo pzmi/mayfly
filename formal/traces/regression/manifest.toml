@@ -20,7 +20,9 @@
 # "lifecycle_traces"`, `init = "tinit"`), built the same way; the scripts VER-01F added
 # (`unknownStopResolvedByListing`, `confirmRetirementInBackoff`, `confirmRetirementAfterExit`,
 # `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`) pin the divergences VER-01 found,
-# resolved. Every
+# resolved; KER-04G's (`retirementInBackoffWaitsForDeregistration`,
+# `stageFailureHoldingRegistrationWaitsForDeregistration`) pin deregister-before-stop in Backoff.
+# Every
 # `*.itf.json` here has exactly one entry.
 
 [[trace]]
@@ -551,5 +553,25 @@ main = "lifecycle_traces"
 init = "tinit"
 step = "requarantineAfterVanished"
 max_steps = 14
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-retirementInBackoffWaitsForDeregistration.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "retirementInBackoffWaitsForDeregistration"
+max_steps = 12
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-stageFailureHoldingRegistrationWaitsForDeregistration.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "stageFailureHoldingRegistrationWaitsForDeregistration"
+max_steps = 13
 seed = "0x5ce1"
 invariant = "allInvariants"

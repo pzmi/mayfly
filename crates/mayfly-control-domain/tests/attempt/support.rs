@@ -337,6 +337,55 @@ pub fn launched_after_restart() -> Vec<Step> {
     path
 }
 
+/// KER-04G (I21): a launch of unknown outcome, so a runner may be registered in the VM; then a
+/// restart, and the fresh verification of the new epoch refused: Backoff in the activate stage
+/// with the registration held.
+pub fn backoff_holding_registration() -> Vec<Step> {
+    let mut path = then(
+        jit_issued(),
+        [
+            issue(5),
+            observe(Fact::RunnerLaunchUnknown {
+                directive_id: directive(5),
+            }),
+        ],
+    );
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    ));
+    path.push(at(2, SAGA, issue(6)));
+    path.push(at(
+        2,
+        SAGA,
+        observe_in(
+            2,
+            Fact::DirectiveRefused {
+                directive_id: directive(6),
+                reason: RefusalReason::EffectFailed,
+            },
+        ),
+    ));
+    path
+}
+
+/// [`backoff_holding_registration`] with a retirement requested there, waiting for its
+/// deregistration.
+pub fn backoff_retirement_waiting() -> Vec<Step> {
+    let mut path = backoff_holding_registration();
+    path.push(at(
+        2,
+        SAGA,
+        AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        },
+    ));
+    path
+}
+
 /// An observation from data-plane epoch `epoch`.
 pub fn observe_in(epoch: u64, fact: Fact) -> AttemptCommand {
     AttemptCommand::RecordObservation(Observation {
@@ -441,6 +490,8 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
         ("deleted", deleted()),
         ("lost", lost()),
         ("backoff", backoff()),
+        ("backoff/registered", backoff_holding_registration()),
+        ("backoff/retirement_waiting", backoff_retirement_waiting()),
         ("quarantined", quarantined()),
         ("quarantined/in_flight", then(quarantined(), [issue(10)])),
         (

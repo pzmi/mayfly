@@ -43,7 +43,7 @@ pub enum SagaStep {
 /// | a directive whose outcome is `Unknown` | `Idle` (only an observation moves it, I10) |
 /// | `Deleted`, `Lost` | `Close` |
 /// | nothing pending, and `IssueNext` would issue a directive ([`issuable`]) | `Issue` |
-/// | anything else (`Prepared`, `Listening`, `Busy`, `Finished`, spent budgets, a quarantined VM with nothing to stop) | `Idle` |
+/// | anything else (`Prepared`, `Listening`, `Busy`, `Finished`, spent budgets, a `Backoff` whose retirement waits for its deregistration (KER-04G), a quarantined VM with nothing to stop) | `Idle` |
 ///
 /// Pinned by `tests/attempt/saga.rs::should_issue_exactly_when_issue_next_would_be_accepted`
 /// and `should_follow_the_decision_table_when_each_matrix_state_is_read`.
