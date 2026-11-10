@@ -89,8 +89,9 @@ then, a model's task records the one it tried.
 | lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F) | KER-04, KER-04F |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); simulation about 3 min per seed and relation | KER-05 |
+| recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 6 min for `step`, 3 min for `restartStep`, 2.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
-The planned models are listed in verification §6.1: `scaleset` (KER-06), `recovery` (KER-07) and `registration` (KER-09).
+The planned models are listed in verification §6.1: `scaleset` (KER-06) and `registration` (KER-09).
 
 ### Simulation budget
 
@@ -276,6 +277,79 @@ Tests (`quint test`, stage `formal-test`, all deterministic so each runs once):
 `i02NoSharedSlotGeneration`; dropping the gate guard of `grant` makes simulation of `step`
 report `noGrantWhileClosed`. Simulation runs at about 38 traces of 50 steps per second
 (TypeScript evaluator, 4-CPU sandbox).
+
+### recovery
+
+One host after an earlier run of epoch 1 ended, cleanly or not: two attempt records (each in
+any of Cloning, Prepared, Busy, Deleting, Deleted or Quarantined, with its pending directive's
+outcome unknown), the provider's VMs (each running or stopped, under a live shim or not, with
+the recorded instance id or another), an image base, an `mf-*` VM no record names, the external
+epoch floor (raised by a later run whose journal was rolled back, or not), whether every stored
+event kind is known, and the earlier run's frames still on the link. Durable state (`j`, the
+journal with the safe-mode marker and the recorded GitHub messages; `backup`; `floor`; `world`;
+`net`; `plan`) survives `crash`, which can happen between any two actions, so at every await of
+the startup sequence; the run (`daemon`) and the data plane's session (`dp`) do not. Every reply
+of the data plane is lost, so an effect is learned only from an inventory, the hardest case for
+I10.
+
+The startup sequence is `start` (lock, open, backup), `verify` (floor, kinds, structure, marker:
+safe mode is recorded first), `mint` (`StartRun`, `MintEpoch` above the journal and the floor),
+`welcome` (the data plane raises the floor, then enters the session), `inventory` (complete or
+not; an incomplete one lists nothing), `classifyRecord` (the decision table, `classify`, one
+record at a time, with GitHub's view of its runner as an environment choice), `classifyStray`
+and `complete` (`CompleteRecovery`; admission opens). After it `issueNext` (the saga's next
+directive: a retried clone by name, or a delete carrying the recorded instance id), `dpExecute`
+(a frame runs only in its own session, never in a safe one, a delete only on the proof's
+instance id and never on a base; a frame may stay on the link as a duplicate), `observe` (a
+complete inventory resolves an `Unknown` outcome, the only way out) and `github` (deliver,
+record, ack). In safe mode `proposePlan` draws a plan bound to the journal heads, the
+inventory and the epoch, an operator approves it, each action's intent precedes its outcome,
+the plan is refused when the world moved (`refusePlan`), and `completePlan` leaves safe mode for
+a verified restart. `restore` puts the pre-migration backup back while the daemon is down (ADR
+0043) and `worldChange` makes a VM vanish, be replaced under its name, stop or lose its shim.
+
+`classify` is the abstraction of `mayfly_control_domain::operations::recovery::classify` for
+the inputs the model generates; the rows that depend on a runner registration (Activating,
+Listening) belong to the registration model (KER-09) and are pinned in Rust by the table
+golden. `step` offers every action; `restartStep` leaves out GitHub and the plan, so a bounded
+check spends its depth on the pipeline, its crashes and its effects; `repairStep` leaves out the
+saga and the data plane (which safe mode holds anyway), because a uniform walk of `step` almost
+never strings proposal, approval, two intents, two outcomes and completion together without a
+fault in between.
+
+| Id | Invariant | Pinned by |
+|:--|:--|:--|
+| `i04UnrecognisedNeverDeleted` | I04: no directive names a VM no record names, and none deletes one | `formal-verify`; `crates/mayfly-control-domain/tests/recovery.rs::should_never_delete_when_an_mf_vm_is_unknown_to_the_journal` |
+| `i05BaseNeverDeletable` | I05: no directive targets the image base, which always exists | `formal-verify`; `tests/recovery.rs::should_never_touch_when_the_vm_is_a_base_or_foreign` |
+| `i09NoStaleEpochExecutes` | I09: no frame takes effect outside its own session or below the epoch its attempt accepted | `formal-verify` (the link's own fencing is `link`'s) |
+| `i10UnknownLeavesOnlyOnObservation` | I10: an `Unknown` outcome is cleared only by a classification or an observation of a complete inventory | `formal-verify`; `tests/recovery.rs::should_assert_no_outcome_when_any_row_is_decided` |
+| `noAssertion` | every resolution of an `Unknown` outcome agrees with the inventory: a present VM is never read as a clone not applied or as deleted, an absent one never as a clone applied | the same |
+| `i11RecoveryCompletes` | I11 (bounded): a start the journal trusts never stalls before admission, and one with no fault completes within the pipeline's nine steps with every record classified | `formal-verify` |
+| `i12RecordBeforeAck` | I12: a GitHub message is acked only after its durable record, across crashes | `formal-verify` (the listener's own test is KER-06's) |
+| `i17EpochsIncrease` | I17: sessions are entered at strictly increasing epochs, the floor is raised before an epoch is used, a journal below the floor is never trusted | `formal-verify`; `tests/recovery.rs::should_enter_safe_mode_when_the_journal_is_below_the_floor_or_does_not_verify` |
+| `i25IncompleteNeverAbsence` | I25: no decision reads absence from an incomplete inventory, and admission never opens on one | `formal-verify`; `tests/recovery.rs::should_release_nothing_when_the_inventory_is_incomplete` |
+| `i29SafeModeNoEffects` | I29: in a safe session no clone or delete executes | `formal-verify` |
+| `safeModeNoDestructiveAction` | in safe mode no directive is issued and no decision or plan action retires, retries or deletes | `formal-verify`; `tests/recovery.rs::should_propose_nothing_destructive_when_the_journal_is_untrusted` |
+| `i31PlanBound` | I31: a plan acts only against the heads, inventory and epoch it was drawn from, intent before outcome | `formal-verify` (the `RecoveryPlan` aggregate is KER-10's) |
+| `deleteNeedsProof` | a delete carries the recorded instance id and executes only on the VM that has it | `formal-verify`; `tests/recovery.rs::should_delete_only_a_leaked_vm_with_proof_when_any_row_is_decided`, `should_never_delete_when_the_instance_id_differs` |
+| `quarantineNeverDeleted` | I28 at recovery: no decision, plan action or directive retires or deletes a quarantined VM | `formal-verify`; `tests/recovery.rs::should_keep_when_the_attempt_is_quarantined` |
+| `busyNeverRetiredWhileRunning` | F13 at recovery: a Busy attempt whose VM runs is never retired, whatever GitHub says | `formal-verify`; `tests/recovery.rs::should_never_retire_when_a_busy_vm_runs` |
+
+Tests (`quint test`, stage `formal-test`, all deterministic): one per row of plan §10 the model
+expresses (`busyAdoptedTest`, `unreachableIsNotAbsentTest`, `stoppedBusyRetiresWithProofTest`,
+`unknownCloneAbsentRetriesTest`, `unknownCloneAppliedAdoptsTest`, `deletingAbsentConfirmedTest`,
+`activeRunnerSuspendsCleanupTest`, `incompleteInventoryWaitsTest`, `incompleteThenCompleteTest`,
+`instanceMismatchQuarantinesTest`, `quarantinedKeptTest`, `leakedVmDeletedWithProofTest`,
+`strayReportedNeverDeletedTest`, `preparedAdoptedTest`,
+`preparedWithAnUnknownRunnerQuarantinedTest`), and the crashes and faults around them
+(`staleFrameNeverExecutesTest`, `replacedVmNeverDeletedTest`, `crashBeforeFloorRaisedTest`,
+`rolledBackJournalIsSafeModeTest`, `restoredBackupIsSafeModeTest`, `unknownKindIsSafeModeTest`,
+`planRefusedWhenTheWorldMovesTest`, `recordBeforeAckTest`, `safeSessionExecutesNothingTest`).
+Negative controls tried: reading an incomplete inventory as the table's input (dropping
+`classify`'s first row) makes simulation of `restartStep` report `[violation]` of
+`i25IncompleteNeverAbsence`; retiring a Busy attempt whenever GitHub shows its runner absent
+makes it report `busyNeverRetiredWhileRunning`. Simulation runs at about 60 traces of 40 steps
+per second (TypeScript evaluator, 4-CPU sandbox).
 
 ## Promoting a counterexample
 

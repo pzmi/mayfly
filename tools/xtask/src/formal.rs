@@ -39,7 +39,7 @@ pub struct Model {
 }
 
 /// The registry of models (verification.md section 6). The real models arrive with the tasks
-/// that own them (`scaleset` with KER-06, `recovery` with KER-07).
+/// that own them (`scaleset` with KER-06, `registration` with KER-09).
 /// Registering a
 /// model is one entry here and one entry in [`crate::formal_verify::BOUNDED`] per step
 /// relation; `should_register_every_model_file_when_formal_is_read` and
@@ -60,6 +60,10 @@ pub const MODELS: &[Model] = &[
     Model {
         file: "scheduling.qnt",
         steps: &["step", "admitStep"],
+    },
+    Model {
+        file: "recovery.qnt",
+        steps: &["step", "restartStep", "repairStep"],
     },
 ];
 
