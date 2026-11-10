@@ -2,7 +2,7 @@
 //!
 //! Each migration is one `.sql` file under `src/migrations/`, applied in one transaction with
 //! its row in `schema_meta` (`version`, `applied_at`, `compat_floor`). There is no downgrade.
-//! Before a migration is applied to a store that already holds a schema, the file is copied
+//! Before a migration is applied to a store that held a schema when it was opened, the file is copied
 //! beside itself (`<file>.pre-<version>`, by `VACUUM INTO`), so an operator can go back to the
 //! store as it was. A store whose `compat_floor` is above the newest migration this build knows
 //! was written by a build this one cannot run against: it refuses to open, naming both
@@ -30,11 +30,21 @@ pub(crate) struct Migration {
 }
 
 /// Every migration of this build, in order.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    compat_floor: 1,
-    sql: include_str!("migrations/0001_journal.sql"),
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        compat_floor: 1,
+        sql: include_str!("migrations/0001_journal.sql"),
+    },
+    // Expand-only, yet a build without it must not run on a store that has it: its units would
+    // write no dispatch marks, and a consumer already bootstrapped would never deliver their
+    // events. So the floor rises to 2.
+    Migration {
+        version: 2,
+        compat_floor: 2,
+        sql: include_str!("migrations/0002_delivery.sql"),
+    },
+];
 
 fn engine(stage: impl Fn(StorageError) -> OpenError) -> impl Fn(rusqlite::Error) -> OpenError {
     move |e| stage(read_error(&e))
@@ -89,7 +99,7 @@ pub(crate) fn migrate(
     applied_at: Millis,
 ) -> Result<(), OpenError> {
     let known = migrations.last().map_or(0, |m| m.version);
-    let (mut version, floor) = stored_version(conn)?;
+    let (version, floor) = stored_version(conn)?;
     if floor > known {
         return Err(OpenError::SchemaAboveBuild {
             store: version,
@@ -100,8 +110,11 @@ pub(crate) fn migrate(
     let at = i64::try_from(applied_at.get())
         .map_err(|_| OpenError::Engine(StorageError::new("instant_out_of_range")))?;
     let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > version).collect();
+    // Only a store that held a schema when it was opened is copied: a store created now has
+    // nothing to go back to between its own first migrations.
+    let held_schema = version > 0;
     for migration in pending {
-        if let Some(store) = backup.filter(|_| version > 0) {
+        if let Some(store) = backup.filter(|_| held_schema) {
             let copy = backup_path(store, migration.version);
             if !copy.exists() {
                 conn.execute(
@@ -130,14 +143,11 @@ pub(crate) fn migrate(
                 ],
             )
         });
-        match applied.and_then(|_| conn.execute_batch("COMMIT")) {
-            Ok(()) => version = migration.version,
-            Err(e) => {
-                if !conn.is_autocommit() {
-                    let _ = conn.execute_batch("ROLLBACK");
-                }
-                return Err(engine(failed)(e));
+        if let Err(e) = applied.and_then(|_| conn.execute_batch("COMMIT")) {
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
             }
+            return Err(engine(failed)(e));
         }
     }
     Ok(())
@@ -148,14 +158,14 @@ mod tests {
     use super::*;
 
     const EXTRA: Migration = Migration {
-        version: 2,
-        compat_floor: 1,
+        version: 3,
+        compat_floor: 2,
         sql: "CREATE TABLE extra_fact (id TEXT NOT NULL, CONSTRAINT extra_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
     const BREAKING: Migration = Migration {
-        version: 2,
-        compat_floor: 2,
+        version: 3,
+        compat_floor: 3,
         sql: "CREATE TABLE breaking_fact (id TEXT NOT NULL, CONSTRAINT breaking_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
@@ -189,17 +199,22 @@ mod tests {
             tables(&conn),
             [
                 "command_receipt",
+                "consumer_checkpoint",
+                "consumer_lease",
+                "delivery_consumer",
                 "event_kind_manifest",
                 "inbox",
                 "journal_event",
                 "journal_identity",
                 "projection_row",
                 "schema_meta",
+                "stream_dispatch",
                 "stream_head"
             ]
         );
-        assert_eq!(stored_version(&conn), Ok((1, 1)));
+        assert_eq!(stored_version(&conn), Ok((2, 2)));
         assert!(!backup_path(&path, 1).exists());
+        assert!(!backup_path(&path, 2).exists());
     }
 
     #[test]
@@ -207,16 +222,16 @@ mod tests {
         // given
         let (_dir, path, conn) = store();
         migrate(&conn, MIGRATIONS, Some(&path), Millis::new(7)).unwrap_or_else(|e| panic!("{e}"));
-        let with_extra = [MIGRATIONS[0], EXTRA];
+        let with_extra = [MIGRATIONS[0], MIGRATIONS[1], EXTRA];
 
         // when
         let migrated = migrate(&conn, &with_extra, Some(&path), Millis::new(8));
 
         // then
         assert_eq!(migrated, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((2, 1)));
-        let backup = Connection::open(backup_path(&path, 2)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(stored_version(&backup), Ok((1, 1)));
+        assert_eq!(stored_version(&conn), Ok((3, 2)));
+        let backup = Connection::open(backup_path(&path, 3)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stored_version(&backup), Ok((2, 2)));
         assert!(!tables(&backup).contains(&"extra_fact".to_owned()));
         assert_eq!(
             migrate(&conn, &with_extra, Some(&path), Millis::new(9)),
@@ -228,15 +243,20 @@ mod tests {
     fn should_open_a_newer_store_when_its_floor_is_one_this_build_knows() {
         // given
         let (_dir, path, conn) = store();
-        migrate(&conn, &[MIGRATIONS[0], EXTRA], Some(&path), Millis::new(7))
-            .unwrap_or_else(|e| panic!("{e}"));
+        migrate(
+            &conn,
+            &[MIGRATIONS[0], MIGRATIONS[1], EXTRA],
+            Some(&path),
+            Millis::new(7),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
 
         // when
         let older = migrate(&conn, MIGRATIONS, Some(&path), Millis::new(8));
 
         // then
         assert_eq!(older, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((2, 1)));
+        assert_eq!(stored_version(&conn), Ok((3, 2)));
     }
 
     #[test]
@@ -245,7 +265,7 @@ mod tests {
         let (_dir, path, conn) = store();
         migrate(
             &conn,
-            &[MIGRATIONS[0], BREAKING],
+            &[MIGRATIONS[0], MIGRATIONS[1], BREAKING],
             Some(&path),
             Millis::new(7),
         )
@@ -258,9 +278,9 @@ mod tests {
         assert_eq!(
             older,
             Err(OpenError::SchemaAboveBuild {
-                store: 2,
-                compat_floor: 2,
-                build: 1
+                store: 3,
+                compat_floor: 3,
+                build: 2
             })
         );
     }

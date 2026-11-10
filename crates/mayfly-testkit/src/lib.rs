@@ -7,10 +7,12 @@
 //!   refusals included, over accepted and refused cases, and its outcomes and refusal codes
 //!   match its decisions golden (ver §3.1).
 //! - [`journal`]: `MemoryJournal`, the in-memory `Journal` (ver §7.1).
+//! - [`delivery`]: `MemoryLedger`, the in-memory `DeliveryLedger` over a `MemoryJournal`'s store
+//!   (`doc/event-store.md` §3.4).
 //! - [`clock`]: `FakeClock`, `SeededRng` and `RecordingNotifier`, fakes for `AggregateStore`'s
 //!   ports (ver §3.2, §3.3).
 //! - [`secrets`]: `MemorySecretProvider`, the in-memory `SecretProvider` (ver §7.1).
-//! - [`contracts`]: the port contract suites: the journal's and the secret providers' (ver §5).
+//! - [`contracts`]: the port contract suites: the journal's, the delivery ledger's and the secret providers' (ver §5).
 //! - [`block_on`](block_on()): drives an async port from a synchronous test.
 //!
 //! The golden and determinism harnesses walk an `AggregateRegistry`, so an aggregate that joins
@@ -25,6 +27,7 @@
 mod block_on;
 pub mod clock;
 pub mod contracts;
+pub mod delivery;
 pub mod determinism;
 pub mod golden;
 pub mod journal;

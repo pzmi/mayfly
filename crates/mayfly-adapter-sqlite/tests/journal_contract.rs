@@ -394,10 +394,11 @@ fn should_pass_journal_contract_when_sqlite_crashes_after_each_statement() {
     // then
     assert!(journal.is_green(), "{journal}");
     assert!(engine.is_empty(), "{engine:?}");
-    // JC-23's unit has 17 statements and the COMMIT (reads: 2 heads, the receipt, the inbox
+    // JC-23's unit has 19 statements and the COMMIT (reads: 2 heads, the receipt, the inbox
     // key, 2 ids; writes: 2 heads, the receipt, the inbox entry, 2 identities, 2 events, 1
-    // manifest kind, 2 rows): with the point after BEGIN, 19 crash points, each struck once.
-    assert_eq!(factory.hooks.0.crashes.load(Ordering::SeqCst), 19);
+    // manifest kind, 2 rows, 2 dispatch marks): with the point after BEGIN, 21 crash points,
+    // each struck once.
+    assert_eq!(factory.hooks.0.crashes.load(Ordering::SeqCst), 21);
 }
 
 #[test]
@@ -526,7 +527,7 @@ fn should_refuse_to_open_when_a_newer_build_raised_the_compatibility_floor() {
         Err(OpenError::SchemaAboveBuild {
             store: 9,
             compat_floor: 9,
-            build: 1
+            build: 2
         })
     );
 }

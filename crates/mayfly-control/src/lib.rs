@@ -4,8 +4,12 @@
 //!   `doc/event-store.md` §3).
 //! - [`store`]: `AggregateStore`, the one write path over the journal, with its `Clock`, `Rng`
 //!   and `StoreNotifier` ports (`doc/event-store.md` §3.7).
+//! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
+//!   `DeliveryWorker` with `catch_up` and kicks, and the `directive_relay` consumer
+//!   (`doc/event-store.md` §3.4, §5).
 //! - [`secrets`]: the `SecretProvider` port, its refusals and the `doctor` check (ADR 0033).
 
+pub mod delivery;
 pub mod journal;
 pub mod secrets;
 pub mod store;

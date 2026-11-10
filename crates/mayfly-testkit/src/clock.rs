@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use mayfly_control::delivery::StoreClock;
 use mayfly_control::journal::{StoredKind, StreamId};
 use mayfly_control::store::{Clock, Committed, Rng, StoreNotifier};
 use mayfly_domain::Millis;
@@ -50,6 +51,14 @@ impl Clock for FakeClock {
         let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.0 = shared.0.saturating_add(duration.get());
         shared.1.push(duration);
+    }
+}
+
+/// The same clock as a delivery ledger's store clock (`doc/event-store.md` §2.1): a lease
+/// expires, or a `retry_after` passes, only when a test advances it.
+impl StoreClock for FakeClock {
+    fn now(&self) -> Millis {
+        Clock::now(self)
     }
 }
 

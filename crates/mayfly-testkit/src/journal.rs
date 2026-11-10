@@ -18,16 +18,20 @@ use mayfly_control::journal::{
 use mayfly_domain::{CommandId, EventId};
 
 use crate::contracts::journal::{InjectedFault, JournalFactory};
+use crate::delivery::DeliveryRows;
 
 #[derive(Debug, Clone, Default)]
-struct State {
-    streams: BTreeMap<StreamId, Vec<RecordedEvent>>,
-    heads: BTreeMap<StreamId, StreamHead>,
+pub(crate) struct State {
+    pub(crate) streams: BTreeMap<StreamId, Vec<RecordedEvent>>,
+    pub(crate) heads: BTreeMap<StreamId, StreamHead>,
     identities: BTreeMap<EventId, EventLocation>,
     kinds: BTreeSet<StoredKind>,
     receipts: BTreeMap<CommandId, CommandReceipt>,
     inbox: BTreeSet<InboxKey>,
     projections: BTreeMap<(ProjectionName, String), Payload>,
+    /// The delivery ledger's rows (`crate::delivery::MemoryLedger`), in the same store as the
+    /// journal so a unit's dispatch marks commit with it (ES-I1, DC-03).
+    pub(crate) delivery: DeliveryRows,
 }
 
 impl State {
@@ -213,6 +217,9 @@ impl State {
         if let Some(key) = unit.inbox {
             next.inbox.insert(key);
         }
+        for stream in &appended.streams {
+            next.delivery.mark_all(&stream.stream, stream.last);
+        }
         for write in unit.projections {
             let key = (write.projection, write.key);
             match write.row {
@@ -225,8 +232,8 @@ impl State {
 }
 
 #[derive(Debug, Default)]
-struct Shared {
-    state: State,
+pub(crate) struct Shared {
+    pub(crate) state: State,
     fault: Option<InjectedFault>,
 }
 
@@ -270,7 +277,7 @@ impl MemoryJournal {
             .insert(receipt.command_id, receipt);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
 

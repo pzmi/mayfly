@@ -642,7 +642,8 @@ and workers, never a commit. The directive relay (`d`) is registered, bootstraps
 before it, and its workers `claim` a marked stream with the next fence, run the `effect` of the
 next revision under the live lease, `advance` the checkpoint only up and clear the mark only up
 to the delivered revision, `release`, or `failHandle` (released, nothing skipped); leases
-`expire` and workers crash alone (`crashWorker`). The inline projection (`p`) counts each
+`expire` and workers crash alone (`crashWorker`); the consumer is `retire`d (ES-05: its marks and
+checkpoints go, its leases end and keep their fences, so registered again it takes higher ones). The inline projection (`p`) counts each
 stream's events, computed outside the transaction (`withRows`); `startRebuild`,
 `rebuildStream` and `cutover` are ES-12's online rebuild: units dual-write streams already
 rebuilt, and a unit computed for another generation set, or before its stream was rebuilt, is
@@ -653,7 +654,9 @@ refused at commit. Snapshots (`ES_I8`) join with ES-08.
 unit begins, or appends in one step, only while no other transaction is open; `relayStep` is
 the biased relation: commands of intents 1 and 2 by one build, one-step appends, kicks, crashes
 and every consumer stimulus (registration among them), because a uniform walk of `step` rarely
-strings registration, a commit, a claim, an effect and an advance together. Two component
+strings registration, a commit, a claim, an effect and an advance together. `retire` (ES-05) is offered by
+`step`, `implStepSerial` and `relayStep`, not by `deliveryOnlyStep`, whose depth is spent on one
+registration; the Apalache times below predate it and were not measured again. Two component
 relations exist for Apalache (ES-06F, review MED4): `storeOnlyStep` is `step` without the
 consumer and the rebuild, and `deliveryOnlyStep` is the consumer over a journal grown by
 `DirectiveIssued` commands of one build appended in one step from one slot.
@@ -683,8 +686,8 @@ relation), which samples and proves nothing.
 | `ES_I11_rebuildEquivalence` | the active rows are the fold of every stream; a rebuilt shadow row too | `shadowRebuildDualWriteTest`, `cutoverFenceTest` (ES-12's PC-07..PC-09 to come) |
 | `ES_I12_epochSafety` | a stream's epoch never decreases; nothing is appended above its build or to a stream above it; `replayWithinEpoch` | `epochRaiseTest`, `refusedAboveEpochTest`, `epochRaceTest`; JC-18, `tests/store/save.rs::should_refuse_a_newer_epoch_before_the_receipt_when_a_newer_build_wrote_the_stream` |
 | `replayWithinEpoch` | no receipt answers a build for a stream above it (those the receipt appended or is bound to, or for an acceptance with no event the streams the repeat names), also when a newer build commits between the older build's epoch check and its receipt read | `epochRaceTest`, negative world `staleBuildReplayViolatesTest`; JC-33, `tests/store/save.rs::should_refuse_the_replay_when_a_newer_build_recorded_the_receipt_after_the_epoch_check` |
-| `ES_I14_durableDelivery` | the checkpoint never passes the head nor moves back (checked on every consumer step, whichever action it is); an undelivered revision of a covered stream is marked; no effect and no advance without the live lease | `bootstrapAfterWritesTest`, `commitBetweenFetchAndApplyTest`, `markDuringProcessingTest`, `staleWorkerFencedTest`, `workerCrashRedeliversTest`; DC cases with ES-05 |
-| `ES_I15_noSkip` | the delivered revisions of a stream are a prefix of its committed ones | `failingConsumerNoSkipTest`; DC-08, DC-18 with ES-05 |
+| `ES_I14_durableDelivery` | the checkpoint never passes the head nor moves back (checked on every consumer step, whichever action it is; `retire` removes a consumer's checkpoints with it); an undelivered revision of a covered stream is marked; no effect and no advance without the live lease | `bootstrapAfterWritesTest`, `commitBetweenFetchAndApplyTest`, `markDuringProcessingTest`, `staleWorkerFencedTest`, `workerCrashRedeliversTest`, `retireThenRegisterTest`; DC-01..DC-17, DC-19..DC-25 (ES-05) |
+| `ES_I15_noSkip` | the delivered revisions of a stream are a prefix of its committed ones | `failingConsumerNoSkipTest`; DC-08, DC-13, DC-18 (ES-05) |
 | `ES_I16_lockOrder` | no wait-for cycle | `oppositeOrderUnitsTest`, `racingCommandsTest`, `idWaitTest`; JC-22's two-unit case |
 | `directivesFromJournal` | a directive is sent only for a committed `DirectiveIssued` event, and only committed events are delivered (ADR 0034) | `crashBeforeReactorsTest`, `directiveInUnitTest` |
 | `reactorsNeverReplayed` | the after-commit kick runs at most once per commit and never for a replay; a crash before it loses only the kick. Structural in the relations (only `apply` sets a kick; `kick` and `crash` clear them); the negative world shows it is not vacuous | `crashBeforeReactorsTest`, `zeroEventAcceptanceTest`, negative world `replayingRestartViolatesTest` |
@@ -700,7 +703,7 @@ expresses before ES-08 (`lostRaceTest`, `noStreamVersusEmptyTest`, `independentS
 `workerCrashRedeliversTest`, `failingConsumerNoSkipTest`), plus `refusalReplayedAtSameRevisionTest`,
 `crashBeforeReactorsTest`, `directiveInUnitTest`, `shadowRebuildDualWriteTest` and
 `cutoverFenceTest`, then (ES-06F) `epochRaceTest`, `refusedRedeliveryTest`,
-`refusalWithInboxTest` and `zeroEventAcceptanceTest`, and the negative worlds, each an action
+`refusalWithInboxTest` and `zeroEventAcceptanceTest`, then (ES-05) `retireThenRegisterTest`, and the negative worlds, each an action
 kept out of every step relation: `headTrustingReaderViolatesTest` (`advanceToHead`, the
 `HeadTrustingWorker`, breaks `ES_I15_noSkip`) and `unfencedWorkerViolatesTest`
 (`effectUnfenced`, the `UnfencedLedger`, breaks `ES_I14_durableDelivery`), both of §7.3, and
@@ -753,6 +756,10 @@ steps misses it); a relay that sends every delivered event, not only `DirectiveI
 review's other points: the first conjunct of `directivesFromJournal` is kept, as it pins the
 relay's filter (the mutant just named); `ckpt >= ckptSeen` became the per-step `ckptBack` ghost;
 kicks are named by their unit and the commit counter moved to the ghost (ES-I17).
+
+Negative control tried at ES-05 (scratch mutation, not committed): a `retire` that resets each
+lease's fence fails `retireThenRegisterTest` (the new claim's fence is 1, not 2, the fence the
+retired consumer's claim already handed out).
 
 ## Promoting a counterexample
 

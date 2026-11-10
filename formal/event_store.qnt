@@ -945,6 +945,31 @@ module event_store {
     deliveryStep("crashWorker", { ...d, workers: d.workers.set(w, IDLE) }, g, NONE),
   }
 
+  /// The consumer is retired (ES-05, `DeliveryLedger::retire`): its registration, marks and
+  /// checkpoints are gone and every lease ends, but a lease's fence is kept, so a consumer
+  /// registered again under the name hands out fences above every earlier one (ES-I14) and a
+  /// worker still holding a claim of the retired one can neither effect nor advance. The
+  /// checkpoint is not moved back but removed with its consumer: a consumer registered again is
+  /// a new consumer that bootstraps and delivers every stream from revision 0, so `ckptBack` is
+  /// not set (a step of a registered consumer never lowers a checkpoint).
+  action retire: bool = all {
+    d.registered,
+    j' = j,
+    p' = p,
+    d' = {
+      ...d,
+      registered: false,
+      boot: STREAMS.mapBy(_ => false),
+      marks: STREAMS.mapBy(_ => NOREV),
+      ckpt: STREAMS.mapBy(_ => NOREV),
+      lease: STREAMS.mapBy(x => { ...d.lease.get(x), live: false }),
+    },
+    slots' = slots,
+    kicks' = kicks,
+    g' = g,
+    last' = { stimulus: "retire", slot: 0, outcome: NONE },
+  }
+
   // ---- the online rebuild (ES-12, E9) -------------------------------------------------------
 
   action projStep(name: str, p2: Proj): bool = all {
@@ -1090,6 +1115,7 @@ module event_store {
     any {
       storeStep(serial, t, c, i, s, r, b, m, e, id1, id2, two, id3, ep, n),
       consumerStep(w, s),
+      retire,
       rebuildStep(s),
     }
   }
@@ -1125,7 +1151,8 @@ module event_store {
   /// The durable consumer alone over a journal that grows by `DirectiveIssued` commands of one
   /// build in one-step appends from one slot: the component relation Apalache checks deep
   /// enough to register, commit, claim, effect, advance and take over (ES-I14, ES-I15,
-  /// `directivesFromJournal`).
+  /// `directivesFromJournal`). `retire` (ES-05) is left out, so the depth of the proof is spent
+  /// on one registration; `step` and `relayStep` offer it.
   action deliveryOnlyStep = {
     nondet c = CMDS.oneOf()
     nondet s = STREAMS.oneOf()
@@ -1155,6 +1182,7 @@ module event_store {
       kick(s, n),
       crash,
       consumerStep(w, s),
+      retire,
     }
   }
 
@@ -1430,7 +1458,7 @@ module event_store {
     { ...X, kind: "rawRefusal", t: t, c: c, i: i, s: s, m: m }
   pure val Crash: Stim = { ...X, kind: "crash" }
   /// A consumer step: register, bootstrap, claim, effect, advance, release, failHandle, expire,
-  /// crashWorker.
+  /// crashWorker, retire.
   pure def Dl(kind: str, w: int, s: str, want: str): Stim =
     { ...X, kind: kind, w: w, s: s, want: want }
   /// A rebuild step: startRebuild, rebuildStream, cutover.
@@ -1481,6 +1509,7 @@ module event_store {
     else if (x.kind == "failHandle") failHandle(w)
     else if (x.kind == "expire") expire(s)
     else if (x.kind == "crashWorker") crashWorker(w)
+    else if (x.kind == "retire") retire
     else if (x.kind == "startRebuild") startRebuild
     else if (x.kind == "rebuildStream") rebuildStream(s)
     else if (x.kind == "cutover") cutover
@@ -1778,6 +1807,20 @@ module event_store {
   run failingConsumerNoSkipTest = play(FAILING_CONSUMER_NO_SKIP)
     .expect(d.ckpt.get("a") == NOREV and d.marks.get("a") == 0 and allInvariants)
 
+  // ES-I14 (ES-05, DC-06): a retired consumer is no longer marked, a worker still holding its
+  // claim can neither effect nor advance, and the consumer registered again bootstraps the
+  // stream and delivers it from revision 0 under a higher fence.
+  pure val RETIRE_THEN_REGISTER: List[Stim] = [
+    Dl("register", 1, "a", ""), Cmd(1, 1, 1, "a", "", 1, 0, ""), Tx("appendUnit", 1, COMMITTED),
+    Dl("claim", 1, "a", ""), Dl("effect", 1, "a", ""), Dl("advance", 1, "a", ""),
+    Dl("retire", 1, "a", ""), Cmd(1, 2, 1, "a", "", 1, 0, ""), Tx("appendUnit", 1, COMMITTED),
+    Dl("release", 1, "a", LEASE_LOST), Dl("register", 1, "a", ""), Dl("bootstrap", 1, "a", ""),
+    Dl("claim", 2, "a", ""), Dl("effect", 2, "a", ""), Dl("advance", 2, "a", ""),
+  ]
+  run retireThenRegisterTest = play(RETIRE_THEN_REGISTER)
+    .expect(d.lease.get("a").fence == 2 and d.ckpt.get("a") == 0 and d.marks.get("a") == 1)
+    .expect(allInvariants)
+
   // ES-I11 (ES-12): units dual-write rebuilt streams; a stream rebuilt later folds what was
   // written meanwhile; the cutover switches to rows equal to the live ones.
   pure val SHADOW_REBUILD_DUAL_WRITE: List[Stim] = [
@@ -1973,6 +2016,7 @@ module event_store_traces {
       all { x.kind == "failHandle", E::failHandle(w) },
       all { x.kind == "expire", E::expire(s) },
       all { x.kind == "crashWorker", E::crashWorker(w) },
+      all { x.kind == "retire", E::retire },
       all { x.kind == "startRebuild", E::startRebuild },
       all { x.kind == "rebuildStream", E::rebuildStream(s) },
       all { x.kind == "cutover", E::cutover },
@@ -2017,4 +2061,5 @@ module event_store_traces {
   action refusedRedelivery = script(E::REFUSED_REDELIVERY)
   action refusalWithInbox = script(E::REFUSAL_WITH_INBOX)
   action zeroEventAcceptance = script(E::ZERO_EVENT_ACCEPTANCE)
+  action retireThenRegister = script(E::RETIRE_THEN_REGISTER)
 }

@@ -299,7 +299,33 @@ impl<H: StoreHooks> SqliteJournal<H> {
         &self.inner.path
     }
 
-    async fn read<T: Send + 'static>(
+    /// Runs `f` on a writer connection, the next in turn: how the delivery ledger runs its
+    /// transactions on the journal's writers (`crate::ledger`).
+    pub(crate) async fn write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, Failure> + Send + 'static,
+    ) -> Result<T, StorageError> {
+        let n = self.inner.next.fetch_add(1, Ordering::Relaxed) % self.inner.writers.len();
+        let worker = self
+            .inner
+            .writers
+            .get(n)
+            .ok_or(StorageError::new("writer_gone"))?;
+        let pending = worker
+            .run(move |slot| match slot.conn.as_ref() {
+                Some(conn) => f(conn).map_err(Failure::storage_error),
+                None => Err(StorageError::new("connection_lost")),
+            })
+            .map_err(|refused| match refused {
+                NotQueued::Full => StorageError::new("busy"),
+                NotQueued::Gone => StorageError::new("writer_gone"),
+            })?;
+        pending
+            .await
+            .unwrap_or(Err(StorageError::new("writer_gone")))
+    }
+
+    pub(crate) async fn read<T: Send + 'static>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, Failure> + Send + 'static,
     ) -> Result<T, StorageError> {

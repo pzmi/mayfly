@@ -1,6 +1,7 @@
 //! `mayfly-adapter-sqlite` (control plane): the SQLite journal (ES-02), with receipts, inbox,
-//! the event-kind manifest, inline projection rows and forward-only migrations; the delivery
-//! ledger, snapshots and projection generations join with ES-05, ES-08 and ES-04.
+//! the event-kind manifest, inline projection rows and forward-only migrations, and the delivery
+//! ledger (ES-05, [`SqliteLedger`]); snapshots and projection generations join with ES-08 and
+//! ES-04.
 //!
 //! [`SqliteJournal`] implements `mayfly_control::journal::Journal` over one file through
 //! `rusqlite` with its bundled SQLite (ADR 0008, amended by ADR 0021), following the adapter
@@ -16,6 +17,10 @@
 //!   ES-I16, refusals in the port's reporting order, every refusal also guarded by the data (a
 //!   head compare-and-set, a primary key), classified by extended code and the constraint the
 //!   statement guards (`classify`), never by message text.
+//! - **Delivery** (`ledger`, migration 0002): every unit marks each registered consumer for each
+//!   stream it appends, in its own transaction; the ledger's claims, renewals, advances and
+//!   releases are short `BEGIN IMMEDIATE` transactions on the same writers, fenced by the lease
+//!   and judged by an injected store clock (`doc/event-store.md` §4.2, §5.1).
 //! - **Threads** (`writer`): each connection lives on its own thread; one writer is an
 //!   implementation detail, never a premise (§4.3 rule 2).
 //! - **Barriers** ([`StoreHooks`], [`NoHooks`]): where tests and the store lab strike.
@@ -24,9 +29,11 @@ mod append;
 mod classify;
 mod hooks;
 mod journal;
+mod ledger;
 mod rows;
 mod schema;
 mod writer;
 
 pub use hooks::{HookAction, NoHooks, StoreHooks};
 pub use journal::{Durability, OpenError, SqliteJournal, SqliteOptions};
+pub use ledger::SqliteLedger;

@@ -22,6 +22,8 @@ pub enum JournalValueError {
     InvalidAggregateName,
     /// A command type is not `[a-z][a-z0-9_]{0,63}`.
     InvalidCommandType,
+    /// A consumer name is not `[a-z][a-z0-9_]{0,63}`.
+    InvalidConsumerName,
 }
 
 impl fmt::Display for JournalValueError {
@@ -33,6 +35,7 @@ impl fmt::Display for JournalValueError {
             Self::InvalidProjectionName => "invalid projection name",
             Self::InvalidAggregateName => "invalid aggregate name",
             Self::InvalidCommandType => "invalid command type",
+            Self::InvalidConsumerName => "invalid consumer name",
         })
     }
 }

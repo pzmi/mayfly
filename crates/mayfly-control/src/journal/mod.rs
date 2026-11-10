@@ -39,6 +39,7 @@ use mayfly_domain::{CommandId, EventId};
 
 pub use error::{AppendError, StorageError};
 pub use unit::{Appended, AppendedStream, MalformedUnit, StreamAppend, UnitOfWork};
+pub(crate) use values::valid_snake_name;
 pub use values::{
     AggregateName, CommandReceipt, CommandType, Decision, EventLocation, ExpectedRevision,
     InboxKey, InboxSource, IntentDigest, JournalValueError, MessageId, NewEvent, NewReceipt,

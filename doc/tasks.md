@@ -660,6 +660,14 @@ Accept: DC green on memory and SQLite (all modes); every broken ledger fails its
 ES-03 (ADR 0041 rule 6): a refusal consumes no inbox key, so a consumer or observation handler
 that deduplicates by inbox treats `Outcome::Refused` as handled (acked) and never reads
 "not in the inbox" as "not yet decided"; the refusal receipt answers a redelivery.
+Note (ES-05, as built; event-store §3.4 "As built", §5.1): the model gained `retire` and the
+scenario `retireThenRegister` first. Later tasks: CP-02 implements `DirectiveSink` (the relay
+hands it the decoded `DirectiveIssued` with stream, revision, event id and fence) and keeps the
+data plane's dedupe by `directive_id`; CP-04 and RT-02 call `DeliveryWorker::catch_up` per
+consumer after the start-up checks, own the `Kicks` wiring (one per consumer, `AggregateStore`'s
+notifier) and the coarse timer, and pass the SQLite ledger a store clock; ES-07 maps the model's
+consumer actions onto the ledger (the claim's fence is its token); ES-09 ports migration 0002
+(floor 2) and runs the DC suite in its modes.
 
 #### ES-07 Event-store conformance driver
 Cites: event-store §7.3, ver §6.2. Driver over memory (`step`) and SQLite (`implStepSerial`, two

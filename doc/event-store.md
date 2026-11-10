@@ -197,8 +197,8 @@ the head and never moves back; every committed event is delivered at least once;
 stream's events are delivered in revision order; a lease that expired or was taken over cannot move
 the checkpoint, clear a mark or start an effect; each takeover hands out a strictly higher fence.
 Pinned by DC-01..DC-25; model `ES_I14_durableDelivery` (`bootstrapAfterWrites`,
-`markDuringProcessing`, `staleWorkerFenced`, `workerCrashRedelivers`); SW9; `UnfencedLedger`,
-`ClearAllMarksLedger`.
+`markDuringProcessing`, `staleWorkerFenced`, `workerCrashRedelivers`, `retireThenRegister`); SW9;
+`UnfencedLedger`, `ClearAllMarksLedger`.
 
 **ES-I15 No skip**. For every consumer and every rebuild, the applied revisions of a
 stream are a prefix of its committed revisions. No step drops a pending revision whatever its age:
@@ -400,6 +400,26 @@ releases with a backoff and leaves the checkpoint; `LeaseLost` ends that claim, 
 `catch_up()` registers this build's consumers, finishes any bootstrap and drains each. Backoff
 jitter comes from the `Rng` port; nothing sleeps on a wall clock.
 
+**As built (ES-05).** `mayfly_control::delivery` holds the port and its worker; the sketch differs
+in these points. The claim's token is its fence: a lease is `(consumer, stream, fence)` and the
+fence rises with every claim, so `consumer_lease` has no `token` column and a stale claim is one
+whose fence is not the lease's (DC-11, DC-20). `renew`, `advance` and `release` return
+`LeaseError { Lost, Storage }`, so a store fault is not read as a lost lease. `retry_after` is a
+duration from the store clock's now. A bootstrap page marks a stream only where its head is past
+the consumer's checkpoint, and the last page records the consumer as `bootstrapped`
+(`ConsumerState`). `retire` keeps each lease's fence (§4.1: "fence never reset"), so a consumer
+registered again under its name never hands out a fence a fenced resource already saw. The store
+clock is the `StoreClock` port. `catch_up` is per consumer (`DeliveryWorker::catch_up::<C>`):
+composition calls it for each consumer this build runs (RT-02). Kicks are `Kicks`, a bounded,
+coalescing set of streams that `AggregateStore` fills as its `StoreNotifier` and
+`DeliveryWorker::drain_kicked` empties; a full set drops the kick and counts it. A drain runs at
+most `max_rounds` claim rounds and spawns nothing: the supervision tree owns the loop. The
+backoff is full jitter in `1..=d` (at least 1 ms, so the store clock must pass it), `d` doubling
+per consecutive failure of the stream from `backoff_base` to `backoff_cap`; the failure count
+lives in the worker's memory. Migration 0002 adds the four tables and raises the store's
+compatibility floor to 2: a build without delivery would commit units with no marks, which a
+consumer already bootstrapped would never deliver.
+
 ### 3.5 `SnapshotStore` (ES-08)
 
 ```rust
@@ -506,7 +526,7 @@ anomalies; a constraint or a CAS is the guard).
 | `delivery_consumer` | `consumer` | `registered_at`, `bootstrapped` | |
 | `stream_dispatch` | `(consumer, stream_id)` | `marked`, `retry_at` | the mark |
 | `consumer_checkpoint` | `(consumer, stream_id)` | `revision` | |
-| `consumer_lease` | `(consumer, stream_id)` | `token`, `lease_until`, `fence` | fence never reset |
+| `consumer_lease` | `(consumer, stream_id)` | `lease_until`, `fence` | fence never reset (also the claim's token, ES-05) |
 | `aggregate_snapshot` | `(stream_id, aggregate, format, reducer)` | `revision`, `epoch`, `kinds`, `state`, `checksum` | |
 | `snapshot_request` | `stream_id` | `target` | target only rises |
 | `projection_row` | `(spec, generation, key)` | `stream_id`, `payload` | index `(spec, generation, stream_id)` |
@@ -533,7 +553,7 @@ across both and fails on a drift. Statement triggers on both engines refuse `UPD
 | Journal tables | never `ON CONFLICT DO NOTHING`: a conflict must abort | the same |
 | Dispatch marks | `INSERT … ON CONFLICT (consumer, stream_id) DO UPDATE SET marked = max(marked, excluded.marked)` per registered consumer (the list read in the same transaction); no write when none is registered | the same; rows keyed by the writer's own stream, so no two streams' writers meet |
 | Lease claim | `INSERT … ON CONFLICT DO UPDATE … WHERE consumer_lease.lease_until <= :now RETURNING fence`; `:now` from `StoreClock` read inside the transaction | the same with `now()` in a one-statement transaction (the database's clock) |
-| Advance / renew / release | in one `BEGIN IMMEDIATE`: check `token = ? AND lease_until > :now`; then checkpoint `= max(…)`, `DELETE FROM stream_dispatch WHERE … AND marked <= ?to`, extend | `SELECT … FROM consumer_lease WHERE token = $t AND lease_until > now() FOR UPDATE`; no row → `LeaseLost`; then the same writes |
+| Advance / renew / release | in one `BEGIN IMMEDIATE`: check `fence = ? AND lease_until > :now`; then checkpoint `= max(…)`, `DELETE FROM stream_dispatch WHERE … AND marked <= ?to`, extend | `SELECT … FROM consumer_lease WHERE fence = $f AND lease_until > now() FOR UPDATE`; no row → `LeaseLost`; then the same writes |
 | Snapshot save | `INSERT … ON CONFLICT DO UPDATE … WHERE excluded.revision > aggregate_snapshot.revision` | the same |
 | Durability at open | `PRAGMA journal_mode` = `wal`, `synchronous` = 2 (`FULL`), `foreign_keys` = 1, read back and checked | `SHOW fsync`, `synchronous_commit`, `full_page_writes` = `on`, read back and checked |
 | Commit outcome | an error from `COMMIT` → `OutcomeUnknown` (a lost `SQLITE_IOERR` on commit is ambiguous) | an error or lost connection after `COMMIT` was sent → `OutcomeUnknown`; any error before it → definite |
@@ -610,6 +630,20 @@ classification relies on it, and says so. Projection rebuild is online (E9) and 
    port, capped), leaves the checkpoint, and the event is delivered again. Nothing skips it.
 6. Discovery reads `stream_dispatch` by `(consumer, stream_id)` key, round-robin from the last key
    claimed, never ordered by time; `retry_at` is a filter, not an order.
+
+**The model, and where the code differs (ES-05).** The worker follows `formal/event_store.qnt`
+action by action: `claim` fixes the revision it reads through (the mark at the claim), `effect`
+is `renew` then `handle`, `advance` goes to the delivered revision, `failHandle` is a release with
+a backoff, and `retire` (added by ES-05, with the scenario `retireThenRegister`) removes the
+consumer's marks and checkpoints and ends its leases, keeping their fences. The code differs in
+what the model abstracts away: (1) `effect` is atomic in the model; in the code a lease can run
+out between `renew` and the end of `handle`, which is why consumers are idempotent by
+`Delivery.key` or fence by `Delivery.fence` (below; DC-15); (2) the model has one consumer, the
+code any number, each with its own rows; (3) `retry_after` and the round-robin discovery
+restrict when a claim may be taken, never what it may do, so they remove behaviours of the model
+and add none; (4) the model's bootstrap marks a stream at its head whatever its checkpoint, the
+code only past the checkpoint, which the model's `claim` guard (`marks > ckpt`) makes
+equivalent; (5) `max_rounds` bounds a drain, which the model (a relation) has no need for.
 
 **What the lease fences, and what it cannot.** It fences the checkpoint and the mark. It cannot
 fence an effect already in flight when its lease ran out: across a takeover a consumer may see a
@@ -839,8 +873,9 @@ after statement n) fails those cases; nothing skips.
 **Delivery (DC).** DC-01 no consumer: no mark and no write beyond the unit. DC-02 each registered consumer
 is marked at the new head. DC-03 a refused unit leaves no mark. DC-04 bootstrap marks every
 existing stream. DC-05 registering twice is one consumer. DC-06 a retired consumer is no longer
-marked and its rows are gone. DC-07 a drain delivers every event once, in revision order. DC-08 a
-mark set during processing survives the checkpoint move. DC-09 a live lease is not claimable. DC-10
+marked and its registration, marks and checkpoints are gone; its leases end but keep only their
+fences, so registered again it is bootstrapped and claims under a higher fence. DC-07 a drain
+delivers every event once, in revision order. DC-08 a mark set during processing survives the checkpoint move. DC-09 a live lease is not claimable. DC-10
 a kick claims only its stream. DC-11 a stale worker's advance after a takeover is refused. DC-12 an
 advance after expiry without takeover is refused. DC-13 the checkpoint never moves back. DC-14 a
 worker dead before its effect: redelivered. DC-15 dead after the effect, before advance:
@@ -1042,9 +1077,9 @@ then a fix.
 | SQLite without its journal triggers | contract | JC-27 |
 | SQLite opening a store without durability under the production profile | contract | JC-26 |
 | `AckBeforeCommitJournal` (reports success before `COMMIT` returns) | lab | SW6 `ack-before-commit` |
-| `UnfencedLedger` (advance ignores the token) | contract | DC-11; model trace `staleWorkerFenced`; SW9 |
-| `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08 |
-| `HeadTrustingWorker` (advances to the head, not the delivered revision) | contract | DC-08, DC-18; negative world `headTrustingReader` |
+| `UnfencedLedger` (advance ignores the token) | contract | DC-11, DC-23; model trace `staleWorkerFenced`; SW9 |
+| `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08, DC-13, DC-18 |
+| `HeadTrustingWorker` (advances to the head, not the delivered revision) | contract | DC-08, DC-13, DC-18; negative world `headTrustingReader` |
 | `SkippingLedger` (moves past a failing event after N tries) | contract | DC-18 |
 | `BlindSnapshotUpsert`, `ResealingSnapshots` | contract | SC-09, SC-08 |
 | `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01 |

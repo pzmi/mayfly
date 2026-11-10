@@ -38,7 +38,7 @@ pub(crate) fn sql_revision(revision: StreamRevision) -> Result<i64, Failure> {
         .map_err(|_| Failure::Storage(StorageError::new("revision_exhausted")))
 }
 
-fn revision_of(value: i64) -> Result<StreamRevision, Failure> {
+pub(crate) fn revision_of(value: i64) -> Result<StreamRevision, Failure> {
     u64::try_from(value)
         .map(StreamRevision::new)
         .map_err(|_| unreadable())
@@ -53,13 +53,13 @@ pub(crate) fn sql_millis(at: Millis) -> Result<i64, Failure> {
     i64::try_from(at.get()).map_err(|_| Failure::Storage(StorageError::new("instant_out_of_range")))
 }
 
-fn millis_of(value: i64) -> Result<Millis, Failure> {
+pub(crate) fn millis_of(value: i64) -> Result<Millis, Failure> {
     u64::try_from(value)
         .map(Millis::new)
         .map_err(|_| unreadable())
 }
 
-fn stream_of(text: &str) -> Result<StreamId, Failure> {
+pub(crate) fn stream_of(text: &str) -> Result<StreamId, Failure> {
     StreamId::new(text).map_err(|_| unreadable())
 }
 

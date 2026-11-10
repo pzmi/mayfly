@@ -3,7 +3,8 @@
 //! **Lock order, then reporting order.** The statements run in the lock order of ES-I16:
 //! stream heads (appended and read streams, by `StreamId`), the receipt row, the inbox key, the
 //! event identities (ascending id), then the writes in the same order and the journal,
-//! manifest and projection rows. SQLite's write lock is the whole file, taken by `BEGIN
+//! manifest and projection rows, and last the dispatch marks of every registered consumer
+//! (ES-05, ES-I1: in the unit's transaction, so no unit commits unmarked; contract case DC-03). SQLite's write lock is the whole file, taken by `BEGIN
 //! IMMEDIATE`, so the order is trivially kept here; it is written down so the statement
 //! sequence matches PostgreSQL's (ES-09), where it is what prevents a wait cycle. The reads
 //! decide the refusal in the port's **reporting order** (receipt, inbox, event ids, expected
@@ -503,6 +504,21 @@ impl<H: StoreHooks> Tx<'_, H> {
                     params![row.projection.as_str(), GENERATION, row.key],
                 )?,
             };
+        }
+        // Dispatch marks, last in the lock order (§4.2): every consumer registered as this
+        // transaction reads it is marked at each appended stream's new head; a mark only
+        // rises. One statement per stream, and no row when nothing is registered (DC-01).
+        for (append, placed) in &appends {
+            self.exec(
+                "INSERT INTO stream_dispatch (consumer, stream_id, marked, retry_at) \
+                 SELECT consumer, ?1, ?2, NULL FROM delivery_consumer WHERE true \
+                 ON CONFLICT (consumer, stream_id) DO UPDATE SET marked = excluded.marked \
+                 WHERE excluded.marked > stream_dispatch.marked",
+                params![
+                    append.stream.as_str(),
+                    sql_revision(placed.last).map_err(refused)?
+                ],
+            )?;
         }
         Ok(appended)
     }
