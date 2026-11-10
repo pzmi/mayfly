@@ -44,6 +44,13 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         compat_floor: 2,
         sql: include_str!("migrations/0002_delivery.sql"),
     },
+    // A trigger that refuses what no build does (lowering a dispatch mark): a build at 2 that
+    // runs on a store at 3 never fires it, so the floor stays at 2.
+    Migration {
+        version: 3,
+        compat_floor: 2,
+        sql: include_str!("migrations/0003_dispatch_mark_rises.sql"),
+    },
 ];
 
 fn engine(stage: impl Fn(StorageError) -> OpenError) -> impl Fn(rusqlite::Error) -> OpenError {
@@ -158,14 +165,14 @@ mod tests {
     use super::*;
 
     const EXTRA: Migration = Migration {
-        version: 3,
+        version: 4,
         compat_floor: 2,
         sql: "CREATE TABLE extra_fact (id TEXT NOT NULL, CONSTRAINT extra_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
     const BREAKING: Migration = Migration {
-        version: 3,
-        compat_floor: 3,
+        version: 4,
+        compat_floor: 4,
         sql: "CREATE TABLE breaking_fact (id TEXT NOT NULL, CONSTRAINT breaking_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
@@ -212,9 +219,10 @@ mod tests {
                 "stream_head"
             ]
         );
-        assert_eq!(stored_version(&conn), Ok((2, 2)));
+        assert_eq!(stored_version(&conn), Ok((3, 2)));
         assert!(!backup_path(&path, 1).exists());
         assert!(!backup_path(&path, 2).exists());
+        assert!(!backup_path(&path, 3).exists());
     }
 
     #[test]
@@ -222,16 +230,16 @@ mod tests {
         // given
         let (_dir, path, conn) = store();
         migrate(&conn, MIGRATIONS, Some(&path), Millis::new(7)).unwrap_or_else(|e| panic!("{e}"));
-        let with_extra = [MIGRATIONS[0], MIGRATIONS[1], EXTRA];
+        let with_extra = [MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], EXTRA];
 
         // when
         let migrated = migrate(&conn, &with_extra, Some(&path), Millis::new(8));
 
         // then
         assert_eq!(migrated, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((3, 2)));
-        let backup = Connection::open(backup_path(&path, 3)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(stored_version(&backup), Ok((2, 2)));
+        assert_eq!(stored_version(&conn), Ok((4, 2)));
+        let backup = Connection::open(backup_path(&path, 4)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stored_version(&backup), Ok((3, 2)));
         assert!(!tables(&backup).contains(&"extra_fact".to_owned()));
         assert_eq!(
             migrate(&conn, &with_extra, Some(&path), Millis::new(9)),
@@ -245,7 +253,7 @@ mod tests {
         let (_dir, path, conn) = store();
         migrate(
             &conn,
-            &[MIGRATIONS[0], MIGRATIONS[1], EXTRA],
+            &[MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], EXTRA],
             Some(&path),
             Millis::new(7),
         )
@@ -256,7 +264,7 @@ mod tests {
 
         // then
         assert_eq!(older, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((3, 2)));
+        assert_eq!(stored_version(&conn), Ok((4, 2)));
     }
 
     #[test]
@@ -265,7 +273,7 @@ mod tests {
         let (_dir, path, conn) = store();
         migrate(
             &conn,
-            &[MIGRATIONS[0], MIGRATIONS[1], BREAKING],
+            &[MIGRATIONS[0], MIGRATIONS[1], MIGRATIONS[2], BREAKING],
             Some(&path),
             Millis::new(7),
         )
@@ -278,9 +286,9 @@ mod tests {
         assert_eq!(
             older,
             Err(OpenError::SchemaAboveBuild {
-                store: 3,
-                compat_floor: 3,
-                build: 2
+                store: 4,
+                compat_floor: 4,
+                build: 3
             })
         );
     }
@@ -308,5 +316,35 @@ mod tests {
         );
         assert_eq!(tables(&conn), Vec::<String>::new());
         assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn should_refuse_an_update_when_it_lowers_a_dispatch_mark() {
+        // given
+        let (_dir, path, conn) = store();
+        migrate(&conn, MIGRATIONS, Some(&path), Millis::new(7)).unwrap_or_else(|e| panic!("{e}"));
+        conn.execute(
+            "INSERT INTO stream_dispatch (consumer, stream_id, marked, retry_at) \
+             VALUES ('c', 'attempt-1', 5, NULL)",
+            [],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let set = |sql: &str| conn.execute(sql, []).map_err(|e| e.to_string());
+
+        // when
+        let lowered = set("UPDATE stream_dispatch SET marked = 4");
+        let moved = set("UPDATE stream_dispatch SET stream_id = 'attempt-2'");
+        let backed_off = set("UPDATE stream_dispatch SET retry_at = 9");
+        let raised = set("UPDATE stream_dispatch SET marked = 6");
+
+        // then
+        assert!(
+            lowered
+                .as_ref()
+                .is_err_and(|e| e.contains("stream_dispatch mark never falls")),
+            "{lowered:?}"
+        );
+        assert!(moved.is_err(), "{moved:?}");
+        assert_eq!((backed_off, raised), (Ok(1), Ok(1)));
     }
 }

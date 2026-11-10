@@ -156,8 +156,9 @@ mayfly-domain = { serde = ["default", "derive"] }
 mayfly-protocol = { serde = ["default", "derive"] }
 mayfly-control-domain = { serde = ["default", "derive"] }
 mayfly-adapter-sqlite = { rusqlite = ["default", "bundled"], serde_json = ["default"] }
-# AggregateStore encodes events and refusals and hashes intent digests (ADR 0041).
-mayfly-control = { serde_json = ["default"], sha2 = ["default"] }
+# AggregateStore encodes events and refusals and hashes intent digests (ADR 0041); tracing for the
+# delivery worker's ERROR on a stream whose journal read falls short of its mark (ES-05F).
+mayfly-control = { serde_json = ["default"], sha2 = ["default"], tracing = ["std"] }
 mayfly-testkit = { serde_json = ["default"] }
 # The link transports (plan section 3.3): bounded Tokio channels for inproc, JSON frames
 # (ADR 0010) encoded and decoded on every send, in process too.

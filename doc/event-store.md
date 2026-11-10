@@ -196,7 +196,7 @@ after each SW run, and JC-19 (store errors carry codes and ids only).
 the head and never moves back; every committed event is delivered at least once; within a claim a
 stream's events are delivered in revision order; a lease that expired or was taken over cannot move
 the checkpoint, clear a mark or start an effect; each takeover hands out a strictly higher fence.
-Pinned by DC-01..DC-25; model `ES_I14_durableDelivery` (`bootstrapAfterWrites`,
+Pinned by DC-01..DC-27; model `ES_I14_durableDelivery` (`bootstrapAfterWrites`,
 `markDuringProcessing`, `staleWorkerFenced`, `workerCrashRedelivers`, `retireThenRegister`); SW9;
 `UnfencedLedger`, `ClearAllMarksLedger`.
 
@@ -420,6 +420,37 @@ lives in the worker's memory. Migration 0002 adds the four tables and raises the
 compatibility floor to 2: a build without delivery would commit units with no marks, which a
 consumer already bootstrapped would never deliver.
 
+**As built (ES-05F, the review of ES-05).** (1) *A deadline on `handle`.* Nothing renews a lease
+while `Consumer::handle` runs, so a call longer than the lease could only end in a refused
+advance and the same event delivered again, round after round. The worker therefore races each
+call against `DeliveryConfig::handle_budget()` (`handle_deadline`, at most three quarters of
+`lease_ttl`; 20 s of 30 s by default) on a `DeliveryTimer` port (every `Clock` is one) and, past
+it, drops the call and releases the claim with the failure backoff: the model's `failHandle`,
+never a skip (DC-26). Consumers and `DirectiveSink::send` put their own shorter deadline on a
+blocking effect. (2) *One claim at a time.* A round claims up to `claim_limit` streams, but each
+with its own `claim(limit = 1)` taken when the drain reaches it, so the lease of a stream late in
+a round no longer runs out while earlier streams are handled (DC-27; `GreedyClaimLedger` is its
+negative control). The model's `claim` is already per stream, and the cut is its `failHandle`,
+so `formal/event_store.qnt` needed no change; a short read is outside it (the model's journal
+always holds what it marked). (3) *A short read.* A read that
+ends below the claim's mark (the mark names a revision the journal does not return: a damaged or
+wrongly restored store) is released with the failure backoff, reported in
+`DrainReport::inconsistent` and logged once per run of failures at ERROR
+(`delivery_mark_beyond_journal`); before, the drain released it without a backoff and claimed it
+again every round. (4) The worker's failure counts are dropped when the stream advances, is
+drained or is lost, and are capped at 1,024 entries. (5) Migration 0003 adds the trigger
+`stream_dispatch_mark_never_falls` (an update that lowers a mark or moves its row aborts). It
+refuses only what no build does, so its floor stays 2: a build at version 2 runs on a store at 3
+unchanged.
+
+**Raising the floor after the first release.** Until the first tagged release no store exists
+outside development, so ES-05 could raise the floor to 2 in one step. From the first release on,
+a migration that raises `compat_floor` makes every older build refuse the store (§6.3 rule 3), so
+it is a change an older build cannot ignore and follows prepare then activate (§6.1, ADR 0043):
+the release before the raise already writes what the raise protects (a prepare that ships the
+code with the floor unchanged), and only the next release raises it. A floor raise in the same
+release as the code that needs it breaks the one-release rollback.
+
 ### 3.5 `SnapshotStore` (ES-08)
 
 ```rust
@@ -626,8 +657,9 @@ classification relies on it, and says so. Projection rebuild is online (E9) and 
    expired or taken: no effect starts without the lease), `handle`, `advance` to that revision.
 4. `advance` moves the checkpoint only up, clears the mark only up to the delivered revision (a
    mark set during processing survives), and is fenced by the live token.
-5. A `handle` error releases the claim with `retry_after` (full-jitter backoff from the `Rng`
-   port, capped), leaves the checkpoint, and the event is delivered again. Nothing skips it.
+5. A `handle` error, or a `handle` cut at its deadline (below the lease, ES-05F), releases the
+   claim with `retry_after` (full-jitter backoff from the `Rng` port, capped), leaves the
+   checkpoint, and the event is delivered again. Nothing skips it.
 6. Discovery reads `stream_dispatch` by `(consumer, stream_id)` key, round-robin from the last key
    claimed, never ordered by time; `retry_at` is a filter, not an order.
 
@@ -885,7 +917,10 @@ the same event again, never the next. DC-19 a long-down worker catches up every 
 DC-20 a takeover gets a higher fence. DC-21 each delivery carries its claim's fence. DC-22 renewing
 an expired lease is refused. DC-23 a slow consumer that lost one stream goes on draining others.
 DC-24 a consumer registered by another build is marked by this one. DC-25 a release with
-`retry_after` is not claimable before the store clock passes it.
+`retry_after` is not claimable before the store clock passes it. DC-26 a `handle` slower than the
+lease is cut at its deadline and released with a backoff, never redelivered round after round
+under a dead lease. DC-27 a drain claims each stream when it reaches it: slow streams early in a
+round waste no later claim (ES-05F).
 
 **Snapshots (SC).** SC-01 a request on crossing the interval; SC-02 one request per stream, target
 only rising; SC-03 a refused unit leaves no request; SC-04 no snapshot: load whole; SC-05 snapshot
@@ -1081,6 +1116,7 @@ then a fix.
 | `ClearAllMarksLedger` (deletes the mark whatever its revision) | contract | DC-08, DC-13, DC-18 |
 | `HeadTrustingWorker` (advances to the head, not the delivered revision) | contract | DC-08, DC-13, DC-18; negative world `headTrustingReader` |
 | `SkippingLedger` (moves past a failing event after N tries) | contract | DC-18 |
+| `GreedyClaimLedger` (a claim takes every claimable stream whatever its limit) | contract | DC-23, DC-27 |
 | `BlindSnapshotUpsert`, `ResealingSnapshots` | contract | SC-09, SC-08 |
 | `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01 |
 

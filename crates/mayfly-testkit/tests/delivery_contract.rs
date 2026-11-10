@@ -32,6 +32,10 @@ enum Flaw {
     /// `SkippingLedger`: after a second failure at one checkpoint, a release moves past the
     /// failing event.
     Skipping,
+    /// `GreedyClaimLedger`: a claim takes every claimable stream whatever its limit, so the
+    /// worker holds a whole round's leases before it reaches them (the batch claim ES-05F
+    /// removed from the worker).
+    GreedyClaim,
 }
 
 /// A memory ledger with `flaw`. Clones share the store and the skip counts.
@@ -71,6 +75,11 @@ impl DeliveryLedger for Flawed {
         limit: u32,
         only: Option<&StreamId>,
     ) -> Result<Vec<Claim>, StorageError> {
+        let limit = if self.flaw == Flaw::GreedyClaim {
+            limit.max(16)
+        } else {
+            limit
+        };
         self.inner.claim(consumer, ttl, limit, only).await
     }
 
@@ -107,7 +116,7 @@ impl DeliveryLedger for Flawed {
                     .map_or(to, |h| h.revision);
                 self.inner.advance(claim, head, ttl).await
             }
-            Flaw::Skipping => self.inner.advance(claim, to, ttl).await,
+            Flaw::Skipping | Flaw::GreedyClaim => self.inner.advance(claim, to, ttl).await,
         }
     }
 
@@ -290,4 +299,16 @@ fn should_fail_the_failing_consumer_case_when_the_ledger_skips_after_retries() {
 
     // then
     assert_eq!(failed, ["DC-18"]);
+}
+
+#[test]
+fn should_fail_the_round_cases_when_a_claim_takes_more_than_its_limit() {
+    // given
+    let flaw = Flaw::GreedyClaim;
+
+    // when
+    let failed = failed_with(flaw);
+
+    // then
+    assert_eq!(failed, ["DC-23", "DC-27"]);
 }

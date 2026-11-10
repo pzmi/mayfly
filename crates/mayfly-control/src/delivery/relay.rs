@@ -62,8 +62,22 @@ impl std::error::Error for SinkError {}
 
 /// Where the relay hands directives: the link, once CP-02 wires it. The host epoch is stamped by
 /// the link adapter at send time, never stored (§5.3).
+///
+/// **Order is not promised.** Within one claim the relay sends a stream's directives in
+/// revision order, but across a takeover sends may overlap and arrive out of order: a stale
+/// worker A whose lease ran out mid-`send` can still put directive 5 on the link after worker B,
+/// under a higher fence, sent 5 and 6. The checkpoint stays safe (A's advance is refused, DC-11);
+/// the link does not. So the sink, and the data plane behind it, must not rely on per-stream
+/// order: they dedupe by `directive_id` (or the event id) and judge each directive on its own
+/// (generation, host epoch, the attempt's state), never as "the next one after the last seen".
+///
+/// **Deadline.** `send` must finish well within the relay's lease (`DeliveryConfig::lease_ttl`):
+/// the worker cuts a `handle` past [`super::DeliveryConfig::handle_budget`] and delivers the
+/// directive again after a backoff (DC-26). A link that may block puts its own, shorter
+/// deadline on the send and answers a [`SinkError`] when it passes.
 pub trait DirectiveSink: Send + Sync {
-    /// Sends one directive.
+    /// Sends one directive, at least once per committed `DirectiveIssued`; possibly again, and
+    /// possibly after a later directive of the same stream (see the trait).
     fn send(
         &self,
         directive: RelayedDirective,

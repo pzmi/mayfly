@@ -527,7 +527,7 @@ fn should_refuse_to_open_when_a_newer_build_raised_the_compatibility_floor() {
         Err(OpenError::SchemaAboveBuild {
             store: 9,
             compat_floor: 9,
-            build: 2
+            build: 3
         })
     );
 }

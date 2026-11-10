@@ -11,9 +11,11 @@
 //!   [`LeaseFence`]. A claim reads the stream after its checkpoint through its mark and, per
 //!   event, renews the lease, hands the event to the consumer, then advances the checkpoint to
 //!   that revision, clearing the mark only up to it (ES-I14, ES-I15).
-//! - **Failures.** A consumer error releases the claim with a jittered backoff (`retry_after`)
-//!   and leaves the checkpoint: the same event comes again, never the next (DC-18). A lost lease
-//!   ends that claim, not the drain (DC-23).
+//! - **Failures.** A consumer error, or a `handle` cut at its deadline (below the lease, DC-26),
+//!   releases the claim with a jittered backoff (`retry_after`) and leaves the checkpoint: the
+//!   same event comes again, never the next (DC-18). A lost lease ends that claim, not the drain
+//!   (DC-23). A drain claims each stream when it reaches it, so a slow stream wastes no other
+//!   claim (DC-27).
 //! - **Waking.** [`DeliveryWorker::catch_up`] at start-up and on a coarse timer of the
 //!   supervision tree; [`Kicks`], the after-commit notification, for latency. A kick carries no
 //!   obligation and is never replayed: a lost kick loses nothing, the mark is durable (§5.5).
@@ -25,7 +27,7 @@
 //!
 //! Implementations of [`DeliveryLedger`]: `mayfly_testkit::delivery::MemoryLedger` (over
 //! `MemoryJournal`) and the SQLite adapter's `SqliteLedger`; both pass the delivery contract,
-//! `mayfly_testkit::contracts::delivery` (DC-01..DC-25), whose own tests show the broken
+//! `mayfly_testkit::contracts::delivery` (DC-01..DC-27), whose own tests show the broken
 //! ledgers of `doc/event-store.md` §7.6 failing named cases.
 
 mod kicks;
@@ -38,6 +40,7 @@ use std::future::Future;
 use mayfly_domain::Millis;
 
 use crate::journal::{StorageError, StreamId, StreamRevision};
+use crate::store::Clock;
 
 pub use kicks::Kicks;
 pub use relay::{DirectiveRelay, DirectiveSink, RelayedDirective, SinkError};
@@ -51,10 +54,31 @@ pub use worker::{DeliveryConfig, DeliveryError, DeliveryWorker, DrainReport};
 /// database's own on PostgreSQL, an injected one on SQLite and in memory, never a worker's.
 /// Milliseconds since the Unix epoch, like the control plane's `Clock` (ADR 0020); a store
 /// clock that steps back only delays claims, it never lets two workers hold one lease, since
-/// every claim takes a strictly higher fence.
+/// every claim takes a strictly higher fence. A store clock that steps *forward* ends leases
+/// early: a live worker's next renew or advance is refused and another worker may take the
+/// stream over, so an event can be delivered twice (never skipped: the checkpoint is fenced).
+/// Duplicates only, which consumers absorb by `Delivery::key`; still, CP-04's production store
+/// clock on SQLite should be one that does not jump (a monotonic reading anchored to the wall
+/// clock at start-up rather than the raw wall clock), so an NTP step does not cause a burst of
+/// takeovers.
 pub trait StoreClock: Send + Sync {
     /// The store's current instant.
     fn now(&self) -> Millis;
+}
+
+/// The worker's timer for the deadline of each `Consumer::handle`
+/// ([`DeliveryConfig::handle_budget`]): a local wait that never judges a lease (the store clock
+/// does). Every [`Clock`] is one, through its `sleep`: the production clock sleeps on the
+/// runtime's timer; tests pass a timer that fires only where a case wants a cut.
+pub trait DeliveryTimer: Send + Sync {
+    /// Completes once `duration` has passed.
+    fn sleep(&self, duration: Millis) -> impl Future<Output = ()> + Send;
+}
+
+impl<C: Clock> DeliveryTimer for C {
+    fn sleep(&self, duration: Millis) -> impl Future<Output = ()> + Send {
+        Clock::sleep(self, duration)
+    }
 }
 
 /// The delivery ledger: registrations, marks, checkpoints and fenced leases per
@@ -66,7 +90,7 @@ pub trait StoreClock: Send + Sync {
 /// here reads the journal in a global order (ES-I17): marks are found by `(consumer, stream_id)`
 /// key, and `retry_at` is a filter, never an order.
 ///
-/// Pinned by `crates/mayfly-testkit/src/contracts/delivery.rs` (DC-01..DC-25), run on memory by
+/// Pinned by `crates/mayfly-testkit/src/contracts/delivery.rs` (DC-01..DC-27), run on memory by
 /// `crates/mayfly-testkit/tests/delivery_contract.rs` and on SQLite, in the journal contract's
 /// five modes, by `crates/mayfly-adapter-sqlite/tests/delivery_contract.rs`.
 pub trait DeliveryLedger: Send + Sync {
@@ -171,6 +195,14 @@ pub trait DeliveryLedger: Send + Sync {
 /// ran out (DC-15). A consumer that issues commands treats a refused outcome as handled: a
 /// refusal consumes no inbox key (ADR 0041 rule 6, the ES-03 note), so "not in the inbox" never
 /// means "not yet decided", and a redelivery is answered by the refusal receipt.
+///
+/// **Deadline.** `handle` must finish well within the lease (`DeliveryConfig::lease_ttl`): the
+/// worker renews the lease right before the call and advances right after it, and nothing
+/// renews it during the call. The worker enforces this: it drops a call that runs past
+/// [`DeliveryConfig::handle_budget`] (at most three quarters of the lease) and releases the
+/// claim with a backoff, so the event is delivered again later rather than handled under a
+/// lease that already ran out (DC-26). A consumer whose effect may take longer (a network call)
+/// puts its own, shorter deadline on it and answers an error when it passes.
 pub trait Consumer: Send + Sync {
     /// The consumer's name, `[a-z][a-z0-9_]{0,63}`.
     const NAME: &'static str;

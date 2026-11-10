@@ -5,3 +5,4 @@
 # Format: `sha256sum` (`<64 lowercase hex>  <path>`), so `sha256sum -c migrations.lock` works too.
 abc0dfa5106fa565f9f1246f8eb6ad05ce71d11be888018dad4a27002ca2e91a  crates/mayfly-adapter-sqlite/src/migrations/0001_journal.sql
 273769f96c47e1b56c79df0b9bcc48ce55c5db555d4b01ef568b0b922a9d1011  crates/mayfly-adapter-sqlite/src/migrations/0002_delivery.sql
+d047cda0702494821cd50aa51bb3eb88d29177e8ccf74fa2135d6e91dc95b42a  crates/mayfly-adapter-sqlite/src/migrations/0003_dispatch_mark_rises.sql

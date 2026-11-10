@@ -689,6 +689,13 @@ consumer after the start-up checks, own the `Kicks` wiring (one per consumer, `A
 notifier) and the coarse timer, and pass the SQLite ledger a store clock; ES-07 maps the model's
 consumer actions onto the ledger (the claim's fence is its token); ES-09 ports migration 0002
 (floor 2) and runs the DC suite in its modes.
+Note (ES-05F, the review of ES-05; event-store §3.4 "As built (ES-05F)"): the worker cuts a
+`handle` at `DeliveryConfig::handle_budget` (below the lease) on a `DeliveryTimer` and releases
+with a backoff (DC-26), claims one stream at a time (DC-27), backs off and reports a read that ends
+short of its mark; migration 0003 (floor 2) refuses lowering a dispatch mark, which ES-09 ports.
+CP-04 picks the production store clock on SQLite: one that does not step forward (a forward step
+ends leases early, which costs only duplicates), and RT-02's supervision passes the runtime clock
+as the worker's `DeliveryTimer`.
 
 #### ES-07 Event-store conformance driver
 Cites: event-store §7.3, ver §6.2. Driver over memory (`step`) and SQLite (`implStepSerial`, two
@@ -717,6 +724,21 @@ ES-07's driver on PostgreSQL with `pg_blocking_pids` checks; a `postgres` job in
 Accept: every JC/DC/SC/PC case green on PostgreSQL locally and in CI; committed traces replay with
 blocker checks; parity green; `GlobalLockJournal` caught by JC-22's blocking half; the stage fails
 (not skips) without Docker.
+Note (ES-05F, marks against a concurrent registration): under `READ COMMITTED` (or snapshot
+isolation) an append reads `delivery_consumer` at its first statement, so a `register` plus that
+consumer's bootstrap page can commit between the append's read and its commit: the append marks
+no row for the new consumer, and the bootstrap, which read the stream's head before the append
+committed, marked it only up to the old head. The new event is then never marked: a skip. SQLite
+cannot show it (one writer at a time). The PostgreSQL adapter must order the two: the append
+takes a shared lock on the consumer set (`SELECT … FROM delivery_consumer FOR SHARE`, or a shared
+advisory lock on a fixed key) before it writes its marks, and `register` takes the exclusive one
+(`LOCK TABLE delivery_consumer IN SHARE ROW EXCLUSIVE MODE`, or the exclusive advisory lock), so a
+registration commits wholly before or wholly after each unit; then the bootstrap sees every unit
+that did not mark the consumer. ES-09 adds a contract case for it (the next free DC id: a
+registration and its bootstrap racing appends on two connections, with the append held between
+its consumer read and its commit by a test hook; every committed event is marked or covered by the
+bootstrap) and the lock's place in §4.2's order (it is taken before any stream head, so it adds no
+wait-for cycle with ES-I16).
 
 #### ES-10 Store lab
 Cites: event-store §7.5, ver §8, D11; ADR 0035 (E5). `tools/storelab-worker`, `ARCH-store-hooks`,
@@ -764,6 +786,13 @@ in safe mode (I29), and a deadline is the saga's `RecordDirectiveTimeout` comman
 attempt to `Unknown` (never to success).
 Accept: component tests: lost reply → `Unknown`, not retry-with-new-name; same directive id on
 resend; a relay killed between send and advance resends the same `directive_id`.
+Note (ES-05F): the relay's sends are at least once and **not ordered** across a takeover: a stale
+relay worker whose lease ran out mid-send can put directive 5 on the link after the new holder sent
+5 and 6 (the checkpoint stays fenced; the link is not). The `DirectiveSink` and the data plane
+therefore dedupe by `directive_id` (the event id) and judge each directive on its own (generation,
+host epoch, the attempt's state), never by per-stream order or "the one after the last seen"; a
+component test sends 6 before a late 5 and shows 5 neither undoes 6 nor runs twice. `send` puts
+its own deadline below the relay's `handle_budget` (DC-26).
 
 #### CP-03 Reconciler
 Cites: plan §9, §10; dm P5, P22, P23; ADRs 0024, 0028. Level-triggered pass (≤ 1/min plus events):

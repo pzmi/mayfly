@@ -25,11 +25,13 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display};
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 
 use mayfly_control::delivery::{
     Claim, Consumer, ConsumerError, ConsumerName, Delivery, DeliveryConfig, DeliveryKey,
-    DeliveryLedger, DeliveryWorker, DrainReport, Kicks, LeaseError, LeaseFence,
+    DeliveryLedger, DeliveryTimer, DeliveryWorker, DrainReport, Kicks, LeaseError, LeaseFence,
 };
 use mayfly_control::journal::{
     AggregateName, ExpectedRevision, Journal, NewEvent, Payload, StoredKind, StreamId,
@@ -156,6 +158,8 @@ cases! {
     LostStreamOthersGoOn => "DC-23", "lost_stream_others_go_on", "DC-23: a slow consumer that lost one stream goes on draining others.";
     ForeignConsumerMarked => "DC-24", "foreign_consumer_marked", "DC-24: a consumer registered by another build is marked by this one.";
     RetryAfterHonoured => "DC-25", "retry_after_honoured", "DC-25: a release with `retry_after` is not claimable before the store clock passes it.";
+    SlowHandleCut => "DC-26", "slow_handle_cut", "DC-26: a `handle` slower than the lease is cut at its deadline and released with a backoff, never redelivered round after round under a dead lease.";
+    ClaimedWhenReached => "DC-27", "claimed_when_reached", "DC-27: a drain claims each stream when it reaches it: slow streams early in a round waste no later claim.";
 }
 
 impl Display for DeliveryCase {
@@ -262,6 +266,8 @@ pub async fn check_case<F: DeliveryFactory>(factory: &F, case: DeliveryCase) -> 
         DeliveryCase::LostStreamOthersGoOn => lost_stream_others_go_on(factory).await,
         DeliveryCase::ForeignConsumerMarked => foreign_consumer_marked(factory).await,
         DeliveryCase::RetryAfterHonoured => retry_after_honoured(factory).await,
+        DeliveryCase::SlowHandleCut => slow_handle_cut(factory).await,
+        DeliveryCase::ClaimedWhenReached => claimed_when_reached(factory).await,
     }
 }
 
@@ -457,6 +463,7 @@ impl Consumer for Recorder {
 fn config(claim_limit: u32) -> DeliveryConfig {
     DeliveryConfig {
         lease_ttl: TTL,
+        handle_deadline: TTL,
         claim_limit,
         bootstrap_page: 2,
         backoff_base: Millis::new(100),
@@ -465,14 +472,43 @@ fn config(claim_limit: u32) -> DeliveryConfig {
     }
 }
 
-type Worker<F> =
-    DeliveryWorker<<F as DeliveryFactory>::Journal, <F as DeliveryFactory>::Ledger, SeededRng>;
+/// The deadline timer of the suite's workers: `Never` for every case but DC-26, so a `handle`
+/// that waits on a real store's I/O is never cut; `Hand` in DC-26, where the deadline passes
+/// the store clock by the time it waited and fires at once.
+#[derive(Clone)]
+enum Timer {
+    /// Never fires.
+    Never,
+    /// Moves the store clock by the duration, then fires.
+    Hand(ClockHand),
+}
+
+impl DeliveryTimer for Timer {
+    async fn sleep(&self, duration: Millis) {
+        match self {
+            Self::Never => std::future::pending::<()>().await,
+            Self::Hand(hand) => hand(duration),
+        }
+    }
+}
+
+type Worker<F> = DeliveryWorker<
+    <F as DeliveryFactory>::Journal,
+    <F as DeliveryFactory>::Ledger,
+    SeededRng,
+    Timer,
+>;
 
 fn worker<F: DeliveryFactory>(store: &Store<F>, claim_limit: u32) -> Worker<F> {
+    timed_worker::<F>(store, claim_limit, Timer::Never)
+}
+
+fn timed_worker<F: DeliveryFactory>(store: &Store<F>, claim_limit: u32, timer: Timer) -> Worker<F> {
     DeliveryWorker::new(
         store.journal.clone(),
         store.ledger.clone(),
         SeededRng::new(5),
+        timer,
         config(claim_limit),
     )
 }
@@ -1258,4 +1294,149 @@ async fn retry_after_honoured<F: DeliveryFactory>(factory: &F) -> Check {
         &claimed(&claim(&store.ledger, &c, None).await?),
         &vec![(s1, None, rev(0))],
     )
+}
+
+/// Pending once (waking itself), then ready: a call that does not finish on its first poll.
+#[derive(Default)]
+struct Yield {
+    yielded: bool,
+}
+
+impl Future for Yield {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.yielded {
+            return Poll::Ready(());
+        }
+        self.yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+/// A consumer whose `handle` of `slow`, while `slow_now` holds, outlives the lease: it does
+/// not finish on its first poll, and when it does it has let the store clock pass the lease.
+struct Sluggish {
+    recorder: Recorder,
+    slow: StreamId,
+    slow_now: Mutex<bool>,
+    clock: ClockHand,
+}
+
+impl Consumer for Sluggish {
+    const NAME: &'static str = RECORDER;
+
+    async fn handle(&self, delivery: Delivery<'_>) -> Result<(), ConsumerError> {
+        let slow = delivery.event.stream == self.slow
+            && *self.slow_now.lock().unwrap_or_else(PoisonError::into_inner);
+        self.recorder.record(delivery)?;
+        if slow {
+            Yield::default().await;
+            (self.clock)(past_ttl());
+        }
+        Ok(())
+    }
+}
+
+async fn slow_handle_cut<F: DeliveryFactory>(factory: &F) -> Check {
+    let (store, c) = registered(factory).await?;
+    let (s1, s2) = (stream("attempt-dc1"), stream("attempt-dc2"));
+    append(&store.journal, &s1, None, &[2701]).await?;
+    append(&store.journal, &s2, None, &[2702]).await?;
+    let sluggish = Sluggish {
+        recorder: Recorder::default(),
+        slow: s1.clone(),
+        slow_now: Mutex::new(true),
+        clock: factory.clock(),
+    };
+    let worker = timed_worker::<F>(&store, 16, Timer::Hand(factory.clock()));
+    let report = io("drain", worker.drain(&sluggish, None).await)?;
+    let failed: Vec<StreamId> = report.failed.iter().map(|(s, _)| s.clone()).collect();
+    eq(
+        "streams failed (cut at the deadline)",
+        &failed,
+        &vec![s1.clone()],
+    )?;
+    eq("streams lost", &report.lost, &Vec::new())?;
+    eq(
+        "deliveries of the slow stream in one drain",
+        &sluggish.recorder.revisions(&s1),
+        &vec![0],
+    )?;
+    eq(
+        "revisions of the other stream",
+        &sluggish.recorder.revisions(&s2),
+        &vec![0],
+    )?;
+    let backoff = report.failed.first().map_or(Millis::new(0), |(_, b)| *b);
+    eq(
+        "claims of the cut stream before its backoff passed",
+        &claimed(&claim(&store.ledger, &c, Some(&s1)).await?),
+        &Vec::new(),
+    )?;
+    tick(factory, backoff);
+    *sluggish
+        .slow_now
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = false;
+    let again = io("drain", worker.drain(&sluggish, None).await)?;
+    eq("delivered once the handle is quick", &again.delivered, &1)?;
+    eq(
+        "deliveries of the slow stream",
+        &sluggish.recorder.revisions(&s1),
+        &vec![0, 0],
+    )?;
+    let store = factory.reopen(store).await;
+    eq(
+        "claims once delivered",
+        &claimed(&claim(&store.ledger, &c, None).await?),
+        &Vec::new(),
+    )
+}
+
+/// A consumer that lets the store clock pass `step` per delivery.
+struct Ticking {
+    recorder: Recorder,
+    step: Millis,
+    clock: ClockHand,
+}
+
+impl Consumer for Ticking {
+    const NAME: &'static str = RECORDER;
+
+    async fn handle(&self, delivery: Delivery<'_>) -> Result<(), ConsumerError> {
+        (self.clock)(self.step);
+        self.recorder.record(delivery)
+    }
+}
+
+async fn claimed_when_reached<F: DeliveryFactory>(factory: &F) -> Check {
+    let (store, _) = registered(factory).await?;
+    let streams = [
+        stream("attempt-dc1"),
+        stream("attempt-dc2"),
+        stream("attempt-dc3"),
+    ];
+    for (s, id) in streams.iter().zip([2801, 2802, 2803]) {
+        append(&store.journal, s, None, &[id]).await?;
+    }
+    // Each delivery takes three quarters of a lease: within its own lease, but a claim of the
+    // third stream taken with the first would run out before the drain reached it.
+    let ticking = Ticking {
+        recorder: Recorder::default(),
+        step: Millis::new(TTL.get() * 3 / 4),
+        clock: factory.clock(),
+    };
+    let report = io("drain", worker::<F>(&store, 16).drain(&ticking, None).await)?;
+    eq("streams lost", &report.lost, &Vec::new())?;
+    eq("delivered", &report.delivered, &3)?;
+    for s in &streams {
+        eq(
+            &format!("revisions of {s}"),
+            &ticking.recorder.revisions(s),
+            &vec![0],
+        )?;
+    }
+    Ok(())
 }
