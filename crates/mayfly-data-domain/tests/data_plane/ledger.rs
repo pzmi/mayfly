@@ -649,13 +649,91 @@ fn should_count_only_foreign_vms_and_name_the_unsized_dimensions_when_a_listing_
     // when
     let foreign = foreign_use(&listing);
 
-    // then: only the two foreign VMs count, the base and the `mf-` VMs never (no double count)
+    // then: only the two foreign VMs are sized, the base and the `mf-` VMs never (no double
+    // count); but every running VM not of our shape is a running guest to the hypervisor
     assert_eq!(
         foreign,
         ForeignUse {
             used: capacity(2, 1, 4, 80),
             unsized_in: BTreeSet::from([ResourceDimension::Disk]),
-            running: 1,
+            running: 3,
         }
     );
+}
+
+#[test]
+fn should_count_a_listed_base_vm_when_the_image_store_does_not_list_it() {
+    // given: the image store lists no base, the inventory lists a described base VM and one
+    // it does not describe
+    let mut ledger = ledger(roomy());
+
+    // when
+    ledger.apply_inventory(&Inventory::Complete {
+        vms: vec![
+            described("mfb-stray".to_owned(), false, GuestOs::Macos, 8),
+            listed("mfb-undescribed".to_owned(), false),
+        ],
+    });
+    let used = ledger.used();
+    let report = ledger.report();
+    ledger.apply_images(
+        &BTreeSet::new(),
+        &BTreeMap::from([
+            (base_named("mfb-stray"), GuestOs::Macos),
+            (base_named("mfb-undescribed"), GuestOs::Macos),
+        ]),
+    );
+    let stored = ledger.used();
+    let stored_unknown = ledger.unknown();
+
+    // then: counted by the inventory in full until the image store lists them, never left
+    // uncounted (ADR 0052)
+    assert_eq!(
+        used,
+        capacity(2, 0, 0, 80),
+        "two slots and the described disk"
+    );
+    assert_eq!(
+        report.foreign,
+        capacity(2, 0, 0, 80),
+        "not ours to run a job in"
+    );
+    assert_eq!(
+        report.unknown,
+        vec![UnknownCapacity {
+            dimension: ResourceDimension::Disk,
+            causes: BTreeSet::from([UnknownCause::VmFactUnknown {
+                vm_name: "mfb-undescribed".to_owned(),
+            }]),
+        }]
+    );
+    assert_eq!(
+        stored,
+        capacity(0, 0, 0, 120),
+        "then each base's disk by the image store, once"
+    );
+    assert!(stored_unknown.is_empty(), "the image store sizes both");
+}
+
+#[test]
+fn should_count_a_running_base_vm_s_memory_and_guest_when_the_image_store_lists_it() {
+    // given: a base the image store lists, which the inventory shows running
+    let mut ledger = ledger(roomy());
+    ledger.apply_images(
+        &BTreeSet::new(),
+        &BTreeMap::from([(base(), GuestOs::Macos)]),
+    );
+
+    // when
+    ledger.apply_inventory(&Inventory::Complete {
+        vms: vec![described(base().to_string(), true, GuestOs::Macos, 8)],
+    });
+
+    // then: its disk once (the image store's), and what it takes while it runs
+    assert_eq!(ledger.used(), capacity(0, 1, 8, 60));
+    assert!(ledger.unknown().is_empty());
+}
+
+fn base_named(name: &str) -> mayfly_protocol::BaseName {
+    mayfly_protocol::BaseName::new(name).expect("a valid base name")
 }

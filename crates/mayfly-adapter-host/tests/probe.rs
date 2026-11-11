@@ -13,13 +13,13 @@ use mayfly_data::{
     Capacity, GuestOs, HostProbe, HostReading, Inventory, InventoryGap, ProbeFailed,
     ResourceDimension, VmObservation,
 };
-use mayfly_domain::Resources;
+use mayfly_domain::{OwnedVmName, Resources, Sample as _};
 use mayfly_testkit_data::host_contract::{
-    DISK_LOW_WATER, HostState, HostWorld, MEMORY_LOW_WATER, check_host_probe_contract,
+    DISK_LOW_WATER, HostState, HostWorld, MACOS_GUESTS, MEMORY_LOW_WATER, RESERVE, VM_SLOTS,
+    WAKE_GAP, check_host_probe_contract,
 };
 
 const GIB: u64 = 1 << 30;
-const WAKE_GAP: Duration = Duration::from_secs(60);
 
 /// Which read the scripted host fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -145,13 +145,9 @@ impl ProviderView for ScriptedProvider {
 fn config() -> HostConfig {
     HostConfig {
         provider_home: PathBuf::from("/var/lib/mayfly/tart"),
-        vm_slots: 4,
-        macos_guests: 2,
-        reserve: Capacity {
-            vm_slots: 0,
-            macos_guests: 0,
-            resources: Resources::new(8 * GIB, 50 * GIB),
-        },
+        vm_slots: VM_SLOTS,
+        macos_guests: MACOS_GUESTS,
+        reserve: RESERVE,
         disk_low_water_bytes: DISK_LOW_WATER,
         memory_low_water_bytes: MEMORY_LOW_WATER,
         wake_gap: WAKE_GAP,
@@ -185,6 +181,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 struct World {
     host: ScriptedHost,
+    provider: ScriptedProvider,
     probe: OsProbe<ScriptedProvider, ScriptedHost>,
 }
 
@@ -197,15 +194,33 @@ impl HostWorld for World {
 
     fn set(&self, state: HostState) {
         self.host.with(|h| {
-            h.volume.free_bytes = state.disk_free_bytes;
-            h.memory.available_bytes = state.memory_available_bytes;
+            h.volume = Volume {
+                total_bytes: state.disk_total_bytes,
+                free_bytes: state.disk_free_bytes,
+            };
+            h.memory = Memory {
+                total_bytes: state.memory_total_bytes,
+                available_bytes: state.memory_available_bytes,
+            };
         });
+    }
+
+    fn list(&self, inventory: Inventory) {
+        self.provider.set(inventory);
+    }
+
+    fn sleep(&self, asleep: Duration) {
+        self.host.pass(Duration::ZERO, asleep);
     }
 
     fn fail(&self, failing: bool) {
         for read in [Broken::Volume, Broken::Memory, Broken::Clocks] {
             self.host.breaks(read, failing);
         }
+    }
+
+    fn fail_disk(&self, failing: bool) {
+        self.host.breaks(Broken::Volume, failing);
     }
 }
 
@@ -218,6 +233,7 @@ fn should_pass_every_case_when_the_os_probe_runs_the_contract() {
         World {
             probe: probe(&host, &provider),
             host,
+            provider,
         }
     };
 
@@ -391,18 +407,89 @@ fn should_keep_the_wake_for_the_next_report_when_a_report_fails() {
 
 #[test]
 fn should_fail_facts_rather_than_say_not_woken_when_the_clocks_were_unreadable() {
-    // given: the clocks cannot be read when the probe starts
+    // given: the clocks cannot be read when the probe starts, and the host sleeps before they
+    // can be
     let host = ScriptedHost::new();
     host.breaks(Broken::Clocks, true);
     let provider = ScriptedProvider::listing(Vec::new());
     let probe = probe(&host, &provider);
     host.breaks(Broken::Clocks, false);
+    host.pass(Duration::from_secs(1), 2 * WAKE_GAP);
 
     // when
     let first = block_on(probe.facts());
     let second = block_on(probe.facts());
+    host.pass(Duration::from_secs(1), WAKE_GAP);
+    let third = block_on(probe.facts());
 
-    // then: no origin, so whether it slept is unknown once; then known again
+    // then: no origin, so whether it slept is unknown once, and that sleep is never seen (the
+    // documented window: nothing measured it); from the first readable report on, a sleep is
     assert_eq!(first, Err(ProbeFailed));
     assert!(second.is_ok_and(|facts| !facts.woke));
+    assert!(third.is_ok_and(|facts| facts.woke));
+}
+
+#[test]
+fn should_report_a_wake_when_sleeps_under_the_gap_add_up_to_it() {
+    // given: three sleeps, each a third of the gap, with reports between them
+    let host = ScriptedHost::new();
+    let provider = ScriptedProvider::listing(Vec::new());
+    let probe = probe(&host, &provider);
+    let mut woke = Vec::new();
+
+    // when
+    for _ in 0..3 {
+        host.pass(Duration::from_secs(10), WAKE_GAP / 3);
+        woke.push(block_on(probe.facts()).expect("readable").woke);
+    }
+    host.pass(Duration::from_secs(10), WAKE_GAP / 3);
+    woke.push(block_on(probe.facts()).expect("readable").woke);
+
+    // then: the third report sees the gap reached in all; the wake resets the count
+    assert_eq!(woke, vec![false, false, true, false]);
+}
+
+#[test]
+fn should_keep_the_wake_for_the_next_report_when_the_listing_is_incomplete() {
+    // given: the host slept, then the provider's listing is incomplete
+    let host = ScriptedHost::new();
+    let provider = ScriptedProvider::listing(Vec::new());
+    let probe = probe(&host, &provider);
+    host.pass(Duration::from_secs(1), WAKE_GAP);
+    provider.set(Inventory::Incomplete {
+        reason: InventoryGap::ListFailed,
+    });
+    let failed = block_on(probe.facts());
+    let reading = block_on(probe.resources());
+    provider.set(Inventory::Complete { vms: Vec::new() });
+
+    // when
+    let facts = block_on(probe.facts()).expect("complete again");
+
+    // then: the whole report failed, disk included, but the disk is still read for the ledger
+    // and the wake is reported by the next report
+    assert_eq!(failed, Err(ProbeFailed));
+    assert!(reading.is_ok_and(|reading| !reading.disk_low_water));
+    assert!(facts.woke);
+}
+
+#[test]
+fn should_count_every_running_guest_not_ours_when_facts_are_reported() {
+    // given: one of ours, a malformed `mf-` VM, a base and a foreign VM, all running, and a
+    // stopped foreign VM
+    let host = ScriptedHost::new();
+    let provider = ScriptedProvider::listing(vec![
+        observed(&OwnedVmName::sample().to_string(), true),
+        observed("mf-not-ours-shape", true),
+        observed("mfb-macos-15", true),
+        observed("someone-elses", true),
+        observed("stopped", false),
+    ]);
+    let probe = probe(&host, &provider);
+
+    // when
+    let facts = block_on(probe.facts()).expect("readable");
+
+    // then: the hypervisor counts every running guest but ours
+    assert_eq!(facts.external_guests, 3);
 }

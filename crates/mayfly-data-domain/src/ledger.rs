@@ -25,7 +25,8 @@
 //! before a clone was applied and applied after it would forget that clone and free its
 //! capacity. DP-01 lists only while no VM effect runs, or discards a listing that overlapped
 //! one. Likewise [`HostProbe::foreign`] counts only VMs whose names are not `mf-*`: the ledger
-//! counts a malformed `mf-*` VM itself from the inventory ([`Ledger::malformed`]).
+//! counts a malformed `mf-*` VM itself from the inventory ([`Ledger::malformed`]), and a listed
+//! base VM (`mfb-*`) from the inventory and the image store together ([`Ledger::base_vms`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,7 +64,8 @@ pub struct HostProbe {
     /// What VMs that are not ours use: their slots, running macOS guests, memory and disk. Only
     /// VMs whose names are not `mf-*` ([`VmNameClass::Foreign`]): a malformed `mf-*` VM is
     /// counted by the ledger from the inventory ([`Ledger::malformed`]), never here too; nor a
-    /// base's `mfb-*`, counted from the image store's listing ([`foreign_use`]).
+    /// base's `mfb-*`, counted from the inventory and the image store's listing
+    /// ([`Ledger::base_vms`], [`foreign_use`]).
     pub foreign: Capacity,
     /// The dimensions in which the probe could not size a VM that is not ours: `foreign` is
     /// then only what it could size, and the dimension is unknown (ADR 0052).
@@ -109,7 +111,10 @@ pub struct ForeignUse {
     pub used: Capacity,
     /// The dimensions a listed foreign VM's missing facts make unknown ([`gaps`]).
     pub unsized_in: BTreeSet<ResourceDimension>,
-    /// How many of them run.
+    /// How many listed VMs run that are not of our well-formed `mf-*` shape: the foreign ones,
+    /// and malformed `mf-*` and base `mfb-*` VMs too, which the ledger sizes itself but which
+    /// the hypervisor counts as running guests all the same (`HostFacts::external_guests`, the
+    /// safe side: never fewer than the hypervisor sees beside ours).
     pub running: u32,
 }
 
@@ -148,6 +153,13 @@ pub struct Ledger {
     /// them (what it does not say is unknown), and rebuilt by each complete inventory. Never a
     /// target: no directive can name one (plan §8.4: reported, never deleted).
     pub malformed: BTreeMap<String, VmUse>,
+    /// Listed VMs whose names are a base's (`mfb-*`), by what the last complete inventory
+    /// describes. [`foreign_use`] leaves them out, so the ledger counts each here (ADR 0052,
+    /// fail safe): one the image store lists ([`Ledger::bases`]) is counted there for its disk
+    /// and adds only what it takes while it runs; one the image store does not list is counted
+    /// by the inventory in full, as a malformed `mf-*` VM is, so a base VM is never counted in
+    /// neither ([`Ledger::base_vm`]).
+    pub base_vms: BTreeMap<BaseName, VmUse>,
     /// Pulled images and their disk.
     pub images: BTreeMap<ImageDigest, u64>,
     /// Materialised bases. No VM directive can name one (ADR 0026): it names an
@@ -270,9 +282,10 @@ fn described(listed: &VmObservation, before: Option<&VmUse>) -> VmUse {
 
 /// What the VMs of a complete listing that are not ours use: only names that are neither
 /// `mf-*` ([`VmNameClass::Foreign`]; the ledger counts a malformed `mf-*` VM itself) nor a
-/// base's `mfb-*` (counted by [`Ledger::apply_images`] from the image store's listing, so never
-/// twice). Each is counted by what the listing describes, as [`Ledger::apply_inventory`] counts
-/// one of ours, and a fact it lacks makes its dimension unknown, never a default (ADR 0052).
+/// base's `mfb-*` (counted by the ledger, [`Ledger::base_vms`], so never twice). Each is
+/// counted by what the listing describes, as [`Ledger::apply_inventory`] counts one of ours,
+/// and a fact it lacks makes its dimension unknown, never a default (ADR 0052). The running
+/// count is wider ([`ForeignUse::running`]): every running VM not of our well-formed shape.
 /// Pinned by
 /// `tests/data_plane/ledger.rs::should_count_only_foreign_vms_and_name_the_unsized_dimensions_when_a_listing_mixes_them`.
 #[must_use]
@@ -282,18 +295,19 @@ pub fn foreign_use(listed: &[VmObservation]) -> ForeignUse {
         unsized_in: BTreeSet::new(),
         running: 0,
     };
-    let foreign = listed
-        .iter()
-        .filter(|vm| match mayfly_domain::classify_vm_name(&vm.name) {
-            VmNameClass::Foreign => BaseName::new(&vm.name).is_err(),
-            VmNameClass::WellFormed(_) | VmNameClass::MalformedManaged => false,
-        });
-    for vm in foreign {
-        let counted = described(vm, None);
-        out.used = plus(out.used, known_use(&counted));
-        out.unsized_in.extend(gaps(&counted));
-        if vm.running {
+    for vm in listed {
+        let (ours, foreign) = match mayfly_domain::classify_vm_name(&vm.name) {
+            VmNameClass::Foreign => (false, BaseName::new(&vm.name).is_err()),
+            VmNameClass::MalformedManaged => (false, false),
+            VmNameClass::WellFormed(_) => (true, false),
+        };
+        if vm.running && !ours {
             out.running = out.running.saturating_add(1);
+        }
+        if foreign {
+            let counted = described(vm, None);
+            out.used = plus(out.used, known_use(&counted));
+            out.unsized_in.extend(gaps(&counted));
         }
     }
     out
@@ -308,6 +322,7 @@ impl Ledger {
             probe,
             vms: BTreeMap::new(),
             malformed: BTreeMap::new(),
+            base_vms: BTreeMap::new(),
             images: BTreeMap::new(),
             bases: BTreeMap::new(),
             reservations: BTreeMap::new(),
@@ -323,16 +338,40 @@ impl Ledger {
         minus(self.probe.totals, self.probe.reserve)
     }
 
-    /// What is known to be used: our VMs, malformed `mf-*` VMs, images, bases, every
-    /// reservation and foreign VMs; a lower bound in every [`Ledger::unknown`] dimension. Pinned by
+    /// What a listed base VM adds, and the dimensions its missing facts make unknown. One the
+    /// image store lists is counted there for its disk and takes no VM slot (no job runs in a
+    /// base), so only its running memory and macOS-guest slot are added and only their gaps
+    /// count; one the image store does not list is counted by the inventory in full
+    /// ([`known_use`], [`gaps`]), the larger way (ADR 0052). Pinned by
+    /// `tests/data_plane/ledger.rs::should_count_a_listed_base_vm_when_the_image_store_does_not_list_it`.
+    #[must_use]
+    pub fn base_vm(&self, name: &BaseName, vm: &VmUse) -> (Capacity, Vec<ResourceDimension>) {
+        if !self.bases.contains_key(name) {
+            return (known_use(vm), gaps(vm));
+        }
+        let mut running = known_use(vm);
+        running.vm_slots = 0;
+        running.resources.disk_bytes = 0;
+        let mut unknown = gaps(vm);
+        unknown.retain(|dimension| *dimension != ResourceDimension::Disk);
+        (running, unknown)
+    }
+
+    /// What is known to be used: our VMs, malformed `mf-*` VMs, listed base VMs
+    /// ([`Ledger::base_vm`]), images, bases, every reservation and foreign VMs; a lower bound
+    /// in every [`Ledger::unknown`] dimension. Pinned by
     /// `tests/data_plane/ledger.rs::should_count_a_malformed_mf_vm_when_a_complete_inventory_lists_it`.
     #[must_use]
     pub fn used(&self) -> Capacity {
+        let listed_bases = self
+            .base_vms
+            .iter()
+            .fold(ZERO, |sum, (name, vm)| plus(sum, self.base_vm(name, vm).0));
         let vms = self
             .vms
             .values()
             .chain(self.malformed.values())
-            .fold(ZERO, |sum, vm| plus(sum, known_use(vm)));
+            .fold(listed_bases, |sum, vm| plus(sum, known_use(vm)));
         let images = self
             .images
             .values()
@@ -360,7 +399,8 @@ impl Ledger {
 
     /// The dimensions the ledger cannot determine, each with every cause (ADR 0052): all four
     /// before the first complete inventory, disk before the first image listing, the probe's
-    /// unsized foreign dimensions, and each listed `mf-` VM's [`gaps`]. Empty when everything
+    /// unsized foreign dimensions, each listed `mf-` VM's [`gaps`] and each listed base VM's
+    /// ([`Ledger::base_vm`]). Empty when everything
     /// is known. Pinned by
     /// `tests/data_plane/ledger.rs::should_return_capacity_when_a_complete_listing_describes_every_vm`.
     #[must_use]
@@ -382,8 +422,16 @@ impl Ledger {
         }
         let ours = self.vms.iter().map(|(name, vm)| (name.to_string(), vm));
         let malformed = self.malformed.iter().map(|(name, vm)| (name.clone(), vm));
-        for (vm_name, vm) in ours.chain(malformed) {
-            for dimension in gaps(vm) {
+        let listed_bases = self
+            .base_vms
+            .iter()
+            .map(|(name, vm)| (name.to_string(), self.base_vm(name, vm).1));
+        let described = ours
+            .chain(malformed)
+            .map(|(name, vm)| (name, gaps(vm)))
+            .chain(listed_bases);
+        for (vm_name, dimensions) in described {
+            for dimension in dimensions {
                 add(
                     dimension,
                     UnknownCause::VmFactUnknown {
@@ -647,7 +695,8 @@ impl Ledger {
     /// shape is counted by what the listing describes, else by what the ledger already knew of
     /// it, and what neither says stays unknown (ADR 0052); an unlisted one is gone, and held VM
     /// reservations are settled; a listed malformed `mf-*` VM is counted in
-    /// [`Ledger::malformed`] by what the listing describes. An incomplete one changes nothing
+    /// [`Ledger::malformed`] and a listed base VM in [`Ledger::base_vms`], by what the listing
+    /// describes. An incomplete one changes nothing
     /// (I25): no VM is released on it, and nothing becomes known. The caller serialises listing
     /// against effects (module doc). Pinned by
     /// `tests/data_plane/ledger.rs::should_release_nothing_when_an_inventory_is_incomplete` and
@@ -659,6 +708,7 @@ impl Ledger {
         };
         let mut ours: BTreeMap<OwnedVmName, VmUse> = BTreeMap::new();
         self.malformed.clear();
+        self.base_vms.clear();
         for vm in listed {
             match mayfly_domain::classify_vm_name(&vm.name) {
                 VmNameClass::WellFormed(name) => {
@@ -668,7 +718,11 @@ impl Ledger {
                 VmNameClass::MalformedManaged => {
                     self.malformed.insert(vm.name.clone(), described(vm, None));
                 }
-                VmNameClass::Foreign => {}
+                VmNameClass::Foreign => {
+                    if let Ok(base) = BaseName::new(&vm.name) {
+                        self.base_vms.insert(base, described(vm, None));
+                    }
+                }
             }
         }
         self.vms = ours;
@@ -707,7 +761,9 @@ impl Ledger {
     }
 
     /// The `CapacityReported` content now, under the next report id (ADR 0024). Every unknown
-    /// dimension is listed with its causes and reported free zero (ADR 0052). What keeps the
+    /// dimension is listed with its causes and reported free zero (ADR 0052). `foreign` is the
+    /// probe's foreign use plus the malformed `mf-*` VMs and the listed base VMs the image store
+    /// does not list: none of them is ours to run a job in. What keeps the
     /// host safe is this ledger's own gate, not the report: a directive that needs an unknown
     /// dimension is refused `capacity_unknown` ([`Ledger::admits`]); the control plane's
     /// admission reads totals, foreign and base use rather than `free`, so until it zeroes an
@@ -721,9 +777,15 @@ impl Ledger {
         let used = self.used();
         let unknown = self.unknown();
         let probe = &self.probe;
+        let unstored_bases = self
+            .base_vms
+            .iter()
+            .filter(|(name, _)| !self.bases.contains_key(*name))
+            .map(|(_, vm)| vm);
         let foreign = self
             .malformed
             .values()
+            .chain(unstored_bases)
             .fold(probe.foreign, |sum, vm| plus(sum, known_use(vm)));
         let mut free = minus(totals, used);
         for dimension in unknown.keys() {

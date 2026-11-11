@@ -1,6 +1,7 @@
 //! The fake image store, guest transport, host probe and floor: scripted answers, shared state.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use mayfly_data::{
     Diagnostics, FloorFailed, FloorStore, GuestAnswer, GuestTransport, HostProbe, ImageListing,
@@ -127,7 +128,8 @@ impl GuestTransport for FakeGuest {
     }
 }
 
-/// A host probe answering a settable reading, or failing.
+/// A host probe answering a settable reading, or failing; it can be put to sleep and then
+/// reports a wake once the time slept since the last reported wake reaches a gap.
 #[derive(Debug, Clone)]
 pub struct FakeHostProbe {
     state: Arc<Mutex<ProbeState>>,
@@ -138,6 +140,9 @@ struct ProbeState {
     reading: mayfly_data_domain::HostProbe,
     facts: HostFacts,
     failing: bool,
+    facts_failing: bool,
+    asleep: Duration,
+    wake_gap: Option<Duration>,
 }
 
 impl FakeHostProbe {
@@ -149,6 +154,9 @@ impl FakeHostProbe {
                 reading,
                 facts,
                 failing: false,
+                facts_failing: false,
+                asleep: Duration::ZERO,
+                wake_gap: None,
             })),
         }
     }
@@ -168,6 +176,23 @@ impl FakeHostProbe {
         lock(&self.state).failing = failing;
     }
 
+    /// Fails `facts` alone from now on, or not, as an incomplete provider listing does.
+    pub fn fail_facts(&self, failing: bool) {
+        lock(&self.state).facts_failing = failing;
+    }
+
+    /// Reports a wake from now on once the time slept since the last reported wake reaches
+    /// `gap`; until called, sleeping is never a wake.
+    pub fn wake_after(&self, gap: Duration) {
+        lock(&self.state).wake_gap = Some(gap);
+    }
+
+    /// The host sleeps for `asleep`: added up until a successful `facts` reports the wake.
+    pub fn sleep(&self, asleep: Duration) {
+        let mut state = lock(&self.state);
+        state.asleep = state.asleep.saturating_add(asleep);
+    }
+
     fn answer<T>(&self, read: impl FnOnce(&ProbeState) -> T) -> Result<T, ProbeFailed> {
         let state = lock(&self.state);
         if state.failing {
@@ -183,8 +208,20 @@ impl HostProbe for FakeHostProbe {
         self.answer(|state| state.reading.clone())
     }
 
+    /// A failed call leaves the time slept for the next one.
     async fn facts(&self) -> Result<HostFacts, ProbeFailed> {
-        self.answer(|state| state.facts.clone())
+        let mut state = lock(&self.state);
+        if state.failing || state.facts_failing {
+            return Err(ProbeFailed);
+        }
+        let slept = state.wake_gap.is_some_and(|gap| state.asleep >= gap);
+        if slept {
+            state.asleep = Duration::ZERO;
+        }
+        Ok(HostFacts {
+            woke: state.facts.woke || slept,
+            ..state.facts.clone()
+        })
     }
 }
 

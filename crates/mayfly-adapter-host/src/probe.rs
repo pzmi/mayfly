@@ -29,7 +29,7 @@ pub struct HostConfig {
     pub disk_low_water_bytes: u64,
     /// Available memory under this is memory pressure: nothing that needs memory starts.
     pub memory_low_water_bytes: u64,
-    /// Time asleep at or above this between two `HostFacts` reports is a wake (P22).
+    /// Time asleep at or above this since the last reported wake is a wake (P22).
     pub wake_gap: Duration,
 }
 
@@ -52,9 +52,11 @@ pub struct OsProbe<P, S = Os> {
     config: HostConfig,
     provider: P,
     source: S,
-    /// The clocks at the last `HostFacts` report (or at construction), the origin of the next
-    /// report's wake check; `None` when they could not be read then.
-    last: Mutex<Option<Clocks>>,
+    /// The origin of the wake check: the clocks at construction, then at the last report that
+    /// said `woke`. It moves only when a wake is reported, so sleeps each under the gap add up
+    /// until together they reach it. `None` when they could not be read at construction (see
+    /// [`OsProbe::with_source`]).
+    origin: Mutex<Option<Clocks>>,
 }
 
 impl<P: ProviderView> OsProbe<P> {
@@ -67,14 +69,21 @@ impl<P: ProviderView> OsProbe<P> {
 
 impl<P: ProviderView, S: HostSource> OsProbe<P, S> {
     /// A probe that reads the host through `source`: the seam a test scripts.
+    ///
+    /// The clocks read now are the wake check's origin. If they cannot be read, there is no
+    /// origin: the first report that reads them fails (whether the host slept is unknown, never
+    /// `false`) and becomes the origin, so a sleep before that report is never seen as a wake.
+    /// That window is the same as a sleep before the daemon started: nothing measured it, and
+    /// a reboot within it is the boot id's to show. Pinned by
+    /// `tests/probe.rs::should_fail_facts_rather_than_say_not_woken_when_the_clocks_were_unreadable`.
     #[must_use]
     pub fn with_source(config: HostConfig, provider: P, source: S) -> Self {
-        let last = source.clocks().ok();
+        let origin = source.clocks().ok();
         Self {
             config,
             provider,
             source,
-            last: Mutex::new(last),
+            origin: Mutex::new(origin),
         }
     }
 
@@ -99,18 +108,29 @@ impl<P: ProviderView, S: HostSource> OsProbe<P, S> {
         }
     }
 
-    /// Whether the host slept at least [`HostConfig::wake_gap`] since the last report, which
-    /// this reading then becomes the origin of. Clocks that could not be read last time make
-    /// the answer unknown: a failed read, never `false`.
+    /// Whether the host slept at least [`HostConfig::wake_gap`] in all since the last reported
+    /// wake; a reported wake makes `now` the origin, anything else leaves it, so sub-gap sleeps
+    /// accumulate. No origin makes the answer unknown: a failed read, never `false`, and `now`
+    /// becomes the origin. Pinned by
+    /// `tests/probe.rs::should_report_a_wake_when_sleeps_under_the_gap_add_up_to_it`.
     fn woke(&self, now: Clocks) -> Result<bool, ReadFailed> {
-        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        let before = last.replace(now).ok_or(ReadFailed)?;
-        Ok(slept(before, now) >= self.config.wake_gap)
+        let mut origin = self.origin.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(before) = *origin else {
+            *origin = Some(now);
+            return Err(ReadFailed);
+        };
+        let woke = slept(before, now) >= self.config.wake_gap;
+        if woke {
+            *origin = Some(now);
+        }
+        Ok(woke)
     }
 }
 
 /// How long the host slept between two readings: how much further the clock that counts sleep
 /// moved than the one that does not. Saturates at zero, so reading jitter is never a sleep.
+/// Both readings are absolute, so jitter does not add up across reports however long the
+/// origin is kept.
 /// Pinned by `tests/probe.rs::should_report_a_wake_once_when_the_host_slept_past_the_gap`.
 #[must_use]
 pub fn slept(before: Clocks, now: Clocks) -> Duration {
@@ -163,6 +183,18 @@ impl<P: ProviderView, S: HostSource> HostProbe for OsProbe<P, S> {
 
     /// Every fallible reading is taken before the clocks, so a failure never consumes a wake:
     /// the next report still sees it.
+    ///
+    /// An incomplete provider listing fails the whole report, free disk and the wake included:
+    /// `HostFacts` cannot say that `external_guests` is unknown, and a count of zero would be a
+    /// default (ADR 0052). That is the safe side: a failed report is unknown everywhere, the
+    /// ledger's own `resources` still read the disk, and the wake waits for the next report.
+    /// Pinned by
+    /// `tests/probe.rs::should_keep_the_wake_for_the_next_report_when_the_listing_is_incomplete`.
+    ///
+    /// `external_guests` counts every running VM not of our well-formed shape, malformed
+    /// `mf-*` and base `mfb-*` VMs included ([`mayfly_data::ForeignUse::running`]): the
+    /// hypervisor's guest limit counts them all. Pinned by
+    /// `tests/probe.rs::should_count_every_running_guest_not_ours_when_facts_are_reported`.
     async fn facts(&self) -> Result<HostFacts, ProbeFailed> {
         let volume = self
             .source
