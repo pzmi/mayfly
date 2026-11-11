@@ -179,8 +179,12 @@ pub enum HostRunCommand {
         floor: Epoch,
         /// What the start-up verification found.
         verification: Verification,
-        /// The service manager's start count says the daemon is crash-looping (P25): recorded
-        /// as safe mode in the same unit, so this run cannot leave it as a verified restart.
+        /// The daemon is crash-looping (P25: K starts within W without `RecoveryCompleted`):
+        /// recorded as safe mode in the same unit, so this run cannot leave it as a verified
+        /// restart. Computed by the start-up use case from the watchdog's start record outside the
+        /// journal (OPS-05, ADR 0031), because a crash loop must be found even when the journal
+        /// cannot be read or its writes are what crashes; `RunStarted` carries no time to derive
+        /// it from the stream.
         crash_loop: bool,
     },
     /// The startup recovery finished.

@@ -106,7 +106,7 @@ fn should_refuse_an_older_run_epoch_when_a_newer_one_was_minted() {
 fn should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_any_exit_is_tried() {
     // given
     let same_run = reach(unknown_kind());
-    let mut crash_loop = operating();
+    let mut crash_loop = recovering();
     crash_loop.push(at(1, enter(SafeModeReason::CrashLoop)));
     let crash_loop = reach(crash_loop);
     let restarted = reach(unknown_kind_restarted());
@@ -249,4 +249,25 @@ fn should_refuse_an_epoch_it_never_minted_when_the_run_minted_one() {
     let newer = outcome(&state, at(2, HostRunCommand::BeginShutdown));
     // then
     assert_eq!(newer, "epoch_not_minted");
+}
+
+#[test]
+fn should_leave_by_a_plan_only_while_recovering_when_safe_mode_was_entered_operating() {
+    // given: safe mode entered while operating
+    let mut path = operating();
+    path.push(at(1, enter(SafeModeReason::CrashLoop)));
+    let operating_safe = reach(path.clone());
+    // when: a plan exit in that run, then after a restart that recovers
+    let same_run = outcome(
+        &operating_safe,
+        at(1, by_plan(true, 1, Verification::Verified)),
+    );
+    path.extend([at(1, start()), at(1, mint(1, Verification::Verified))]);
+    let restarted = reach(path);
+    let next_run = outcome(&restarted, at(2, by_plan(true, 2, Verification::Verified)));
+    // then: the plan never returns an operating run to operating
+    assert_eq!(
+        (same_run.as_str(), next_run.as_str()),
+        ("not_recovering", "accepted")
+    );
 }

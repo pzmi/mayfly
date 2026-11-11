@@ -4,7 +4,7 @@
 use mayfly_control_domain::Actor;
 use mayfly_control_domain::operations::plan::{
     ActionOutcome, Bindings, GithubBinding, OwnWrite, PlanPhase, RecoveryPlanCommand,
-    RecoveryPlanEvent, RecoveryPlanState,
+    RecoveryPlanEvent, RecoveryPlanState, stale,
 };
 use mayfly_domain::Epoch;
 use proptest::prelude::*;
@@ -168,6 +168,10 @@ proptest! {
                 | RecoveryPlanCommand::CompletePlan { .. }
                 | RecoveryPlanCommand::ExpirePlan => None,
             };
+            let fresh = current
+                .as_ref()
+                .zip(drawn.as_ref())
+                .map(|(now, d)| stale(d, now).is_none());
             if let Ok((after, events)) = apply(&state, when(1, actor, ms, body)) {
                 // then: a bound head moves only by the plan's own write, from where it was bound
                 if let (Some(before), Some(now)) = (&drawn, &after.bindings) {
@@ -183,14 +187,14 @@ proptest! {
                     match event {
                         RecoveryPlanEvent::RecoveryActionStarted(_)
                         | RecoveryPlanEvent::RecoveryPlanCompleted(_) => {
-                            prop_assert_eq!(&current, &drawn, "acted on a moved world");
+                            prop_assert_eq!(fresh, Some(true), "acted on a moved world");
                         }
                         RecoveryPlanEvent::RecoveryPlanRefused(_) => {
                             let foreign_write = write.as_ref().is_some_and(|w| {
                                 drawn.as_ref().and_then(|d| d.heads.get(&w.stream).copied())
                                     != Some(w.before)
                             });
-                            prop_assert!(current != drawn || foreign_write, "refused a bound plan");
+                            prop_assert!(fresh != Some(true) || foreign_write, "refused a bound plan");
                         }
                         RecoveryPlanEvent::RecoveryPlanEpochAdvanced(_)
                         | RecoveryPlanEvent::RecoveryPlanProposed(_)

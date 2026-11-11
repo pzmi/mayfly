@@ -847,9 +847,10 @@ module recovery {
   }
 
   /// The outcome, recorded on the plan's stream after its own write: the plan advances only
-  /// that stream's bound head, from the revision before the write to the one after; a head that
-  /// was not where the plan bound it, or any other stream that moved, leaves the plan unbound,
-  /// and it is refused rather than applied further (I31, F45; KER-10F).
+  /// that stream's bound head, from the revision before the write to the one after, so any other
+  /// writer's append leaves the plan unbound and `refusePlan` follows (I31, F45; KER-10F). The
+  /// refused branch (a write that started past the bound head) cannot be reached in the model,
+  /// whose `planActWith` reads every bound head; it mirrors the aggregate's defence in depth.
   action planOutcomeWith(a: int): bool = {
     val before = plan.wrote.get(a)
     all {
@@ -1406,14 +1407,19 @@ module recovery {
       .then(refusePlan).expect(plan.phase == "refused" and allInvariants)
   }
 
-  // A foreign write to the action's own stream between its write and its outcome: the head is
-  // not where the plan's write left it, and the outcome refuses the plan.
+  // A foreign write to the action's own stream after the plan's own write and before its
+  // outcome: the outcome advances the bound head by the plan's write only, so the journal's head
+  // is one past it, the plan is unbound and refused before anything else runs. (The outcome's own
+  // refused branch, a write that started past the bound revision, is unreachable here: the
+  // action's unit reads every bound head. It stays as the aggregate's defence in depth, pinned by
+  // `tests/recovery_plan/rules.rs::should_refuse_the_plan_when_its_own_stream_moved_before_its_write`.)
   run foreignWriteOnTheOwnStreamRefusesTest = {
     initWith(recWith(BUSY, 1), recWith(CLONING, 2), running(1), running(2), R_ABSENT, 2, true, Set())
       .then(startTo(true)).then(proposePlan).then(approvePlan)
       .then(planIntentWith(1)).then(planActWith(1)).then(foreignWriteWith(1))
       .then(planOutcomeWith(1))
-      .expect(not(bound) and allInvariants)
+      .expect(plan.phase == "approved" and not(bound) and allInvariants)
+      .then(refusePlan).expect(plan.phase == "refused" and allInvariants)
   }
 
   // Negative control: KER-10's outcome took the reported heads into the binding, so the same

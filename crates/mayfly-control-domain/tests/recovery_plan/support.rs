@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use mayfly_control_domain::operations::plan::{
-    ActionKind, ActionOutcome, Bindings, GithubBinding, OwnWrite, PlanAction, RecoveryPlan,
-    RecoveryPlanCommand, RecoveryPlanEvent, RecoveryPlanRejection, RecoveryPlanState,
+    ActionKind, ActionOutcome, Bindings, GithubBinding, Observed, OwnWrite, PlanAction,
+    RecoveryPlan, RecoveryPlanCommand, RecoveryPlanEvent, RecoveryPlanRejection, RecoveryPlanState,
     attempt_stream,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, Rejection};
@@ -114,8 +114,21 @@ pub fn approve() -> Step {
     when(1, OPERATOR, NOW, RecoveryPlanCommand::ApprovePlan)
 }
 
-pub fn begin(index: u32, current: Bindings) -> RecoveryPlanCommand {
-    RecoveryPlanCommand::BeginAction { index, current }
+/// What a use case observes when the world is `now`: the bound streams read through
+/// `Bindings::read_now`, the inventory and GitHub.
+pub fn observe(now: &Bindings) -> Observed {
+    Observed {
+        heads: now.read_now(|s| now.heads.get(s).copied().unwrap_or(0)),
+        inventory: now.inventory,
+        github: now.github,
+    }
+}
+
+pub fn begin(index: u32, now: Bindings) -> RecoveryPlanCommand {
+    RecoveryPlanCommand::BeginAction {
+        index,
+        current: observe(&now),
+    }
 }
 
 /// The outcome of action `index`, with the plan's own write when it was applied.
@@ -130,8 +143,10 @@ pub fn outcome(index: u32, outcome: ActionOutcome) -> RecoveryPlanCommand {
     }
 }
 
-pub fn complete(current: Bindings) -> RecoveryPlanCommand {
-    RecoveryPlanCommand::CompletePlan { current }
+pub fn complete(now: Bindings) -> RecoveryPlanCommand {
+    RecoveryPlanCommand::CompletePlan {
+        current: observe(&now),
+    }
 }
 
 /// Decides `step` and folds what it accepted.

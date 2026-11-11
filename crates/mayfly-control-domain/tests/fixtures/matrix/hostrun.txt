@@ -102,10 +102,10 @@ operating/safe x mint_unknown_kind -> refused already_minted
 operating/safe x mint_crash_loop -> refused already_minted
 operating/safe x complete_recovery -> refused not_recovering
 operating/safe x enter_crash_loop -> accepted, no event
-operating/safe x leave_by_plan -> accepted safe_mode_left/v1
-operating/safe x leave_by_plan_unconfirmed -> refused plan_not_completed
-operating/safe x leave_by_plan_of_another_run -> refused plan_of_another_run
-operating/safe x leave_by_plan_unverified -> refused journal_unverified
+operating/safe x leave_by_plan -> refused not_recovering
+operating/safe x leave_by_plan_unconfirmed -> refused not_recovering
+operating/safe x leave_by_plan_of_another_run -> refused not_recovering
+operating/safe x leave_by_plan_unverified -> refused not_recovering
 operating/safe x leave_by_restart -> refused restart_required
 operating/safe x begin_shutdown -> accepted shutdown_started/v1
 operating/safe x end_run -> refused not_shutting_down

@@ -9,8 +9,8 @@ use mayfly_domain::{AttemptId, CommandId, Epoch, Millis, ProviderInstanceId, Sam
 
 use super::events::{RecoveryPlanApproved, RecoveryPlanEvent, RecoveryPlanProposed};
 use super::state::{
-    ActionKind, ActionOutcome, Bindings, GithubBinding, LegacyBindings, OwnWrite, PlanAction,
-    RecoveryPlanCommand, RecoveryPlanRejection, RecoveryPlanState, attempt_stream,
+    ActionKind, ActionOutcome, Bindings, GithubBinding, LegacyBindings, Observed, OwnWrite,
+    PlanAction, RecoveryPlanCommand, RecoveryPlanRejection, RecoveryPlanState, attempt_stream,
 };
 use super::{RecoveryPlan, decide, evolve};
 use crate::aggregate::{DeterminismCase, Expect};
@@ -102,8 +102,27 @@ fn plan() -> RecoveryPlanCommand {
     ])
 }
 
-fn begin(index: u32, current: Bindings) -> RecoveryPlanCommand {
-    RecoveryPlanCommand::BeginAction { index, current }
+/// What a use case observes when the world is `now`: the bound streams read through
+/// [`Bindings::read_now`], the inventory and GitHub.
+fn observe(now: &Bindings) -> Observed {
+    Observed {
+        heads: now.read_now(|s| now.heads.get(s).copied().unwrap_or(0)),
+        inventory: now.inventory,
+        github: now.github,
+    }
+}
+
+fn begin(index: u32, now: Bindings) -> RecoveryPlanCommand {
+    RecoveryPlanCommand::BeginAction {
+        index,
+        current: observe(&now),
+    }
+}
+
+fn complete(now: Bindings) -> RecoveryPlanCommand {
+    RecoveryPlanCommand::CompletePlan {
+        current: observe(&now),
+    }
 }
 
 fn outcome(index: u32, outcome: ActionOutcome) -> RecoveryPlanCommand {
@@ -136,9 +155,10 @@ fn approved() -> Vec<Step> {
     path
 }
 
-fn approved_at_two() -> Vec<Step> {
-    let mut path = proposed();
-    path.push(when(2, OPERATOR, NOW, RecoveryPlanCommand::ApprovePlan));
+/// Approved in run epoch 1, then refused by an intent under run epoch 2: the plan's fence is 2.
+fn refused_at_two() -> Vec<Step> {
+    let mut path = approved();
+    path.push(when(2, REPAIR, NOW, begin(0, bound(0))));
     path
 }
 
@@ -162,10 +182,7 @@ fn all_applied() -> Vec<Step> {
 }
 
 fn completed() -> Vec<Step> {
-    then(
-        all_applied(),
-        [RecoveryPlanCommand::CompletePlan { current: bound(2) }],
-    )
+    then(all_applied(), [complete(bound(2))])
 }
 
 /// A plan KER-10 drew, bound by a digest, then approved.
@@ -228,7 +245,7 @@ fn paths() -> Vec<Vec<Step>> {
     vec![
         proposed(),
         approved(),
-        approved_at_two(),
+        refused_at_two(),
         intent(),
         applied(),
         failed(),
@@ -309,7 +326,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<RecoveryPlan>> {
         case(
             "complete_plan",
             all_applied(),
-            auto(RecoveryPlanCommand::CompletePlan { current: bound(2) }),
+            auto(complete(bound(2))),
             Accepted,
         ),
         case(
@@ -321,9 +338,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<RecoveryPlan>> {
         case(
             "github_answer_refuses_completion",
             all_applied(),
-            auto(RecoveryPlanCommand::CompletePlan {
-                current: github_answers,
-            }),
+            auto(complete(github_answers)),
             Accepted,
         ),
         case(
@@ -353,10 +368,10 @@ pub(super) fn cases() -> Vec<DeterminismCase<RecoveryPlan>> {
             Accepted,
         ),
         case(
-            "command_under_another_epoch_refuses_plan",
-            approved_at_two(),
-            when(2, REPAIR, NOW, begin(0, bound(0))),
-            Accepted,
+            "approval_under_another_epoch_is_refused",
+            proposed(),
+            when(2, OPERATOR, NOW, RecoveryPlanCommand::ApprovePlan),
+            Refused,
         ),
         DeterminismCase {
             name: "legacy_plan_is_refused",
@@ -389,7 +404,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<RecoveryPlan>> {
         ),
         case(
             "stale_run",
-            approved_at_two(),
+            refused_at_two(),
             auto(begin(0, bound(0))),
             Refused,
         ),
@@ -444,7 +459,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<RecoveryPlan>> {
         case(
             "actions_remaining",
             applied(),
-            auto(RecoveryPlanCommand::CompletePlan { current: bound(1) }),
+            auto(complete(bound(1))),
             Refused,
         ),
         case(

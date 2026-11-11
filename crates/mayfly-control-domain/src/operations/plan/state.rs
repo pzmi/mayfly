@@ -48,8 +48,8 @@ pub fn attempt_stream(attempt_id: AttemptId) -> String {
 pub struct Bindings {
     /// The revision of every stream the plan read, by stream id: the attempts it acts on (each
     /// action's [`attempt_stream`] must be here) and whatever else its decision read. The use
-    /// case binds the same heads as read conditions of each unit it appends for the plan
-    /// (ADR 0041), so a stream that moves between its read and the append refuses the unit.
+    /// case reads them through [`Bindings::read_now`] for the plan's own units and conditions an
+    /// action's attempt command on [`Bindings::read_conditions`] (ADR 0041).
     pub heads: BTreeMap<String, u64>,
     /// The digest of the complete inventory the plan read (an incomplete one binds no plan:
     /// [`ActionKind::from_proposal`]).
@@ -60,18 +60,76 @@ pub struct Bindings {
     pub epoch: Epoch,
 }
 
-/// The first binding of `drawn` that `current` no longer matches, in a fixed order. `current`
-/// is what the use case read; the store's read conditions on the same heads keep it honest.
+impl Bindings {
+    /// The read conditions of an action's attempt command unit: every bound stream at its
+    /// **bound** revision (ADR 0041), so the command is refused, and never runs, once any of them
+    /// moved since the plan last recorded it (`formal/recovery.qnt`'s `planActWith`). The use
+    /// case passes them as the unit's reads, the attempt's own stream as its expected revision.
+    /// Pinned by `tests/recovery_plan/rules.rs::should_read_exactly_the_bound_heads_when_a_unit_is_built`.
+    #[must_use]
+    pub fn read_conditions(&self) -> Vec<(String, u64)> {
+        self.heads.iter().map(|(s, r)| (s.clone(), *r)).collect()
+    }
+
+    /// The current revision of every bound stream, and of no other, read through `revision_of`
+    /// (the store's read of one stream's head). The only way to build a [`HeadsRead`], so a
+    /// plan-stream unit (`BeginAction`, `CompletePlan`) always reports exactly the bound streams
+    /// as they are now; the use case appends that unit with these **current** revisions as its
+    /// read conditions, so a stream that moves after the read refuses the unit and the retry
+    /// reads it again, and the aggregate, comparing them with the bound ones, records the
+    /// refusal. Conditioning the plan's own units on the bound revisions instead would refuse
+    /// the very unit that must record `RecoveryPlanRefused` once a stream moved.
+    #[must_use]
+    pub fn read_now(&self, mut revision_of: impl FnMut(&str) -> u64) -> HeadsRead {
+        HeadsRead {
+            heads: self
+                .heads
+                .keys()
+                .map(|s| (s.clone(), revision_of(s)))
+                .collect(),
+        }
+    }
+}
+
+/// The current revisions of exactly a plan's bound streams, as the use case read them; built
+/// only by [`Bindings::read_now`]. A validated boundary value: its stream set cannot be chosen by
+/// the caller (ADR 0022 allows privacy here).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeadsRead {
+    heads: BTreeMap<String, u64>,
+}
+
+impl HeadsRead {
+    /// The read conditions of the plan-stream unit that carries this read: each bound stream at
+    /// the revision read now.
+    #[must_use]
+    pub fn read_conditions(&self) -> Vec<(String, u64)> {
+        self.heads.iter().map(|(s, r)| (s.clone(), *r)).collect()
+    }
+}
+
+/// What the use case observes when it applies a plan: the bound streams' heads as read now, the
+/// inventory and GitHub. The run epoch is not observed but fenced: it is the command's own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Observed {
+    /// The bound streams' heads now.
+    pub heads: HeadsRead,
+    /// The digest of the complete inventory now.
+    pub inventory: StateDigest,
+    /// GitHub's runner listing now, or that it is unreachable.
+    pub github: GithubBinding,
+}
+
+/// The first binding of `drawn` that `now` no longer matches, in a fixed order; the epoch is
+/// the decision's (the command's fenced run epoch).
 #[must_use]
-pub fn stale(drawn: &Bindings, current: &Bindings) -> Option<StaleBinding> {
-    if drawn.heads != current.heads {
+pub fn stale(drawn: &Bindings, now: &Observed) -> Option<StaleBinding> {
+    if drawn.heads != now.heads.heads {
         Some(StaleBinding::JournalHeads)
-    } else if drawn.inventory != current.inventory {
+    } else if drawn.inventory != now.inventory {
         Some(StaleBinding::Inventory)
-    } else if drawn.github != current.github {
+    } else if drawn.github != now.github {
         Some(StaleBinding::Github)
-    } else if drawn.epoch != current.epoch {
-        Some(StaleBinding::Epoch)
     } else {
         None
     }
@@ -176,7 +234,7 @@ pub enum ActionOutcome {
 /// The plan's phase (`doc/domain-model.md` §6.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanPhase {
-    /// No `RecoveryPlanProposed` yet.
+    /// No plan drawn yet (neither `RecoveryPlanDrawn` nor KER-10's `RecoveryPlanProposed`).
     Unproposed,
     /// Drawn, awaiting an operator's approval.
     Proposed,
@@ -256,8 +314,8 @@ pub enum RecoveryPlanCommand {
     BeginAction {
         /// The action.
         index: u32,
-        /// The bindings now.
-        current: Bindings,
+        /// What the use case observes now.
+        current: Observed,
     },
     /// The outcome of action `index`.
     RecordOutcome {
@@ -271,8 +329,8 @@ pub enum RecoveryPlanCommand {
     },
     /// Every action applied: complete, with the bindings as they stand now.
     CompletePlan {
-        /// The bindings now.
-        current: Bindings,
+        /// What the use case observes now.
+        current: Observed,
     },
     /// The plan's expiry passed (P20's timer).
     ExpirePlan,

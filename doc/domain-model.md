@@ -990,6 +990,8 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
 - **As built (KER-10F):** the plan exit is `plan_completed{plan_id, completed_ref, plan_epoch,
   verification}`: the plan of this run, a verification taken after it, and then a restart before
   `CompleteRecovery` (`restart_required`), as the model's `completePlan` takes the daemon down.
+  KER-10G: the plan exit is accepted only while the run is `Recovering`, so safe mode entered
+  while operating is left by a restart that recovers, never straight back to operating.
   `MintEpoch` carries `crash_loop` and records it as safe mode in the same unit, so a crash-looping
   run is never a verified restart. Once the run minted, a command under a newer epoch is refused
   (`epoch_not_minted`).
@@ -1027,8 +1029,11 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   `RecoveryPlanRefused{epoch}`. `RecoveryActionRecorded{index, outcome, write}` replaces
   `RecoveryActionApplied`: the write is the attempt unit's own (stream, revision before, after),
   the bound head advances only by it, and a write that started past the bound revision records
-  `RecoveryPlanRefused{journal_heads}` with the outcome. The repair use case binds the heads as
-  ADR 0041 read conditions of each unit (CP-04 card).
+  `RecoveryPlanRefused{journal_heads}` with the outcome. KER-10G: the plan's own units take
+  `Observed{heads: HeadsRead}`, built only by `Bindings::read_now` (the bound streams read now,
+  appended with those current revisions as read conditions); only an action's attempt command
+  is conditioned on the bound revisions (`Bindings::read_conditions`); `ApprovePlan` is refused
+  under another run epoch (CP-04 card).
 
 ### 6.10 `QuarantineCase` [Operations]
 

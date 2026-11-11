@@ -12,8 +12,9 @@ use super::events::{
     RecoveryPlanRefused,
 };
 use super::state::{
-    ActionKind, ActionOutcome, Bindings, OwnWrite, PlanAction, PlanPhase, RecoveryPlanCommand,
-    RecoveryPlanRejection, RecoveryPlanState, StaleBinding, attempt_stream, stale,
+    ActionKind, ActionOutcome, Bindings, Observed, OwnWrite, PlanAction, PlanPhase,
+    RecoveryPlanCommand, RecoveryPlanRejection, RecoveryPlanState, StaleBinding, attempt_stream,
+    stale,
 };
 use crate::command::{Actor, Command};
 
@@ -42,7 +43,7 @@ pub fn decide(state: &RecoveryPlanState, command: Command<RecoveryPlanCommand>) 
             actions,
             expires_at,
         } => decide_propose(state, run_epoch, bindings, actions, expires_at)?,
-        RecoveryPlanCommand::ApprovePlan => decide_approve(state, actor, issued_at)?,
+        RecoveryPlanCommand::ApprovePlan => decide_approve(state, actor, run_epoch, issued_at)?,
         RecoveryPlanCommand::BeginAction { index, current } => {
             decide_begin(state, index, &current, run_epoch, issued_at)?
         }
@@ -136,8 +137,16 @@ fn decide_propose(
     )])
 }
 
-/// One approval, by an operator, before the expiry.
-fn decide_approve(state: &RecoveryPlanState, actor: Actor, at: Millis) -> Decision {
+/// One approval, by an operator, before the expiry and in the run the plan was drawn in: a plan
+/// of an earlier run is stale whatever an operator says (`epoch_mismatch`). An outcome is not so
+/// checked: once an action's command ran, its outcome must be recorded whatever run records it
+/// (intent then outcome, resumable across a restart).
+fn decide_approve(
+    state: &RecoveryPlanState,
+    actor: Actor,
+    run_epoch: Epoch,
+    at: Millis,
+) -> Decision {
     match state.phase {
         PlanPhase::Proposed => {}
         PlanPhase::Approved | PlanPhase::Applying | PlanPhase::Failed => {
@@ -154,6 +163,13 @@ fn decide_approve(state: &RecoveryPlanState, actor: Actor, at: Millis) -> Decisi
             return Err(RecoveryPlanRejection::OperatorOnly);
         }
     };
+    if state
+        .bindings
+        .as_ref()
+        .is_some_and(|drawn| drawn.epoch != run_epoch)
+    {
+        return Err(RecoveryPlanRejection::EpochMismatch);
+    }
     if at >= state.expires_at {
         return Err(RecoveryPlanRejection::PlanExpired);
     }
@@ -169,7 +185,7 @@ fn at_next(state: &RecoveryPlanState, index: u32) -> bool {
 /// Whether the plan still holds, against the command's own run epoch (fenced, I18) and the
 /// heads the use case read: the first binding that moved, if any. A plan drawn by KER-10 is
 /// bound by a digest that cannot be checked per stream, so it never holds.
-fn moved(state: &RecoveryPlanState, current: &Bindings, run_epoch: Epoch) -> Option<StaleBinding> {
+fn moved(state: &RecoveryPlanState, current: &Observed, run_epoch: Epoch) -> Option<StaleBinding> {
     if state.legacy {
         return Some(StaleBinding::JournalHeads);
     }
@@ -191,7 +207,7 @@ fn moved(state: &RecoveryPlanState, current: &Bindings, run_epoch: Epoch) -> Opt
 fn decide_begin(
     state: &RecoveryPlanState,
     index: u32,
-    current: &Bindings,
+    current: &Observed,
     run_epoch: Epoch,
     at: Millis,
 ) -> Decision {
@@ -282,7 +298,7 @@ fn decide_outcome(
 
 /// Completed only with every action applied and every binding still holding, under the run
 /// epoch the plan was drawn in.
-fn decide_complete(state: &RecoveryPlanState, current: &Bindings, run_epoch: Epoch) -> Decision {
+fn decide_complete(state: &RecoveryPlanState, current: &Observed, run_epoch: Epoch) -> Decision {
     match state.phase {
         PlanPhase::Approved | PlanPhase::Applying => {}
         PlanPhase::Failed => return Err(RecoveryPlanRejection::ActionsRemaining),

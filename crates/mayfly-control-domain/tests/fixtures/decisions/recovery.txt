@@ -20,13 +20,12 @@ code wrong_write
 case actions_remaining refused actions_remaining
 case already_approved refused already_approved
 case already_proposed refused already_proposed
+case approval_under_another_epoch_is_refused refused epoch_mismatch
 case approve_plan accepted
   recovery_plan_approved/v1 {"operator_uid":501}
 case begin_action accepted
   recovery_action_started/v1 {"index":0}
 case closed refused closed
-case command_under_another_epoch_refuses_plan accepted
-  recovery_plan_refused/v1 {"stale":"epoch"}
 case complete_plan accepted
   recovery_plan_completed/v1 {}
 case duplicate_target refused duplicate_target

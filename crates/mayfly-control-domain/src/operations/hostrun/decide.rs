@@ -200,9 +200,11 @@ fn decide_enter(state: &HostRunState, reason: SafeModeReason, at: Millis) -> Dec
     })])
 }
 
-/// Safe mode is left only by a completed plan of this run with a verification of the journal
-/// taken after it (the run then restarts, as `formal/recovery.qnt`'s `completePlan` takes the
-/// daemon down), or by a later run whose start-up verification trusted the journal and found no
+/// Safe mode is left only by a completed plan of this run, while it recovers, with a
+/// verification of the journal taken after it (the run then restarts, as
+/// `formal/recovery.qnt`'s `completePlan` takes the daemon down; a plan exit never returns an
+/// operating run to operating: safe mode entered while operating is left by a restart that
+/// recovers, `tests/hostrun/rules.rs::should_leave_by_a_plan_only_while_recovering_when_safe_mode_was_entered_operating`), or by a later run whose start-up verification trusted the journal and found no
 /// crash loop; a rolled-back journal only by the plan. Pinned by `tests/hostrun/rules.rs::should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_any_exit_is_tried`
 /// and `tests/hostrun/properties.rs::should_leave_safe_mode_only_by_its_two_exits_when_commands_are_random`.
 fn decide_leave(state: &HostRunState, exit: SafeModeExit) -> Decision {
@@ -221,6 +223,15 @@ fn decide_leave(state: &HostRunState, exit: SafeModeExit) -> Decision {
             plan_epoch,
             verification,
         } => {
+            match state.phase {
+                RunPhase::Recovering => {}
+                RunPhase::Operating | RunPhase::ShuttingDown => {
+                    return Err(HostRunRejection::NotRecovering);
+                }
+                RunPhase::NotStarted | RunPhase::Starting | RunPhase::Ended => {
+                    return Err(HostRunRejection::NoRun);
+                }
+            }
             if completed_ref.is_none() {
                 return Err(HostRunRejection::PlanNotCompleted);
             }

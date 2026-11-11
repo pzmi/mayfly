@@ -47,9 +47,9 @@ pub use events::{
     RecoveryPlanExpired, RecoveryPlanProposed, RecoveryPlanRefused,
 };
 pub use state::{
-    ActionKind, ActionOutcome, Bindings, GithubBinding, LegacyBindings, OwnWrite, PlanAction,
-    PlanPhase, RecoveryPlanCommand, RecoveryPlanRejection, RecoveryPlanState, StaleBinding,
-    attempt_stream, stale,
+    ActionKind, ActionOutcome, Bindings, GithubBinding, HeadsRead, LegacyBindings, Observed,
+    OwnWrite, PlanAction, PlanPhase, RecoveryPlanCommand, RecoveryPlanRejection, RecoveryPlanState,
+    StaleBinding, attempt_stream, stale,
 };
 
 use crate::aggregate::{Aggregate, DeterminismCase, DeterminismCases};

@@ -162,6 +162,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-07 | Recovery model and decision table | KER-04, KER-05, KER-09, DEC-01 | opus | |
 | KER-10 | Operations aggregates: `HostRun`, `RecoveryPlan`, `QuarantineCase`, effective mode | KER-03, KER-07 | opus | |
 | KER-10F | Review fixes: per-stream plan heads, fenced plan epoch, plan exit restarts, crash loop at mint, resolution proof | KER-10 | opus | |
+| KER-10G | Review fixes: typed plan reads, current-revision plan units, plan exit only while recovering | KER-10F | opus | |
 | KER-11 | Image catalog: `Image`, `ImagePlacement` | KER-03, KER-02 | sonnet | |
 | KER-08 | Data-plane domain: executor, supervisor, resource ledger, fencing | KER-02, DEC-01 | opus | ⛳ |
 | DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
@@ -628,6 +629,15 @@ a quarantine stream refuses another attempt and an open case another reason.
 Accept: the model's foreign-write scenarios pass and the absorbing outcome fails `i31PlanBound`;
 unit tests for each item; `formal-verify --model recovery` at the bounded depths.
 
+#### KER-10G Review fixes to KER-10F
+Cites: KER-10F's review; ADR 0041. `BeginAction`/`CompletePlan` take `Observed`, whose heads are a
+`HeadsRead` built only by `Bindings::read_now`; `Bindings::read_conditions` conditions the
+attempt command; the CP-04 card's rule corrected (plan units read current revisions); a plan exit
+only while `Recovering`; `ApprovePlan` refused under another run epoch; `crash_loop` named as
+OPS-05's input.
+Accept: unit tests for each; the read set equals the bound heads; `formal-verify --model
+recovery` at the bounded depths.
+
 #### KER-11 Image catalog: `Image`, `ImagePlacement`
 Cites: dm §6.6–§6.7, P17, P18, ADRs 0030, 0039. `Image` (status monotonic, runner version and its
 expiry), `ImagePlacement` (single pull per host and digest, materialise to a base named by digest
@@ -964,20 +974,25 @@ an older epoch (`attempt_not_adopted`) until the attempt is adopted; recovery de
 adopted attempt's pending directive becomes (inventory first, plan §10) before that redelivery
 sends it. The inbox's mapping of an answer to a `Fact` replaces the test stand-in `Cp::record`
 of `crates/mayfly-composition/tests/directive_loop/support.rs`.
-Note (KER-10F, the repair use case of P20): a recovery plan's `heads` are the revisions of the
-streams it read, the attempts it acts on included, and the use case must keep the aggregate's
-input honest through the store, not as a value the caller echoes: (1) `ProposePlan` is issued
-under the run's own epoch with `bindings.epoch` equal to it; (2) every unit it appends for the
-plan, the `BeginAction` and `CompletePlan` on the plan's stream and each action's ordinary
-command on its attempt, carries every bound head as an ADR 0041 read condition at its bound
-revision (`AppendUnit` reads, built inside its own `with_revision_retry` closure), the attempt
-command's own stream as its expected revision, so a stream that moved between the read and the
-append refuses the unit and the retry reads the moved head, which the aggregate then records as
-`RecoveryPlanRefused{journal_heads}`; (3) `RecordOutcome` carries the attempt unit's receipt
-(stream, revision before and after), never a recomputed digest. Accept adds: a component test in
-which another writer appends to a bound attempt stream between an action's intent and its
-attempt command, and the command is refused and the plan recorded refused, with no further
-action executed; and one in which a command under a new run epoch refuses the plan
+Note (KER-10F, corrected by KER-10G; the repair use case of P20): a recovery plan's `heads` are
+the revisions of the streams it read, the attempts it acts on included, and the use case keeps
+the aggregate's input honest through the store, not as a value the caller echoes: (1)
+`ProposePlan` is issued under the run's own epoch with `bindings.epoch` equal to it (and
+`ApprovePlan` in the same run); (2) a **plan-stream** unit (`BeginAction`, `CompletePlan`) carries
+`Observed { heads: bindings.read_now(..), .. }`, the bound streams read **now**, and appends with
+`HeadsRead::read_conditions()`, those **current** revisions, as its ADR 0041 reads (built inside
+its own `with_revision_retry` closure): a stream that moves after the read refuses the unit and
+the retry reads it again, and the aggregate compares the current revisions with the bound ones and
+records `RecoveryPlanRefused{journal_heads}` when they differ. Conditioning these units on the
+bound revisions would refuse forever the unit that must record the refusal. (3) Only an action's
+**attempt command** unit is conditioned on the **bound** revisions, `Bindings::read_conditions()`
+(the attempt's own stream as its expected revision), so it never runs on a moved world (the
+model's `planActWith`). (4) `RecordOutcome` carries the attempt unit's receipt (stream, revision
+before and after), never a recomputed digest. Accept adds: a component test in which another
+writer appends to a bound attempt stream between an action's intent and its attempt command: the
+command is refused, the next `BeginAction` (conditioned on the current heads) is accepted and
+records the plan refused, and no further action executes; and one in which a command under a new
+run epoch refuses the plan
 (`formal/recovery.qnt`: `foreignWriteBeforeTheActionRefusesTest`,
 `foreignWriteBeforeTheOutcomeRefusesTest`). Leaving safe mode by a plan passes the plan's epoch
 and a verification taken after `RecoveryPlanCompleted`; the daemon then restarts
@@ -1399,6 +1414,10 @@ Cites: dm P25, ADR 0031. Heartbeats per supervised loop, stall > T_wd exits with
 crash-loop detection starts into safe mode, `mayfly_heartbeat_timestamp_seconds`, distinct codes
 for lock refused, watchdog and invalid config.
 Accept: F40 at integration level; the codes are distinct and documented.
+Note (KER-10F/G): the crash-loop finding is the input `HostRun`'s `MintEpoch.crash_loop` takes
+(K starts within W before `RecoveryCompleted`, from the watchdog's own start record outside the
+journal, so it holds when the journal is what crashes). Accept adds: a component test in which
+the K-th start within W mints with `crash_loop` and that run is refused a verified restart.
 
 #### OPS-06 `mayfly image refresh <pool>`
 Cites: ADRs 0030, 0039; dm P17, P18. The command (pull by digest and record it; base named by

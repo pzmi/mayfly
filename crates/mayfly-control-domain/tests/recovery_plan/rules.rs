@@ -8,7 +8,6 @@ use mayfly_control_domain::operations::plan::{
     RecoveryPlanCommand, RecoveryPlanEvent, StaleBinding,
 };
 use mayfly_control_domain::operations::recovery::Proposal;
-use mayfly_domain::Epoch;
 
 use super::support::{
     LATER, NOW, OPERATOR, REPAIR, action, all_applied, applied, apply, approve, approved, auto,
@@ -36,13 +35,6 @@ fn moved_worlds() -> Vec<(StaleBinding, Bindings)> {
             Bindings {
                 github: GithubBinding::Snapshot(digest(0x6A)),
                 ..drawn.clone()
-            },
-        ),
-        (
-            StaleBinding::Epoch,
-            Bindings {
-                epoch: Epoch::new(2),
-                ..drawn
             },
         ),
     ]
@@ -395,4 +387,48 @@ fn should_refuse_a_legacy_plan_when_it_is_applied() {
     let (after, _) = apply(&state, auto(begin(0, bound(0)))).unwrap_or_else(|r| panic!("{r:?}"));
     // then
     assert_eq!(after.phase, PlanPhase::Refused(StaleBinding::JournalHeads));
+}
+
+#[test]
+fn should_read_exactly_the_bound_heads_when_a_unit_is_built() {
+    // given: a plan drawn, its first action applied (its own head advanced)
+    let state = reach(applied());
+    let drawn = state
+        .bindings
+        .clone()
+        .unwrap_or_else(|| panic!("no bindings"));
+    // when: the attempt unit's conditions, and a read of the store where only an unbound stream
+    // and one bound stream moved
+    let attempt_unit = drawn.read_conditions();
+    let read = drawn.read_now(|s| {
+        if s == stream(2) {
+            drawn.heads[s] + 1
+        } else {
+            drawn.heads.get(s).copied().unwrap_or(0)
+        }
+    });
+    // then: the attempt unit is conditioned on every bound head at its bound revision, and the
+    // read covers exactly the bound streams, at their current revisions
+    let bound_heads: Vec<(String, u64)> = drawn.heads.clone().into_iter().collect();
+    assert_eq!(attempt_unit, bound_heads);
+    let read_streams: Vec<String> = read.read_conditions().into_iter().map(|(s, _)| s).collect();
+    let bound_streams: Vec<String> = drawn.heads.keys().cloned().collect();
+    assert_eq!(read_streams, bound_streams);
+    assert!(
+        read.read_conditions()
+            .contains(&(stream(2), drawn.heads[&stream(2)] + 1))
+    );
+}
+
+#[test]
+fn should_refuse_an_approval_when_the_run_moved_on() {
+    // given: a plan drawn in run epoch 1
+    let proposed = reach([auto(plan())]);
+    // when
+    let later = outcome_of(
+        &proposed,
+        when(2, OPERATOR, NOW, RecoveryPlanCommand::ApprovePlan),
+    );
+    // then
+    assert_eq!(later, "epoch_mismatch");
 }
