@@ -954,6 +954,14 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   "safe mode is left only by a completed plan or a verified restart", one run Operating at a time.
 - **Must not protect:** enforcement of safe mode (the relay, the DP executor and the broker refuse
   effects when told the mode at `Welcome`/by the relay: I29), admission (Host gate, mirrored by P3).
+- **As built (KER-10):** `MintEpoch{floor, verification}` mints the epoch and, in the same unit,
+  records `SafeModeEntered` for a floor above the journal (`epoch_below_floor`) or a failed
+  verification; `EpochMinted` carries `floor` and `verified`. `LeaveSafeMode{exit}` takes
+  `plan_completed{plan_id, completed_ref}` (this run verified) or `verified_restart` (a later run
+  that verified; never for `epoch_below_floor`, which needs the plan). `RunEnded{run_no}` is
+  always clean; an unclean end is the next run's `PreviousRunEndedUnclean`. `StartRun` and
+  `MintEpoch` carry no epoch of their own; every later command is fenced by the minted one.
+  The plan binding of `safe_mode` (P20) is left to CP-04.
 
 ### 6.9 `RecoveryPlan` [Operations]
 
@@ -972,6 +980,14 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   "At most one plan Applying per host" is a policy rule (P20) using `HostRun.safe_mode.plan_id`.
 - **Applies through ordinary commands** (`Attempt.Adopt`, `Attempt.ResolveQuarantine`, …), never by
   writing other streams' events.
+- **As built (KER-10):** actions are the recovery table's safe-mode proposals only
+  (`adopt`, `mark_lost`, `quarantine{reason}`, `keep`, `report`, `ignore`); `stop`,
+  `delete_with_proof`, `release_slot` and `rebuild_projection` are not offered until a task
+  needs them, so no plan action deletes. Each action is `RecoveryActionStarted{index}` (intent,
+  only while bound) then `RecoveryActionApplied{index, outcome, heads_after}`, in order; a moved
+  binding (journal heads, inventory, GitHub, epoch) records `RecoveryPlanRefused{stale}`; a
+  failed action stops the plan resumably (`Failed`); only an unstarted plan expires. Fenced by
+  `RecoveryPlanEpochAdvanced`.
 
 ### 6.10 `QuarantineCase` [Operations]
 
@@ -989,6 +1005,11 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
 - **Protects alone:** "resolution needs an operator actor", "no disposition is applied by a timer
   or a cap" (I28), closed reason set. Escalation (`QuarantineCaseEscalated`) is loud and never acts
   on the VM. **Must not protect:** capacity accounting (Host), freeing the slot (Attempt → Host only on observed absence).
+- **As built (KER-10):** no `Resolving` phase (no event marks it); `ResolveCase{disposition,
+  absence}` is operator-only, `delete_with_proof` needs the case's recorded instance id and
+  `released_observed_absent` the observation id of the complete inventory without the VM. No
+  case opens for `vm_vanished_externally` (ADR 0066 as amended); a resolved case may be followed
+  by a new one on the same stream. Fenced by `QuarantineEpochAdvanced`.
 
 ---
 

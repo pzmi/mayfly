@@ -1,0 +1,61 @@
+# recovery: refusal codes, then the outcome of each determinism case
+code actions_remaining
+code already_approved
+code already_proposed
+code closed
+code duplicate_target
+code in_progress
+code no_evidence
+code no_intent
+code not_approved
+code not_expired
+code not_proposed
+code operator_only
+code out_of_order
+code plan_expired
+code stale_run
+case actions_remaining refused actions_remaining
+case already_approved refused already_approved
+case already_proposed refused already_proposed
+case approve_plan accepted
+  recovery_plan_approved/v1 {"operator_uid":501}
+case begin_action accepted
+  recovery_action_started/v1 {"index":0}
+case closed refused closed
+case complete_plan accepted
+  recovery_plan_completed/v1 {}
+case duplicate_target refused duplicate_target
+case expire_plan accepted
+  recovery_plan_expired/v1 {}
+case github_answer_refuses_completion accepted
+  recovery_plan_refused/v1 {"stale":"github"}
+case in_progress refused in_progress
+case newer_epoch_refuses_plan accepted
+  recovery_plan_epoch_advanced/v1 {"epoch":2}
+  recovery_plan_refused/v1 {"stale":"epoch"}
+case next_action_after_own_heads accepted
+  recovery_action_started/v1 {"index":1}
+case no_evidence refused no_evidence
+case no_intent refused no_intent
+case not_approved refused not_approved
+case not_expired refused not_expired
+case not_proposed refused not_proposed
+case operator_only refused operator_only
+case out_of_order refused out_of_order
+case plan_expired refused plan_expired
+case propose_plan accepted
+  recovery_plan_epoch_advanced/v1 {"epoch":1}
+  recovery_plan_proposed/v1 {"bindings":{"heads":"00000000000000000000000000000010","inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":"adopt"},{"attempt_id":"0000000000000000000000000000a002","instance_id":null,"kind":"mark_lost"}],"expires_at":10000}
+case propose_quarantine_and_keep accepted
+  recovery_plan_epoch_advanced/v1 {"epoch":1}
+  recovery_plan_proposed/v1 {"bindings":{"heads":"00000000000000000000000000000010","inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":{"quarantine":"ownership_doubt"}},{"attempt_id":"0000000000000000000000000000a002","instance_id":"0a:00:00:00:00:01","kind":"keep"},{"attempt_id":"0000000000000000000000000000a003","instance_id":"0a:00:00:00:00:01","kind":"report"},{"attempt_id":"0000000000000000000000000000a004","instance_id":null,"kind":"ignore"}],"expires_at":10000}
+case record_failed_outcome accepted
+  recovery_action_applied/v1 {"index":0,"outcome":"failed","heads_after":"00000000000000000000000000000011"}
+case record_outcome accepted
+  recovery_action_applied/v1 {"index":0,"outcome":"applied","heads_after":"00000000000000000000000000000011"}
+case repeated_intent_resumes accepted
+case resume_after_failure accepted
+  recovery_action_started/v1 {"index":0}
+case stale_run refused stale_run
+case world_moved_refuses_plan accepted
+  recovery_plan_refused/v1 {"stale":"inventory"}

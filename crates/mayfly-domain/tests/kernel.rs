@@ -2,8 +2,9 @@
 
 use mayfly_domain::{
     AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Fence, FenceError, Generation,
-    HostId, ImageDigest, Millis, ObservationId, OwnedVmName, PoolName, ProviderInstanceId,
-    Resources, Sample, SecretHandleId, Slot, VmNameClass, VmNameError, classify_vm_name,
+    HostId, ImageDigest, Millis, ObservationId, OwnedVmName, PlanId, PoolName, ProviderInstanceId,
+    Resources, Sample, SecretHandleId, Slot, StateDigest, VmNameClass, VmNameError,
+    classify_vm_name,
 };
 use proptest::prelude::*;
 use serde::Deserialize;
@@ -549,10 +550,16 @@ fn should_decode_its_own_text_when_an_attempt_sample_is_serialised() {
     // given
     let instance = ProviderInstanceId::sample();
     let handle = SecretHandleId::sample();
+    let plan = PlanId::sample();
+    let digest = StateDigest::sample();
     // when
     let decoded_instance = decoded_sample::<ProviderInstanceId>();
     let decoded_handle = decoded_sample::<SecretHandleId>();
+    let decoded_plan = decoded_sample::<PlanId>();
+    let decoded_digest = decoded_sample::<StateDigest>();
     // then
     assert_eq!(decoded_instance, Ok(instance));
     assert_eq!(decoded_handle, Ok(handle));
+    assert_eq!(decoded_plan, Ok(plan));
+    assert_eq!(decoded_digest, Ok(digest));
 }

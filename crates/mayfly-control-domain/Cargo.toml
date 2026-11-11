@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-control-domain"
-description = "Pure control-plane domain: aggregates (Host, Pool, Attempt, ScaleSet), commands, events, decide/evolve, capacity policy and the recovery decision table."
+description = "Pure control-plane domain: aggregates (Host, Pool, Attempt, ScaleSet, RunnerRegistration, HostRun, RecoveryPlan, QuarantineCase), commands, events, decide/evolve, capacity policy and the recovery decision table."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

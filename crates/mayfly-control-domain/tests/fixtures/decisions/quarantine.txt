@@ -1,0 +1,37 @@
+# quarantine: refusal codes, then the outcome of each determinism case
+code absence_not_observed
+code no_proof
+code not_open
+code operator_only
+code resolved
+code stale_run
+code vanished_not_quarantined
+case absence_not_observed refused absence_not_observed
+case escalate_case accepted
+  quarantine_case_escalated/v1 {"level":"ticket"}
+case escalate_to_page accepted
+  quarantine_case_escalated/v1 {"level":"page"}
+case inspect_case accepted
+  quarantine_case_inspected/v1 {"operator_uid":501}
+case newer_epoch_is_recorded accepted
+  quarantine_epoch_advanced/v1 {"epoch":2}
+  quarantine_case_escalated/v1 {"level":"page"}
+case no_proof refused no_proof
+case not_open refused not_open
+case open_again_records_nothing accepted
+case open_case accepted
+  quarantine_epoch_advanced/v1 {"epoch":1}
+  quarantine_case_opened/v1 {"attempt_id":"0000000000000000000000000000a001","reason":"provider_identity_mismatch","instance_id":"0a:00:00:00:00:01","holds":{"disk_bytes":64424509440,"memory_bytes":8589934592,"macos_guest":true},"evidence":["000000000000000000000000000000e1"],"opened_at":1000}
+case operator_only refused operator_only
+case reopen_after_resolution accepted
+  quarantine_case_opened/v1 {"attempt_id":"0000000000000000000000000000a001","reason":"guest_identity_refused","instance_id":"0a:00:00:00:00:01","holds":{"disk_bytes":64424509440,"memory_bytes":8589934592,"macos_guest":true},"evidence":["000000000000000000000000000000e1"],"opened_at":1000}
+case resolve_delete_with_proof accepted
+  quarantine_case_resolved/v1 {"disposition":"delete_with_proof","operator_uid":501,"absence":null}
+case resolve_keep accepted
+  quarantine_case_resolved/v1 {"disposition":"keep","operator_uid":501,"absence":null}
+case resolve_released_observed_absent accepted
+  quarantine_case_resolved/v1 {"disposition":"released_observed_absent","operator_uid":501,"absence":"000000000000000000000000000000b1"}
+case resolved refused resolved
+case same_level_records_nothing accepted
+case stale_run refused stale_run
+case vanished_not_quarantined refused vanished_not_quarantined

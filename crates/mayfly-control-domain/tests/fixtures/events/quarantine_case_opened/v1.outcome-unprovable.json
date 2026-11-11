@@ -1,0 +1,14 @@
+{
+  "attempt_id": "0000000000000000000000000000a001",
+  "reason": "outcome_unprovable",
+  "instance_id": "0a:00:00:00:00:01",
+  "holds": {
+    "disk_bytes": 64424509440,
+    "memory_bytes": 8589934592,
+    "macos_guest": true
+  },
+  "evidence": [
+    "000000000000000000000000000000e1"
+  ],
+  "opened_at": 1000
+}

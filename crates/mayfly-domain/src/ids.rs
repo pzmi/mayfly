@@ -168,6 +168,19 @@ hex_id!(
     EventId
 );
 
+hex_id!(
+    /// A recovery plan (`doc/domain-model.md` §6.9): the first 128 bits of the SHA-256 of the
+    /// plan's content, computed by the use case that draws it, so the same plan drawn twice has
+    /// the same stream.
+    PlanId
+);
+hex_id!(
+    /// A 128-bit digest of observed state a recovery plan is bound to (the journal's stream
+    /// heads, a complete inventory, a GitHub snapshot: I31), computed outside the pure crates;
+    /// compared for equality only.
+    StateDigest
+);
+
 impl Sample for PoolName {
     fn sample() -> Self {
         Self("pool0".to_owned())

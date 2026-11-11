@@ -22,7 +22,8 @@ pub use digest::ImageDigest;
 pub use error::{DigestError, IdError, VmNameError};
 pub use fence::{Epoch, Fence, FenceError, Generation};
 pub use ids::{
-    AttemptId, CommandId, DirectiveId, EventId, HostId, ObservationId, PoolName, SecretHandleId,
+    AttemptId, CommandId, DirectiveId, EventId, HostId, ObservationId, PlanId, PoolName,
+    SecretHandleId, StateDigest,
 };
 pub use instance::ProviderInstanceId;
 pub use resources::Resources;

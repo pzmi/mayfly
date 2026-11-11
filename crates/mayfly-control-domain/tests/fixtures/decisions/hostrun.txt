@@ -1,0 +1,57 @@
+# hostrun: refusal codes, then the outcome of each determinism case
+code already_minted
+code already_shutting_down
+code epoch_exhausted
+code in_safe_mode
+code journal_unverified
+code no_run
+code not_in_safe_mode
+code not_minted
+code not_recovering
+code not_shutting_down
+code plan_not_completed
+code plan_required
+code restart_required
+code stale_run
+case already_minted refused already_minted
+case already_shutting_down refused already_shutting_down
+case begin_shutdown accepted
+  shutdown_started/v1 {}
+case complete_recovery accepted
+  recovery_completed/v1 {"counts":{"adopted":2,"retired":1,"quarantined":1,"lost":0,"reported":1}}
+case end_run accepted
+  run_ended/v1 {"run_no":1}
+case enter_safe_mode accepted
+  safe_mode_entered/v1 {"reason":"crash_loop","run_no":1,"at":1000}
+case epoch_exhausted refused epoch_exhausted
+case floor_above_journal_enters_safe_mode accepted
+  epoch_minted/v1 {"epoch":6,"floor":5,"verified":true}
+  safe_mode_entered/v1 {"reason":"epoch_below_floor","run_no":1,"at":1000}
+case in_safe_mode refused in_safe_mode
+case journal_unverified refused journal_unverified
+case leave_by_completed_plan accepted
+  safe_mode_left/v1 {"plan_id":"000000000000000000000000000000b1"}
+case leave_by_verified_restart accepted
+  safe_mode_left/v1 {"plan_id":null}
+case mint_epoch accepted
+  epoch_minted/v1 {"epoch":1,"floor":0,"verified":true}
+case no_run refused no_run
+case not_in_safe_mode refused not_in_safe_mode
+case not_minted refused not_minted
+case not_recovering refused not_recovering
+case not_shutting_down refused not_shutting_down
+case plan_not_completed refused plan_not_completed
+case plan_required refused plan_required
+case restart_required refused restart_required
+case same_reason_records_nothing accepted
+case stale_run refused stale_run
+case start_after_clean_end accepted
+  run_started/v1 {"run_no":2,"boot_id":"boot0","version":"0.1.0"}
+case start_after_unclean_end accepted
+  previous_run_ended_unclean/v1 {"run_no":1}
+  run_started/v1 {"run_no":2,"boot_id":"boot0","version":"0.1.0"}
+case start_run accepted
+  run_started/v1 {"run_no":1,"boot_id":"boot0","version":"0.1.0"}
+case unverified_journal_enters_safe_mode accepted
+  epoch_minted/v1 {"epoch":1,"floor":0,"verified":false}
+  safe_mode_entered/v1 {"reason":"verification_failed","run_no":1,"at":1000}

@@ -668,11 +668,11 @@ fault in between.
 | `noAssertion` | every resolution of an `Unknown` outcome agrees with the inventory: a present VM is never read as a clone not applied or as deleted, an absent one never as a clone applied | the same |
 | `i11RecoveryCompletes` | I11 (bounded): a start the journal trusts never stalls before admission, and one with no fault completes within the pipeline's nine steps with every record classified | `formal-verify` |
 | `i12RecordBeforeAck` | I12: a GitHub message is acked only after its durable record, across crashes | `formal-verify` (the listener's own test is KER-06's) |
-| `i17EpochsIncrease` | I17: sessions are entered at strictly increasing epochs, the floor is raised before an epoch is used, a journal below the floor is never trusted | `formal-verify`; `tests/recovery.rs::should_enter_safe_mode_when_the_journal_is_below_the_floor_or_does_not_verify` |
+| `i17EpochsIncrease` | I17: sessions are entered at strictly increasing epochs, the floor is raised before an epoch is used, a journal below the floor is never trusted | `formal-verify`; `tests/recovery.rs::should_enter_safe_mode_when_the_journal_is_below_the_floor_or_does_not_verify`, `tests/hostrun/rules.rs::should_mint_above_the_journal_and_the_floor_when_a_run_starts`, `should_enter_safe_mode_when_the_floor_is_above_the_journal`, `tests/hostrun/properties.rs::should_mint_strictly_increasing_epochs_when_runs_restart` |
 | `i25IncompleteNeverAbsence` | I25: no decision reads absence from an incomplete inventory, and admission never opens on one | `formal-verify`; `tests/recovery.rs::should_release_nothing_when_the_inventory_is_incomplete` |
 | `i29SafeModeNoEffects` | I29: in a safe session no clone or delete executes | `formal-verify` |
 | `safeModeNoDestructiveAction` | in safe mode no directive is issued and no decision or plan action retires, retries or deletes | `formal-verify`; `tests/recovery.rs::should_propose_nothing_destructive_when_the_journal_is_untrusted` |
-| `i31PlanBound` | I31: a plan acts only against the heads, inventory and epoch it was drawn from, intent before outcome | `formal-verify` (the `RecoveryPlan` aggregate is KER-10's) |
+| `i31PlanBound` | I31: a plan acts only against the heads, inventory and epoch it was drawn from, intent before outcome | `formal-verify`; `crates/mayfly-control-domain/tests/recovery_plan/rules.rs::should_refuse_the_plan_when_it_is_applied_after_the_world_moved` (F45), `tests/recovery_plan/properties.rs::should_record_no_intent_when_a_binding_moved`, `should_record_each_outcome_after_its_intent_when_commands_are_random` |
 | `deleteNeedsProof` | a delete carries the recorded instance id and executes only on the VM that has it | `formal-verify`; `tests/recovery.rs::should_delete_only_a_leaked_vm_with_proof_when_any_row_is_decided`, `should_never_delete_when_the_instance_id_differs` |
 | `quarantineNeverDeleted` | I28 at recovery: every decision and plan action on a quarantined record is keep (wait on an incomplete inventory), so none retires, deletes, adopts or releases it, and no directive targets it | `formal-verify`; `tests/recovery.rs::should_keep_when_the_attempt_is_quarantined` |
 | `busyNeverRetiredWhileRunning` | F13 at recovery: a running VM whose runner may serve a job is never retired: a Busy attempt's whatever GitHub says, or a Prepared, Activating, Listening or Deleting attempt's whose runner GitHub shows busy | `formal-verify`; `tests/recovery.rs::should_never_retire_when_a_busy_vm_runs` |
@@ -699,6 +699,33 @@ VM runs (`busyNeverRetiredWhileRunning`), presuming leaked an Activating attempt
 GitHub shows busy, the pre-KER-07F row (`busyNeverRetiredWhileRunning`); and simulation reports
 deleting the unrecorded `mf-*` VM (`i04UnrecognisedNeverDeleted`). Simulation runs at about 60 traces of 40 steps
 per second (TypeScript evaluator, 4-CPU sandbox).
+
+**Not modelled (KER-10).** The `HostRun`, `RecoveryPlan` and `QuarantineCase` aggregates and
+`operations::mode` refine the model's `j.epoch`, `j.safe`, `plan` and `quarantineNeverDeleted`
+without adding a model change; what they decide beyond it is pinned by Rust tests only:
+
+- `HostRun`'s phases (`Starting`, `Recovering`, `Operating`, `ShuttingDown`, `Ended`),
+  `PreviousRunEndedUnclean`, and the shutdown pair. The model's `mint` (above `max(j.epoch,
+  floor)`) and `verify` (a floor above the journal is safe mode) are one command here,
+  `MintEpoch`, which records the epoch and safe mode in one unit
+  (`tests/hostrun/rules.rs`, `tests/hostrun/properties.rs`).
+- A **verified restart** as a second exit from safe mode: the model leaves safe mode only by
+  `completePlan` followed by a restart that re-verifies. The aggregate also lets a later run
+  whose start-up verification trusts the journal leave safe mode entered for an unknown event
+  kind, a failed verification or a crash loop, never for a rolled-back journal (`needs_plan`),
+  which still needs a completed plan, as the model's `rolledBackJournalIsSafeModeTest` does
+  (`tests/hostrun/rules.rs::should_refuse_a_verified_restart_when_the_journal_was_rolled_back`).
+  The model has no upgrade step that would make an unknown kind known, so this exit has no
+  model counterpart to check.
+- The plan's sequential order (the model applies actions in any order), its expiry, a failed
+  action that stops it resumably, the operator-only single approval, the GitHub binding (the
+  model binds journal version, epoch and inventory only), and the heads binding advanced by
+  each outcome's own `heads_after` (the model's `jv: j2.version`, taken atomically there; here
+  the use case reports the heads after the action, so a write by another stream between the
+  action and the outcome record is absorbed into the binding rather than refusing the plan).
+- `QuarantineCase` entirely: opening, inspection, escalation and the operator's resolution
+  (`tests/quarantine/`). The model's `quarantineNeverDeleted` covers recovery's side only.
+- The mode precedence (`tests/mode.rs`, an exhaustive table).
 
 ### registration
 

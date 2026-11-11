@@ -1,6 +1,7 @@
 //! `mayfly-control-domain` (control plane): the pure event-sourcing kernel and the aggregates
 //! (`Attempt` in [`attempt`], `Host` in [`host`], `Pool` in [`pool`], `RunnerRegistration` in
-//! [`registration`], `ScaleSet` in [`scaleset`]),
+//! [`registration`], `ScaleSet` in [`scaleset`], and `HostRun`, `RecoveryPlan` and
+//! `QuarantineCase` in [`operations`]),
 //! their commands, events and policies (the capacity policy in [`capacity`], demand and
 //! `PlanAcquire` in [`demand`], the recovery decision table in [`operations::recovery`]).
 //!
