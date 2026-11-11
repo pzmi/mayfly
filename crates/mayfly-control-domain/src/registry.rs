@@ -4,9 +4,11 @@ use crate::aggregate::{AggregateRegistry, AggregateVisitor, DeterminismCases};
 use crate::attempt::Attempt;
 use crate::event::{EventKind, EventSet};
 use crate::host::Host;
+use crate::image::Image;
 use crate::operations::hostrun::HostRun;
 use crate::operations::plan::RecoveryPlan;
 use crate::operations::quarantine::QuarantineCase;
+use crate::placement::ImagePlacement;
 use crate::pool::Pool;
 use crate::registration::RunnerRegistration;
 use crate::scaleset::ScaleSet;
@@ -29,6 +31,8 @@ impl AggregateRegistry for ControlAggregates {
         visitor.visit::<HostRun>();
         visitor.visit::<RecoveryPlan>();
         visitor.visit::<QuarantineCase>();
+        visitor.visit::<Image>();
+        visitor.visit::<ImagePlacement>();
     }
 }
 

@@ -1,0 +1,36 @@
+# image: refusal codes, then the outcome of each determinism case
+code already_rejected
+code manifest_immutable
+code not_registered
+code operator_only
+code runner_not_expired
+code stale_run
+code withdrawn
+case already_rejected refused already_rejected
+case expired_again_records_nothing accepted
+case manifest_immutable refused manifest_immutable
+case newer_epoch_is_recorded accepted
+  image_epoch_advanced/v1 {"epoch":2}
+  image_verified/v1 {}
+case not_registered refused not_registered
+case operator_only refused operator_only
+case operator_withdraws_image accepted
+  image_withdrawn/v1 {"operator_uid":501}
+case register_image accepted
+  image_epoch_advanced/v1 {"epoch":1}
+  image_registered/v1 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","manifest":{"os":"macos","runner_version":{"major":2,"minor":330,"patch":0},"revision":1}}
+case reject_registered_image accepted
+  image_rejected/v1 {"reason":"verification_failed"}
+case reject_verified_image accepted
+  image_rejected/v1 {"reason":"verification_failed"}
+case rejected_again_records_nothing accepted
+case runner_not_expired refused runner_not_expired
+case runner_version_expired accepted
+  image_runner_version_expired/v1 {"minimum":{"major":2,"minor":331,"patch":0},"at":1000}
+case same_registration_records_nothing accepted
+case stale_run refused stale_run
+case verified_again_records_nothing accepted
+case verify_image accepted
+  image_verified/v1 {}
+case withdrawn refused withdrawn
+case withdrawn_again_records_nothing accepted

@@ -1036,6 +1036,12 @@ retired; unreferenced digests evicted; `WithdrawImage` refused while pinned; run
 trips the breaker.
 Accept: component tests on fakes; withdraw refused while pinned; never a clone from an OCI
 reference.
+Note (KER-11 review): the placement stream is keyed by the host and the digest's first twelve hex
+digits, so the manager passes the full digest it read (`PlacementState::digest`) as its proof:
+`RequestPlacement` with another digest of the same prefix is refused `placement_differs`
+(`tests/placement/rules.rs::should_refuse_another_digest_when_it_shares_the_twelve_digit_prefix`).
+`RequestPlacement` while the placement is under way or `Materialised` records nothing, whatever its
+runner version: a runner refresh is `RequestRefresh`, never a second request.
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,

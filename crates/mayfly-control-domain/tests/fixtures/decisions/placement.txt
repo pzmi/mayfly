@@ -1,0 +1,87 @@
+# placement: refusal codes, then the outcome of each determinism case
+code base_referenced
+code deadline_not_passed
+code directive_pending
+code no_drift
+code no_previous_base
+code not_materialised
+code not_pending
+code not_requested
+code not_sent
+code nothing_to_issue
+code outcome_not_unknown
+code placement_differs
+code previous_base_held
+code stale_run
+case base_referenced refused base_referenced
+case deadline_not_passed refused deadline_not_passed
+case directive_pending refused directive_pending
+case evict_previous_base accepted
+  eviction_requested/v1 {"scope":"previous"}
+case eviction_again_records_nothing accepted
+case eviction_refused_keeps_base accepted
+  placement_directive_refused/v1 {"directive_id":"0000000000000000000000000000d004","reason":"proof_mismatch"}
+case first_materialise_refused_fails accepted
+  placement_directive_refused/v1 {"directive_id":"0000000000000000000000000000d002","reason":"insufficient_resources"}
+  placement_failed/v1 {}
+case issue_evict accepted
+  placement_directive_issued/v1 {"directive_id":"0000000000000000000000000000d004","directive":{"evict_image":{"runner_version":{"major":2,"minor":330,"patch":0}}},"deadline":60000}
+case issue_materialise accepted
+  placement_directive_issued/v1 {"directive_id":"0000000000000000000000000000d002","directive":{"materialise_image":{"runner_version":{"major":2,"minor":330,"patch":0}}},"deadline":60000}
+case issue_pull accepted
+  placement_directive_issued/v1 {"directive_id":"0000000000000000000000000000d001","directive":"pull_image","deadline":60000}
+case newer_epoch_is_recorded accepted
+  placement_epoch_advanced/v1 {"epoch":2}
+  placement_directive_issued/v1 {"directive_id":"0000000000000000000000000000d001","directive":"pull_image","deadline":60000}
+case no_drift refused no_drift
+case no_previous_base refused no_previous_base
+case not_materialised refused not_materialised
+case not_pending refused not_pending
+case not_requested refused not_requested
+case not_sent refused not_sent
+case nothing_to_issue refused nothing_to_issue
+case outcome_not_unknown refused outcome_not_unknown
+case placement_differs refused placement_differs
+case previous_base_held refused previous_base_held
+case pull_observed_not_applied accepted
+  placement_directive_not_applied/v1 {"directive_id":"0000000000000000000000000000d001"}
+case pull_outcome_unknown accepted
+  placement_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d001","since":70000}
+case pull_refused_fails accepted
+  placement_directive_refused/v1 {"directive_id":"0000000000000000000000000000d001","reason":"safe_mode"}
+  placement_failed/v1 {}
+case record_drift accepted
+  image_drift_detected/v1 {"directive_id":"0000000000000000000000000000d001","expected":"sha256:0000000000000000000000000000000000000000000000000000000000000000","observed":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}
+  placement_failed/v1 {}
+case record_evicted accepted
+  image_evicted/v1 {"directive_id":"0000000000000000000000000000d004","runner_version":{"major":2,"minor":330,"patch":0}}
+case record_materialised accepted
+  image_materialised/v1 {"directive_id":"0000000000000000000000000000d002","runner_version":{"major":2,"minor":330,"patch":0}}
+case record_pulled accepted
+  image_pulled/v1 {"directive_id":"0000000000000000000000000000d001"}
+case record_sent accepted
+  placement_directive_sent/v1 {"directive_id":"0000000000000000000000000000d001","deadline":60000}
+case refresh_materialised_keeps_previous accepted
+  image_materialised/v1 {"directive_id":"0000000000000000000000000000d003","runner_version":{"major":2,"minor":331,"patch":0}}
+case refresh_of_current_records_nothing accepted
+case refresh_refused_keeps_base accepted
+  placement_directive_refused/v1 {"directive_id":"0000000000000000000000000000d003","reason":"effect_failed"}
+case request_after_eviction accepted
+  placement_requested/v1 {"host_id":"host0","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","runner_version":{"major":2,"minor":330,"patch":0}}
+case request_after_failure accepted
+  placement_requested/v1 {"host_id":"host0","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","runner_version":{"major":2,"minor":330,"patch":0}}
+case request_again_records_nothing accepted
+case request_eviction accepted
+  eviction_requested/v1 {"scope":"placement"}
+case request_placement accepted
+  placement_epoch_advanced/v1 {"epoch":1}
+  placement_requested/v1 {"host_id":"host0","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","runner_version":{"major":2,"minor":330,"patch":0}}
+case request_refresh accepted
+  base_refresh_requested/v1 {"runner_version":{"major":2,"minor":331,"patch":0}}
+case roll_back_base accepted
+  base_rolled_back/v1 {"to":{"major":2,"minor":330,"patch":0},"from":{"major":2,"minor":331,"patch":0}}
+case sent_again_records_nothing accepted
+case stale_run refused stale_run
+case unknown_again_records_nothing accepted
+case unknown_pull_answered accepted
+  image_pulled/v1 {"directive_id":"0000000000000000000000000000d001"}

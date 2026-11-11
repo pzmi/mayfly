@@ -1,0 +1,55 @@
+# image: every status against every command: accepted events or the refusal code
+unregistered x register_same -> accepted image_epoch_advanced/v1 image_registered/v1
+unregistered x register_other -> accepted image_epoch_advanced/v1 image_registered/v1
+unregistered x verification_passed -> refused not_registered
+unregistered x verification_failed -> refused not_registered
+unregistered x expired_below -> refused not_registered
+unregistered x expired_not_below -> refused not_registered
+unregistered x withdraw_by_operator -> refused not_registered
+unregistered x withdraw_by_automation -> refused not_registered
+unregistered x stale_run -> refused not_registered
+registered x register_same -> accepted, no event
+registered x register_other -> refused manifest_immutable
+registered x verification_passed -> accepted image_verified/v1
+registered x verification_failed -> accepted image_rejected/v1
+registered x expired_below -> accepted image_runner_version_expired/v1
+registered x expired_not_below -> refused runner_not_expired
+registered x withdraw_by_operator -> accepted image_withdrawn/v1
+registered x withdraw_by_automation -> refused operator_only
+registered x stale_run -> refused stale_run
+verified x register_same -> accepted, no event
+verified x register_other -> refused manifest_immutable
+verified x verification_passed -> accepted, no event
+verified x verification_failed -> accepted image_rejected/v1
+verified x expired_below -> accepted image_runner_version_expired/v1
+verified x expired_not_below -> refused runner_not_expired
+verified x withdraw_by_operator -> accepted image_withdrawn/v1
+verified x withdraw_by_automation -> refused operator_only
+verified x stale_run -> refused stale_run
+rejected x register_same -> accepted, no event
+rejected x register_other -> refused manifest_immutable
+rejected x verification_passed -> refused already_rejected
+rejected x verification_failed -> accepted, no event
+rejected x expired_below -> accepted image_runner_version_expired/v1
+rejected x expired_not_below -> refused runner_not_expired
+rejected x withdraw_by_operator -> accepted image_withdrawn/v1
+rejected x withdraw_by_automation -> refused operator_only
+rejected x stale_run -> refused stale_run
+withdrawn x register_same -> accepted, no event
+withdrawn x register_other -> refused manifest_immutable
+withdrawn x verification_passed -> refused withdrawn
+withdrawn x verification_failed -> refused withdrawn
+withdrawn x expired_below -> refused withdrawn
+withdrawn x expired_not_below -> refused withdrawn
+withdrawn x withdraw_by_operator -> accepted, no event
+withdrawn x withdraw_by_automation -> refused operator_only
+withdrawn x stale_run -> refused stale_run
+expired x register_same -> accepted, no event
+expired x register_other -> refused manifest_immutable
+expired x verification_passed -> accepted, no event
+expired x verification_failed -> accepted image_rejected/v1
+expired x expired_below -> accepted, no event
+expired x expired_not_below -> refused runner_not_expired
+expired x withdraw_by_operator -> accepted image_withdrawn/v1
+expired x withdraw_by_automation -> refused operator_only
+expired x stale_run -> refused stale_run

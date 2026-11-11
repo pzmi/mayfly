@@ -1,0 +1,267 @@
+# placement: every phase against every command: accepted events or the refusal code
+unrequested x request_same -> accepted placement_epoch_advanced/v1 placement_requested/v1
+unrequested x request_other_digest -> accepted placement_epoch_advanced/v1 placement_requested/v1
+unrequested x issue -> refused not_requested
+unrequested x record_sent -> refused not_requested
+unrequested x record_pulled -> refused not_requested
+unrequested x record_drift -> refused not_requested
+unrequested x record_materialised -> refused not_requested
+unrequested x record_evicted -> refused not_requested
+unrequested x record_refused -> refused not_requested
+unrequested x unknown_before_deadline -> refused not_requested
+unrequested x unknown_after_deadline -> refused not_requested
+unrequested x record_not_applied -> refused not_requested
+unrequested x refresh_new -> refused not_requested
+unrequested x refresh_current -> refused not_requested
+unrequested x roll_back -> refused not_requested
+unrequested x evict_placement_unreferenced -> refused not_requested
+unrequested x evict_placement_referenced -> refused not_requested
+unrequested x evict_previous -> refused not_requested
+unrequested x stale_run -> refused not_requested
+wanted x request_same -> accepted, no event
+wanted x request_other_digest -> refused placement_differs
+wanted x issue -> accepted placement_directive_issued/v1
+wanted x record_sent -> refused not_pending
+wanted x record_pulled -> refused not_pending
+wanted x record_drift -> refused not_pending
+wanted x record_materialised -> refused not_pending
+wanted x record_evicted -> refused not_pending
+wanted x record_refused -> refused not_pending
+wanted x unknown_before_deadline -> refused not_pending
+wanted x unknown_after_deadline -> refused not_pending
+wanted x record_not_applied -> refused not_pending
+wanted x refresh_new -> refused not_materialised
+wanted x refresh_current -> refused not_materialised
+wanted x roll_back -> refused not_materialised
+wanted x evict_placement_unreferenced -> refused not_materialised
+wanted x evict_placement_referenced -> refused not_materialised
+wanted x evict_previous -> refused not_materialised
+wanted x stale_run -> refused stale_run
+pulling x request_same -> accepted, no event
+pulling x request_other_digest -> refused placement_differs
+pulling x issue -> refused directive_pending
+pulling x record_sent -> accepted placement_directive_sent/v1
+pulling x record_pulled -> accepted image_pulled/v1
+pulling x record_drift -> accepted image_drift_detected/v1 placement_failed/v1
+pulling x record_materialised -> refused not_pending
+pulling x record_evicted -> refused not_pending
+pulling x record_refused -> accepted placement_directive_refused/v1 placement_failed/v1
+pulling x unknown_before_deadline -> refused not_sent
+pulling x unknown_after_deadline -> refused not_sent
+pulling x record_not_applied -> refused outcome_not_unknown
+pulling x refresh_new -> refused not_materialised
+pulling x refresh_current -> refused not_materialised
+pulling x roll_back -> refused not_materialised
+pulling x evict_placement_unreferenced -> refused not_materialised
+pulling x evict_placement_referenced -> refused not_materialised
+pulling x evict_previous -> refused not_materialised
+pulling x stale_run -> refused stale_run
+pull_sent x request_same -> accepted, no event
+pull_sent x request_other_digest -> refused placement_differs
+pull_sent x issue -> refused directive_pending
+pull_sent x record_sent -> accepted, no event
+pull_sent x record_pulled -> accepted image_pulled/v1
+pull_sent x record_drift -> accepted image_drift_detected/v1 placement_failed/v1
+pull_sent x record_materialised -> refused not_pending
+pull_sent x record_evicted -> refused not_pending
+pull_sent x record_refused -> accepted placement_directive_refused/v1 placement_failed/v1
+pull_sent x unknown_before_deadline -> refused deadline_not_passed
+pull_sent x unknown_after_deadline -> accepted placement_outcome_unknown/v1
+pull_sent x record_not_applied -> refused outcome_not_unknown
+pull_sent x refresh_new -> refused not_materialised
+pull_sent x refresh_current -> refused not_materialised
+pull_sent x roll_back -> refused not_materialised
+pull_sent x evict_placement_unreferenced -> refused not_materialised
+pull_sent x evict_placement_referenced -> refused not_materialised
+pull_sent x evict_previous -> refused not_materialised
+pull_sent x stale_run -> refused stale_run
+pull_unknown x request_same -> accepted, no event
+pull_unknown x request_other_digest -> refused placement_differs
+pull_unknown x issue -> refused directive_pending
+pull_unknown x record_sent -> accepted, no event
+pull_unknown x record_pulled -> accepted image_pulled/v1
+pull_unknown x record_drift -> accepted image_drift_detected/v1 placement_failed/v1
+pull_unknown x record_materialised -> refused not_pending
+pull_unknown x record_evicted -> refused not_pending
+pull_unknown x record_refused -> accepted placement_directive_refused/v1 placement_failed/v1
+pull_unknown x unknown_before_deadline -> accepted, no event
+pull_unknown x unknown_after_deadline -> accepted, no event
+pull_unknown x record_not_applied -> accepted placement_directive_not_applied/v1
+pull_unknown x refresh_new -> refused not_materialised
+pull_unknown x refresh_current -> refused not_materialised
+pull_unknown x roll_back -> refused not_materialised
+pull_unknown x evict_placement_unreferenced -> refused not_materialised
+pull_unknown x evict_placement_referenced -> refused not_materialised
+pull_unknown x evict_previous -> refused not_materialised
+pull_unknown x stale_run -> refused stale_run
+pulled x request_same -> accepted, no event
+pulled x request_other_digest -> refused placement_differs
+pulled x issue -> accepted placement_directive_issued/v1
+pulled x record_sent -> refused not_pending
+pulled x record_pulled -> refused not_pending
+pulled x record_drift -> refused not_pending
+pulled x record_materialised -> refused not_pending
+pulled x record_evicted -> refused not_pending
+pulled x record_refused -> refused not_pending
+pulled x unknown_before_deadline -> refused not_pending
+pulled x unknown_after_deadline -> refused not_pending
+pulled x record_not_applied -> refused not_pending
+pulled x refresh_new -> refused not_materialised
+pulled x refresh_current -> refused not_materialised
+pulled x roll_back -> refused not_materialised
+pulled x evict_placement_unreferenced -> refused not_materialised
+pulled x evict_placement_referenced -> refused not_materialised
+pulled x evict_previous -> refused not_materialised
+pulled x stale_run -> refused stale_run
+materialising x request_same -> accepted, no event
+materialising x request_other_digest -> refused placement_differs
+materialising x issue -> refused directive_pending
+materialising x record_sent -> accepted placement_directive_sent/v1
+materialising x record_pulled -> refused not_pending
+materialising x record_drift -> refused not_pending
+materialising x record_materialised -> accepted image_materialised/v1
+materialising x record_evicted -> refused not_pending
+materialising x record_refused -> accepted placement_directive_refused/v1 placement_failed/v1
+materialising x unknown_before_deadline -> refused not_sent
+materialising x unknown_after_deadline -> refused not_sent
+materialising x record_not_applied -> refused outcome_not_unknown
+materialising x refresh_new -> refused not_materialised
+materialising x refresh_current -> refused not_materialised
+materialising x roll_back -> refused not_materialised
+materialising x evict_placement_unreferenced -> refused not_materialised
+materialising x evict_placement_referenced -> refused not_materialised
+materialising x evict_previous -> refused not_materialised
+materialising x stale_run -> refused stale_run
+materialised x request_same -> accepted, no event
+materialised x request_other_digest -> refused placement_differs
+materialised x issue -> refused nothing_to_issue
+materialised x record_sent -> refused not_pending
+materialised x record_pulled -> refused not_pending
+materialised x record_drift -> refused not_pending
+materialised x record_materialised -> refused not_pending
+materialised x record_evicted -> refused not_pending
+materialised x record_refused -> refused not_pending
+materialised x unknown_before_deadline -> refused not_pending
+materialised x unknown_after_deadline -> refused not_pending
+materialised x record_not_applied -> refused not_pending
+materialised x refresh_new -> accepted base_refresh_requested/v1
+materialised x refresh_current -> accepted, no event
+materialised x roll_back -> refused no_previous_base
+materialised x evict_placement_unreferenced -> accepted eviction_requested/v1
+materialised x evict_placement_referenced -> refused base_referenced
+materialised x evict_previous -> refused no_previous_base
+materialised x stale_run -> refused stale_run
+refreshing x request_same -> accepted, no event
+refreshing x request_other_digest -> refused placement_differs
+refreshing x issue -> refused directive_pending
+refreshing x record_sent -> accepted placement_directive_sent/v1
+refreshing x record_pulled -> refused not_pending
+refreshing x record_drift -> refused not_pending
+refreshing x record_materialised -> accepted image_materialised/v1
+refreshing x record_evicted -> refused not_pending
+refreshing x record_refused -> accepted placement_directive_refused/v1
+refreshing x unknown_before_deadline -> refused not_sent
+refreshing x unknown_after_deadline -> refused not_sent
+refreshing x record_not_applied -> refused outcome_not_unknown
+refreshing x refresh_new -> refused directive_pending
+refreshing x refresh_current -> refused directive_pending
+refreshing x roll_back -> refused directive_pending
+refreshing x evict_placement_unreferenced -> refused directive_pending
+refreshing x evict_placement_referenced -> refused base_referenced
+refreshing x evict_previous -> refused directive_pending
+refreshing x stale_run -> refused stale_run
+refreshed x request_same -> accepted, no event
+refreshed x request_other_digest -> refused placement_differs
+refreshed x issue -> refused nothing_to_issue
+refreshed x record_sent -> refused not_pending
+refreshed x record_pulled -> refused not_pending
+refreshed x record_drift -> refused not_pending
+refreshed x record_materialised -> refused not_pending
+refreshed x record_evicted -> refused not_pending
+refreshed x record_refused -> refused not_pending
+refreshed x unknown_before_deadline -> refused not_pending
+refreshed x unknown_after_deadline -> refused not_pending
+refreshed x record_not_applied -> refused not_pending
+refreshed x refresh_new -> refused previous_base_held
+refreshed x refresh_current -> refused previous_base_held
+refreshed x roll_back -> accepted base_rolled_back/v1
+refreshed x evict_placement_unreferenced -> accepted eviction_requested/v1
+refreshed x evict_placement_referenced -> refused base_referenced
+refreshed x evict_previous -> accepted eviction_requested/v1
+refreshed x stale_run -> refused stale_run
+eviction_requested x request_same -> accepted, no event
+eviction_requested x request_other_digest -> refused placement_differs
+eviction_requested x issue -> accepted placement_directive_issued/v1
+eviction_requested x record_sent -> refused not_pending
+eviction_requested x record_pulled -> refused not_pending
+eviction_requested x record_drift -> refused not_pending
+eviction_requested x record_materialised -> refused not_pending
+eviction_requested x record_evicted -> refused not_pending
+eviction_requested x record_refused -> refused not_pending
+eviction_requested x unknown_before_deadline -> refused not_pending
+eviction_requested x unknown_after_deadline -> refused not_pending
+eviction_requested x record_not_applied -> refused not_pending
+eviction_requested x refresh_new -> refused not_materialised
+eviction_requested x refresh_current -> refused not_materialised
+eviction_requested x roll_back -> refused not_materialised
+eviction_requested x evict_placement_unreferenced -> accepted, no event
+eviction_requested x evict_placement_referenced -> refused base_referenced
+eviction_requested x evict_previous -> refused not_materialised
+eviction_requested x stale_run -> refused stale_run
+evicting x request_same -> accepted, no event
+evicting x request_other_digest -> refused placement_differs
+evicting x issue -> refused directive_pending
+evicting x record_sent -> accepted placement_directive_sent/v1
+evicting x record_pulled -> refused not_pending
+evicting x record_drift -> refused not_pending
+evicting x record_materialised -> refused not_pending
+evicting x record_evicted -> accepted image_evicted/v1
+evicting x record_refused -> accepted placement_directive_refused/v1
+evicting x unknown_before_deadline -> refused not_sent
+evicting x unknown_after_deadline -> refused not_sent
+evicting x record_not_applied -> refused outcome_not_unknown
+evicting x refresh_new -> refused not_materialised
+evicting x refresh_current -> refused not_materialised
+evicting x roll_back -> refused not_materialised
+evicting x evict_placement_unreferenced -> accepted, no event
+evicting x evict_placement_referenced -> refused base_referenced
+evicting x evict_previous -> refused not_materialised
+evicting x stale_run -> refused stale_run
+evicted x request_same -> accepted placement_requested/v1
+evicted x request_other_digest -> refused placement_differs
+evicted x issue -> refused nothing_to_issue
+evicted x record_sent -> refused not_pending
+evicted x record_pulled -> refused not_pending
+evicted x record_drift -> refused not_pending
+evicted x record_materialised -> refused not_pending
+evicted x record_evicted -> refused not_pending
+evicted x record_refused -> refused not_pending
+evicted x unknown_before_deadline -> refused not_pending
+evicted x unknown_after_deadline -> refused not_pending
+evicted x record_not_applied -> refused not_pending
+evicted x refresh_new -> refused not_materialised
+evicted x refresh_current -> refused not_materialised
+evicted x roll_back -> refused not_materialised
+evicted x evict_placement_unreferenced -> refused not_materialised
+evicted x evict_placement_referenced -> refused not_materialised
+evicted x evict_previous -> refused not_materialised
+evicted x stale_run -> refused stale_run
+failed x request_same -> accepted placement_requested/v1
+failed x request_other_digest -> refused placement_differs
+failed x issue -> refused nothing_to_issue
+failed x record_sent -> refused not_pending
+failed x record_pulled -> refused not_pending
+failed x record_drift -> refused not_pending
+failed x record_materialised -> refused not_pending
+failed x record_evicted -> refused not_pending
+failed x record_refused -> refused not_pending
+failed x unknown_before_deadline -> refused not_pending
+failed x unknown_after_deadline -> refused not_pending
+failed x record_not_applied -> refused not_pending
+failed x refresh_new -> refused not_materialised
+failed x refresh_current -> refused not_materialised
+failed x roll_back -> refused not_materialised
+failed x evict_placement_unreferenced -> refused not_materialised
+failed x evict_placement_referenced -> refused not_materialised
+failed x evict_previous -> refused not_materialised
+failed x stale_run -> refused stale_run

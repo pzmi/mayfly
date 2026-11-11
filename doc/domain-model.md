@@ -927,6 +927,14 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
 - **Protects alone:** digest immutability, status monotonic (no Verified after Rejected/Withdrawn),
   manifest schema. **Must not protect:** "not withdrawn while pinned" (policy P17 refuses
   `WithdrawImage` via a pinned-by projection check and unpins first), placement.
+- **As built (KER-11):** the manifest is `{os, runner_version, revision}` (OPS-02 adds the launcher
+  hash and the required host as optional fields); a runner version is `major.minor.patch` as three
+  numbers, so it orders by number and names a base with no free text. The status order is
+  `Registered` → `Verified` → `Rejected` → `Withdrawn`: a failure may reject a verified image (a
+  drift), nothing moves back, and a rejected or withdrawn image refuses a passed verification
+  (`already_rejected`, `withdrawn`). `WithdrawImage` is an operator's (`operator_only`) and records
+  the uid; the expiry is recorded once, only below the minimum (`runner_not_expired`), with the
+  command's instant. A newer run epoch is recorded as `ImageEpochAdvanced` (I18).
 
 ### 6.7 `ImagePlacement` [Image]
 
@@ -940,6 +948,23 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
 - **Protects alone:** single in-flight pull per (host, digest), eviction only from `Materialised`
   with zero referencing leases (the reference count is passed in by policy and re-checked by the DP
   against its base set), I05 at the CP (the base is never the target of a VM directive).
+- **As built (KER-11):** event types are unique in the registry, so the directive bookkeeping is
+  `PlacementDirectiveIssued{PullImage|MaterialiseImage{runner}|EvictImage{runner}}`,
+  `PlacementDirectiveSent{deadline}` (the relay put it on the link), `PlacementOutcomeUnknown`
+  (only once sent and past the deadline: a directive held unsent did nothing, ADR 0025), `PlacementDirectiveNotApplied` (only from
+  unknown, on a complete listing) and `PlacementDirectiveRefused{reason}`; a refused pull or first
+  materialisation, or a drift, adds `PlacementFailed{}`, and a new `PlacementRequested` starts
+  again (as after `Evicted`). `ImagePulled` carries no byte count: disk is the data plane's ledger
+  (ADR 0024). A base is named `mfb-<digest12>-r<major>-<minor>-<patch>` from the digest and the
+  runner version (`image::base_name`). The state keeps the **base pointer** (`base`) and the
+  **previous base** for rollback (ADR 0030 decision 3, ADR 0039 decision 2):
+  `RequestRefresh{runner}` (`BaseRefreshRequested`) materialises another base of the same digest,
+  `ImageMaterialised` moves the pointer and keeps the base it left, `RollBackBase`
+  (`BaseRolledBack{to, from}`) swaps them; at most two bases, so a refresh is refused while the
+  previous is kept (`previous_base_held`). `RequestEviction{scope: previous|placement,
+  references}` (`EvictionRequested`) needs `Materialised`, nothing pending and zero references
+  (`base_referenced`), and evicts the previous base first. The digest's pin and its previous
+  digest stay the `Pool`'s (`ImagePinned{digest, previous}`).
 
 ### 6.8 `HostRun` [Operations]
 

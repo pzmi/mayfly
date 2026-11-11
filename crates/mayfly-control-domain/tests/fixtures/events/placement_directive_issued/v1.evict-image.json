@@ -1,0 +1,13 @@
+{
+  "directive_id": "0000000000000000000000000000d001",
+  "directive": {
+    "evict_image": {
+      "runner_version": {
+        "major": 2,
+        "minor": 330,
+        "patch": 0
+      }
+    }
+  },
+  "deadline": 60000
+}
