@@ -181,7 +181,15 @@ stops Busy VMs.
 **U14 Quarantine and its resolution.** `AttemptQuarantined{reason, vm: stopped|running}` →
 `LeaseQuarantined` (Host counts it against the cap) → `QuarantineCaseOpened` →
 `QuarantineCaseEscalated{age}` → `QuarantineCaseResolved{disposition, actor}` → ATT continues
-cleanup (`Deleting`) or `AttemptLost` → `SlotReleased` only on observed absence.
+cleanup (`Deleting`) or, on observed absence, `VmVanished` (a VM the attempt recorded, DEC-07)
+or `AttemptLost` (one it never recorded) → `SlotReleased` only on observed absence.
+
+**U15 A recorded VM vanished (DEC-07, ADR 0066 as amended 2026-11-11).** A complete listing
+lacks a VM the attempt recorded (`VmCloned`) and mayfly did not delete: the stop's or start's
+re-observation (`DirectiveRefused{target_absent}`) or the inventory → `VmVanished{discovered_by,
+instance_id, vm}` (Lost) → `AttemptClosed`, `SlotReleased{attempt_lost}`; the reconciler mints a
+fresh attempt for the remaining demand; P15 counts a pool failure; the `attempts` view, `mayfly
+status` and the bundle show the desync. An incomplete listing concludes nothing (I25).
 
 ---
 
@@ -761,7 +769,9 @@ one VM's capacity, not two. Beyond it, two options were put to the owner in ADR 
   `JitHandleTaken`, `JitHandleOrphaned`, `RunnerLaunched`, `RunnerLaunchUnknown`, `JobBound`,
   `RunnerExited{code}`, `VmObservedStopped`, `AttemptBackedOff`, `RetirementRequested`,
   `RetirementWithdrawn`, `AttemptRetired{reason}`, `DiagnosticsExported{bytes, hash}`,
-  `DiagnosticsLost{reason}`, `VmStopped`, `VmDeleted`, `AttemptLost{evidence}`,
+  `DiagnosticsLost{reason}`, `VmStopped`, `VmDeleted`, `AttemptLost{evidence}` (a quarantined
+  VM the attempt never recorded, released by its absence),
+  `VmVanished{discovered_by: inventory|stop_vm|start_vm, instance_id, vm}` (DEC-07),
   `AttemptQuarantined{reason, vm}`, `StopDeregistrationRequested`, `StopDeregistrationConfirmed`,
   `StopDeregistrationRefusedBusy` (ADR 0076), `AttemptAdopted{epoch}`,
   `StaleObservationIgnored{generation|epoch|directive}` (sampled), `AttemptClosed`. An operator's
@@ -782,12 +792,17 @@ one VM's capacity, not two. Beyond it, two options were put to the owner in ADR 
     (a refused proof counts as one more refusal), and never deletes it. A VM quarantined for
     `ownership_doubt` has no recorded instance id, so no proof: it is neither stopped nor
     deleted, and a complete inventory without it releases it (`AttemptLost`).
-  - *A vanished VM* (ADR 0066). A `StopVm` or `StartVm` whose VM, one the attempt recorded
-    cloning, a complete listing shows absent is refused `target_absent`: mayfly did not remove
-    it, so the journal and the provider have desynced. The attempt is quarantined
-    `vm_vanished_externally` (VM not running, so nothing is stopped); the inventory's absence
-    does not release it, and only an operator resolves it (a delete, answered `VmDeleted`). A
-    start refused `proof_mismatch` quarantines `provider_identity_mismatch`.
+  - *A vanished VM* (ADR 0066, amended 2026-11-11 by DEC-07). A VM the attempt recorded
+    cloning, which mayfly did not delete, found absent from a **complete** listing, whether a
+    `StopVm` or `StartVm` is refused `target_absent` or the inventory does not list it, is a
+    desync: the attempt records `VmVanished` and is lost and closed, quarantined or not, and
+    never resurrected; the reconciler provisions a fresh attempt for the remaining demand, and
+    the desync is surfaced (the `attempts` view's `desync`, `mayfly status`, the bundle) and
+    counted by the breaker (P15). Quarantine is for a VM that is present and does not match
+    the record; an incomplete listing concludes nothing (I25). A start refused `proof_mismatch`
+    quarantines `provider_identity_mismatch`. (Until DEC-07 such an attempt was quarantined
+    `vm_vanished_externally` and kept for an operator, and the inventory's absence was a silent
+    `AttemptLost`.)
   - *Actor.* Who issued each command (operator uid, policy, startup) is recorded in the event
     envelope, not the payload; `ResolveQuarantine` is refused unless the actor is an operator,
     so an `AttemptRetired{quarantine_resolved}` event's envelope names that operator.
@@ -799,7 +814,8 @@ one VM's capacity, not two. Beyond it, two options were put to the owner in ADR 
     happened, so retiring is safe (I21). A lost attempt is terminal and confirms nothing.
   - *An Unknown stop that a listing shows stopped* is `VmStopped`, the stop's success: the
     count of tries restarts for the delete.
-  - *A vanished case ends with its resolution*: a later quarantine has its own reason.
+  - *A vanished case ends with its resolution*: a later quarantine has its own reason. (Since
+    DEC-07 a vanish closes the attempt, so no vanished case is resolved.)
 - **Behaviour decided by KER-04G** (deregister before stop in Backoff, I21; `doc/formal-models.md`,
   lifecycle, `i21DeregisterBeforeStop`):
   - *Backoff holds the registration too.* A fresh verification refused after the JIT was issued
@@ -851,8 +867,8 @@ Finished|stage failure (budget spent)|Retiring → (diagnostics) → Deleting �
 Cloning|Booting|Verifying|Activating → Backoff{n} → same stage (same name, generation)
 any state ↔ pending.Unknown overlay (no transition until observed)
 Verifying|Activating --GuestRejected--> Quarantined;  Deleting --proof refused--> Quarantined
-any non-terminal --observed absence without our delete--> Lost
-Quarantined --case resolved--> Deleting | Lost
+any non-terminal --recorded VM absent without our delete (VmVanished, a desync)--> Lost → Closed
+Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
 ```
 
 ### 6.5 `RunnerRegistration` [Registration]
@@ -964,7 +980,7 @@ Quarantined --case resolved--> Deleting | Lost
 - **State:** `reason` (closed enum: `ownership_doubt`, `guest_identity_refused`,
   `jit_presumed_leaked`, `provider_identity_mismatch`, `delete_refused_repeatedly`,
   `redaction_violation`, `forensic_retention`, `outcome_unprovable`, `vm_vanished_externally`:
-  ADR 0066), `holds {disk, memory?, macos_token?}`, `evidence`
+  ADR 0066, no longer opened since DEC-07, which closes a vanished VM's attempt instead), `holds {disk, memory?, macos_token?}`, `evidence`
   refs, `opened_at`, `escalation_level`, `phase ∈ {Open, Inspected, Resolving, Resolved{disposition,
   actor}}`; dispositions (operator only) `delete_with_proof` (the data plane re-checks the proof),
   `released_observed_absent` (only on a complete inventory without the VM), `keep`.
@@ -1000,7 +1016,7 @@ literally (F25).
 | P12 | `MessageRecorded.JobStarted` / `.JobCompleted` | find registration by runner name (projection) → `BindJob` + `RecordConsumed`; on completion `RecordCompleted{result}`, then `RequestRetirement{job_done}` once `RunnerExited` or grace G expires (then probe) | DEM→ATT/REG | `request_id` | — | grace G | unknown runner name → `UnrecognisedRegistrations`; a JobStarted for a registration already completed → audit, ignore |
 | P13 | `RunnerLaunchUnknown`, `JitHandleOrphaned`, identity doubt after delivery, redaction violation | `PresumeLeaked` → `RequestDeregistration` (if journaled id); attempt `RequestRetirement{jit_presumed_leaked}` or `Quarantine` | REG/SEC | `attempt_id` | GitHub budget | — | deregistration impossible → stays on reaper list; attempt never relaunched (I22) |
 | P14 | `RunStarted`, daily timer, `mayfly doctor`, `SessionOpened` after a long outage | list our scale set's runners; journaled + non-live → `RequestDeregistration`; our name shape, unjournaled → report only | REG reaper | `(run_no, day)` | GitHub budget, ≤ 1 listing per hour | — | report, never delete by name pattern |
-| P15 | final `AttemptBackedOff`, stage-failure `AttemptRetired`, `GuestRejected` | `CountAttemptFailure{digest, stage}` on Pool; trip at N in window W → P4 closes terms | FLT breaker | source `event_id` | backoff | — | — |
+| P15 | final `AttemptBackedOff`, stage-failure `AttemptRetired`, `GuestRejected`, `VmVanished` (DEC-07) | `CountAttemptFailure{digest, stage}` on Pool; trip at N in window W → P4 closes terms | FLT breaker | source `event_id` | backoff | — | — |
 | P16 | `AttemptQuarantined` | `QuarantineLease` (Host), `QuarantineCaseOpened` (ERROR event, metric, status), `StopVm` unless a job is live; the lease keeps counting, so a pool whose capacity is consumed admits nothing (I28) | OPS | `attempt_id` | backoff | escalation at T_q1 (ticket), T_q2 (page) | every reason → escalate only; never delete, never on a timer or a cap (ADR 0025) |
 | P17 | `ImagePinned` | `PlacementRequested` per host; on `ImageMaterialised` the pool becomes admissible there; prepared attempts on the old digest retired; old digest unreferenced → `EvictionRequested`; `WithdrawImage` refused while pinned | IMG placement manager | `(host, digest)` | backoff; single pull per host | pull deadline (large) | `PlacementFailed` → pool not admissible on that host, reason shown; drift → `ImageRejected` |
 | P18 | `ImageRunnerVersionExpired` | trip the breaker for that digest with reason `runner_version`; alert the maintainer | IMG→FLT | `digest` | — | — | admission for the pool stops with a named reason, never silent queueing |

@@ -98,7 +98,7 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
-| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i21DeregisterBeforeStop`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside); at KER-04G, with `i21DeregisterBeforeStop`, 119 s, 56 s and 155 s; at DEC-06, with the quarantine stop's deregistration, 187 s, 101 s and 195 s (beside a simulation run) | KER-04, KER-04F, DEC-04, DEC-05, VER-01F, KER-04G, DEC-06 |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i21DeregisterBeforeStop`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `mismatchStaysQuarantined`, `vanishedClosedForGood`, `noAbsenceFromIncomplete`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside); at KER-04G, with `i21DeregisterBeforeStop`, 119 s, 56 s and 155 s; at DEC-06, with the quarantine stop's deregistration, 187 s, 101 s and 195 s (beside a simulation run); at DEC-07, with `listingIncomplete` and the three vanish invariants, 192 s, 73 s and 252 s (with quint simulations and a test build running alongside), and on top of DEC-06 246 s, 128 s and 254 s (beside conformance sweeps) | KER-04, KER-04F, DEC-04, DEC-05, VER-01F, KER-04G, DEC-06, DEC-07 |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); KER-05D's carve ran Apalache out of memory before it checked anything; at DEC-06, the state machine in `scheduling_machine` with the plan carved from counts and both capacity policies chosen by `init`, 489 s and 293 s (`formal-verify --model scheduling`); simulation about 3 min per seed and relation | KER-05, DEC-04, DEC-06 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
@@ -302,7 +302,9 @@ was changed: which side is wrong is the follow-up's decision (ver §6.2 item 9).
 | `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
 | `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
 | `quarantineNeverAutoDeleted` | I28: no `DeleteVm` while quarantined and unresolved | the same |
-| `vanishedStaysQuarantined` | ADR 0066: an attempt quarantined because a stop or start found its recorded VM absent stays quarantined until an operator resolves it; the inventory's absence does not release it (VER-01F: `vanished implies Quarantined`, the flag cleared only by the resolution) | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent`, `should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent`; `matrix/attempt.txt` (`quarantined/vanished`) |
+| `mismatchStaysQuarantined` | DEC-07 (i): while a VM is present under the attempt's name with another instance id than the recorded one, a quarantined, unresolved attempt stays quarantined | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_a_mismatched_vm_quarantined_when_it_is_listed_until_it_is_absent`; control `mismatchReleasedFromQuarantineIsFlaggedTest` |
+| `vanishedClosedForGood` | DEC-07 (ii), ADR 0066 as amended 2026-11-11: a recorded VM absent from a complete listing without our delete is a recorded desync (`vanished`, never cleared), and the attempt is `Lost` then `Closed` with nothing issued after; a recorded VM's absence is never a silent `Lost`, and an unrecorded VM never vanishes. Replaces DEC-05's `vanishedStaysQuarantined` | `formal-verify`; `tests/attempt/lifecycle.rs::should_close_as_vanished_when_a_stop_or_start_finds_its_vm_absent`, `should_close_as_vanished_when_the_inventory_shows_a_recorded_vm_absent`, `should_record_no_vanish_when_the_refusal_is_not_a_recorded_vm_s_absence`; `matrix/attempt.txt` (`lost/vanished_on_start`); controls `silentLossOfRecordedVmIsFlaggedTest`, `resurrectionAfterVanishIsFlaggedTest`; conformance `should_catch_a_forgotten_desync_at_the_first_divergent_step_when_the_inventory_finds_a_vm_gone` |
+| `noAbsenceFromIncomplete` | DEC-07 (iii), I25: an incomplete listing (`listingIncomplete`: the inventory's `InventoryIncomplete`, or `Unknown{listing_incomplete}` for a re-observing directive) moves no phase and records no vanish; at most it makes the pending outcome `Unknown` | `formal-verify`; `tests/attempt/lifecycle.rs::should_conclude_no_absence_when_a_stop_is_reobserved_on_an_incomplete_listing`; control `vanishFromIncompleteListingIsFlaggedTest` |
 | `retryKeepsNameAndGeneration` | every `CloneVm`, first or retried, targets the name and generation fixed at start | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
 
 Tests (`quint test`, stage `formal-test`, all deterministic): `happyPathTest`,
@@ -318,7 +320,9 @@ is enabled when the provider holds no VM (the data plane answers a delete whose 
 complete listing does not list `VmDeleted`), so a lost delete reply is resolved by the answer
 to its re-delivery as well as by the inventory (`inventoryAbsent` already read absence as
 `Deleted` for a pending delete; a stop of a stopped VM was already a success), and from DEC-05
-(ADR 0066) `stopOfVanishedVmQuarantinesTest` and `startOfVanishedVmQuarantinesTest`, and
+(ADR 0066) `stopOfVanishedVmQuarantinesTest` and `startOfVanishedVmQuarantinesTest` (renamed
+by DEC-07 `stopOfVanishedVmIsClosedAsDesyncTest` and `startOfVanishedVmIsClosedAsDesyncTest`),
+and
 from CP-02 `timeoutIsUnknownNeverSuccessTest` (a sent clone whose deadline passed is `Unknown`,
 issues nothing new, and is resolved by the inventory) and `heldDirectiveNeverTimesOutTest` (an
 issued, unsent directive cannot time out; its tries are unchanged when it is sent), with the
@@ -330,16 +334,27 @@ letting the timeout apply the success transition reports `[violation]` of
 `DirectiveSent` after the link took the frame, so an answer may be recorded first, which the
 model's unguarded replies cover: a stop or
 start whose recorded VM the provider no longer holds is answered `target_absent`
-(`replyTargetAbsent`) and quarantines the attempt as a desync (the attempt's `vanished` flag,
-the VM not running), which `inventoryAbsent` no longer releases to `Lost`; and a start may be
+(`replyTargetAbsent`), which DEC-05 quarantined as a desync and DEC-07 (ADR 0066 as amended
+2026-11-11) records and closes instead (`vanish`: `Lost` with the `vanished` flag, inside
+quarantine too; `inventoryAbsent` does the same for a recorded VM, and releases an unrecorded
+quarantined one to a plain `Lost`); and a start may be
 refused its proof too (`replyProofRefused`, an over-approximation for a start: the model's world
 has no listed-but-unproven VM), and from VER-01F `unknownStopResolvedByListingTest`,
 `confirmRetirementInBackoffTest`, `confirmRetirementAfterExitTest`,
 `cloneAnsweredAfterRemovalTest` and `requarantineAfterVanishedTest` (the resolved divergences
-above), and from KER-04G `retirementInBackoffWaitsForDeregistrationTest`,
+above; DEC-07 renamed the last `requarantineAfterResolutionTest`, a quarantine for a replaced
+VM, since a vanish no longer quarantines), and from KER-04G `retirementInBackoffWaitsForDeregistrationTest`,
 `stageFailureHoldingRegistrationWaitsForDeregistrationTest` (both regression traces too),
 `stopAfterRefusedLaunchNeedsNoDeregistrationTest`, `stopAfterRunnerExitedNeedsNoDeregistrationTest`
-and `stopBeforeDeregistrationIsFlaggedTest` (controls of `i21DeregisterBeforeStop`). Stops and deletes count against the
+and `stopBeforeDeregistrationIsFlaggedTest` (controls of `i21DeregisterBeforeStop`), and from
+DEC-07 `inventoryFindsVanishedVmTest`, `quarantinedVmVanishedIsClosedTest`,
+`mismatchedVmStaysQuarantinedTest` and `incompleteListingConcludesNothingTest` (each a
+regression trace too, with the two renamed vanish scripts), and the controls
+`vanishFromIncompleteListingIsFlaggedTest`, `silentLossOfRecordedVmIsFlaggedTest`,
+`resurrectionAfterVanishIsFlaggedTest` and `mismatchReleasedFromQuarantineIsFlaggedTest`.
+`listingIncomplete` (DEC-07) is the incomplete listing: the conformance driver sends
+`OutcomeUnknown` for it only when a clone, start, stop or delete is in flight, and nothing
+otherwise (the inventory's is never routed to the attempt). Stops and deletes count against the
 retry budget like the stage directives: a cleanup the data plane keeps refusing ends in
 quarantine (`delete_refused_repeatedly`), and inside quarantine the stops, a refused proof
 included, end. The Rust code asserts the model's invariants on every accepted transition two
@@ -352,8 +367,12 @@ guard of `recordJitHandle` makes simulation of `serveStep` report `[violation]` 
 `i22JitMintedOnceAfterGrantAndVerification`; letting `requestRetirement` run while a directive
 is pending (mutant 27) makes simulation of `step` report `[violation]` of
 `i10UnknownLeavesOnlyOnObservation`; letting `inventoryAbsent` release a vanished quarantine
-(DEC-05) makes simulation of `step` report `[violation]` of `vanishedStaysQuarantined` within a
-second.
+(DEC-05) made simulation of `step` report `[violation]` of the then `vanishedStaysQuarantined`
+within a second. DEC-07's scratch mutations, each found by simulation of `step` in about half a
+second and by its own invariant only: `inventoryAbsent` reading a recorded VM's absence as a
+plain `Lost` (`vanishedClosedForGood`), `listingIncomplete` concluding the stop's target absent
+(`noAbsenceFromIncomplete`), and `inventoryPresent` closing a quarantined attempt whose VM is
+listed under another instance id (`mismatchStaysQuarantined`).
 
 **The saga (CP-02).** `mayfly_control_domain::attempt::next_step` is `issueNext`'s guard read as
 a policy: it issues exactly when `canIssueNext` holds (`issuable`, pinned against the aggregate by

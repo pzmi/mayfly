@@ -16,14 +16,15 @@ use mayfly_control::projection::{
 use mayfly_control::queries;
 use mayfly_control::store::Outcome;
 use mayfly_control::store::{AggregateStore, NoNotifier, SaveRequest, stream_of};
-use mayfly_control_domain::attempt::{AttemptCommand, GuestOs};
+use mayfly_control_domain::attempt::{AttemptCommand, Fact, GuestOs, VanishDiscovery};
 use mayfly_control_domain::capacity::ReportedCapacity;
 use mayfly_control_domain::host::{ApplyPoolTerms, Host, HostCommand, ReserveSlot};
 use mayfly_control_domain::pool::TrustTier;
 use mayfly_control_domain::pool::{Pool, PoolEvent};
 use mayfly_control_domain::{Actor, Command, ControlAggregates, DeterminismCases, Expect, replay};
 use mayfly_domain::{
-    AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Millis, PoolName, Resources,
+    AttemptId, CommandId, Deadline, DirectiveId, Epoch, EventId, Millis, PoolName,
+    ProviderInstanceId, Resources, Sample,
 };
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use mayfly_testkit::contracts::projections::{
@@ -394,6 +395,76 @@ fn should_list_pending_effects_and_count_the_unknown_when_queried() {
 
     // then
     assert_eq!((pending.0.len(), pending.1), (3, 1));
+}
+
+/// DEC-07: a VM the attempt recorded, found absent by the inventory, shows as a desync on the
+/// `attempts` row (`lost`, `desync: inventory`), and the start that was pending is gone from
+/// `pending_effects`; the other attempt's row carries none.
+#[test]
+fn should_show_the_desync_and_clear_the_pending_effect_when_a_recorded_vm_vanishes() {
+    // given: two cloned attempts, each with its start pending
+    let memory = MemoryJournal::new();
+    let store = store(&memory);
+    for n in 1..=2_u128 {
+        let save = |id, body| block_on(attempts::save(&store, n, n * 10 + id, Epoch::new(1), body));
+        save(0, attempts::start(n));
+        save(
+            1,
+            AttemptCommand::IssueNext {
+                directive_id: DirectiveId::from_u128(n * 10 + 1),
+                deadline: Deadline::at(Millis::new(1)),
+            },
+        );
+        save(
+            2,
+            attempts::observe(
+                n * 10 + 2,
+                Epoch::new(1),
+                Fact::VmCloned {
+                    directive_id: DirectiveId::from_u128(n * 10 + 1),
+                    instance_id: ProviderInstanceId::sample(),
+                },
+            ),
+        );
+        save(
+            3,
+            AttemptCommand::IssueNext {
+                directive_id: DirectiveId::from_u128(n * 10 + 3),
+                deadline: Deadline::at(Millis::new(1)),
+            },
+        );
+    }
+
+    // when: the inventory does not list attempt 1's VM
+    let vanished = block_on(attempts::save(
+        &store,
+        1,
+        99,
+        Epoch::new(1),
+        attempts::observe(99, Epoch::new(1), Fact::VmAbsent),
+    ));
+
+    // then
+    assert!(matches!(vanished, Outcome::Accepted { .. }), "{vanished:?}");
+    let rows =
+        block_on(queries::all_rows::<Attempts, _>(&memory)).unwrap_or_else(|e| panic!("{e}"));
+    let shown: Vec<_> = rows
+        .iter()
+        .map(|(_, row)| (row.attempt_id, row.phase.as_str(), row.desync))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                AttemptId::from_u128(1),
+                "lost",
+                Some(VanishDiscovery::Inventory)
+            ),
+            (AttemptId::from_u128(2), "booting", None),
+        ]
+    );
+    let pending = block_on(queries::pending_effects(&memory)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(pending.0.len(), 1);
 }
 
 proptest! {

@@ -31,6 +31,14 @@
 //! - **Adoption with a launch in flight** orphans the handle; the late launch is recorded and
 //!   that runner never gets a job
 //!   (`tests/attempt/lifecycle.rs::should_record_a_late_launch_and_never_bind_a_job_when_a_restart_orphaned_its_handle`).
+//! - **A vanished VM converges (DEC-07; the model's `vanishedClosedForGood`,
+//!   `mismatchStaysQuarantined`, `noAbsenceFromIncomplete`)**: a VM the attempt recorded and
+//!   did not delete, absent from a complete listing (a stop's or start's `target_absent`, or the
+//!   inventory), records `VmVanished` and closes the attempt, quarantined or not; a present VM
+//!   that does not match the record stays quarantined
+//!   (`tests/attempt/lifecycle.rs::should_close_as_vanished_when_a_stop_or_start_finds_its_vm_absent`,
+//!   `should_close_as_vanished_when_the_inventory_shows_a_recorded_vm_absent`,
+//!   `should_keep_a_mismatched_vm_quarantined_when_it_is_listed_until_it_is_absent`).
 //! - **Bounded cleanup**: stops and deletes count against the retry budget; refused again and
 //!   again, cleanup ends in quarantine
 //!   (`tests/attempt/lifecycle.rs::should_quarantine_when_a_delete_is_refused_again_and_again`).
@@ -63,6 +71,7 @@ pub use events::{
     RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
     StaleObservationIgnored, Staleness, StopDeregistrationConfirmed, StopDeregistrationRefusedBusy,
     StopDeregistrationRequested, VmBooted, VmCloned, VmDeleted, VmObservedStopped, VmStopped,
+    VmVanished,
 };
 pub use evolve::evolve;
 pub use rejection::AttemptRejection;
@@ -70,7 +79,7 @@ pub use saga::{SagaStep, next_step};
 pub use state::{
     AttemptState, Diagnostics, DirectiveKind, DirectiveTag, Identity, Jit, Outcome, OwnershipProof,
     Pending, Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, StopDeregistration,
-    VmCondition,
+    VanishDiscovery, VmCondition,
 };
 
 use crate::aggregate::{Aggregate, DeterminismCase, DeterminismCases};

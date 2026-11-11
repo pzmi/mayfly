@@ -94,10 +94,10 @@ module lifecycle {
     // "none" | "exported" | "lost"
     diagnostics: str,
     runnerExited: bool,
-    // quarantined because a stop or start found its recorded VM absent on a complete listing:
-    // we know it was there and did not remove it, a desync kept for review (ADR 0066); the
-    // reason of the quarantine the attempt is in, so leaving it (an operator's resolution)
-    // clears it (VER-01F)
+    // the VM the attempt recorded cloning was found absent from a complete listing, by a stop's
+    // or start's re-observation or by the inventory, and mayfly had not deleted it: a desync,
+    // recorded (`VmVanished`) and surfaced, and the attempt closed for good; the reconciler
+    // provisions a fresh one for the remaining demand (ADR 0066 as amended 2026-11-11, DEC-07)
     vanished: bool,
     // the quarantine stop's deregistration (ADR 0076): "none" (nothing to wait for), "requested"
     // (a runner of the attempt's registration may be registered and idle in the running VM, so
@@ -150,6 +150,13 @@ module lifecycle {
     // retired outside quarantine with the VM running (so its stop follows) while such a runner
     // may be registered and idle in it, before the deregistration answered (I21)
     stopBeforeDeregister: bool,
+    // a vanished VM was recorded (`VmVanished`): never cleared
+    vanishedEver: bool,
+    // a directive was issued, or the phase left Lost or Closed for another, after a vanish
+    actedAfterVanish: bool,
+    // an incomplete listing changed the phase or recorded a vanish: an absence concluded from
+    // it (I25)
+    concludedFromIncomplete: bool,
   }
 
   var a: Attempt
@@ -231,12 +238,10 @@ module lifecycle {
   /// Directives counted against the retry budget: the stage directives, stops and deletes.
   pure def isCounted(d: str): bool = isStageDirective(d) or isCleanupDirective(d)
 
-  /// Retirement decided: cleanup begins, or ends at once when no VM was ever cloned. An
-  /// operator's resolution of a quarantine is one, so it ends a vanished case too: a later
-  /// quarantine has its own reason (VER-01F).
+  /// Retirement decided: cleanup begins, or ends at once when no VM was ever cloned.
   pure def retire(x: Attempt): Attempt =
     { ...x, phase: if (x.instance == NONE) DELETED else RETIRING, retireRequested: false,
-      pending: NO_DIRECTIVE, unknown: false, tries: 0, vanished: false, dereg: "none" }
+      pending: NO_DIRECTIVE, unknown: false, tries: 0, dereg: "none" }
 
   /// Quarantine; entering it restarts the count of stops, staying in it does not. Entering it
   /// with a runner that may be registered in the running VM requests its deregistration, which
@@ -249,11 +254,17 @@ module lifecycle {
         else if (stopNeedsDeregistration(x)) "requested"
         else "none" }
 
-  /// Quarantine because the recorded VM vanished (`vm_vanished_externally`, ADR 0066): it is
-  /// not running, so no stop is issued for it (nor a deregistration asked for one), and its
-  /// absence is the reason, not a release.
-  pure def quarantineVanished(x: Attempt): Attempt =
-    { ...quarantine(x), vmRunning: false, vanished: true, dereg: "none" }
+  /// The recorded VM vanished (`VmVanished`, ADR 0066 as amended 2026-11-11, DEC-07): a VM the
+  /// attempt recorded cloning, which mayfly did not delete, is absent from a complete listing.
+  /// Like a controller restoring desired state, the attempt does not wait on it: the desync is
+  /// recorded, the attempt is lost (its slot released, `Close` follows) and never resurrected;
+  /// the reconciler provisions a fresh attempt for the demand that remains. Whatever was
+  /// pending is moot, its target gone, and so is a quarantine stop's deregistration (ADR 0076):
+  /// there is no VM left to stop. Quarantined or not, the same: quarantine holds only a VM that
+  /// is present and does not match the record.
+  pure def vanish(x: Attempt): Attempt =
+    { ...x, phase: LOST, vmRunning: false, pending: NO_DIRECTIVE, unknown: false, vanished: true,
+      dereg: "none" }
 
   /// A stage directive failed definitely (refused, or observed not applied). Once the budget is
   /// spent the attempt retires, but one holding a registration (a JIT was issued: the activate
@@ -292,6 +303,13 @@ module lifecycle {
     done: g0.done or after.phase == RETIRING or after.phase == FINISHED
       or (before.phase != DELETED and after.phase == DELETED),
     quarantined: g0.quarantined or after.phase == QUARANTINED,
+    vanishedEver: g0.vanishedEver or after.vanished,
+    actedAfterVanish: g0.actedAfterVanish
+      or (g0.vanishedEver and not(Set(LOST, CLOSED).contains(after.phase))),
+    concludedFromIncomplete: g0.concludedFromIncomplete or (kind == "incomplete" and or {
+      after.phase != before.phase,
+      after.vanished != before.vanished,
+    }),
     // retiring a running VM commits to its stop (diagnostics, then StopVm): that decision is
     // where deregister-before-stop is kept or lost, so it is checked there, at the bounded
     // depth Apalache reaches (KER-04G)
@@ -385,6 +403,7 @@ module lifecycle {
         served: false, done: false, servedAfterDone: false, quarantined: false,
         operatorResolved: false, autoDelete: false, providerInstances: Set(),
         runnerMayLive: false, deregistered: false, stopBeforeDeregister: false,
+        vanishedEver: false, actedAfterVanish: false, concludedFromIncomplete: false,
       },
     }
   }
@@ -426,6 +445,7 @@ module lifecycle {
           clones: if (d == CLONE_VM) g.clones + 1 else g.clones,
           autoDelete: g.autoDelete
             or (d == DELETE_VM and g.quarantined and not(g.operatorResolved)),
+          actedAfterVanish: g.actedAfterVanish or g.vanishedEver,
           runnerMayLive: g.runnerMayLive or d == LAUNCH_RUNNER,
         }),
     }
@@ -520,16 +540,16 @@ module lifecycle {
 
   /// `DirectiveRefused{target_absent}` for a stop or a start whose recorded VM a complete
   /// listing shows absent: we know it was there and did not remove it, so the journal and the
-  /// provider have desynced, and the attempt is quarantined for review
-  /// (`vm_vanished_externally`, ADR 0066), never read as stopped or retried. A delete of an
-  /// absent VM is done instead (`replySucceededWith`, ADR 0053). Inside quarantine it is one
-  /// more refused stop.
+  /// provider have desynced. The desync is recorded and the attempt closed (`vanish`, ADR 0066
+  /// as amended 2026-11-11), never read as stopped, a stage failure or retried; inside
+  /// quarantine too, since quarantine holds only a VM that is present. A delete of an absent VM
+  /// is done instead (`replySucceededWith`, ADR 0053), and a re-observation on an incomplete
+  /// listing concludes nothing (`listingIncomplete`).
   action replyTargetAbsent = all {
     Set(STOP_VM, START_VM).contains(a.pending),
     a.instance != NONE,
     not(w.exists),
-    commit("observation",
-      if (a.phase == QUARANTINED) notApplied(a) else quarantineVanished(a), g),
+    commit("observation", vanish(a), g),
   }
 
   /// `GuestRejected`: the guest failed its identity challenge (U3).
@@ -638,23 +658,37 @@ module lifecycle {
     }
   }
 
-  /// A complete inventory does not list the VM.
+  /// A complete inventory does not list the VM: our delete took effect; an Unknown clone did
+  /// not; a VM we recorded and did not delete vanished (`vanish`, the same as a stop's or a
+  /// start's `target_absent`, DEC-07); a quarantined VM of our name that we never recorded is
+  /// released when it is gone (lost, not a desync: we never knew it was ours).
   action inventoryAbsent = {
     val x = a
     val result =
       if (x.pending == DELETE_VM) { ...x, phase: DELETED, vmRunning: false, pending: NO_DIRECTIVE,
                                     unknown: false }
       else if (x.pending == CLONE_VM) (if (x.unknown) notApplied(x) else x)
-      // a quarantined VM of our name that we never recorded is released when it is gone
       else if (x.instance == NONE and x.phase != QUARANTINED) x
-      // a VM quarantined because it vanished stays quarantined for review: its absence is
-      // the reason, not a release (ADR 0066)
-      else if (x.phase == QUARANTINED and x.vanished) x
-      else { ...x, phase: LOST, vmRunning: false, pending: NO_DIRECTIVE, unknown: false }
+      else if (x.instance == NONE) { ...x, phase: LOST, vmRunning: false, pending: NO_DIRECTIVE,
+                                     unknown: false }
+      else vanish(x)
     all {
       not(w.exists),
       not(terminal(a)),
       commit("observation", result, g),
+    }
+  }
+
+  /// An incomplete listing (I25): the inventory's `InventoryIncomplete`, or the data plane's
+  /// `Unknown{listing_incomplete}` for a directive whose re-observation it is (a clone, start,
+  /// stop or delete; the data plane touches nothing then). Nothing is concluded from it, least
+  /// of all an absence: the inventory's is never routed to the attempt, and an answer makes the
+  /// pending outcome Unknown, never vanished, lost or deleted (`noAbsenceFromIncomplete`).
+  action listingIncomplete = {
+    val reobserves = Set(CLONE_VM, START_VM, STOP_VM, DELETE_VM).contains(a.pending)
+    all {
+      not(terminal(a)),
+      commit("incomplete", if (reobserves) { ...a, unknown: true } else a, g),
     }
   }
 
@@ -825,6 +859,7 @@ module lifecycle {
     replyLaunchUnknown,
     inventoryPresent,
     inventoryAbsent,
+    listingIncomplete,
     vmObservedStopped,
     runnerExited,
     vmReplacedOrRemoved,
@@ -917,6 +952,7 @@ module lifecycle {
     directiveTimeout,
     replyLaunchUnknown,
     inventoryPresent,
+    listingIncomplete,
     vmReplacedOrRemoved,
     beginActivation,
     recordJitHandle,
@@ -972,19 +1008,41 @@ module lifecycle {
     a.instance == NONE or g.providerInstances.contains(a.instance)
 
   /// quarantineTerminal: automation never takes an attempt out of quarantine; only an operator
-  /// resolution or an observed absence does.
+  /// resolution or an observed absence does (a recorded VM's absence is a vanish, DEC-07).
   val quarantineTerminal =
     (g.quarantined and not(g.operatorResolved)) implies Set(QUARANTINED, LOST, CLOSED).contains(a.phase)
 
   /// quarantineNeverAutoDeleted: no delete directive while quarantined and unresolved (I28).
   val quarantineNeverAutoDeleted = not(g.autoDelete)
 
-  /// vanishedStaysQuarantined: an attempt quarantined because its recorded VM vanished stays
-  /// quarantined until an operator resolves it; no inventory, saga step or retry takes it out
-  /// (ADR 0066: a desync is reported, never absorbed). The flag is the reason of the current
-  /// quarantine and only the resolution's `retire` clears it (VER-01F), so the invariant needs
-  /// no history: it also holds for a second vanished case after a first one was resolved.
-  val vanishedStaysQuarantined = a.vanished implies a.phase == QUARANTINED
+  /// mismatchStaysQuarantined (DEC-07, (i)): while a VM is present under the attempt's name with
+  /// another instance id than the recorded one, a quarantined attempt stays quarantined until
+  /// an operator resolves it. Quarantine is for a VM that is there and does not match the
+  /// record; only its absence (a vanish) or the operator ends it.
+  val mismatchStaysQuarantined =
+    (and {
+      g.quarantined,
+      not(g.operatorResolved),
+      w.exists,
+      a.instance != NONE,
+      w.instance != a.instance,
+    }) implies a.phase == QUARANTINED
+
+  /// vanishedClosedForGood (DEC-07, (ii)): a VM the attempt recorded and did not delete, found
+  /// absent from a complete listing, is a recorded desync (`vanished`), and the attempt is
+  /// closed for good: lost, then closed, with no directive issued and no phase entered after
+  /// it, and the record never cleared. A recorded VM's absence is never a silent loss, and a
+  /// VM never recorded never vanishes.
+  val vanishedClosedForGood = and {
+    a.vanished implies (Set(LOST, CLOSED).contains(a.phase) and a.instance != NONE),
+    g.vanishedEver implies a.vanished,
+    not(g.actedAfterVanish),
+    (a.phase == LOST and a.instance != NONE) implies a.vanished,
+  }
+
+  /// noAbsenceFromIncomplete (DEC-07, (iii); I25): an incomplete listing moves no phase and
+  /// records no vanish; at most it makes a pending outcome Unknown.
+  val noAbsenceFromIncomplete = not(g.concludedFromIncomplete)
 
   /// retryKeepsNameAndGeneration: every clone, first or retried, targets the name and slot
   /// generation fixed at start.
@@ -1016,7 +1074,9 @@ module lifecycle {
     i30GuestNeverDecidesOwnership,
     quarantineTerminal,
     quarantineNeverAutoDeleted,
-    vanishedStaysQuarantined,
+    mismatchStaysQuarantined,
+    vanishedClosedForGood,
+    noAbsenceFromIncomplete,
     retryKeepsNameAndGeneration,
   }
 
@@ -1216,29 +1276,104 @@ module lifecycle {
         and allInvariants)
   }
 
-  // ADR 0066: a stop whose recorded VM vanished is refused target_absent and quarantines the
-  // attempt for review; the inventory's absence does not release it, and only an operator's
-  // resolution ends it (with a delete that ADR 0053 answers done).
-  run stopOfVanishedVmQuarantinesTest = {
+  // ADR 0066 as amended 2026-11-11 (DEC-07): a stop whose recorded VM vanished is refused
+  // target_absent; the desync is recorded and the attempt closed, never quarantined, stopped
+  // or retried; a later inventory's absence changes nothing.
+  run stopOfVanishedVmIsClosedAsDesyncTest = {
     initWith(1, 1).then(toPrepared).then(requestRetirement)
       .then(issueNext).then(ok).then(issueNext).expect(a.pending == STOP_VM)
       .then(vmReplacedOrRemovedWith(1, true))
       .then(replyTargetAbsent)
-      .expect(a.phase == QUARANTINED and a.vanished and not(a.vmRunning))
-      .expect(not(canIssueNext(a)))
-      .then(inventoryAbsent).expect(a.phase == QUARANTINED and vanishedStaysQuarantined)
-      .then(resolveQuarantine).expect(a.phase == RETIRING)
-      .then(issueNext).expect(a.pending == DELETE_VM)
-      .then(ok).expect(a.phase == DELETED and allInvariants)
+      .expect(a.phase == LOST and a.vanished and not(a.vmRunning) and a.pending == NO_DIRECTIVE)
+      .expect(not(canIssueNext(a)) and not(canQuarantine(a)) and not(canRequestRetirement(a)))
+      .then(close).expect(a.phase == CLOSED and a.vanished and allInvariants)
   }
 
-  // ADR 0066: a start whose cloned VM vanished is quarantined too, never a stage failure.
-  run startOfVanishedVmQuarantinesTest = {
+  // DEC-07: a start whose cloned VM vanished is closed as a desync too, never a stage failure.
+  run startOfVanishedVmIsClosedAsDesyncTest = {
     initWith(1, 1).then(issueNext).then(ok).expect(a.phase == BOOTING)
       .then(vmReplacedOrRemovedWith(1, true))
       .then(issueNext).expect(a.pending == START_VM)
       .then(replyTargetAbsent)
-      .expect(a.phase == QUARANTINED and a.vanished and a.tries == 0 and allInvariants)
+      .expect(a.phase == LOST and a.vanished and g.clones == 1 and allInvariants)
+  }
+
+  // DEC-07: the periodic inventory finds a recorded VM gone, with nothing pending: the same
+  // desync as a stop's or start's target_absent, never a silent loss.
+  run inventoryFindsVanishedVmTest = {
+    initWith(1, 1).then(toPrepared).then(toListening)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(inventoryAbsent)
+      .expect(a.phase == LOST and a.vanished and not(a.vmRunning) and allInvariants)
+      .then(close).expect(a.phase == CLOSED and a.vanished and allInvariants)
+  }
+
+  // DEC-07: a quarantined attempt (the guest failed its challenge) whose recorded VM then
+  // vanishes is closed as a desync: quarantine holds only a VM that is present.
+  run quarantinedVmVanishedIsClosedTest = {
+    initWith(1, 1).then(issueNext).then(ok).then(issueNext).then(ok)
+      .then(issueNext).then(replyGuestRejected).expect(a.phase == QUARANTINED)
+      .then(issueNext).expect(a.pending == STOP_VM)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(replyTargetAbsent)
+      .expect(a.phase == LOST and a.vanished and quarantineNeverAutoDeleted and allInvariants)
+  }
+
+  // DEC-07, (i): a VM present under our name with another instance id keeps the attempt
+  // quarantined, whatever the inventory or the stops say, until the VM goes (a vanish of the
+  // recorded VM) or an operator resolves it.
+  run mismatchedVmStaysQuarantinedTest = {
+    initWith(1, 1).then(toPrepared)
+      .then(vmReplacedOrRemovedWith(2, false))
+      .then(inventoryPresent).expect(a.phase == QUARANTINED and not(a.vanished))
+      .then(issueNext).expect(a.pending == STOP_VM)
+      .then(replyProofRefused).expect(a.phase == QUARANTINED)
+      .then(inventoryPresent).expect(a.phase == QUARANTINED and mismatchStaysQuarantined)
+      .then(vmReplacedOrRemovedWith(2, true))
+      .then(inventoryAbsent).expect(a.phase == LOST and a.vanished and allInvariants)
+  }
+
+  // DEC-07, (iii): an incomplete listing concludes no absence: a stop re-observed on one is
+  // Unknown, never vanished; an inventory one moves nothing. The complete listing decides.
+  run incompleteListingConcludesNothingTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).expect(a.pending == STOP_VM)
+      .then(vmReplacedOrRemovedWith(1, true))
+      .then(listingIncomplete)
+      .expect(a.phase == RETIRING and a.unknown and not(a.vanished) and noAbsenceFromIncomplete)
+      .then(listingIncomplete).expect(a.phase == RETIRING and not(a.vanished))
+      .then(inventoryAbsent)
+      .expect(a.phase == LOST and a.vanished and i10UnknownLeavesOnlyOnObservation
+        and allInvariants)
+  }
+
+  // DEC-07, negative controls: each new invariant flags the behaviour it forbids, forced here
+  // by a transition no action allows.
+  run vanishFromIncompleteListingIsFlaggedTest = {
+    initWith(1, 1).then(toPrepared)
+      .then(commit("incomplete", vanish(a), g))
+      .expect(not(noAbsenceFromIncomplete))
+  }
+
+  run silentLossOfRecordedVmIsFlaggedTest = {
+    initWith(1, 1).then(toPrepared)
+      .then(commit("observation", { ...a, phase: LOST, vmRunning: false }, g))
+      .expect(not(vanishedClosedForGood))
+  }
+
+  run resurrectionAfterVanishIsFlaggedTest = {
+    initWith(1, 1).then(toPrepared).then(vmReplacedOrRemovedWith(1, true))
+      .then(inventoryAbsent).expect(a.vanished)
+      .then(commit("command", { ...a, phase: RESERVED, vanished: false }, g))
+      .expect(not(vanishedClosedForGood))
+  }
+
+  run mismatchReleasedFromQuarantineIsFlaggedTest = {
+    initWith(1, 1).then(toPrepared)
+      .then(vmReplacedOrRemovedWith(2, false))
+      .then(inventoryPresent).expect(a.phase == QUARANTINED)
+      .then(commit("observation", vanish(a), g))
+      .expect(not(mismatchStaysQuarantined))
   }
 
   // The activation relation's shortcut lands where the preparation does.
@@ -1403,17 +1538,19 @@ module lifecycle {
         and i10UnknownLeavesOnlyOnObservation and allInvariants)
   }
 
-  // VER-01F: an operator's resolution ends a vanished case; a later quarantine has its own
-  // reason, so a later absence is read by that reason, not as the old desync.
-  run requarantineAfterVanishedTest = {
+  // VER-01F, as DEC-07 left it: an operator's resolution and a policy's quarantine record no
+  // vanish; only a recorded VM's absence does.
+  run requarantineAfterResolutionTest = {
     initWith(1, 1).then(toPrepared).then(requestRetirement)
-      .then(issueNext).then(ok).then(issueNext)
-      .then(vmReplacedOrRemovedWith(1, true)).then(replyTargetAbsent)
-      .expect(a.phase == QUARANTINED and a.vanished)
+      .then(issueNext).then(ok).then(issueNext).then(replyProofRefusedAfterReplace)
+      .expect(a.phase == QUARANTINED and not(a.vanished))
       .then(resolveQuarantine).expect(a.phase == RETIRING and not(a.vanished))
       .then(quarantineCommand)
       .expect(a.phase == QUARANTINED and not(a.vanished) and allInvariants)
   }
+
+  /// The VM replaced behind our back, then the pending stop refused for its proof.
+  action replyProofRefusedAfterReplace = vmReplacedOrRemovedWith(2, false).then(replyProofRefused)
 }
 
 /**
@@ -1428,7 +1565,8 @@ module lifecycle {
  * The scripts follow the `run`s of `lifecycle` of the same name. Four of them reproduced the
  * divergences the first replays found between the model and the aggregate (VER-01); VER-01F
  * resolved each and keeps its script as a regression trace (`unknownStopResolvedByListing`,
- * `confirmRetirementInBackoff`, `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`).
+ * `confirmRetirementInBackoff`, `cloneAnsweredAfterRemoval`, and `requarantineAfterVanished`,
+ * renamed `requarantineAfterResolution` when DEC-07 made a vanish close the attempt).
  *
  * Each trace is regenerated into `formal/traces/regression/` from the repository root (the
  * scripts are deterministic; the seed is recorded for byte-for-byte freshness, VER-01):
@@ -1512,9 +1650,28 @@ module lifecycle_traces {
   pure val DELETE_LOST_THEN_ANSWERED_DELETED = TO_PREPARED.concat([
     s("requestRetirement"), ISSUE, OK, ISSUE, OK, ISSUE, lost(true), OK, s("close"),
   ])
-  pure val STOP_OF_VANISHED_VM_QUARANTINES = TO_STOPPING.concat([
-    replaced(1, true), s("replyTargetAbsent"), s("inventoryAbsent"), s("resolveQuarantine"),
-    ISSUE, OK, s("close"),
+  pure val STOP_OF_VANISHED_VM_IS_CLOSED_AS_DESYNC =
+    TO_STOPPING.concat([replaced(1, true), s("replyTargetAbsent"), s("close")])
+  /// DEC-07: a start whose cloned VM vanished.
+  pure val START_OF_VANISHED_VM_IS_CLOSED_AS_DESYNC =
+    [ISSUE, OK, replaced(1, true), ISSUE, s("replyTargetAbsent")]
+  /// DEC-07: the inventory finds a listening attempt's VM gone.
+  pure val INVENTORY_FINDS_VANISHED_VM = TO_PREPARED.concat(TO_LISTENING).concat([
+    replaced(1, true), s("inventoryAbsent"), s("close"),
+  ])
+  /// DEC-07: a quarantined attempt whose VM vanishes under its stop.
+  pure val QUARANTINED_VM_VANISHED_IS_CLOSED = [
+    ISSUE, OK, ISSUE, OK, ISSUE, s("replyGuestRejected"), ISSUE, replaced(1, true),
+    s("replyTargetAbsent"),
+  ]
+  /// DEC-07: a replaced VM keeps the attempt quarantined until it goes.
+  pure val MISMATCHED_VM_STAYS_QUARANTINED = TO_PREPARED.concat([
+    replaced(2, false), s("inventoryPresent"), ISSUE, s("replyProofRefused"),
+    s("inventoryPresent"), replaced(2, true), s("inventoryAbsent"),
+  ])
+  /// DEC-07: incomplete listings conclude nothing; the complete one decides.
+  pure val INCOMPLETE_LISTING_CONCLUDES_NOTHING = TO_STOPPING.concat([
+    replaced(1, true), s("listingIncomplete"), s("listingIncomplete"), s("inventoryAbsent"),
   ])
   pure val ACTIVATION_AT_ONCE = [
     prepare(true), s("recordJitHandle"), ISSUE, OK, s("bindJob"), s("vmObservedStopped"),
@@ -1537,9 +1694,10 @@ module lifecycle_traces {
   /// A clone whose reply was lost and whose VM was then removed, answered by a re-delivery.
   pure val CLONE_ANSWERED_AFTER_REMOVAL =
     [ISSUE, lost(true), replaced(1, true), OK]
-  /// A vanished quarantine resolved by an operator, then quarantined again by a policy.
-  pure val REQUARANTINE_AFTER_VANISHED = TO_STOPPING.concat([
-    replaced(1, true), s("replyTargetAbsent"), s("resolveQuarantine"), s("quarantineCommand"),
+  /// A quarantine resolved by an operator, then quarantined again by a policy: no vanish is
+  /// recorded either way (VER-01F's `requarantineAfterVanished`, as DEC-07 left it).
+  pure val REQUARANTINE_AFTER_RESOLUTION = TO_STOPPING.concat([
+    replaced(2, false), s("replyProofRefused"), s("resolveQuarantine"), s("quarantineCommand"),
   ])
 
   // KER-04G: deregister before stop in Backoff (I21), see `i21DeregisterBeforeStop`.
@@ -1594,6 +1752,7 @@ module lifecycle_traces {
       all { x.kind == "replyLaunchUnknown", L::replyLaunchUnknown },
       all { x.kind == "inventoryPresent", L::inventoryPresent },
       all { x.kind == "inventoryAbsent", L::inventoryAbsent },
+      all { x.kind == "listingIncomplete", L::listingIncomplete },
       all { x.kind == "vmObservedStopped", L::vmObservedStopped },
       all { x.kind == "runnerExited", L::runnerExited },
       all { x.kind == "vmReplacedOrRemoved", L::vmReplacedOrRemovedWith(other, removed) },
@@ -1624,13 +1783,18 @@ module lifecycle_traces {
   action adoptDuringLaunchNeverServes = script(ADOPT_DURING_LAUNCH_NEVER_SERVES)
   action deleteRefusedRepeatedlyQuarantines = script(DELETE_REFUSED_REPEATEDLY_QUARANTINES)
   action deleteLostThenAnsweredDeleted = script(DELETE_LOST_THEN_ANSWERED_DELETED)
-  action stopOfVanishedVmQuarantines = script(STOP_OF_VANISHED_VM_QUARANTINES)
+  action stopOfVanishedVmIsClosedAsDesync = script(STOP_OF_VANISHED_VM_IS_CLOSED_AS_DESYNC)
+  action startOfVanishedVmIsClosedAsDesync = script(START_OF_VANISHED_VM_IS_CLOSED_AS_DESYNC)
+  action inventoryFindsVanishedVm = script(INVENTORY_FINDS_VANISHED_VM)
+  action quarantinedVmVanishedIsClosed = script(QUARANTINED_VM_VANISHED_IS_CLOSED)
+  action mismatchedVmStaysQuarantined = script(MISMATCHED_VM_STAYS_QUARANTINED)
+  action incompleteListingConcludesNothing = script(INCOMPLETE_LISTING_CONCLUDES_NOTHING)
   action activationAtOnce = script(ACTIVATION_AT_ONCE)
   action unknownStopResolvedByListing = script(UNKNOWN_STOP_RESOLVED_BY_LISTING)
   action confirmRetirementInBackoff = script(CONFIRM_RETIREMENT_IN_BACKOFF)
   action confirmRetirementAfterExit = script(CONFIRM_RETIREMENT_AFTER_EXIT)
   action cloneAnsweredAfterRemoval = script(CLONE_ANSWERED_AFTER_REMOVAL)
-  action requarantineAfterVanished = script(REQUARANTINE_AFTER_VANISHED)
+  action requarantineAfterResolution = script(REQUARANTINE_AFTER_RESOLUTION)
   action retirementInBackoffWaitsForDeregistration =
     script(RETIREMENT_IN_BACKOFF_WAITS_FOR_DEREGISTRATION)
   action stageFailureHoldingRegistrationWaitsForDeregistration =

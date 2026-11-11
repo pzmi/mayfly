@@ -148,8 +148,9 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   more than the session's minor: a 1.0 session gets `insufficient_resources`, `deadline` and no
   new fields (`ObservationKind::written_in`).
 - **Protocol 1.2 (DEC-05).** The refusal `target_absent`: a `StopVm` or `StartVm` whose recorded
-  VM a complete listing shows absent, which the control plane quarantines as a desync
-  (`vm_vanished_externally`, ADR 0066); a 1.1 or older session gets `proof_mismatch`. The
+  VM a complete listing shows absent, which the control plane records as a desync and closes
+  the attempt (`VmVanished`, ADR 0066 as amended 2026-11-11, DEC-07); a 1.1 or older session
+  gets `proof_mismatch`. The
   `Welcome`'s optional `cp_clock`, the control plane's clock reading, from which the data plane
   reads every deadline of the session by an offset to its monotonic clock (ADR 0020, amended
   2026-11-10); without it, its wall clock at receipt.
@@ -188,9 +189,9 @@ a second wire under the same endpoints.
 `mayfly-domain` (shared kernel) and `mayfly-protocol`. Only `mayfly-composition` sees both. The
 data plane names no journal type; the control plane names no process API (`std::process` is
 allowed only in the Tart/guest adapters, composition and test tools), with one exception
-(ADR 0058, proposed): the `command` module of `mayfly-adapter-secrets`, the shell-free runner of
-`exec:` secret commands and the Keychain tool, which spawns nothing else and talks to no data-plane
-crate. Every child, in either plane, gets a cleared environment plus an explicit allowlist
+(ADR 0058, accepted by the owner 2026-11-11): the `command` module of `mayfly-adapter-secrets`,
+the shell-free runner of `exec:` secret commands and the Keychain tool, which spawns nothing else
+and talks to no data-plane crate. Every child, in either plane, gets a cleared environment plus an explicit allowlist
 (`ARCH-child-environment`).
 
 ---
@@ -359,8 +360,8 @@ Finished|stage failure (budget spent)|Retiring → (diagnostics) → Deleting �
 Cloning|Booting|Verifying|Activating → Backoff{n} → same stage (same name, generation)
 any state ↔ pending.Unknown overlay (no transition until observed)
 Verifying|Activating --GuestRejected--> Quarantined;  Deleting --proof refused--> Quarantined
-any non-terminal --observed absence without our delete--> Lost
-Quarantined --operator resolves the case--> Deleting | Lost (observed absent)
+any non-terminal --recorded VM absent without our delete (VmVanished, a desync)--> Lost → Closed
+Quarantined --operator resolves the case--> Deleting;  Quarantined --observed absent--> Lost
 ```
 
 Rules (each pinned by a test and by `formal/lifecycle.qnt`):
@@ -380,10 +381,19 @@ Rules (each pinned by a test and by `formal/lifecycle.qnt`):
    both and delivered at most once (I22).
 6. `Quarantined` is terminal for automation: the VM is kept, the lease keeps its resources, and
    only an operator resolves the case; nothing deletes a quarantined VM automatically (I28).
+   Quarantine holds a VM that is present and does not match the record; once it is absent from a
+   complete listing, the attempt is lost (rule 9).
 7. Drain is not a state: it closes admission terms and retires Prepared and Listening attempts;
    Busy attempts finish.
 8. Every State × Stimulus pair is either a defined transition or a defined refusal (exhaustive
    matrix test, no wildcard arms).
+9. **A vanished VM converges** (owner, 2026-11-11, DEC-07, ADR 0066 as amended): a VM the
+   attempt recorded and mayfly did not delete, absent from a complete listing (a stop's or
+   start's `target_absent`, or the inventory), is a desync. The attempt records `VmVanished`, is
+   lost and closed and never resurrected; the reconciler provisions a fresh attempt for the
+   remaining demand, as a controller restores desired state. The desync is kept in the journal,
+   shown (`attempts` view, `mayfly status`, the bundle) and counted by the breaker. An
+   incomplete listing concludes nothing (I25).
 
 The **data plane** has its own small FSM per directive (`Received → Executing → Done |
 Refused | Unknown`) and per VM supervisor (`Absent → Present → Running → Stopped`, plus
@@ -598,8 +608,9 @@ table** (pure, `mayfly-control-domain::operations::recovery`, model `formal/reco
 | Prepared | any | a runner GitHub knows | quarantine `jit_presumed_leaked`, read before the VM's liveness (ADRs 0025, 0029) |
 | Deleted | owned clone present | any | leaked VM: delete with proof |
 | Deleting | absent | — | confirm deletion, release slot |
+| Booting … Retiring (a VM recorded, no delete of ours) | absent (complete inventory) | — | mark lost: the attempt records `VmVanished`, a desync, and closes; slot released (DEC-07) |
 | Deleting | present | active | suspend cleanup, inspect |
-| Quarantined | any | any | keep; the case continues |
+| Quarantined | any | any | keep; the case continues (its VM's absence on a complete inventory is read by the attempt: `VmVanished` for a recorded VM, DEC-07) |
 | no record | `mf-*` name | any | report for operator review; never delete |
 | journal epoch < floor, unknown event kind, failed verification | — | — | safe mode |
 
@@ -670,7 +681,8 @@ an ERROR. Metrics (bounded labels, no ids) on a loopback HTTP endpoint: `mayfly_
 `mayfly_github_assigned_jobs`, `mayfly_last_poll_age_seconds`, `mayfly_orphans`,
 `mayfly_disk_free_bytes`, `mayfly_reconcile_errors_total{kind}`, plus dm §8's `mayfly_mode{mode}`,
 `mayfly_epoch`, `mayfly_unknown_effects{age_bucket}`, `mayfly_quarantined{pool,reason}`,
-`mayfly_breaker_open{pool}`, `mayfly_registrations{phase}`, `mayfly_job_result_total{pool,result}`,
+`mayfly_breaker_open{pool}`, `mayfly_vms_vanished_total{pool,discovered_by}` (DEC-07),
+`mayfly_registrations{phase}`, `mayfly_job_result_total{pool,result}`,
 `mayfly_heartbeat_timestamp_seconds`, `mayfly_secret_handles_outstanding`. Nothing is sent
 anywhere (ADR 0036). One trace spans poll → reconcile → clone → boot → verify → JIT → runner →
 job → stop → delete.

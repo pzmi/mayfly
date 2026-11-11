@@ -4,7 +4,7 @@
 use mayfly_control_domain::attempt::{
     AttemptCommand, AttemptEvent, AttemptRejection, AttemptState, DirectiveKind, Fact, Jit,
     Outcome, Phase, QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, SagaStep,
-    Stage, StopDeregistration, VmCondition, next_step,
+    Stage, StopDeregistration, VanishDiscovery, VmCondition, VmVanished, next_step,
 };
 use mayfly_control_domain::{Actor, Rejection};
 
@@ -12,9 +12,9 @@ use super::support::Step;
 use super::support::{
     OPERATOR, SAGA, activating, apply, at, backoff_holding_registration, booting, busy, cloning,
     directive, doubted, event, facts, finished, handle, instance, issue, jit_issued, listening,
-    observe, observe_in, prepared, quarantined, quarantined_busy, quarantined_registered, reach,
-    retiring, saga, stimuli, stopped, then, unknown_clone, vanished, verified_activation,
-    verifying,
+    observe, observe_in, other_instance, prepared, quarantined, quarantined_busy,
+    quarantined_registered, reach, retiring, saga, stimuli, stopped, then, unknown, unknown_clone,
+    verified_activation, verifying,
 };
 
 fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
@@ -48,6 +48,7 @@ fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
         | AttemptEvent::VmStopped(..)
         | AttemptEvent::VmDeleted(..)
         | AttemptEvent::AttemptLost(..)
+        | AttemptEvent::VmVanished(..)
         | AttemptEvent::AttemptQuarantined(..)
         | AttemptEvent::AttemptAdopted(..)
         | AttemptEvent::StopDeregistrationRequested(..)
@@ -481,8 +482,16 @@ fn should_quarantine_when_the_data_plane_refuses_the_proof_of_a_delete() {
     );
 }
 
+/// The one `VmVanished` of `events`, if it is the last event.
+fn last_vanished(events: &[AttemptEvent]) -> Option<&VmVanished> {
+    match events.last() {
+        Some(AttemptEvent::VmVanished(vanished)) => Some(vanished),
+        _ => None,
+    }
+}
+
 #[test]
-fn should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent() {
+fn should_close_as_vanished_when_a_stop_or_start_finds_its_vm_absent() {
     // given: a start of the cloned VM in flight, and a stop of the running one
     let starting = reach(&then(booting(), [issue(2)])).0;
     let stopping = reach(&then(
@@ -499,66 +508,213 @@ fn should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent() {
     ))
     .0;
 
-    // when
-    let refused: Vec<_> = [(starting, 2), (stopping, 7)]
-        .into_iter()
-        .map(|(state, n)| {
-            apply(
-                &state,
-                saga(observe(Fact::DirectiveRefused {
-                    directive_id: directive(n),
-                    reason: RefusalReason::TargetAbsent,
-                })),
-            )
-            .unwrap_or_else(|r| panic!("{r:?}"))
-        })
-        .collect();
+    // and the stop of a quarantined VM (the guest failed its challenge, the VM still running)
+    let quarantined_stop = reach(&then(quarantined(), [issue(10)])).0;
 
-    // then: a desync kept for review, the VM not running, nothing more issued
-    for (state, events) in refused {
+    // when
+    let refused: Vec<_> = [
+        (starting, 2, VanishDiscovery::StartVm, VmCondition::Stopped),
+        (stopping, 7, VanishDiscovery::StopVm, VmCondition::Running),
+        (
+            quarantined_stop,
+            10,
+            VanishDiscovery::StopVm,
+            VmCondition::Running,
+        ),
+    ]
+    .into_iter()
+    .map(|(state, n, by, vm)| {
+        let (after, events) = apply(
+            &state,
+            saga(observe(Fact::DirectiveRefused {
+                directive_id: directive(n),
+                reason: RefusalReason::TargetAbsent,
+            })),
+        )
+        .unwrap_or_else(|r| panic!("{r:?}"));
+        (after, events, by, vm)
+    })
+    .collect();
+
+    // then: the desync recorded, the attempt lost and closable, never quarantined or retried
+    for (state, events, by, vm) in refused {
+        let vanished = last_vanished(&events).unwrap_or_else(|| panic!("{events:?}"));
         assert_eq!(
-            state.phase,
-            Phase::Quarantined {
-                reason: QuarantineReason::VmVanishedExternally,
-                vm: VmCondition::Stopped,
-            }
+            (vanished.discovered_by, &vanished.instance_id, vanished.vm),
+            (by, &instance(), vm)
         );
-        assert!(!state.vm_running);
         assert!(matches!(
-            events.last(),
-            Some(AttemptEvent::AttemptQuarantined(_))
+            events.first(),
+            Some(AttemptEvent::DirectiveRefused(_))
         ));
+        assert_eq!(
+            (state.phase, state.vanished, state.pending, state.vm_running),
+            (Phase::Lost, Some(by), None, false)
+        );
         assert_eq!(
             code(apply(&state, saga(issue(9)))),
             Some("nothing_to_issue")
+        );
+        let closed = apply(&state, saga(AttemptCommand::Close));
+        assert_eq!(
+            closed.map(|(s, _)| (s.phase, s.vanished)),
+            Ok((Phase::Closed, Some(by)))
         );
     }
 }
 
 #[test]
-fn should_keep_a_vanished_vm_quarantined_when_the_inventory_shows_it_absent() {
-    // given
-    let (vanished, _) = reach(&vanished());
+fn should_close_as_vanished_when_the_inventory_shows_a_recorded_vm_absent() {
+    // given: a recorded VM in every kind of phase, a stop in flight, and a quarantined one
+    let states = [
+        reach(&prepared()).0,
+        reach(&listening()).0,
+        reach(&busy()).0,
+        reach(&then(retiring(), [issue(6)])).0,
+        reach(&unknown(then(booting(), [issue(2)]), 2)).0,
+        reach(&quarantined()).0,
+    ];
 
     // when
-    let absent = apply(&vanished, saga(observe(Fact::VmAbsent)));
-    let resolved = apply(
-        &vanished,
-        at(1, OPERATOR, AttemptCommand::ResolveQuarantine),
+    let absent: Vec<_> = states
+        .iter()
+        .map(|state| apply(state, saga(observe(Fact::VmAbsent))))
+        .collect();
+
+    // then: the same desync a stop's target_absent records, never a silent loss
+    for result in absent {
+        let (state, events) = result.unwrap_or_else(|r| panic!("{r:?}"));
+        let vanished = last_vanished(&events).unwrap_or_else(|| panic!("{events:?}"));
+        assert_eq!(vanished.discovered_by, VanishDiscovery::Inventory);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            (state.phase, state.vanished, state.pending),
+            (Phase::Lost, Some(VanishDiscovery::Inventory), None)
+        );
+    }
+}
+
+#[test]
+fn should_keep_a_mismatched_vm_quarantined_when_it_is_listed_until_it_is_absent() {
+    // given: another VM under our name (instance id differs): quarantined
+    let (prepared, _) = reach(&prepared());
+    let (mismatched, _) = apply(
+        &prepared,
+        saga(observe(Fact::VmPresent {
+            instance_id: other_instance(),
+            running: true,
+        })),
     )
-    .and_then(|(state, _)| apply(&state, saga(issue(9))));
+    .unwrap_or_else(|r| panic!("{r:?}"));
+
+    // when: the inventory keeps listing it, its stop is refused for the proof, then it goes
+    let listed = apply(
+        &mismatched,
+        saga(observe(Fact::VmPresent {
+            instance_id: other_instance(),
+            running: true,
+        })),
+    );
+    let stop_refused = apply(&mismatched, saga(issue(10))).and_then(|(state, _)| {
+        apply(
+            &state,
+            saga(observe(Fact::DirectiveRefused {
+                directive_id: directive(10),
+                reason: RefusalReason::ProofMismatch,
+            })),
+        )
+    });
+    let gone = apply(&mismatched, saga(observe(Fact::VmAbsent)));
+
+    // then: present and mismatched stays quarantined; absent, our recorded VM vanished
+    let quarantined = |result: Result<(AttemptState, Vec<AttemptEvent>), AttemptRejection>| {
+        result.map(|(state, _)| state.phase)
+    };
+    assert!(matches!(
+        mismatched.phase,
+        Phase::Quarantined {
+            reason: QuarantineReason::ProviderIdentityMismatch,
+            ..
+        }
+    ));
+    assert_eq!(quarantined(listed), Ok(mismatched.phase));
+    assert_eq!(quarantined(stop_refused), Ok(mismatched.phase));
+    let (state, events) = gone.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(last_vanished(&events).is_some(), "{events:?}");
+    assert_eq!(state.vanished, Some(VanishDiscovery::Inventory));
+}
+
+#[test]
+fn should_conclude_no_absence_when_a_stop_is_reobserved_on_an_incomplete_listing() {
+    // given: a stop in flight
+    let (stopping, _) = reach(&then(retiring(), [issue(6)]));
+
+    // when: the data plane answers Unknown{listing_incomplete}, which the link records as an
+    // unknown outcome (the inventory's own incomplete listing never reaches the attempt, I25)
+    let unknown = apply(
+        &stopping,
+        saga(observe(Fact::OutcomeUnknown {
+            directive_id: directive(6),
+        })),
+    );
+
+    // then: Unknown, never vanished, lost or deleted
+    let (state, events) = unknown.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(last_vanished(&events).is_none(), "{events:?}");
+    assert_eq!((state.phase, state.vanished), (Phase::Retiring, None));
+    assert!(matches!(
+        state.pending.map(|p| p.outcome),
+        Some(Outcome::Unknown { .. })
+    ));
+}
+
+/// Negative control of the vanish rule: a refusal for any reason but `target_absent`, and a
+/// `target_absent` for a directive that re-observes nothing by absence, record no vanish.
+#[test]
+fn should_record_no_vanish_when_the_refusal_is_not_a_recorded_vm_s_absence() {
+    // given
+    let starting = reach(&then(booting(), [issue(2)])).0;
+    let verifying = reach(&then(verifying(), [issue(3)])).0;
+    let others = [
+        RefusalReason::EffectFailed,
+        RefusalReason::ProofMismatch,
+        RefusalReason::SafeMode,
+        RefusalReason::StaleEpoch,
+        RefusalReason::InsufficientResources,
+    ];
+
+    // when
+    let mut outcomes: Vec<_> = others
+        .into_iter()
+        .map(|reason| {
+            apply(
+                &starting,
+                saga(observe(Fact::DirectiveRefused {
+                    directive_id: directive(2),
+                    reason,
+                })),
+            )
+        })
+        .collect();
+    outcomes.push(apply(
+        &verifying,
+        saga(observe(Fact::DirectiveRefused {
+            directive_id: directive(3),
+            reason: RefusalReason::TargetAbsent,
+        })),
+    ));
 
     // then
-    let (state, events) = absent.unwrap_or_else(|r| panic!("{r:?}"));
-    assert!(
-        events.is_empty(),
-        "absence is why it is quarantined: {events:?}"
-    );
-    assert_eq!(state.phase, vanished.phase);
-    assert!(matches!(
-        resolved.map(|(_, events)| issued_kind(&events)),
-        Ok(Some(DirectiveKind::DeleteVm { .. }))
-    ));
+    for outcome in outcomes {
+        let (state, events) = outcome.unwrap_or_else(|r| panic!("{r:?}"));
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, AttemptEvent::VmVanished(_))),
+            "{events:?}"
+        );
+        assert_eq!(state.vanished, None);
+    }
 }
 
 #[test]
@@ -937,7 +1093,11 @@ fn should_release_a_doubted_quarantine_when_the_vm_is_gone() {
     let gone = apply(&doubted, saga(observe(Fact::VmAbsent)));
     // then
     assert_eq!(code(stop), Some("nothing_to_issue"));
-    assert_eq!(gone.map(|(s, _)| s.phase), Ok(Phase::Lost));
+    // a VM of our name we never recorded is released, lost: no desync, it was never ours
+    assert_eq!(
+        gone.map(|(s, _)| (s.phase, s.vanished)),
+        Ok((Phase::Lost, None))
+    );
 }
 
 fn timeout_at(at_ms: u64, n: u128) -> mayfly_control_domain::Command<AttemptCommand> {
@@ -1377,6 +1537,76 @@ fn should_keep_a_quarantined_vm_running_when_github_answers_busy_for_its_deregis
         stop.map(|(_, events)| issued_kind(&events)),
         Ok(Some(DirectiveKind::StopVm { .. }))
     ));
+}
+
+#[test]
+fn should_deregister_before_the_stop_when_a_listening_runner_s_vm_is_listed_mismatched() {
+    // given: a listening runner, and another VM listed under its name (instance id differs)
+    let (held, _) = reach(&listening());
+
+    // when
+    let mismatched = apply(
+        &held,
+        saga(observe(Fact::VmPresent {
+            instance_id: other_instance(),
+            running: true,
+        })),
+    );
+    let (quarantined, events) = mismatched.unwrap_or_else(|r| panic!("{r:?}"));
+    let early = apply(&quarantined, saga(issue(10)));
+
+    // then: quarantined for the mismatch, and the stop waits for the deregistration (ADR 0076)
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AttemptEvent::AttemptQuarantined(..),
+            AttemptEvent::StopDeregistrationRequested(..)
+        ]
+    ));
+    assert!(matches!(
+        quarantined.phase,
+        Phase::Quarantined {
+            reason: QuarantineReason::ProviderIdentityMismatch,
+            ..
+        }
+    ));
+    assert_eq!(
+        quarantined.stop_deregistration,
+        StopDeregistration::Requested
+    );
+    assert_eq!(code(early), Some("nothing_to_issue"));
+}
+
+#[test]
+fn should_close_and_end_the_wait_when_a_quarantined_vm_vanishes_before_its_deregistration() {
+    // given: quarantine stops waiting for the deregistration, unanswered and answered busy
+    let states = [
+        reach(&quarantined_registered()).0,
+        reach(&quarantined_busy()).0,
+    ];
+
+    // when
+    let vanished: Vec<_> = states
+        .iter()
+        .map(|state| apply(state, saga(observe(Fact::VmAbsent))))
+        .collect();
+
+    // then: the desync closes the attempt; nothing is left to stop, so nothing is waited for,
+    // a late answer from P11 confirms nothing, and `Close` follows (the model's `vanish`)
+    for result in vanished {
+        let (state, events) = result.unwrap_or_else(|r| panic!("{r:?}"));
+        assert!(
+            matches!(events.as_slice(), [AttemptEvent::VmVanished(..)]),
+            "{events:?}"
+        );
+        assert_eq!(
+            (state.phase, state.vanished, state.pending),
+            (Phase::Lost, Some(VanishDiscovery::Inventory), None)
+        );
+        assert_eq!(state.stop_deregistration, StopDeregistration::NotNeeded);
+        assert!(apply(&state, saga(AttemptCommand::ConfirmRetirement)).is_err());
+        assert_eq!(next_step(&state), SagaStep::Close);
+    }
 }
 
 #[test]

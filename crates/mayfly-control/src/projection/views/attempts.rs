@@ -8,8 +8,8 @@ use mayfly_control_domain::attempt::{
     AttemptState, DiagnosticsExported, DiagnosticsLost, DirectiveIssued,
     DirectiveObservedNotApplied, DirectiveOutcomeUnknown, DirectiveRefused, DirectiveSent,
     DirectiveTag, GuestRejected, GuestVerified, Outcome, Phase, QuarantineReason, RetireReason,
-    RunnerLaunchUnknown, RunnerLaunched, RunnerRequestId, Stage, VmBooted, VmCloned, VmDeleted,
-    VmStopped,
+    RunnerLaunchUnknown, RunnerLaunched, RunnerRequestId, Stage, VanishDiscovery, VmBooted,
+    VmCloned, VmDeleted, VmStopped, VmVanished,
 };
 use mayfly_domain::{
     AttemptId, Deadline, DirectiveId, Generation, HostId, ImageDigest, Millis, OwnedVmName,
@@ -53,6 +53,11 @@ pub struct AttemptRow {
     pub job: Option<RunnerRequestId>,
     /// Why it retired.
     pub retire_reason: Option<RetireReason>,
+    /// The desync it recorded: its VM vanished outside mayfly, and how that was found
+    /// (`VmVanished`, DEC-07); the phase is then `lost`. What `mayfly status` and the
+    /// diagnostics bundle surface. Absent from rows written by version 1, read as none.
+    #[serde(default)]
+    pub desync: Option<VanishDiscovery>,
     /// The stream revision this row is the fold of.
     pub revision: u64,
     /// When that event was recorded (display only).
@@ -65,7 +70,8 @@ pub struct Attempts;
 
 impl ProjectionSpec for Attempts {
     const NAME: &'static str = "attempts";
-    const VERSION: u32 = 1;
+    /// 2: the row's `desync` (DEC-07), a compatible addition.
+    const VERSION: u32 = 2;
     const SUBSCRIBES: &'static [EventKind] = <AttemptEvent as EventSet>::KINDS;
     type Source = Attempt;
     type Row = AttemptRow;
@@ -142,6 +148,7 @@ fn attempt_row(state: &AttemptState, at: EventMeta) -> Option<AttemptRow> {
             .is_some_and(|p| matches!(p.outcome, Outcome::Unknown { .. })),
         job: state.job_binding,
         retire_reason: state.retire_reason,
+        desync: state.vanished,
         revision: at.revision.get(),
         updated_at: at.recorded_at,
     })
@@ -212,7 +219,8 @@ pub struct PendingEffects;
 
 impl ProjectionSpec for PendingEffects {
     const NAME: &'static str = "pending_effects";
-    const VERSION: u32 = 1;
+    /// 2: `VmVanished` clears the pending directive (DEC-07), a compatible addition.
+    const VERSION: u32 = 2;
     /// Every kind that sets, changes or clears the pending directive (`evolve`).
     const SUBSCRIBES: &'static [EventKind] = &[
         EventKind::of::<DirectiveIssued>(),
@@ -233,6 +241,7 @@ impl ProjectionSpec for PendingEffects {
         EventKind::of::<VmStopped>(),
         EventKind::of::<VmDeleted>(),
         EventKind::of::<AttemptLost>(),
+        EventKind::of::<VmVanished>(),
         EventKind::of::<AttemptQuarantined>(),
     ];
     type Source = Attempt;

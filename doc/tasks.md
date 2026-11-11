@@ -69,7 +69,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Amends 0028 (registration token as an auth-chain step only; accepted 2026-11-10). | Accepted (owner, 2026-11-10) |
 | [ADR 0052](adr/0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | The data plane assumes no fact it does not have: an unknown VM size or guest, or a listing not read yet, makes the dimension unknown; what needs it is refused `capacity_unknown`; `CapacityReported` lists the unknown dimensions with their causes and nothing free; protocol 1.1, compatible. Amends 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026; amended by 0066. | Accepted (owner, 2026-11-10) |
-| [ADR 0066](adr/0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A `StopVm` or `StartVm` whose recorded VM a complete listing shows absent is refused `target_absent` and the attempt quarantined `vm_vanished_externally` for review (a desync, never read as stopped or lost, not released by the inventory); status and the diagnostics bundle name it; a start refused `proof_mismatch` quarantines too; protocol 1.2, written `proof_mismatch` below. Amends 0053. | Accepted (owner, 2026-11-10) |
+| [ADR 0066](adr/0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A `StopVm` or `StartVm` whose recorded VM a complete listing shows absent is refused `target_absent` and the attempt quarantined `vm_vanished_externally` for review (a desync, never read as stopped or lost, not released by the inventory); status and the diagnostics bundle name it; a start refused `proof_mismatch` quarantines too; protocol 1.2, written `proof_mismatch` below. Amends 0053. Amended 2026-11-11 (DEC-07): a recorded VM absent from a complete listing, found by a stop, a start or the inventory, records `VmVanished` and closes the attempt (no quarantine); the `attempts` view's `desync`, the breaker counts it; quarantine only for a present, mismatched VM. | Accepted (owner, 2026-11-10); amended 2026-11-11 (owner) |
 | [ADR 0064](adr/0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | The GitHub client's crypto and TLS: `aws-lc-rs` as the `rustls` provider and for RS256, `rustls-platform-verifier`, `reqwest` 0.13, the App JWT built by hand (no JWT crate). Amends foundation.md §2.4. | Accepted (owner, 2026-11-10) |
 | [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
@@ -82,7 +82,9 @@ destructive directives (ADR 0053) and ADR 0048's amendment of ADR 0028 accepted 
 vanished VM quarantined as a desync (ADR 0066), deadlines by the handshake's clock offset (ADR
 0020's amendment) and the Apalache lane weekly only (DEC-05); ADR 0064 accepted, the event
 store's `storeOnlyStep` kept at depth 4 (weekly), ADR 0069 accepted with a per-pool `DEMAND`
-option (default `EXACT`) and quarantine stops deregistering first (ADR 0076) (DEC-06). Still
+option (default `EXACT`) and quarantine stops deregistering first (ADR 0076) (DEC-06). Decided on 2026-11-11 (DEC-07):
+ADR 0058 accepted (the secrets adapter's command runner); a vanished VM converges like a
+controller's, its desync recorded and its attempt closed (ADR 0066's amendment). Still
 planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
 GitHub capture (GH-00).
@@ -164,6 +166,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
 | DEC-05 | Record and implement the owner decisions of 2026-11-10: ADR 0066, ADR 0020's amendment, a weekly formal lane | DEC-04, DP-01 | opus | |
 | DEC-06 | Record and implement the owner decisions of 2026-11-10 (round 7): ADRs 0064, 0069 with `DEMAND`, 0076; store-only depth 4 | DEC-05, KER-05, KER-04, KER-09 | opus | |
+| DEC-07 | Record and implement the owner decisions of 2026-11-11: ADR 0058 accepted; a vanished VM converges (ADR 0066 amended) | DEC-06, ES-04 | opus | |
 | ES-01 | Storage-neutral journal port, memory journal, journal contract (landed) | KER-03 | opus | |
 | ES-01F | Align the landed journal port with the owner's decisions and its review | ES-01, DEC-01 | opus | |
 | ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
@@ -417,7 +420,8 @@ Accept: the named tests of ADRs 0052 and 0053; the regenerated `matrix/ledger.tx
 `directive.txt` and `link.txt`; the affected Apalache relations at their bounded depths.
 Owner decision (2026-11-10, DEC-05, ADR 0066): a `StopVm` (or `StartVm`) whose VM a complete
 listing shows absent is refused `target_absent` and quarantined as a desync
-(`vm_vanished_externally`), not the proposed non-quarantining refusal.
+(`vm_vanished_externally`), not the proposed non-quarantining refusal. Amended by the owner on
+2026-11-11 (DEC-07): the desync is recorded and the attempt closed instead.
 
 #### DEC-05 Record and implement the owner decisions of 2026-11-10
 Cites: plan §3.2, §6, §8.4; ver §6; ADRs 0020, 0025, 0026, 0042, 0052, 0053. The owner decided on
@@ -433,6 +437,9 @@ push and pull-request triggers and runs one job per model (`cargo xtask formal-v
 Accept: the named tests of ADR 0066 and of ADR 0020's amendment; the regenerated
 `matrix/directive.txt`, `link.txt`, `matrix/attempt.txt` and `decisions/attempt.txt`; the
 lifecycle relations at their bounded depths; `actionlint` and `action-pins` green.
+
+Amended 2026-11-11 (DEC-07): the vanished VM's quarantine and `vanishedStaysQuarantined` are
+replaced; a vanish closes the attempt (ADR 0066's amendment).
 
 #### DEC-06 Record and implement the owner decisions of 2026-11-10 (round 7)
 Cites: plan §6, §9, §11; ver §6; dm §6.3.1, §6.4; ADRs 0024, 0025, 0046, 0064, 0069;
@@ -453,6 +460,24 @@ unchanged in what they assert; the regenerated `matrix/attempt.txt`, `decisions/
 `intents/attempt.txt`, the lifecycle regression traces and two new ones; the conformance replay
 and a 1000-trace sweep of lifecycle green; the lifecycle and scheduling relations at their
 bounded depths.
+
+#### DEC-07 Record and implement the owner decisions of 2026-11-11
+Cites: plan §3.4, §6, §10; dm §6.4, P15; ver §6; ADRs 0025, 0058, 0066, 0076. The owner decided on
+2026-11-11: (a) "If we need secrets in control plane that's ok, just need to do it reasonably.":
+ADR 0058 accepted (plan §3.4 names the exception; `CLAUDE.md` is the orchestrator's); (b) "maybe
+we should treat it like a k8s controller? we want desired state and try to restore it? keep
+log/audit/journal for debugging?", option A: a VM the attempt recorded and mayfly did not
+delete, absent from a complete listing, whether a stop's or start's re-observation
+(`target_absent`) or the inventory finds it, records `VmVanished{discovered_by, instance_id,
+vm}` and closes the attempt (never resurrected; the reconciler provisions afresh), surfaced in
+the `attempts` view (`desync`, spec 2) and counted by the breaker (P15, CP-06); quarantine only
+for a present VM that does not match the record, whose stop deregisters first (ADR 0076;
+a vanish ends any such wait, nothing being left to stop); an incomplete listing concludes nothing (I25).
+Model first: `formal/lifecycle.qnt` (`vanish`, `listingIncomplete`; `mismatchStaysQuarantined`,
+`vanishedClosedForGood`, `noAbsenceFromIncomplete` replace `vanishedStaysQuarantined`).
+Accept: the named tests of ADR 0066's amendment; the regenerated lifecycle regression traces,
+`matrix/attempt.txt`, `decisions/attempt.txt` and `intents/attempt.txt`; conformance replay and
+two seeded sweeps; the lifecycle relations at their bounded depths.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,
@@ -545,6 +570,10 @@ every row of plan §10's table (shim alive or gone, `exit.json`, instance-id mis
 inventory incomplete → wait) plus safe mode. No row asserts an outcome or deletes a quarantined VM.
 Accept: exhaustive table test; `mf-*` VM unknown to the journal is never `Delete`; an instance-id
 mismatch is never `Delete`; an incomplete inventory releases nothing.
+Note (DEC-07, ADR 0066 amended): the table is unchanged and consistent with the new rule:
+`MarkLost` reads a complete listing's absence, and the attempt it reaches records `VmVanished`
+(a desync) rather than a silent loss; a quarantined record is kept by recovery and converges
+through the attempt's own reading of the inventory.
 
 #### KER-08 ⛳ Data-plane domain
 Cites: plan §3.1, §6 (DP FSMs), §8.4, §9; ADRs 0024, 0026, 0037. `mayfly-data-domain`: directive
@@ -901,6 +930,11 @@ deleting anything (I28); `Unknown` re-observation at T_u1/T_u2 and the provider-
 There is no operator assertion.
 Note (DEC-05, ADR 0066): a `vm_vanished_externally` case opens like any other (ERROR, metric,
 status) and says it is a desync to report; nothing resolves it but an operator.
+Note (DEC-07, ADR 0066 amended): no `vm_vanished_externally` case opens any more; P15 counts
+`VmVanished` as a pool failure (`CountAttemptFailure` with the attempt's digest, under the stage
+of the phase it vanished in; CP-06 fixes that mapping), so repeated vanishes open the breaker,
+and the desync logs at ERROR (a defect to report). Accept adds: a component test where two vanishes in the window trip
+the breaker.
 Accept: F36, F46, F47 component tests on the fake clock; mutant 26 (delete on a timer) and 27
 (resolve without observation) caught.
 
@@ -1045,6 +1079,9 @@ list|inspect|resolve`, `safe-mode enter`, `events --follow` per event-store §5.
 an actor on every mutating command. No `attempt assert` (ADR 0025).
 Note (DEC-05, ADR 0066): `status` and `quarantine list|inspect` name `vm_vanished_externally` in
 plain words (the VM vanished outside mayfly: a desync; send the diagnostics bundle).
+Note (DEC-07, ADR 0066 amended): a vanish is no longer a quarantine: `status` and `vm
+list|inspect` show the `attempts` view's `desync` (how it was found) on the lost attempt in the
+same plain words.
 
 #### RT-04 Observability
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint
@@ -1052,6 +1089,9 @@ Cites: plan §12. tracing JSON subscriber in composition, event naming rule, met
 Accept: metric names and labels golden-tested; no id-valued label.
 DEC-01: the metrics of dm §8 (loopback HTTP endpoint), the quarantine ERROR event, nothing sent
 anywhere (ADR 0036).
+Note (DEC-07, ADR 0066 amended): a counter of vanished VMs, `mayfly_vms_vanished_total{pool,
+discovered_by}` (`inventory`, `stop_vm`, `start_vm`), fed by `VmVanished`; the control plane has
+no metrics port yet, so DEC-07 adds none.
 
 #### E2E-01 ⛳ Walking skeleton
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +
@@ -1264,6 +1304,9 @@ provider and OS versions) and its listing; nothing sent anywhere.
 Accept: a canary-secret test over every bundle file; golden listing.
 Note (DEC-05, ADR 0066): the bundle carries every open quarantine case with its reason and
 evidence, `vm_vanished_externally` included (golden listing).
+Note (DEC-07, ADR 0066 amended): it also carries every attempt with a recorded desync (the
+`attempts` view's `desync`, its `VmVanished` event and the stream's events before it), since a
+vanish closes the attempt instead of opening a case (golden listing).
 
 #### OPS-08 `mayfly restore` and `mayfly uninstall --purge`
 Cites: ADR 0043, ADR 0044, plan §8.4, §10, §11. `mayfly restore <backup>` restores the automatic

@@ -20,7 +20,11 @@
 //!   `provider_identity_mismatch`, a terminal one reports the stranger
 //!   (`should_never_delete_when_the_instance_id_differs`).
 //! - **A quarantined VM is kept** (I28, ADR 0025): no row retires, stops or deletes it
-//!   (`should_keep_when_the_attempt_is_quarantined`).
+//!   (`should_keep_when_the_attempt_is_quarantined`). Its VM's absence on a complete listing is
+//!   read by the attempt itself when the inventory is recorded (`VmVanished` for a VM it
+//!   recorded, DEC-07), not by recovery.
+//! - **A recorded VM's absence is a desync, never a silent loss** (DEC-07): `MarkLost` is taken
+//!   only on a complete listing, and the attempt it reaches records `VmVanished`.
 //! - **No row asserts an outcome** (I10, ADR 0025): a decision that reads a VM's presence is
 //!   taken only on a listing that shows it, one that reads its absence only on a complete listing
 //!   without it (`should_assert_no_outcome_when_any_row_is_decided`).
@@ -188,7 +192,9 @@ pub enum Decision {
     PresumeLeaked,
     /// The pending delete took effect: record the VM's absence and release the slot.
     ConfirmDeleted,
-    /// The VM is absent and we did not delete it: the attempt is lost.
+    /// The VM is absent and we did not delete it: the use case records the complete listing's
+    /// absence on the attempt, which records the VM vanished (`VmVanished`, a desync) and closes
+    /// (DEC-07).
     MarkLost,
     /// A leaked VM of a terminal attempt: delete it with the ownership proof.
     DeleteLeaked,
@@ -221,7 +227,7 @@ pub enum Proposal {
     WaitForInventory,
     /// The VM is the one the journal recorded: adopt it.
     Adopt,
-    /// A complete listing shows the VM absent: mark the attempt lost.
+    /// A complete listing shows the VM absent: mark the attempt lost (its VM vanished, DEC-07).
     MarkLost,
     /// Ownership cannot be proven: quarantine.
     Quarantine(QuarantineReason),

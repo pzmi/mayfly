@@ -273,7 +273,8 @@ pub struct PoolDemand {
 pub enum ReleaseEvidence {
     /// The attempt observed its `VmDeleted`.
     VmDeleted,
-    /// The attempt was found lost: a complete inventory did not list the VM.
+    /// The attempt was found lost: a complete listing did not list the VM, whether the attempt
+    /// recorded it (`VmVanished`, a desync, DEC-07) or not (`AttemptLost`).
     AttemptLost,
     /// No `AttemptStarted` appeared for the reservation: nothing was ever cloned. Refused for a
     /// lease that is not merely reserved.

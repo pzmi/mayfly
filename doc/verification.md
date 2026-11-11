@@ -230,7 +230,7 @@ I14 reads "image revision" for "image generation".
 
 | Model | File | Governs | Invariants | Model-local invariants | Task |
 |:--|:--|:--|:--|:--|:--|
-| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and saga (plan §6, dm §6.4) | I06, I10, I13, I14, I22 (attempt half), I30 | `busyNeverWarm`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined` (ADR 0066), `retryKeepsNameAndGeneration` | KER-04, DEC-05 |
+| lifecycle | `formal/lifecycle.qnt` | `Attempt` aggregate and saga (plan §6, dm §6.4) | I06, I10, I13, I14, I22 (attempt half), I30 | `busyNeverWarm`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `mismatchStaysQuarantined`, `vanishedClosedForGood`, `noAbsenceFromIncomplete` (ADR 0066 as amended 2026-11-11), `retryKeepsNameAndGeneration` | KER-04, DEC-05, DEC-07 |
 | scheduling | `formal/scheduling.qnt` | `Host`/`Pool` aggregates, capacity policy, the data plane's resource ledger (plan §9) | I01, I02, I03, I07, I08, I13, I24, I26, I27, I28, I33 | `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `noGrantWhileClosed`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | KER-05 |
 | recovery | `formal/recovery.qnt` | startup use case and decision table (plan §10), crash at every await | I04, I05, I09, I10, I11, I12, I17, I25, I29, I31 | `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | KER-07 |
 | scaleset | `formal/scaleset.qnt` | `ScaleSet` aggregate, listener, demand (plan §7.2) | I07, I12, I13, I23, I32 | `noDoubleReservationPerRequest`, `desiredFromLatestStatistics` | KER-06 |

@@ -80,7 +80,7 @@ fn should_replay_each_resolved_divergence_when_its_regression_trace_is_replayed(
         "confirmRetirementInBackoff",
         "confirmRetirementAfterExit",
         "cloneAnsweredAfterRemoval",
-        "requarantineAfterVanished",
+        "requarantineAfterResolution",
     ];
 
     for step in resolved {
@@ -190,6 +190,61 @@ impl Aggregate for StopLeavesRunning {
             _ => next,
         }
     }
+}
+
+/// `Attempt` whose `evolve` loses the desync a vanished VM records: `VmVanished` is folded as a
+/// silent loss, the behaviour before DEC-07.
+#[derive(Debug, Clone, Copy, Default)]
+struct VanishForgotten;
+
+impl Aggregate for VanishForgotten {
+    const NAME: &'static str = Attempt::NAME;
+    type State = AttemptState;
+    type Body = AttemptCommand;
+    type Event = AttemptEvent;
+    type Rejection = AttemptRejection;
+
+    fn initial() -> AttemptState {
+        Attempt::initial()
+    }
+
+    fn decide(
+        state: &AttemptState,
+        command: Command<AttemptCommand>,
+    ) -> Result<Vec<AttemptEvent>, AttemptRejection> {
+        Attempt::decide(state, command)
+    }
+
+    fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
+        let next = Attempt::evolve(state, event);
+        match event {
+            AttemptEvent::VmVanished(..) => AttemptState {
+                vanished: None,
+                ..next
+            },
+            _ => next,
+        }
+    }
+}
+
+#[test]
+fn should_catch_a_forgotten_desync_at_the_first_divergent_step_when_the_inventory_finds_a_vm_gone()
+{
+    // given: a listening attempt's VM removed behind its back; the inventory at step 14
+    let manifest = regression();
+    let (entry, trace) = load(&manifest, "inventoryFindsVanishedVm");
+
+    // when
+    let real = lifecycle::replay::<Attempt>(&entry, &trace);
+    let mutant = divergence(lifecycle::replay::<VanishForgotten>(&entry, &trace));
+
+    // then
+    assert!(real.is_ok(), "{real:?}");
+    assert_eq!(mutant.step, 14, "{mutant}");
+    assert_eq!(mutant.action, "inventoryAbsent");
+    assert_eq!(mutant.fields, ["vanished"], "{mutant}");
+    assert_eq!(mutant.expected.0["vanished"], "true");
+    assert_eq!(mutant.actual.0["vanished"], "false");
 }
 
 #[test]
@@ -350,7 +405,7 @@ fn should_diverge_exactly_there_when_one_model_variable_is_edited_for_each_obser
             "stage",
         ),
         (
-            "stopOfVanishedVmQuarantines",
+            "stopOfVanishedVmIsClosedAsDesync",
             12,
             "vanished",
             Value::Bool(false),

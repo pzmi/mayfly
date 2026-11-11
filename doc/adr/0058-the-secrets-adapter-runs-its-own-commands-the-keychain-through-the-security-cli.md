@@ -4,7 +4,9 @@ Date: 2026-11-10
 
 ## Status
 
-Proposed. Amends D1 (ADR 0002) as plan §3.4 states it: one control-plane module may spawn.
+Accepted (owner, 2026-11-11). Amends D1 (ADR 0002) as plan §3.4 states it: one control-plane
+module may spawn. The owner: "If we need secrets in control plane that's ok, just need to do it
+reasonably." (DEC-07)
 
 ## Context
 
@@ -90,7 +92,8 @@ cannot appear (no terminal, no GUI session for a daemon); a locked keychain is r
 anything that waits is cut by the deadline. An executable installed group-writable, or behind a
 symlink, is refused: the operator points the reference at the real file.
 
-`CLAUDE.md` names the process-authority crates; it is updated when this record is accepted.
+`CLAUDE.md` names the process-authority crates; the orchestrator updates it now that this record
+is accepted.
 SEC-02 implements it; DP-04, DP-05 and RT-02 follow rule 2; the real Keychain runs in the
 hardware lane (D14).
 

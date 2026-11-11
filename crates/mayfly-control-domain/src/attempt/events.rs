@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::command::{DiagnosticsLoss, GuestFacts, GuestRejection, RefusalReason};
 use super::state::{
-    DirectiveKind, QuarantineReason, RetireReason, RunnerRequestId, Stage, VmCondition,
+    DirectiveKind, QuarantineReason, RetireReason, RunnerRequestId, Stage, VanishDiscovery,
+    VmCondition,
 };
 use crate::event::DomainEvent;
 use crate::event_set;
@@ -482,7 +483,9 @@ impl DomainEvent for VmDeleted {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// The VM was observed absent without our delete.
+/// A quarantined VM of our name, which this attempt never recorded cloning, was observed absent:
+/// the quarantine is released. A VM the attempt recorded is never lost this way but vanished
+/// ([`VmVanished`], DEC-07).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AttemptLost {
@@ -492,6 +495,29 @@ pub struct AttemptLost {
 
 impl DomainEvent for AttemptLost {
     const EVENT_TYPE: &'static str = "attempt_lost";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// The VM this attempt recorded cloning (`VmCloned`), and mayfly did not delete, is absent from
+/// a complete listing: the journal and the provider have desynced (ADR 0066 as amended
+/// 2026-11-11, DEC-07). A fact kept for debugging and surfaced to the operator (the `attempts`
+/// view's `desync`, the diagnostics bundle); the attempt is lost, its slot released and its
+/// stream closed, never resurrected: the reconciler provisions a fresh attempt for the demand
+/// that remains, as a controller restores desired state. Counted as a pool failure by the
+/// breaker (P15). An incomplete listing never records it (I25).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VmVanished {
+    /// How the absence was found.
+    pub discovered_by: VanishDiscovery,
+    /// The instance id `VmCloned` recorded: the VM that vanished.
+    pub instance_id: ProviderInstanceId,
+    /// Whether it was last known running.
+    pub vm: VmCondition,
+}
+
+impl DomainEvent for VmVanished {
+    const EVENT_TYPE: &'static str = "vm_vanished";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -611,6 +637,8 @@ event_set! {
         VmDeleted(VmDeleted),
         /// See [`AttemptLost`].
         AttemptLost(AttemptLost),
+        /// See [`VmVanished`].
+        VmVanished(VmVanished),
         /// See [`AttemptQuarantined`].
         AttemptQuarantined(AttemptQuarantined),
         /// See [`AttemptAdopted`].

@@ -289,7 +289,8 @@ module recovery {
 
   /// A quarantined record got a decision other than keep (or wait, on an incomplete inventory):
   /// recovery never retires, deletes, adopts or releases it (I28, ADR 0025). Its release on a
-  /// complete inventory without the VM belongs to the quarantine case, not to recovery.
+  /// complete inventory without the VM belongs to the attempt's own reading of that inventory
+  /// (`lifecycle.qnt`'s `inventoryAbsent`: a recorded VM vanished, DEC-07), not to recovery.
   pure def notKept(r: Record, d: str): bool =
     r.phase == QUARANTINED and not(Set(KEEP, WAIT).contains(d))
 

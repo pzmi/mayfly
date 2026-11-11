@@ -19,11 +19,13 @@ use super::events::{
     RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
     StaleObservationIgnored, Staleness, StopDeregistrationConfirmed, StopDeregistrationRefusedBusy,
     StopDeregistrationRequested, VmBooted, VmCloned, VmDeleted, VmObservedStopped, VmStopped,
+    VmVanished,
 };
 use super::rejection::AttemptRejection;
 use super::state::{
     AttemptState, Diagnostics, DirectiveKind, DirectiveTag, Jit, Outcome, OwnershipProof, Pending,
-    Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, StopDeregistration, VmCondition,
+    Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, StopDeregistration,
+    VanishDiscovery, VmCondition,
 };
 use crate::command::{Actor, Command};
 
@@ -1040,11 +1042,13 @@ fn decide_guest_verified(
 /// A refusal means nothing happened. A proof the data plane refused for a stop, a delete, a
 /// launch or a start quarantines the attempt (ADR 0026, ADR 0038; a start's refusal is the
 /// name it re-observed listed but unproven, or, from a data plane older than protocol 1.2, its
-/// VM absent, ADR 0066). A target a complete listing shows absent (`target_absent`) quarantines
-/// it as a desync, `vm_vanished_externally` with the VM not running, so no stop is issued for it
-/// (ADR 0066). Inside quarantine either is one more refused stop, so it cannot loop. Any other
-/// refusal is a stage failure or a bounded retry. Pinned by
-/// `tests/attempt/lifecycle.rs::should_quarantine_as_vanished_when_a_stop_or_start_finds_its_vm_absent`.
+/// VM absent, ADR 0066); inside quarantine it is one more refused stop, so it cannot loop. A
+/// stop's or start's target a complete listing shows absent (`target_absent`) is the VM this
+/// attempt recorded, gone without our delete: the desync is recorded (`VmVanished`) and the
+/// attempt closed, inside quarantine too, since quarantine holds only a VM that is present
+/// (ADR 0066 as amended 2026-11-11, DEC-07). Any other refusal is a stage failure or a bounded
+/// retry. Pinned by
+/// `tests/attempt/lifecycle.rs::should_close_as_vanished_when_a_stop_or_start_finds_its_vm_absent`.
 fn refused(state: &AttemptState, pending: Pending, reason: RefusalReason) -> Vec<AttemptEvent> {
     let refusal = AttemptEvent::DirectiveRefused(DirectiveRefused {
         directive_id: pending.directive_id,
@@ -1079,31 +1083,27 @@ fn refused(state: &AttemptState, pending: Pending, reason: RefusalReason) -> Vec
         | Phase::Closed => false,
     };
     // only a stop or a start re-observes a VM the attempt recorded cloning by its absence; the
-    // data plane answers no other kind so, and one that did is a plain refusal
+    // data plane answers no other kind so, and one that did (or one with no recorded VM) is a
+    // plain refusal
     let reads_absence = match pending.tag {
-        DirectiveTag::StopVm | DirectiveTag::StartVm => true,
+        DirectiveTag::StopVm => Some(VanishDiscovery::StopVm),
+        DirectiveTag::StartVm => Some(VanishDiscovery::StartVm),
         DirectiveTag::CloneVm
         | DirectiveTag::DeleteVm
         | DirectiveTag::LaunchRunner
         | DirectiveTag::VerifyGuest
-        | DirectiveTag::ExportDiagnostics => false,
+        | DirectiveTag::ExportDiagnostics => None,
     };
     let (proof_refused, vanished) = match reason {
-        RefusalReason::ProofMismatch => (proof_checked && !in_quarantine, false),
-        RefusalReason::TargetAbsent => (false, reads_absence && !in_quarantine),
+        RefusalReason::ProofMismatch => (proof_checked && !in_quarantine, None),
+        RefusalReason::TargetAbsent => (false, reads_absence),
         RefusalReason::InsufficientResources
         | RefusalReason::SafeMode
         | RefusalReason::StaleEpoch
-        | RefusalReason::EffectFailed => (false, false),
+        | RefusalReason::EffectFailed => (false, None),
     };
-    if vanished {
-        return vec![
-            refusal,
-            AttemptEvent::AttemptQuarantined(AttemptQuarantined {
-                reason: QuarantineReason::VmVanishedExternally,
-                vm: VmCondition::Stopped,
-            }),
-        ];
+    if let Some(event) = vanished.and_then(|by| vanished_event(state, by)) {
+        return vec![refusal, event];
     }
     if proof_refused {
         let mut events = vec![refusal];
@@ -1116,6 +1116,18 @@ fn refused(state: &AttemptState, pending: Pending, reason: RefusalReason) -> Vec
     let mut events = vec![refusal];
     events.extend(not_applied(state, pending));
     events
+}
+
+/// `VmVanished` for the VM this attempt recorded, found absent by `discovered_by`; `None` when
+/// no VM was recorded (nothing of ours can vanish then).
+fn vanished_event(state: &AttemptState, discovered_by: VanishDiscovery) -> Option<AttemptEvent> {
+    state.instance_id.as_ref().map(|instance_id| {
+        AttemptEvent::VmVanished(VmVanished {
+            discovered_by,
+            instance_id: instance_id.clone(),
+            vm: condition(state),
+        })
+    })
 }
 
 /// What follows a directive that definitely did not take effect.
@@ -1456,16 +1468,14 @@ fn resolve_present(
 }
 
 /// A complete inventory does not list the VM: our delete took effect; an `Unknown` clone did
-/// not; anything else that had a VM lost it (I25: an incomplete inventory never arrives here).
+/// not; a VM this attempt recorded and did not delete vanished, quarantined or not, the same
+/// desync a stop's or start's `target_absent` records (DEC-07; pinned by
+/// `tests/attempt/lifecycle.rs::should_close_as_vanished_when_the_inventory_shows_a_recorded_vm_absent`);
+/// a quarantined VM of our name we never recorded is released, lost (I25: an incomplete
+/// inventory never arrives here).
 fn decide_vm_absent(state: &AttemptState) -> Decision {
     match state.phase {
         Phase::Deleted | Phase::Lost => return Ok(Vec::new()),
-        // its absence is why it is quarantined, not a release: it stays for review until an
-        // operator resolves it (ADR 0066, the model's `vanishedStaysQuarantined`)
-        Phase::Quarantined {
-            reason: QuarantineReason::VmVanishedExternally,
-            ..
-        } if state.pending.is_none() => return Ok(Vec::new()),
         Phase::NotStarted => return Err(AttemptRejection::NotStarted),
         Phase::Closed => return Err(AttemptRejection::Closed),
         Phase::Reserved
@@ -1482,8 +1492,8 @@ fn decide_vm_absent(state: &AttemptState) -> Decision {
         | Phase::Backoff { .. }
         | Phase::Quarantined { .. } => {}
     }
-    // a VM we recorded is lost; so is a quarantined VM of our name we never recorded cloning
-    // (ownership doubt), which its absence releases
+    // a VM we recorded vanished; a quarantined VM of our name we never recorded cloning
+    // (ownership doubt) is lost: its absence releases it, and it was never known to be ours
     let quarantined_now = match state.phase {
         Phase::Quarantined { .. } => true,
         Phase::NotStarted
@@ -1504,7 +1514,9 @@ fn decide_vm_absent(state: &AttemptState) -> Decision {
         | Phase::Closed => false,
     };
     let lost = || {
-        if state.instance_id.is_some() || quarantined_now {
+        if let Some(event) = vanished_event(state, VanishDiscovery::Inventory) {
+            Ok(vec![event])
+        } else if quarantined_now {
             Ok(vec![AttemptEvent::AttemptLost(AttemptLost {
                 evidence: LostEvidence::InventoryAbsent,
             })])

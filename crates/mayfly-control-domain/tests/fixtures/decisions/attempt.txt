@@ -54,6 +54,8 @@ case directive_pending refused directive_pending
 case guest_rejected_quarantines accepted
   guest_rejected/v1 {"directive_id":"0000000000000000000000000000d003","reason":"challenge_failed"}
   attempt_quarantined/v1 {"reason":"guest_identity_refused","vm":"running"}
+case inventory_vanished_vm_closes accepted
+  vm_vanished/v1 {"discovered_by":"inventory","instance_id":"0a:00:00:00:00:01","vm":"stopped"}
 case issue_clone accepted
   directive_issued/v1 {"directive_id":"0000000000000000000000000000d001","kind":"clone_vm","deadline":60000}
 case jit_already_issued refused jit_already_issued
@@ -118,9 +120,9 @@ case timeout_makes_unknown accepted
   directive_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d001","since":60000}
 case unknown_left_by_inventory accepted
   vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
-case vanished_vm_quarantines accepted
+case vanished_vm_closes accepted
   directive_refused/v1 {"directive_id":"0000000000000000000000000000d002","reason":"target_absent"}
-  attempt_quarantined/v1 {"reason":"vm_vanished_externally","vm":"stopped"}
+  vm_vanished/v1 {"discovered_by":"start_vm","instance_id":"0a:00:00:00:00:01","vm":"stopped"}
 case verification_prepares accepted
   guest_verified/v1 {"nonce_ref":"0000000000000000000000000000d003","facts":{"os":"macos","uptime":30000}}
   attempt_prepared/v1 {}

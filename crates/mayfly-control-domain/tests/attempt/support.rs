@@ -48,6 +48,11 @@ pub fn instance() -> ProviderInstanceId {
     ProviderInstanceId::sample()
 }
 
+/// Another VM's instance id under our name: not the one `VmCloned` recorded.
+pub fn other_instance() -> ProviderInstanceId {
+    ProviderInstanceId::new("0a:00:00:00:00:02").unwrap_or_else(|e| panic!("{e}"))
+}
+
 pub fn issue(n: u128) -> AttemptCommand {
     AttemptCommand::IssueNext {
         directive_id: directive(n),
@@ -290,7 +295,8 @@ pub fn quarantined() -> Vec<Step> {
     )
 }
 
-/// Quarantined because the start found the cloned VM absent from a complete listing (ADR 0066).
+/// Lost with a recorded desync: the start found the cloned VM absent from a complete listing
+/// (`VmVanished`, ADR 0066 as amended 2026-11-11, DEC-07).
 pub fn vanished() -> Vec<Step> {
     then(
         booting(),
@@ -427,7 +433,7 @@ pub fn quarantined_busy() -> Vec<Step> {
     )
 }
 
-fn unknown(path: Vec<Step>, n: u128) -> Vec<Step> {
+pub fn unknown(path: Vec<Step>, n: u128) -> Vec<Step> {
     then(
         path,
         [observe(Fact::OutcomeUnknown {
@@ -518,9 +524,13 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
             unknown(then(quarantined(), [issue(10)]), 10),
         ),
         ("quarantined/doubted", doubted()),
-        ("quarantined/vanished", vanished()),
         ("quarantined/deregistering", quarantined_registered()),
         ("quarantined/busy", quarantined_busy()),
+        ("lost/vanished_on_start", vanished()),
+        (
+            "lost/doubt_released",
+            then(doubted(), [observe(Fact::VmAbsent)]),
+        ),
         ("closed", closed()),
     ];
     paths

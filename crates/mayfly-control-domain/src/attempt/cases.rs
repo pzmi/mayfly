@@ -623,12 +623,17 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             }),
         ),
         accepted(
-            "vanished_vm_quarantines",
+            "vanished_vm_closes",
             then(booting(), [issue(2)]),
             observe(Fact::DirectiveRefused {
                 directive_id: directive(2),
                 reason: RefusalReason::TargetAbsent,
             }),
+        ),
+        accepted(
+            "inventory_vanished_vm_closes",
+            booting(),
+            observe(Fact::VmAbsent),
         ),
         accepted(
             "guest_rejected_quarantines",

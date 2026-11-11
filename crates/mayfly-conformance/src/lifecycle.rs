@@ -28,7 +28,7 @@
 //! | `retire_requested` | `retireRequested` | `retirement_requested` is set |
 //! | `diagnostics` | `diagnostics` | `diagnostics` |
 //! | `runner_exited` | `runnerExited` | `runner_exited` |
-//! | `vanished` | `vanished` | quarantined `vm_vanished_externally` |
+//! | `vanished` | `vanished` | `vanished` is set (`VmVanished` recorded) |
 //! | `dereg` | `dereg` | `stop_deregistration` (`none`, `requested`, `confirmed`, `busy`) |
 //! | `refused` | `-`: every model step is an accepted transition | the last command's refusal code, else `-` |
 //!
@@ -42,9 +42,13 @@
 //!   an orphaned handle `jit = orphaned`, and the consequence (no job is ever bound) shows as a
 //!   refusal only if the model offers `bindJob`, which it never does then.
 //! - `freshEpoch` is compared as "fresh in the current epoch"; the aggregate keeps no number.
-//! - `vanished` is the model's flag, which holds only while quarantined (its
-//!   `vanishedStaysQuarantined`; an operator's resolution clears it, VER-01F), and the
-//!   aggregate's quarantine reason.
+//! - `vanished` is the model's flag, set with `Lost` and never cleared (its
+//!   `vanishedClosedForGood`, DEC-07), and the aggregate's recorded `VmVanished`; how the
+//!   absence was found (`VanishDiscovery`) is the driver's, not the model's.
+//! - `listingIncomplete` is two stimuli in one: the inventory's `InventoryIncomplete`, which is
+//!   never routed to an attempt (I25), and the data plane's `Unknown{listing_incomplete}` for a
+//!   directive it re-observes. The driver sends the latter, `OutcomeUnknown`, only when the
+//!   folded attempt has a clone, start, stop or delete in flight, and nothing otherwise.
 //! - Ids, deadlines, refusal and quarantine reasons, the retirement reason, guest facts and
 //!   diagnostics digests are minted by the driver; the model has none of them.
 //! - Rust-only rows (`NotStarted`, stale observations, the run-epoch fence of I18, actor
@@ -293,16 +297,7 @@ pub fn observe_state(state: &AttemptState, refused: Option<&str>) -> Observation
             StopDeregistration::RefusedBusy => "busy",
         },
     );
-    o.set(
-        "vanished",
-        matches!(
-            state.phase,
-            Phase::Quarantined {
-                reason: QuarantineReason::VmVanishedExternally,
-                ..
-            }
-        ),
-    );
+    o.set("vanished", state.vanished.is_some());
     o.set("refused", refused.unwrap_or("-"));
     o
 }
@@ -584,6 +579,32 @@ impl<A: AttemptLike> LifecycleDriver<A> {
     }
 }
 
+impl<A: AttemptLike> LifecycleDriver<A> {
+    /// An incomplete listing (I25): the data plane's `Unknown{listing_incomplete}` answers a
+    /// re-observing directive in flight; the inventory's is never routed to the attempt.
+    fn listing_incomplete(&mut self) -> Result<(), DriverError> {
+        let Some(pending) = self.state()?.pending else {
+            return Ok(());
+        };
+        let reobserves = match pending.tag {
+            DirectiveTag::CloneVm
+            | DirectiveTag::StartVm
+            | DirectiveTag::StopVm
+            | DirectiveTag::DeleteVm => true,
+            DirectiveTag::VerifyGuest
+            | DirectiveTag::LaunchRunner
+            | DirectiveTag::ExportDiagnostics => false,
+        };
+        let in_flight = matches!(pending.outcome, PendingOutcome::InFlight);
+        if reobserves && in_flight {
+            self.observation(Fact::OutcomeUnknown {
+                directive_id: pending.directive_id,
+            })?;
+        }
+        Ok(())
+    }
+}
+
 fn pick_int(step: &Step<'_>, name: &str) -> Result<i128, DriverError> {
     step.pick(name)?
         .as_int()
@@ -743,6 +764,7 @@ impl<A: AttemptLike> crate::replay::Driver for LifecycleDriver<A> {
             "inventoryAbsent" => {
                 self.observation(Fact::VmAbsent)?;
             }
+            "listingIncomplete" => self.listing_incomplete()?,
             "vmObservedStopped" => {
                 self.observation(Fact::VmObservedStopped)?;
             }

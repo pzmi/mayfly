@@ -56,10 +56,26 @@ pub enum QuarantineReason {
     /// An outcome cannot be proven by any observation the provider can give.
     OutcomeUnprovable,
     /// A `StopVm` or `StartVm` found the VM this attempt recorded cloning absent from a complete
-    /// listing: mayfly did not remove it, so the journal and the provider have desynced. Kept
-    /// for review and reported (`mayfly status`, the diagnostics bundle), never read as stopped
-    /// or lost, and not released by the inventory's absence (ADR 0066).
+    /// listing: mayfly did not remove it, so the journal and the provider have desynced
+    /// (ADR 0066). Written by no build since DEC-07, which records such a desync as
+    /// [`VanishDiscovery`] in `VmVanished` and closes the attempt (ADR 0066 as amended
+    /// 2026-11-11); kept so a journal that holds it still decodes, and an attempt quarantined so
+    /// converges like any other when the inventory shows its VM absent.
     VmVanishedExternally,
+}
+
+/// How a VM the attempt recorded cloning, and mayfly did not delete, was found absent from a
+/// complete listing (`VmVanished`, ADR 0066 as amended 2026-11-11). Whichever way, the desync is
+/// the same and so is its handling: recorded, surfaced, the attempt closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VanishDiscovery {
+    /// The inventory's complete listing did not list it.
+    Inventory,
+    /// The data plane refused the pending `StopVm` `target_absent`.
+    StopVm,
+    /// The data plane refused the pending `StartVm` `target_absent`.
+    StartVm,
 }
 
 /// Why an attempt was retired (`AttemptRetired`, `RetirementRequested`).
@@ -275,7 +291,8 @@ pub enum Phase {
     Deleting,
     /// The VM's absence after our delete was observed.
     Deleted,
-    /// The VM was observed absent without our delete.
+    /// The VM was observed absent without our delete: a recorded VM's absence is a desync
+    /// (`vanished` is set, DEC-07), an unrecorded one's (a quarantined VM of our name) is not.
     Lost,
     /// A stage failed definitely; it is retried with the same name and generation.
     Backoff {
@@ -351,6 +368,9 @@ pub struct AttemptState {
     pub diagnostics: Diagnostics,
     /// The quarantine stop's deregistration (ADR 0076).
     pub stop_deregistration: StopDeregistration,
+    /// The VM this attempt recorded vanished (`VmVanished`): a desync, and how it was found.
+    /// Set once, with the phase `Lost`; never cleared (the model's `vanishedClosedForGood`).
+    pub vanished: Option<VanishDiscovery>,
 }
 
 impl AttemptState {
@@ -374,6 +394,7 @@ impl AttemptState {
             retire_reason: None,
             diagnostics: Diagnostics::NotTaken,
             stop_deregistration: StopDeregistration::NotNeeded,
+            vanished: None,
         }
     }
 }

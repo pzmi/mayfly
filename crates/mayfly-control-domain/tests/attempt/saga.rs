@@ -20,11 +20,12 @@ fn expected(name: &str) -> &'static str {
         // sent: its deadline runs; every other in-flight state is issued and not sent yet,
         // held by the relay with no deadline running, so it is idle below
         "cloning/sent" => "await",
-        "deleted" | "lost" => "close",
+        // a vanished VM's attempt closes like any lost one (DEC-07)
+        "deleted" | "lost" | "lost/vanished_on_start" | "lost/doubt_released" => "close",
         // a Backoff whose retirement waits for its deregistration does not retry (KER-04G);
         // not started or closed; issued and not sent; an Unknown outcome waits for an observation (I10); another
-        // policy moves prepared, listening, busy and finished attempts; a vanished VM is not
-        // running and a doubted one has no proof, so nothing is stopped
+        // policy moves prepared, listening, busy and finished attempts; a doubted VM has no
+        // proof, so nothing is stopped
         _ => "idle",
     }
 }

@@ -167,6 +167,14 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
             s.vm_running = false;
             s.phase = Phase::Lost;
         }
+        AttemptEvent::VmVanished(e) => {
+            s.pending = None;
+            s.vm_running = false;
+            s.phase = Phase::Lost;
+            s.vanished = Some(e.discovered_by);
+            // no VM is left to stop, so a quarantine stop's deregistration is moot (ADR 0076)
+            s.stop_deregistration = StopDeregistration::NotNeeded;
+        }
         AttemptEvent::AttemptQuarantined(e) => {
             // entering quarantine restarts the count of stops and has nothing to wait for
             // until its `StopDeregistrationRequested`; staying in it changes neither

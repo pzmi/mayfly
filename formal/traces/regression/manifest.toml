@@ -19,8 +19,11 @@
 # it too. The lifecycle scripts are `lifecycle_traces` in `formal/lifecycle.qnt` (`main =
 # "lifecycle_traces"`, `init = "tinit"`), built the same way; the scripts VER-01F added
 # (`unknownStopResolvedByListing`, `confirmRetirementInBackoff`, `confirmRetirementAfterExit`,
-# `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`) pin the divergences VER-01 found,
-# resolved; KER-04G's (`retirementInBackoffWaitsForDeregistration`,
+# `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`, renamed `requarantineAfterResolution`
+# by DEC-07) pin the divergences VER-01 found, resolved; DEC-07's (`stopOfVanishedVmIsClosedAsDesync`,
+# `startOfVanishedVmIsClosedAsDesync`, `inventoryFindsVanishedVm`, `quarantinedVmVanishedIsClosed`,
+# `mismatchedVmStaysQuarantined`, `incompleteListingConcludesNothing`) pin a vanished VM's
+# convergence; KER-04G's (`retirementInBackoffWaitsForDeregistration`,
 # `stageFailureHoldingRegistrationWaitsForDeregistration`) pin deregister-before-stop in Backoff;
 # DEC-06's (`quarantineStopWaitsForDeregistration`, `quarantineStopBusyKeepsRunning`) pin it for
 # the quarantine stop (ADR 0076).
@@ -489,12 +492,62 @@ seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-stopOfVanishedVmQuarantines.itf.json"
+file = "lifecycle-stopOfVanishedVmIsClosedAsDesync.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "stopOfVanishedVmQuarantines"
-max_steps = 17
+step = "stopOfVanishedVmIsClosedAsDesync"
+max_steps = 13
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-startOfVanishedVmIsClosedAsDesync.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "startOfVanishedVmIsClosedAsDesync"
+max_steps = 5
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-inventoryFindsVanishedVm.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "inventoryFindsVanishedVm"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-quarantinedVmVanishedIsClosed.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "quarantinedVmVanishedIsClosed"
+max_steps = 9
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-mismatchedVmStaysQuarantined.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "mismatchedVmStaysQuarantined"
+max_steps = 13
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-incompleteListingConcludesNothing.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "incompleteListingConcludesNothing"
+max_steps = 14
 seed = "0x5ce1"
 invariant = "allInvariants"
 
@@ -549,11 +602,11 @@ seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
-file = "lifecycle-requarantineAfterVanished.itf.json"
+file = "lifecycle-requarantineAfterResolution.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"
 init = "tinit"
-step = "requarantineAfterVanished"
+step = "requarantineAfterResolution"
 max_steps = 14
 seed = "0x5ce1"
 invariant = "allInvariants"
