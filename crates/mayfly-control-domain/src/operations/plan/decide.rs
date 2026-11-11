@@ -4,16 +4,16 @@
 
 use std::collections::BTreeSet;
 
-use mayfly_domain::{Epoch, Millis, StateDigest};
+use mayfly_domain::{Epoch, Millis};
 
 use super::events::{
-    RecoveryActionApplied, RecoveryActionStarted, RecoveryPlanApproved, RecoveryPlanCompleted,
-    RecoveryPlanEpochAdvanced, RecoveryPlanEvent, RecoveryPlanExpired, RecoveryPlanProposed,
+    RecoveryActionRecorded, RecoveryActionStarted, RecoveryPlanApproved, RecoveryPlanCompleted,
+    RecoveryPlanDrawn, RecoveryPlanEpochAdvanced, RecoveryPlanEvent, RecoveryPlanExpired,
     RecoveryPlanRefused,
 };
 use super::state::{
-    ActionKind, ActionOutcome, Bindings, PlanAction, PlanPhase, RecoveryPlanCommand,
-    RecoveryPlanRejection, RecoveryPlanState, stale,
+    ActionKind, ActionOutcome, Bindings, OwnWrite, PlanAction, PlanPhase, RecoveryPlanCommand,
+    RecoveryPlanRejection, RecoveryPlanState, StaleBinding, attempt_stream, stale,
 };
 use crate::command::{Actor, Command};
 
@@ -41,17 +41,19 @@ pub fn decide(state: &RecoveryPlanState, command: Command<RecoveryPlanCommand>) 
             bindings,
             actions,
             expires_at,
-        } => decide_propose(state, bindings, actions, expires_at)?,
+        } => decide_propose(state, run_epoch, bindings, actions, expires_at)?,
         RecoveryPlanCommand::ApprovePlan => decide_approve(state, actor, issued_at)?,
         RecoveryPlanCommand::BeginAction { index, current } => {
-            decide_begin(state, index, &current, issued_at)?
+            decide_begin(state, index, &current, run_epoch, issued_at)?
         }
         RecoveryPlanCommand::RecordOutcome {
             index,
             outcome,
-            heads_after,
-        } => decide_outcome(state, index, outcome, heads_after)?,
-        RecoveryPlanCommand::CompletePlan { current } => decide_complete(state, &current)?,
+            write,
+        } => decide_outcome(state, index, outcome, write)?,
+        RecoveryPlanCommand::CompletePlan { current } => {
+            decide_complete(state, &current, run_epoch)?
+        }
         RecoveryPlanCommand::ExpirePlan => decide_expire(state, issued_at)?,
     };
     Ok(with_epoch(state.epoch, run_epoch, events))
@@ -73,10 +75,18 @@ fn with_epoch(
     all
 }
 
-/// A plan names each attempt once, and adopts only on the instance id that proves ownership
-/// (ADR 0026). Pinned by `tests/recovery_plan/rules.rs::should_refuse_a_plan_when_an_adoption_has_no_evidence`.
+fn refused(moved: StaleBinding) -> RecoveryPlanEvent {
+    RecoveryPlanEvent::RecoveryPlanRefused(RecoveryPlanRefused { stale: moved })
+}
+
+/// A plan is drawn under the run epoch that proposes it, names each attempt once with its
+/// stream among the bound heads, and adopts only on the instance id that proves ownership
+/// (ADR 0026). Pinned by
+/// `tests/recovery_plan/rules.rs::should_refuse_a_plan_when_an_adoption_has_no_evidence` and
+/// `should_refuse_a_plan_when_its_bindings_do_not_cover_its_run_and_targets`.
 fn decide_propose(
     state: &RecoveryPlanState,
+    run_epoch: Epoch,
     bindings: Bindings,
     actions: Vec<PlanAction>,
     expires_at: Millis,
@@ -91,10 +101,19 @@ fn decide_propose(
         | PlanPhase::Refused(_)
         | PlanPhase::Expired => return Err(RecoveryPlanRejection::AlreadyProposed),
     }
+    if bindings.epoch != run_epoch {
+        return Err(RecoveryPlanRejection::EpochMismatch);
+    }
     let mut targets = BTreeSet::new();
     for action in &actions {
         if !targets.insert(action.attempt_id) {
             return Err(RecoveryPlanRejection::DuplicateTarget);
+        }
+        if !bindings
+            .heads
+            .contains_key(&attempt_stream(action.attempt_id))
+        {
+            return Err(RecoveryPlanRejection::UnboundTarget);
         }
         let needs_evidence = match action.kind {
             ActionKind::Adopt => true,
@@ -108,8 +127,8 @@ fn decide_propose(
             return Err(RecoveryPlanRejection::NoEvidence);
         }
     }
-    Ok(vec![RecoveryPlanEvent::RecoveryPlanProposed(
-        RecoveryPlanProposed {
+    Ok(vec![RecoveryPlanEvent::RecoveryPlanDrawn(
+        RecoveryPlanDrawn {
             bindings,
             actions,
             expires_at,
@@ -147,12 +166,35 @@ fn at_next(state: &RecoveryPlanState, index: u32) -> bool {
     usize::try_from(index).is_ok_and(|i| i == state.next && i < state.actions.len())
 }
 
-/// I31: an action's intent is recorded only while every binding holds; a binding that moved
-/// refuses the plan instead, so its command never runs (F45). A repeated intent of the open
-/// action resumes it. Pinned by
-/// `tests/recovery_plan/rules.rs::should_refuse_the_plan_when_it_is_applied_after_the_world_moved`
-/// and `tests/recovery_plan/properties.rs::should_record_no_intent_when_a_binding_moved`.
-fn decide_begin(state: &RecoveryPlanState, index: u32, current: &Bindings, at: Millis) -> Decision {
+/// Whether the plan still holds, against the command's own run epoch (fenced, I18) and the
+/// heads the use case read: the first binding that moved, if any. A plan drawn by KER-10 is
+/// bound by a digest that cannot be checked per stream, so it never holds.
+fn moved(state: &RecoveryPlanState, current: &Bindings, run_epoch: Epoch) -> Option<StaleBinding> {
+    if state.legacy {
+        return Some(StaleBinding::JournalHeads);
+    }
+    let Some(drawn) = state.bindings.as_ref() else {
+        return Some(StaleBinding::JournalHeads);
+    };
+    if run_epoch != drawn.epoch {
+        return Some(StaleBinding::Epoch);
+    }
+    stale(drawn, current)
+}
+
+/// I31: an action's intent is recorded only while every binding holds, the run epoch the
+/// command is issued under included; a binding that moved refuses the plan instead, so its
+/// command never runs (F45). A repeated intent of the open action resumes it. Pinned by
+/// `tests/recovery_plan/rules.rs::should_refuse_the_plan_when_it_is_applied_after_the_world_moved`,
+/// `should_refuse_the_plan_when_the_command_runs_under_another_epoch` and
+/// `tests/recovery_plan/properties.rs::should_record_no_intent_when_a_binding_moved`.
+fn decide_begin(
+    state: &RecoveryPlanState,
+    index: u32,
+    current: &Bindings,
+    run_epoch: Epoch,
+    at: Millis,
+) -> Decision {
     match state.phase {
         PlanPhase::Approved => {
             if at >= state.expires_at {
@@ -169,13 +211,8 @@ fn decide_begin(state: &RecoveryPlanState, index: u32, current: &Bindings, at: M
     if !at_next(state, index) {
         return Err(RecoveryPlanRejection::OutOfOrder);
     }
-    let Some(drawn) = state.bindings else {
-        return Err(RecoveryPlanRejection::NotProposed);
-    };
-    if let Some(moved) = stale(&drawn, current) {
-        return Ok(vec![RecoveryPlanEvent::RecoveryPlanRefused(
-            RecoveryPlanRefused { stale: moved },
-        )]);
+    if let Some(moved) = moved(state, current, run_epoch) {
+        return Ok(vec![refused(moved)]);
     }
     if state.intent_open {
         return Ok(vec![]);
@@ -185,13 +222,18 @@ fn decide_begin(state: &RecoveryPlanState, index: u32, current: &Bindings, at: M
     )])
 }
 
-/// I31: an outcome only after its intent. Pinned by
-/// `tests/recovery_plan/rules.rs::should_refuse_an_outcome_when_its_intent_is_not_recorded`.
+/// I31: an outcome only after its intent, with the plan's own write: an applied command wrote
+/// the action's attempt stream once, a refused one wrote nothing. The binding advances that one
+/// head, and only from the revision the plan bound: a write that started elsewhere means another
+/// writer moved the stream, and the plan is refused with the outcome (KER-10F). Pinned by
+/// `tests/recovery_plan/rules.rs::should_refuse_an_outcome_when_its_intent_is_not_recorded`,
+/// `should_refuse_the_plan_when_its_own_stream_moved_before_its_write` and
+/// `should_refuse_the_plan_when_another_stream_moved_before_the_next_action`.
 fn decide_outcome(
     state: &RecoveryPlanState,
     index: u32,
     outcome: ActionOutcome,
-    heads_after: StateDigest,
+    write: Option<OwnWrite>,
 ) -> Decision {
     match state.phase {
         PlanPhase::Applying => {}
@@ -205,17 +247,42 @@ fn decide_outcome(
     if !state.intent_open || !at_next(state, index) {
         return Err(RecoveryPlanRejection::NoIntent);
     }
-    Ok(vec![RecoveryPlanEvent::RecoveryActionApplied(
-        RecoveryActionApplied {
+    let target = state
+        .actions
+        .get(state.next)
+        .map(|a| attempt_stream(a.attempt_id));
+    let foreign = match (outcome, &write) {
+        (ActionOutcome::Applied, Some(w)) => {
+            if target.as_ref() != Some(&w.stream) || w.after <= w.before {
+                return Err(RecoveryPlanRejection::WrongWrite);
+            }
+            let bound = state
+                .bindings
+                .as_ref()
+                .and_then(|b| b.heads.get(&w.stream).copied());
+            bound != Some(w.before)
+        }
+        (ActionOutcome::Failed, None) => false,
+        (ActionOutcome::Applied, None) | (ActionOutcome::Failed, Some(_)) => {
+            return Err(RecoveryPlanRejection::WrongWrite);
+        }
+    };
+    let mut events = vec![RecoveryPlanEvent::RecoveryActionRecorded(
+        RecoveryActionRecorded {
             index,
             outcome,
-            heads_after,
+            write,
         },
-    )])
+    )];
+    if foreign || state.legacy {
+        events.push(refused(StaleBinding::JournalHeads));
+    }
+    Ok(events)
 }
 
-/// Completed only with every action applied and every binding still holding.
-fn decide_complete(state: &RecoveryPlanState, current: &Bindings) -> Decision {
+/// Completed only with every action applied and every binding still holding, under the run
+/// epoch the plan was drawn in.
+fn decide_complete(state: &RecoveryPlanState, current: &Bindings, run_epoch: Epoch) -> Decision {
     match state.phase {
         PlanPhase::Approved | PlanPhase::Applying => {}
         PlanPhase::Failed => return Err(RecoveryPlanRejection::ActionsRemaining),
@@ -228,11 +295,8 @@ fn decide_complete(state: &RecoveryPlanState, current: &Bindings) -> Decision {
     if state.intent_open || state.next < state.actions.len() {
         return Err(RecoveryPlanRejection::ActionsRemaining);
     }
-    let Some(drawn) = state.bindings else {
-        return Err(RecoveryPlanRejection::NotProposed);
-    };
-    Ok(vec![match stale(&drawn, current) {
-        Some(moved) => RecoveryPlanEvent::RecoveryPlanRefused(RecoveryPlanRefused { stale: moved }),
+    Ok(vec![match moved(state, current, run_epoch) {
+        Some(moved) => refused(moved),
         None => RecoveryPlanEvent::RecoveryPlanCompleted(RecoveryPlanCompleted {}),
     }])
 }
@@ -254,6 +318,17 @@ fn decide_expire(state: &RecoveryPlanState, at: Millis) -> Decision {
     )])
 }
 
+fn evolve_outcome(state: &mut RecoveryPlanState, outcome: ActionOutcome) {
+    state.intent_open = false;
+    match outcome {
+        ActionOutcome::Applied => {
+            state.phase = PlanPhase::Applying;
+            state.next = state.next.saturating_add(1);
+        }
+        ActionOutcome::Failed => state.phase = PlanPhase::Failed,
+    }
+}
+
 /// Applies one recorded event.
 #[must_use]
 pub fn evolve(mut state: RecoveryPlanState, event: &RecoveryPlanEvent) -> RecoveryPlanState {
@@ -261,7 +336,15 @@ pub fn evolve(mut state: RecoveryPlanState, event: &RecoveryPlanEvent) -> Recove
         RecoveryPlanEvent::RecoveryPlanEpochAdvanced(e) => state.epoch = e.epoch,
         RecoveryPlanEvent::RecoveryPlanProposed(e) => {
             state.phase = PlanPhase::Proposed;
-            state.bindings = Some(e.bindings);
+            state.legacy = true;
+            state.bindings = None;
+            state.actions.clone_from(&e.actions);
+            state.expires_at = e.expires_at;
+        }
+        RecoveryPlanEvent::RecoveryPlanDrawn(e) => {
+            state.phase = PlanPhase::Proposed;
+            state.legacy = false;
+            state.bindings = Some(e.bindings.clone());
             state.actions.clone_from(&e.actions);
             state.expires_at = e.expires_at;
         }
@@ -273,18 +356,15 @@ pub fn evolve(mut state: RecoveryPlanState, event: &RecoveryPlanEvent) -> Recove
             state.phase = PlanPhase::Applying;
             state.intent_open = true;
         }
-        RecoveryPlanEvent::RecoveryActionApplied(e) => {
-            state.intent_open = false;
-            if let Some(bindings) = state.bindings.as_mut() {
-                bindings.heads = e.heads_after;
+        RecoveryPlanEvent::RecoveryActionApplied(e) => evolve_outcome(&mut state, e.outcome),
+        RecoveryPlanEvent::RecoveryActionRecorded(e) => {
+            if let (Some(write), Some(bindings)) = (&e.write, state.bindings.as_mut())
+                && let Some(head) = bindings.heads.get_mut(&write.stream)
+                && *head == write.before
+            {
+                *head = write.after;
             }
-            match e.outcome {
-                ActionOutcome::Applied => {
-                    state.phase = PlanPhase::Applying;
-                    state.next = state.next.saturating_add(1);
-                }
-                ActionOutcome::Failed => state.phase = PlanPhase::Failed,
-            }
+            evolve_outcome(&mut state, e.outcome);
         }
         RecoveryPlanEvent::RecoveryPlanCompleted(_) => state.phase = PlanPhase::Completed,
         RecoveryPlanEvent::RecoveryPlanRefused(e) => {

@@ -164,6 +164,10 @@ pub enum QuarantineCaseRejection {
     NoProof,
     /// A release without a complete inventory that showed the VM absent (I25).
     AbsenceNotObserved,
+    /// The stream's case is another attempt's.
+    WrongAttempt,
+    /// An open case is reopened for another reason.
+    AlreadyOpen,
 }
 
 impl Rejection for QuarantineCaseRejection {
@@ -175,6 +179,8 @@ impl Rejection for QuarantineCaseRejection {
         "operator_only",
         "no_proof",
         "absence_not_observed",
+        "wrong_attempt",
+        "already_open",
     ];
 
     fn code(&self) -> &'static str {
@@ -186,6 +192,8 @@ impl Rejection for QuarantineCaseRejection {
             Self::OperatorOnly => "operator_only",
             Self::NoProof => "no_proof",
             Self::AbsenceNotObserved => "absence_not_observed",
+            Self::WrongAttempt => "wrong_attempt",
+            Self::AlreadyOpen => "already_open",
         }
     }
 }

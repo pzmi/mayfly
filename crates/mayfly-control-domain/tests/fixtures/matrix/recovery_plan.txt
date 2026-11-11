@@ -1,5 +1,5 @@
 # recovery plan: every phase against every command: accepted events or the refusal code
-unproposed x propose -> accepted recovery_plan_epoch_advanced/v1 recovery_plan_proposed/v1
+unproposed x propose -> accepted recovery_plan_epoch_advanced/v1 recovery_plan_drawn/v1
 unproposed x propose_duplicate -> refused duplicate_target
 unproposed x propose_unproven_adopt -> refused no_evidence
 unproposed x approve_by_operator -> refused not_proposed
@@ -15,6 +15,9 @@ unproposed x complete_world_moved -> refused not_proposed
 unproposed x expire_later -> refused not_proposed
 unproposed x expire_now -> refused not_proposed
 unproposed x stale_run -> refused not_proposed
+unproposed x propose_other_epoch -> refused epoch_mismatch
+unproposed x begin_first_other_run -> refused not_proposed
+unproposed x outcome_first_after_foreign -> refused not_proposed
 proposed x propose -> refused already_proposed
 proposed x propose_duplicate -> refused already_proposed
 proposed x propose_unproven_adopt -> refused already_proposed
@@ -31,6 +34,9 @@ proposed x complete_world_moved -> refused not_approved
 proposed x expire_later -> accepted recovery_plan_expired/v1
 proposed x expire_now -> refused not_expired
 proposed x stale_run -> refused stale_run
+proposed x propose_other_epoch -> refused already_proposed
+proposed x begin_first_other_run -> refused not_approved
+proposed x outcome_first_after_foreign -> refused not_approved
 approved x propose -> refused already_proposed
 approved x propose_duplicate -> refused already_proposed
 approved x propose_unproven_adopt -> refused already_proposed
@@ -47,6 +53,9 @@ approved x complete_world_moved -> refused actions_remaining
 approved x expire_later -> accepted recovery_plan_expired/v1
 approved x expire_now -> refused not_expired
 approved x stale_run -> refused stale_run
+approved x propose_other_epoch -> refused already_proposed
+approved x begin_first_other_run -> accepted recovery_plan_epoch_advanced/v1 recovery_plan_refused/v1
+approved x outcome_first_after_foreign -> refused no_intent
 applying/intent x propose -> refused already_proposed
 applying/intent x propose_duplicate -> refused already_proposed
 applying/intent x propose_unproven_adopt -> refused already_proposed
@@ -56,13 +65,16 @@ applying/intent x approve_after_expiry -> refused already_approved
 applying/intent x begin_first -> accepted, no event
 applying/intent x begin_first_world_moved -> accepted recovery_plan_refused/v1
 applying/intent x begin_second -> refused out_of_order
-applying/intent x outcome_first -> accepted recovery_action_applied/v1
+applying/intent x outcome_first -> accepted recovery_action_recorded/v1
 applying/intent x outcome_second -> refused no_intent
 applying/intent x complete_bound -> refused actions_remaining
 applying/intent x complete_world_moved -> refused actions_remaining
 applying/intent x expire_later -> refused in_progress
 applying/intent x expire_now -> refused in_progress
 applying/intent x stale_run -> refused stale_run
+applying/intent x propose_other_epoch -> refused already_proposed
+applying/intent x begin_first_other_run -> accepted recovery_plan_epoch_advanced/v1 recovery_plan_refused/v1
+applying/intent x outcome_first_after_foreign -> accepted recovery_action_recorded/v1 recovery_plan_refused/v1
 applying/between x propose -> refused already_proposed
 applying/between x propose_duplicate -> refused already_proposed
 applying/between x propose_unproven_adopt -> refused already_proposed
@@ -79,6 +91,9 @@ applying/between x complete_world_moved -> refused actions_remaining
 applying/between x expire_later -> refused in_progress
 applying/between x expire_now -> refused in_progress
 applying/between x stale_run -> refused stale_run
+applying/between x propose_other_epoch -> refused already_proposed
+applying/between x begin_first_other_run -> refused out_of_order
+applying/between x outcome_first_after_foreign -> refused no_intent
 applying/done x propose -> refused already_proposed
 applying/done x propose_duplicate -> refused already_proposed
 applying/done x propose_unproven_adopt -> refused already_proposed
@@ -95,13 +110,16 @@ applying/done x complete_world_moved -> accepted recovery_plan_refused/v1
 applying/done x expire_later -> refused in_progress
 applying/done x expire_now -> refused in_progress
 applying/done x stale_run -> refused stale_run
+applying/done x propose_other_epoch -> refused already_proposed
+applying/done x begin_first_other_run -> refused out_of_order
+applying/done x outcome_first_after_foreign -> refused no_intent
 failed x propose -> refused already_proposed
 failed x propose_duplicate -> refused already_proposed
 failed x propose_unproven_adopt -> refused already_proposed
 failed x approve_by_operator -> refused already_approved
 failed x approve_by_automation -> refused already_approved
 failed x approve_after_expiry -> refused already_approved
-failed x begin_first -> accepted recovery_plan_refused/v1
+failed x begin_first -> accepted recovery_action_started/v1
 failed x begin_first_world_moved -> accepted recovery_plan_refused/v1
 failed x begin_second -> refused out_of_order
 failed x outcome_first -> refused no_intent
@@ -111,6 +129,9 @@ failed x complete_world_moved -> refused actions_remaining
 failed x expire_later -> refused in_progress
 failed x expire_now -> refused in_progress
 failed x stale_run -> refused stale_run
+failed x propose_other_epoch -> refused already_proposed
+failed x begin_first_other_run -> accepted recovery_plan_epoch_advanced/v1 recovery_plan_refused/v1
+failed x outcome_first_after_foreign -> refused no_intent
 completed x propose -> refused already_proposed
 completed x propose_duplicate -> refused already_proposed
 completed x propose_unproven_adopt -> refused already_proposed
@@ -127,6 +148,9 @@ completed x complete_world_moved -> refused closed
 completed x expire_later -> refused closed
 completed x expire_now -> refused closed
 completed x stale_run -> refused stale_run
+completed x propose_other_epoch -> refused already_proposed
+completed x begin_first_other_run -> refused closed
+completed x outcome_first_after_foreign -> refused closed
 refused x propose -> refused already_proposed
 refused x propose_duplicate -> refused already_proposed
 refused x propose_unproven_adopt -> refused already_proposed
@@ -143,6 +167,9 @@ refused x complete_world_moved -> refused closed
 refused x expire_later -> refused closed
 refused x expire_now -> refused closed
 refused x stale_run -> refused stale_run
+refused x propose_other_epoch -> refused already_proposed
+refused x begin_first_other_run -> refused closed
+refused x outcome_first_after_foreign -> refused closed
 expired x propose -> refused already_proposed
 expired x propose_duplicate -> refused already_proposed
 expired x propose_unproven_adopt -> refused already_proposed
@@ -159,3 +186,6 @@ expired x complete_world_moved -> refused closed
 expired x expire_later -> refused closed
 expired x expire_now -> refused closed
 expired x stale_run -> refused stale_run
+expired x propose_other_epoch -> refused already_proposed
+expired x begin_first_other_run -> refused closed
+expired x outcome_first_after_foreign -> refused closed

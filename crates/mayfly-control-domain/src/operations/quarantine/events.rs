@@ -72,7 +72,8 @@ impl DomainEvent for QuarantineCaseEscalated {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// An operator resolved the case.
+/// An operator resolved the case. Version 2 records the instance id a `delete_with_proof`
+/// relied on: the proof the later `DeleteVm` must carry (KER-10F).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct QuarantineCaseResolved {
@@ -82,11 +83,41 @@ pub struct QuarantineCaseResolved {
     pub operator_uid: u32,
     /// For a release: the complete inventory that did not list the VM.
     pub absence: Option<ObservationId>,
+    /// For a delete: the case's recorded instance id, the proof the delete carries.
+    pub instance_id: Option<ProviderInstanceId>,
 }
 
 impl DomainEvent for QuarantineCaseResolved {
     const EVENT_TYPE: &'static str = "quarantine_case_resolved";
+    const SCHEMA_VERSION: u32 = 2;
+}
+
+/// Version 1 of [`QuarantineCaseResolved`] (KER-10), without the instance id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct QuarantineCaseResolvedV1 {
+    /// How.
+    pub disposition: Disposition,
+    /// The operator's uid.
+    pub operator_uid: u32,
+    /// For a release: the complete inventory that did not list the VM.
+    pub absence: Option<ObservationId>,
+}
+
+impl DomainEvent for QuarantineCaseResolvedV1 {
+    const EVENT_TYPE: &'static str = "quarantine_case_resolved";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Version 1 recorded no instance id; a delete resolved by it carries none, so the delete's
+/// proof is the attempt's own record, as before KER-10F.
+fn upcast_resolved_v1(old: QuarantineCaseResolvedV1) -> QuarantineCaseEvent {
+    QuarantineCaseEvent::QuarantineCaseResolved(QuarantineCaseResolved {
+        disposition: old.disposition,
+        operator_uid: old.operator_uid,
+        absence: old.absence,
+        instance_id: None,
+    })
 }
 
 event_set! {
@@ -102,5 +133,8 @@ event_set! {
         QuarantineCaseEscalated(QuarantineCaseEscalated),
         /// See [`QuarantineCaseResolved`].
         QuarantineCaseResolved(QuarantineCaseResolved),
+    }
+    legacy {
+        QuarantineCaseResolvedV1 => upcast_resolved_v1,
     }
 }

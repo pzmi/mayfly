@@ -37,6 +37,7 @@ fn mint(floor: u64, verification: Verification) -> HostRunCommand {
     HostRunCommand::MintEpoch {
         floor: Epoch::new(floor),
         verification,
+        crash_loop: false,
     }
 }
 
@@ -52,11 +53,13 @@ fn complete() -> HostRunCommand {
     }
 }
 
-fn by_plan(completed: bool) -> HostRunCommand {
+fn by_plan(completed: bool, plan_epoch: u64, verification: Verification) -> HostRunCommand {
     HostRunCommand::LeaveSafeMode {
         exit: SafeModeExit::PlanCompleted {
             plan_id: PlanId::from_u128(0xB1),
             completed_ref: completed.then(|| EventId::from_u128(0xE1)),
+            plan_epoch: Epoch::new(plan_epoch),
+            verification,
         },
     }
 }
@@ -106,6 +109,13 @@ fn rolled_back() -> Vec<Step> {
 fn rolled_back_restarted() -> Vec<Step> {
     let mut path = rolled_back();
     path.extend([at(6, start()), at(6, mint(6, Verification::Verified))]);
+    path
+}
+
+/// The rolled-back journal's plan completed in its run: safe mode left, a restart required.
+fn left_by_plan() -> Vec<Step> {
+    let mut path = rolled_back();
+    path.push(at(6, by_plan(true, 6, Verification::Verified)));
     path
 }
 
@@ -187,6 +197,7 @@ fn paths() -> Vec<Vec<Step>> {
         ended(),
         rolled_back(),
         rolled_back_restarted(),
+        left_by_plan(),
         unknown_kind(),
         unknown_kind_restarted(),
         crash_loop(),
@@ -225,6 +236,19 @@ pub(super) fn cases() -> Vec<DeterminismCase<HostRun>> {
             Accepted,
         ),
         case(
+            "crash_loop_enters_safe_mode",
+            started(),
+            at(
+                0,
+                HostRunCommand::MintEpoch {
+                    floor: Epoch::new(0),
+                    verification: Verification::Verified,
+                    crash_loop: true,
+                },
+            ),
+            Accepted,
+        ),
+        case(
             "complete_recovery",
             recovering(),
             at(1, complete()),
@@ -255,7 +279,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<HostRun>> {
         case(
             "leave_by_completed_plan",
             rolled_back(),
-            at(6, by_plan(true)),
+            at(6, by_plan(true, 6, Verification::Verified)),
             Accepted,
         ),
         case(
@@ -313,13 +337,31 @@ pub(super) fn cases() -> Vec<DeterminismCase<HostRun>> {
         case(
             "plan_not_completed",
             rolled_back(),
-            at(6, by_plan(false)),
+            at(6, by_plan(false, 6, Verification::Verified)),
             Refused,
         ),
         case(
             "journal_unverified",
             unknown_kind(),
-            at(1, by_plan(true)),
+            at(1, by_plan(true, 1, Verification::UnknownEventKind)),
+            Refused,
+        ),
+        case(
+            "plan_of_another_run",
+            rolled_back(),
+            at(6, by_plan(true, 5, Verification::Verified)),
+            Refused,
+        ),
+        case(
+            "epoch_not_minted",
+            operating(),
+            at(2, HostRunCommand::BeginShutdown),
+            Refused,
+        ),
+        case(
+            "plan_exit_requires_restart",
+            left_by_plan(),
+            at(6, complete()),
             Refused,
         ),
         case(

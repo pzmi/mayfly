@@ -161,6 +161,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-09 | Registration model and `RunnerRegistration` aggregate | KER-03, FND-06, DEC-01 | opus | |
 | KER-07 | Recovery model and decision table | KER-04, KER-05, KER-09, DEC-01 | opus | |
 | KER-10 | Operations aggregates: `HostRun`, `RecoveryPlan`, `QuarantineCase`, effective mode | KER-03, KER-07 | opus | |
+| KER-10F | Review fixes: per-stream plan heads, fenced plan epoch, plan exit restarts, crash loop at mint, resolution proof | KER-10 | opus | |
 | KER-11 | Image catalog: `Image`, `ImagePlacement` | KER-03, KER-02 | sonnet | |
 | KER-08 | Data-plane domain: executor, supervisor, resource ledger, fencing | KER-02, DEC-01 | opus | ⛳ |
 | DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
@@ -613,6 +614,20 @@ with an exhaustive table.
 Accept: I17 and I31 unit tests; a plan applied after the world moved is refused (F45); no case
 resolves without an operator actor.
 
+#### KER-10F Review fixes to the Operations aggregates
+Cites: KER-10's review; ADR 0041; `formal/recovery.qnt`. H1: a plan binds each stream's revision
+(`RecoveryPlanDrawn`, replacing KER-10's digest-bound `RecoveryPlanProposed`, which still decodes
+and is refused when applied); an outcome carries the plan's own write (`RecoveryActionRecorded`)
+and advances only that head, only from where it was bound; the model splits an action into
+intent, the attempt command's own unit and the outcome, with a foreign writer and a negative
+control. H2: the command's fenced run epoch must be the plan's. M1: a plan exit carries the plan's
+epoch and a fresh verification, and the run restarts before recovery completes (the model's
+`completePlan`). M2: `MintEpoch` carries the crash-loop finding. M4: `QuarantineCaseResolved` v2
+records the instance id a delete relies on. LOW: `HostRun`'s fence is two-sided after the mint;
+a quarantine stream refuses another attempt and an open case another reason.
+Accept: the model's foreign-write scenarios pass and the absorbing outcome fails `i31PlanBound`;
+unit tests for each item; `formal-verify --model recovery` at the bounded depths.
+
 #### KER-11 Image catalog: `Image`, `ImagePlacement`
 Cites: dm §6.6–§6.7, P17, P18, ADRs 0030, 0039. `Image` (status monotonic, runner version and its
 expiry), `ImagePlacement` (single pull per host and digest, materialise to a base named by digest
@@ -949,6 +964,25 @@ an older epoch (`attempt_not_adopted`) until the attempt is adopted; recovery de
 adopted attempt's pending directive becomes (inventory first, plan §10) before that redelivery
 sends it. The inbox's mapping of an answer to a `Fact` replaces the test stand-in `Cp::record`
 of `crates/mayfly-composition/tests/directive_loop/support.rs`.
+Note (KER-10F, the repair use case of P20): a recovery plan's `heads` are the revisions of the
+streams it read, the attempts it acts on included, and the use case must keep the aggregate's
+input honest through the store, not as a value the caller echoes: (1) `ProposePlan` is issued
+under the run's own epoch with `bindings.epoch` equal to it; (2) every unit it appends for the
+plan, the `BeginAction` and `CompletePlan` on the plan's stream and each action's ordinary
+command on its attempt, carries every bound head as an ADR 0041 read condition at its bound
+revision (`AppendUnit` reads, built inside its own `with_revision_retry` closure), the attempt
+command's own stream as its expected revision, so a stream that moved between the read and the
+append refuses the unit and the retry reads the moved head, which the aggregate then records as
+`RecoveryPlanRefused{journal_heads}`; (3) `RecordOutcome` carries the attempt unit's receipt
+(stream, revision before and after), never a recomputed digest. Accept adds: a component test in
+which another writer appends to a bound attempt stream between an action's intent and its
+attempt command, and the command is refused and the plan recorded refused, with no further
+action executed; and one in which a command under a new run epoch refuses the plan
+(`formal/recovery.qnt`: `foreignWriteBeforeTheActionRefusesTest`,
+`foreignWriteBeforeTheOutcomeRefusesTest`). Leaving safe mode by a plan passes the plan's epoch
+and a verification taken after `RecoveryPlanCompleted`; the daemon then restarts
+(`restart_required` refuses `CompleteRecovery` in that run). `MintEpoch.crash_loop` is the
+service manager's start count of P25.
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
@@ -983,6 +1017,17 @@ and the desync logs at ERROR (a defect to report). Accept adds: a component test
 the breaker.
 Accept: F36, F46, F47 component tests on the fake clock; mutant 26 (delete on a timer) and 27
 (resolve without observation) caught.
+Note (KER-10F): `QuarantineCase` trusts its inputs at three points the policies must check. (1) A
+case is addressed as `quarantine-<attempt_id>` from the command's own `attempt_id` (the aggregate
+refuses another attempt once a case exists, not a wrong stream). (2) `released_observed_absent`
+names an observation id; before resolving, the policy loads that stored observation and checks
+that it is a complete inventory (never `InventoryIncomplete`, I25), taken after the case's
+`opened_at`, that does not list this attempt's VM; otherwise it refuses. (3) A
+`delete_with_proof` resolution records the case's instance id (`QuarantineCaseResolved` v2); the
+`DeleteVm` issued for it must carry exactly that id as its proof, and a resolution of v1 (no id)
+falls back to the attempt's recorded one. Accept adds: a component test of each refusal (an
+incomplete inventory, one older than the case, one that lists the VM) and one in which the
+`DeleteVm` proof equals the resolved instance id.
 
 #### CP-07 Image placement manager
 Cites: dm P17, P18; ADRs 0030, 0039. Pin → placement on every host serving the pool; the pool is
@@ -1137,6 +1182,11 @@ plain words (the VM vanished outside mayfly: a desync; send the diagnostics bund
 Note (DEC-07, ADR 0066 amended): a vanish is no longer a quarantine: `status` and `vm
 list|inspect` show the `attempts` view's `desync` (how it was found) on the lost attempt in the
 same plain words.
+Note (KER-10F): only the socket layer constructs `Actor::Operator { uid }`, from the peer
+credentials of the `0600` socket (`SO_PEERCRED`/`getpeereid`); nothing a client sends names an
+actor. `quarantine resolve --release` passes an observation id the CP-06 policy verifies (see its
+card). Accept adds: a test that a request claiming an operator in its body is decided under the
+peer's uid, and that a non-socket caller (a policy, startup) cannot obtain an operator actor.
 
 #### RT-04 Observability
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint

@@ -4,7 +4,7 @@
 use mayfly_domain::{Epoch, Millis, StateDigest};
 use serde::{Deserialize, Serialize};
 
-use super::state::{ActionOutcome, Bindings, PlanAction, StaleBinding};
+use super::state::{ActionOutcome, Bindings, LegacyBindings, OwnWrite, PlanAction, StaleBinding};
 use crate::event::DomainEvent;
 use crate::event_set;
 
@@ -22,12 +22,15 @@ impl DomainEvent for RecoveryPlanEpochAdvanced {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// A plan was drawn, bound to what it read; immutable from here.
+/// A plan was drawn, bound to one digest of the journal's heads. Written by KER-10 only: a
+/// digest cannot tell the plan's own writes from another writer's, so no build writes it any
+/// more ([`RecoveryPlanDrawn`] replaces it) and a plan that holds it is refused when applied.
+/// Kept so a journal that holds it decodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RecoveryPlanProposed {
     /// What it is bound to.
-    pub bindings: Bindings,
+    pub bindings: LegacyBindings,
     /// Its actions.
     pub actions: Vec<PlanAction>,
     /// Its expiry.
@@ -36,6 +39,24 @@ pub struct RecoveryPlanProposed {
 
 impl DomainEvent for RecoveryPlanProposed {
     const EVENT_TYPE: &'static str = "recovery_plan_proposed";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// A plan was drawn, bound to the revision of each stream it read, the inventory, GitHub and
+/// the run epoch; immutable from here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RecoveryPlanDrawn {
+    /// What it is bound to.
+    pub bindings: Bindings,
+    /// Its actions.
+    pub actions: Vec<PlanAction>,
+    /// Its expiry.
+    pub expires_at: Millis,
+}
+
+impl DomainEvent for RecoveryPlanDrawn {
+    const EVENT_TYPE: &'static str = "recovery_plan_drawn";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -65,7 +86,9 @@ impl DomainEvent for RecoveryActionStarted {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// The outcome of one action's command.
+/// The outcome of one action's command, with the journal's heads after it as the caller
+/// reported them. Written by KER-10 only ([`RecoveryActionRecorded`] replaces it); kept so a
+/// journal that holds it decodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RecoveryActionApplied {
@@ -79,6 +102,24 @@ pub struct RecoveryActionApplied {
 
 impl DomainEvent for RecoveryActionApplied {
     const EVENT_TYPE: &'static str = "recovery_action_applied";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// The outcome of one action's command, with the plan's own write: the binding advances that
+/// one head, and only from where the plan bound it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RecoveryActionRecorded {
+    /// The action.
+    pub index: u32,
+    /// How it ended.
+    pub outcome: ActionOutcome,
+    /// The plan's own write; none for a refused command.
+    pub write: Option<OwnWrite>,
+}
+
+impl DomainEvent for RecoveryActionRecorded {
+    const EVENT_TYPE: &'static str = "recovery_action_recorded";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -123,12 +164,16 @@ event_set! {
         RecoveryPlanEpochAdvanced(RecoveryPlanEpochAdvanced),
         /// See [`RecoveryPlanProposed`].
         RecoveryPlanProposed(RecoveryPlanProposed),
+        /// See [`RecoveryPlanDrawn`].
+        RecoveryPlanDrawn(RecoveryPlanDrawn),
         /// See [`RecoveryPlanApproved`].
         RecoveryPlanApproved(RecoveryPlanApproved),
         /// See [`RecoveryActionStarted`].
         RecoveryActionStarted(RecoveryActionStarted),
         /// See [`RecoveryActionApplied`].
         RecoveryActionApplied(RecoveryActionApplied),
+        /// See [`RecoveryActionRecorded`].
+        RecoveryActionRecorded(RecoveryActionRecorded),
         /// See [`RecoveryPlanCompleted`].
         RecoveryPlanCompleted(RecoveryPlanCompleted),
         /// See [`RecoveryPlanRefused`].

@@ -35,7 +35,7 @@ mod state;
 pub use decide::{Decision, decide, evolve};
 pub use events::{
     QuarantineCaseEscalated, QuarantineCaseEvent, QuarantineCaseInspected, QuarantineCaseOpened,
-    QuarantineCaseResolved, QuarantineEpochAdvanced,
+    QuarantineCaseResolved, QuarantineCaseResolvedV1, QuarantineEpochAdvanced,
 };
 pub use state::{
     Case, CasePhase, Disposition, EscalationLevel, Holds, QuarantineCaseCommand,

@@ -220,6 +220,28 @@ pub(super) fn cases() -> Vec<DeterminismCase<QuarantineCase>> {
         ),
         // refused, one per code
         case(
+            "wrong_attempt",
+            opened(),
+            auto(QuarantineCaseCommand::OpenCase {
+                attempt_id: AttemptId::from_u128(0xA002),
+                reason: QuarantineReason::ProviderIdentityMismatch,
+                instance_id: Some(ProviderInstanceId::sample()),
+                holds: Holds {
+                    disk_bytes: 60 << 30,
+                    memory_bytes: Some(8 << 30),
+                    macos_guest: true,
+                },
+                evidence: vec![EventId::from_u128(0xE1)],
+            }),
+            Refused,
+        ),
+        case(
+            "already_open",
+            opened(),
+            auto(open_with(QuarantineReason::GuestIdentityRefused, true)),
+            Refused,
+        ),
+        case(
             "stale_run",
             at_epoch_two(),
             by_operator(QuarantineCaseCommand::InspectCase),

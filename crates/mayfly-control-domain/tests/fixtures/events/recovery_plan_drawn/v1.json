@@ -1,0 +1,115 @@
+{
+  "bindings": {
+    "heads": {
+      "attempt-0000000000000000000000000000a001": 4,
+      "attempt-0000000000000000000000000000a002": 5,
+      "attempt-0000000000000000000000000000a003": 6,
+      "attempt-0000000000000000000000000000a004": 7,
+      "attempt-0000000000000000000000000000a005": 8,
+      "attempt-0000000000000000000000000000a00a": 13,
+      "attempt-0000000000000000000000000000a00b": 14,
+      "attempt-0000000000000000000000000000a00c": 15,
+      "attempt-0000000000000000000000000000a00d": 16,
+      "attempt-0000000000000000000000000000a00e": 17,
+      "attempt-0000000000000000000000000000a00f": 18,
+      "attempt-0000000000000000000000000000a010": 19,
+      "attempt-0000000000000000000000000000a011": 20,
+      "attempt-0000000000000000000000000000a012": 21,
+      "hostrun-host0": 9
+    },
+    "inventory": "0000000000000000000000000000001a",
+    "github": "unreachable",
+    "epoch": 1
+  },
+  "actions": [
+    {
+      "attempt_id": "0000000000000000000000000000a001",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": "adopt"
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a002",
+      "instance_id": null,
+      "kind": "mark_lost"
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a003",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": "keep"
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a004",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": "report"
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a005",
+      "instance_id": null,
+      "kind": "ignore"
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00a",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "ownership_doubt"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00b",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "guest_identity_refused"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00c",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "jit_presumed_leaked"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00d",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "provider_identity_mismatch"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00e",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "delete_refused_repeatedly"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a00f",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "redaction_violation"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a010",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "forensic_retention"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a011",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "outcome_unprovable"
+      }
+    },
+    {
+      "attempt_id": "0000000000000000000000000000a012",
+      "instance_id": "0a:00:00:00:00:01",
+      "kind": {
+        "quarantine": "vm_vanished_externally"
+      }
+    }
+  ],
+  "expires_at": 10000
+}

@@ -31,15 +31,17 @@ const GOLDEN: &str = include_str!("../fixtures/matrix/hostrun.txt");
 fn should_define_every_pair_when_each_phase_meets_each_command() {
     // given
     let states = matrix_states();
-    let stimuli = stimuli();
     let phases: BTreeSet<usize> = states.iter().map(|(_, s)| phase_ordinal(s.phase)).collect();
-    let types: BTreeSet<&str> = stimuli.iter().map(|(_, c)| c.body.command_type()).collect();
+    let types: BTreeSet<&str> = stimuli(1)
+        .iter()
+        .map(|(_, c)| c.body.command_type())
+        .collect();
     let mut text = String::from(
         "# hostrun: every phase against every command: accepted events or the refusal code\n",
     );
     // when
     for (name, state) in &states {
-        for (stimulus, command) in &stimuli {
+        for (stimulus, command) in &stimuli(state.epoch.get()) {
             let outcome = match HostRun::decide(state, command.clone()) {
                 Ok(events) if events.is_empty() => "accepted, no event".to_owned(),
                 Ok(events) => {

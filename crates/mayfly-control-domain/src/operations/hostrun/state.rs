@@ -92,6 +92,9 @@ pub struct HostRunState {
     pub verified: bool,
     /// Safe mode, recorded across runs until a completed plan or a verified restart leaves it.
     pub safe_mode: Option<SafeMode>,
+    /// A completed plan left safe mode in this run: the daemon restarts and verifies again
+    /// before recovery completes (`formal/recovery.qnt`'s `completePlan` takes it down).
+    pub restart_required: bool,
 }
 
 impl HostRunState {
@@ -104,6 +107,7 @@ impl HostRunState {
             epoch: Epoch::new(0),
             verified: false,
             safe_mode: None,
+            restart_required: false,
         }
     }
 
@@ -140,13 +144,19 @@ pub struct RecoveryCounts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafeModeExit {
-    /// A recovery plan completed: P20 passes the plan and the `RecoveryPlanCompleted` event it
-    /// read; `None` is refused.
+    /// A recovery plan completed: P20 passes the plan, the `RecoveryPlanCompleted` event it
+    /// read (`None` is refused), the run epoch the plan was drawn under (only this run's plan
+    /// counts) and a verification of the journal taken after the plan completed. The run then
+    /// restarts before recovery completes.
     PlanCompleted {
         /// The plan.
         plan_id: PlanId,
         /// Its `RecoveryPlanCompleted` event.
         completed_ref: Option<EventId>,
+        /// The run epoch the plan was drawn under.
+        plan_epoch: Epoch,
+        /// The journal's verification after the plan completed.
+        verification: Verification,
     },
     /// A later run's start-up verification trusted the journal.
     VerifiedRestart,
@@ -169,6 +179,9 @@ pub enum HostRunCommand {
         floor: Epoch,
         /// What the start-up verification found.
         verification: Verification,
+        /// The service manager's start count says the daemon is crash-looping (P25): recorded
+        /// as safe mode in the same unit, so this run cannot leave it as a verified restart.
+        crash_loop: bool,
     },
     /// The startup recovery finished.
     CompleteRecovery {
@@ -229,6 +242,11 @@ pub enum HostRunRejection {
     EpochExhausted,
     /// The command needs the run's epoch, which is not minted yet.
     NotMinted,
+    /// The command carries an epoch above the one this run minted (I18 is two-sided once the
+    /// epoch is minted).
+    EpochNotMinted,
+    /// A plan exit names a plan drawn under another run epoch.
+    PlanOfAnotherRun,
     /// Recovery is not what the run is doing.
     NotRecovering,
     /// Recovery cannot complete in safe mode: only a plan or a verified restart leaves it.
@@ -239,7 +257,8 @@ pub enum HostRunRejection {
     PlanNotCompleted,
     /// This run's start-up verification did not trust the journal.
     JournalUnverified,
-    /// A verified restart in the run that recorded safe mode.
+    /// A verified restart in the run that recorded safe mode, or recovery completing in the run
+    /// a plan left safe mode in.
     RestartRequired,
     /// Safe mode for a rolled-back journal is left only by a completed plan.
     PlanRequired,
@@ -256,6 +275,8 @@ impl Rejection for HostRunRejection {
         "already_minted",
         "epoch_exhausted",
         "not_minted",
+        "epoch_not_minted",
+        "plan_of_another_run",
         "not_recovering",
         "in_safe_mode",
         "not_in_safe_mode",
@@ -274,6 +295,8 @@ impl Rejection for HostRunRejection {
             Self::AlreadyMinted => "already_minted",
             Self::EpochExhausted => "epoch_exhausted",
             Self::NotMinted => "not_minted",
+            Self::EpochNotMinted => "epoch_not_minted",
+            Self::PlanOfAnotherRun => "plan_of_another_run",
             Self::NotRecovering => "not_recovering",
             Self::InSafeMode => "in_safe_mode",
             Self::NotInSafeMode => "not_in_safe_mode",

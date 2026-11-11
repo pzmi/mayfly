@@ -30,6 +30,16 @@ pub fn mint(floor: u64, verification: Verification) -> HostRunCommand {
     HostRunCommand::MintEpoch {
         floor: Epoch::new(floor),
         verification,
+        crash_loop: false,
+    }
+}
+
+/// A mint whose service manager reports a crash loop.
+pub fn mint_looping(floor: u64) -> HostRunCommand {
+    HostRunCommand::MintEpoch {
+        floor: Epoch::new(floor),
+        verification: Verification::Verified,
+        crash_loop: true,
     }
 }
 
@@ -43,11 +53,15 @@ pub fn enter(reason: SafeModeReason) -> HostRunCommand {
     HostRunCommand::EnterSafeMode { reason }
 }
 
-pub fn by_plan(completed: bool) -> HostRunCommand {
+/// A plan exit: whether the plan completed, the epoch it was drawn under and the journal's
+/// verification after it.
+pub fn by_plan(completed: bool, plan_epoch: u64, verification: Verification) -> HostRunCommand {
     HostRunCommand::LeaveSafeMode {
         exit: SafeModeExit::PlanCompleted {
             plan_id: PlanId::from_u128(0xB1),
             completed_ref: completed.then(|| EventId::from_u128(0xE1)),
+            plan_epoch: Epoch::new(plan_epoch),
+            verification,
         },
     }
 }
@@ -139,6 +153,14 @@ pub fn matrix_states() -> Vec<(&'static str, HostRunState)> {
             with(operating(), vec![at(1, HostRunCommand::BeginShutdown)]),
         ),
         (
+            "recovering/left_by_plan",
+            reach([
+                at(0, start()),
+                at(0, mint(5, Verification::Verified)),
+                at(6, by_plan(true, 6, Verification::Verified)),
+            ]),
+        ),
+        (
             "ended",
             with(
                 operating(),
@@ -152,23 +174,46 @@ pub fn matrix_states() -> Vec<(&'static str, HostRunState)> {
 }
 
 /// One stimulus of every command type (and the variants that decide differently), under the
-/// highest epoch any matrix state minted.
-pub fn stimuli() -> Vec<(&'static str, Step)> {
+/// epoch the state minted (`epoch`), plus an older and a newer one.
+pub fn stimuli(epoch: u64) -> Vec<(&'static str, Step)> {
+    let e = epoch;
     vec![
-        ("start_run", at(2, start())),
-        ("mint_verified", at(2, mint(0, Verification::Verified))),
-        ("mint_floor_above", at(2, mint(9, Verification::Verified))),
+        ("start_run", at(e, start())),
+        ("mint_verified", at(e, mint(0, Verification::Verified))),
+        (
+            "mint_floor_above",
+            at(e, mint(e + 9, Verification::Verified)),
+        ),
         (
             "mint_unknown_kind",
-            at(2, mint(0, Verification::UnknownEventKind)),
+            at(e, mint(0, Verification::UnknownEventKind)),
         ),
-        ("complete_recovery", at(2, complete())),
-        ("enter_crash_loop", at(2, enter(SafeModeReason::CrashLoop))),
-        ("leave_by_plan", at(2, by_plan(true))),
-        ("leave_by_plan_unconfirmed", at(2, by_plan(false))),
-        ("leave_by_restart", at(2, by_restart())),
-        ("begin_shutdown", at(2, HostRunCommand::BeginShutdown)),
-        ("end_run", at(2, HostRunCommand::EndRun)),
-        ("stale_run", at(0, HostRunCommand::BeginShutdown)),
+        ("mint_crash_loop", at(e, mint_looping(0))),
+        ("complete_recovery", at(e, complete())),
+        ("enter_crash_loop", at(e, enter(SafeModeReason::CrashLoop))),
+        (
+            "leave_by_plan",
+            at(e, by_plan(true, e, Verification::Verified)),
+        ),
+        (
+            "leave_by_plan_unconfirmed",
+            at(e, by_plan(false, e, Verification::Verified)),
+        ),
+        (
+            "leave_by_plan_of_another_run",
+            at(e, by_plan(true, e + 1, Verification::Verified)),
+        ),
+        (
+            "leave_by_plan_unverified",
+            at(e, by_plan(true, e, Verification::StructureFailed)),
+        ),
+        ("leave_by_restart", at(e, by_restart())),
+        ("begin_shutdown", at(e, HostRunCommand::BeginShutdown)),
+        ("end_run", at(e, HostRunCommand::EndRun)),
+        (
+            "stale_run",
+            at(e.saturating_sub(1), HostRunCommand::BeginShutdown),
+        ),
+        ("newer_epoch", at(e + 1, HostRunCommand::BeginShutdown)),
     ]
 }

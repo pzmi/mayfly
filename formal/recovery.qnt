@@ -32,6 +32,11 @@ module recovery {
   /// An `mf-*` name no attempt records (managed-looking, I04).
   pure val STRAY = 3
   pure val NAMES = Set(BASE, 1, 2, STRAY)
+  /// The journal streams a plan binds: `HOSTRUN` and each attempt's (stream `a` is attempt `a`'s).
+  pure val HOSTRUN = 0
+  pure val STREAMS = Set(HOSTRUN, 1, 2)
+  /// A plan action whose own write has not run (revisions start at 0).
+  pure val UNWRITTEN = -1
   /// Provider instance ids (the random MAC of ADR 0026).
   pure val INSTANCES = Set(1, 2)
   /// GitHub scale-set messages.
@@ -119,8 +124,9 @@ module recovery {
   type Journal = {
     // the highest minted epoch (`EpochMinted` of `HostRun`)
     epoch: int,
-    // changes to the streams a plan binds (attempts, epochs): the heads digest
-    version: int,
+    // the revision of each stream a plan binds (`HostRun` and the attempts): the heads, per
+    // stream, as `RecoveryPlan` binds them (KER-10F)
+    heads: int -> int,
     recs: int -> Record,
     // `HostRun.safe_mode`
     safe: bool,
@@ -152,11 +158,15 @@ module recovery {
   type Plan = {
     // "none" | "proposed" | "approved" | "refused" | "completed"
     phase: str,
-    jv: int,
+    // the bound heads, advanced only by the plan's own writes
+    heads: int -> int,
     ep: int,
     inv: int -> Vm,
     actions: int -> str,
     intent: Set[int],
+    // the plan's own write of action `a` (its attempt command's unit): the stream's revision
+    // before it, UNWRITTEN until it ran
+    wrote: int -> int,
     done: Set[int],
   }
 
@@ -188,6 +198,9 @@ module recovery {
     planUnbound: bool,
     outcomeWithoutIntent: bool,
     ackWithoutRecord: bool,
+    // the heads the plan was drawn from, advanced by its own writes only: what a bound plan
+    // must still see (KER-10F)
+    ownHeads: int -> int,
   }
 
   var j: Journal
@@ -209,6 +222,9 @@ module recovery {
   pure def terminal(phase: str): bool = Set(DELETED, LOST).contains(phase)
 
   pure def max2(x: int, y: int): int = if (x > y) x else y
+
+  /// One append to stream `s`.
+  pure def bump(heads: int -> int, s: int): int -> int = heads.set(s, heads.get(s) + 1)
 
   /// A VM that should be booted and idle with no runner: kept only under a live shim (then
   /// verified again before it is used), else retired.
@@ -367,7 +383,7 @@ module recovery {
   val bound = and {
     daemon.phase == INVENTORIED,
     daemon.invOk,
-    j.version == plan.jv,
+    j.heads == plan.heads,
     daemon.epoch == plan.ep,
     daemon.inv == plan.inv,
   }
@@ -390,7 +406,8 @@ module recovery {
   action initWith(r1: Record, r2: Record, w1: Vm, w2: Vm, stray: Vm, fl: int, verifies: bool,
                   frames: Set[Frame]): bool = {
     val journal = {
-      epoch: 1, version: 0, recs: Map(1 -> r1, 2 -> r2), safe: false, verifies: verifies,
+      epoch: 1, heads: STREAMS.mapBy(_ => 0), recs: Map(1 -> r1, 2 -> r2), safe: false,
+      verifies: verifies,
       msgs: Set(),
     }
     all {
@@ -403,8 +420,9 @@ module recovery {
       daemon' = { phase: DOWN, epoch: NONE, safe: false, invOk: false, inv: EMPTY_INV,
                strayDone: false },
       dp' = { session: fl, safe: false },
-      plan' = { phase: "none", jv: 0, ep: 0, inv: EMPTY_INV, actions: ATTEMPTS.mapBy(_ => KEEP),
-                intent: Set(), done: Set() },
+      plan' = { phase: "none", heads: STREAMS.mapBy(_ => 0), ep: 0, inv: EMPTY_INV,
+                actions: ATTEMPTS.mapBy(_ => KEEP), intent: Set(), wrote: ATTEMPTS.mapBy(_ => UNWRITTEN),
+                done: Set() },
       gh' = { pending: Set(), acked: Set() },
       g' = {
         lastKind: "init", progress: 0, lastSession: fl, sessionNotIncreasing: false,
@@ -414,7 +432,7 @@ module recovery {
         busyRetiredWhileRunning: false,
         unknownClearedWithoutObservation: false, inconsistentResolution: false,
         absenceFromIncomplete: false, admittedOnIncomplete: false, planUnbound: false,
-        outcomeWithoutIntent: false, ackWithoutRecord: false,
+        outcomeWithoutIntent: false, ackWithoutRecord: false, ownHeads: STREAMS.mapBy(_ => 0),
       },
     }
   }
@@ -487,7 +505,7 @@ module recovery {
     val e = max2(j.epoch, floor) + 1
     all {
       daemon.phase == VERIFIED,
-      commit("pipeline", { ...j, epoch: e, version: j.version + 1 },
+      commit("pipeline", { ...j, epoch: e, heads: bump(j.heads, HOSTRUN) },
         { ...daemon, phase: MINTED, epoch: e }, g),
     }
   }
@@ -541,7 +559,7 @@ module recovery {
       not(daemon.safe),
       r.seen != daemon.epoch,
       commit(if (d == WAIT) "env" else "observation",
-        { ...j, recs: j.recs.set(a, r2), version: if (r2 == r) j.version else j.version + 1 },
+        { ...j, recs: j.recs.set(a, r2), heads: if (r2 == r) j.heads else bump(j.heads, a) },
         daemon,
         {
           ...g,
@@ -614,7 +632,7 @@ module recovery {
       d != NO_DIRECTIVE,
       j' = { ...j, recs: j.recs.set(a, { ...r, pending: d, unknown: true,
                                          phase: if (d == DELETE_VM) DELETING else r.phase }),
-             version: j.version + 1 },
+             heads: bump(j.heads, a) },
       backup' = backup,
       floor' = floor,
       world' = world,
@@ -702,7 +720,7 @@ module recovery {
       daemon.phase == OPERATING,
       daemon.invOk,
       r.unknown,
-      commit("observation", { ...j, recs: j.recs.set(a, r2), version: j.version + 1 }, daemon,
+      commit("observation", { ...j, recs: j.recs.set(a, r2), heads: bump(j.heads, a) }, daemon,
         { ...g, inconsistentResolution: g.inconsistentResolution or not(consistent(r, r2, vm)),
           absenceFromIncomplete: g.absenceFromIncomplete or not(daemon.invOk) }),
     }
@@ -754,7 +772,8 @@ module recovery {
 
   // ---- safe mode: the recovery plan (I31) ---------------------------------------------------
 
-  /// `mayfly recover --dry-run`: a plan bound to the journal heads, the inventory and the epoch.
+  /// `mayfly recover --dry-run`: a plan bound to the journal heads (per stream), the inventory
+  /// and the epoch.
   action proposePlan = all {
     daemon.safe,
     daemon.phase == INVENTORIED,
@@ -762,12 +781,13 @@ module recovery {
     Set("none", "refused").contains(plan.phase),
     j' = j, backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
     plan' = {
-      phase: "proposed", jv: j.version, ep: daemon.epoch, inv: daemon.inv,
+      phase: "proposed", heads: j.heads, ep: daemon.epoch, inv: daemon.inv,
       actions: ATTEMPTS.mapBy(a => classify(true, j.recs.get(a), daemon.inv.get(a), true, "unreachable")),
-      intent: Set(), done: Set(),
+      intent: Set(), wrote: ATTEMPTS.mapBy(_ => UNWRITTEN), done: Set(),
     },
     gh' = gh,
     g' = { ...ghostAfter(g, "plan", j, j),
+           ownHeads: j.heads,
            destructiveInSafe: g.destructiveInSafe
              or ATTEMPTS.exists(a => destructive(classify(true, j.recs.get(a), daemon.inv.get(a),
                                                           true, "unreachable"))) },
@@ -782,7 +802,11 @@ module recovery {
     g' = ghostAfter(g, "plan", j, j),
   }
 
-  /// The intent of one action, recorded on the plan's stream before the action.
+  /// Whether the journal still shows exactly the drawn heads advanced by the plan's own writes.
+  val ownBound = j.heads == g.ownHeads
+
+  /// The intent of one action, recorded on the plan's stream before the action, only while
+  /// bound.
   action planIntentWith(a: int): bool = all {
     plan.phase == "approved",
     not(plan.intent.contains(a)),
@@ -790,31 +814,69 @@ module recovery {
     j' = j, backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
     plan' = { ...plan, intent: plan.intent.union(Set(a)) },
     gh' = gh,
-    g' = { ...ghostAfter(g, "plan", j, j), planUnbound: g.planUnbound or not(bound) },
+    g' = { ...ghostAfter(g, "plan", j, j), planUnbound: g.planUnbound or not(ownBound) },
   }
 
-  /// The action itself (an ordinary command on the attempt), then its outcome on the plan.
-  action planOutcomeWith(a: int): bool = {
+  /// The action itself: an ordinary command on attempt `a`, one unit on its stream that reads
+  /// every bound head at its bound revision (ADR 0041), so it is refused (disabled here) if any
+  /// stream moved since the plan last recorded them. The plan remembers its own write: the
+  /// stream's revision before it.
+  action planActWith(a: int): bool = {
     val r = j.recs.get(a)
     val d = plan.actions.get(a)
     val r2 = apply(r, d, plan.inv.get(a), daemon.epoch)
-    val j2 = { ...j, recs: j.recs.set(a, r2), version: j.version + 1 }
+    val j2 = { ...j, recs: j.recs.set(a, r2), heads: bump(j.heads, a) }
     all {
       plan.phase == "approved",
-      not(plan.done.contains(a)),
       plan.intent.contains(a),
-      bound,
+      plan.wrote.get(a) == UNWRITTEN,
+      j.heads == plan.heads,
+      daemon.epoch == plan.ep,
       j' = j2, backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
-      plan' = { ...plan, done: plan.done.union(Set(a)), jv: j2.version },
+      plan' = { ...plan, wrote: plan.wrote.set(a, j.heads.get(a)) },
       gh' = gh,
       g' = { ...ghostAfter(g, "observation", j, j2),
-             planUnbound: g.planUnbound or not(bound),
+             ownHeads: bump(g.ownHeads, a),
+             planUnbound: g.planUnbound or not(ownBound),
              outcomeWithoutIntent: g.outcomeWithoutIntent or not(plan.intent.contains(a)),
              inconsistentResolution: g.inconsistentResolution
                or not(consistent(r, r2, plan.inv.get(a))),
              destructiveInSafe: g.destructiveInSafe or destructive(d),
              quarantinedDeleted: g.quarantinedDeleted or notKept(r, d) },
     }
+  }
+
+  /// The outcome, recorded on the plan's stream after its own write: the plan advances only
+  /// that stream's bound head, from the revision before the write to the one after; a head that
+  /// was not where the plan bound it, or any other stream that moved, leaves the plan unbound,
+  /// and it is refused rather than applied further (I31, F45; KER-10F).
+  action planOutcomeWith(a: int): bool = {
+    val before = plan.wrote.get(a)
+    all {
+      plan.phase == "approved",
+      before != UNWRITTEN,
+      not(plan.done.contains(a)),
+      j' = j, backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
+      plan' = { ...plan, done: plan.done.union(Set(a)),
+                heads: if (plan.heads.get(a) == before) plan.heads.set(a, before + 1) else plan.heads,
+                phase: if (plan.heads.get(a) == before) plan.phase else "refused" },
+      gh' = gh,
+      g' = { ...ghostAfter(g, "plan", j, j),
+             outcomeWithoutIntent: g.outcomeWithoutIntent or not(plan.intent.contains(a)) },
+    }
+  }
+
+  /// The outcome as KER-10 recorded it, absorbing whatever heads the caller reported: a foreign
+  /// write between an intent and the outcome is taken into the binding. In no step relation:
+  /// the negative control of `foreignWriteAbsorbedViolatesTest`.
+  action planOutcomeAbsorbingWith(a: int): bool = all {
+    plan.phase == "approved",
+    plan.wrote.get(a) != UNWRITTEN,
+    not(plan.done.contains(a)),
+    j' = j, backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
+    plan' = { ...plan, done: plan.done.union(Set(a)), heads: j.heads },
+    gh' = gh,
+    g' = ghostAfter(g, "plan", j, j),
   }
 
   /// The world, the journal or the epoch moved since the plan was drawn: refused.
@@ -839,13 +901,24 @@ module recovery {
     dp' = dp,
     plan' = { ...plan, phase: "completed" },
     gh' = gh,
-    g' = { ...ghostAfter(g, "plan", j, j), planUnbound: g.planUnbound or not(bound) },
+    g' = { ...ghostAfter(g, "plan", j, j), planUnbound: g.planUnbound or not(ownBound) },
+  }
+
+  /// Another writer appends to attempt `a`'s stream while the host is in safe mode (the inbox
+  /// recording an observation, a delayed reactor): the record is unchanged, its head moves.
+  action foreignWriteWith(a: int): bool = all {
+    daemon.safe,
+    daemon.phase == INVENTORIED,
+    j' = { ...j, heads: bump(j.heads, a) },
+    backup' = backup, floor' = floor, world' = world, net' = net, daemon' = daemon, dp' = dp,
+    plan' = plan, gh' = gh,
+    g' = ghostAfter(g, "env", j, j),
   }
 
   action planStep = {
     nondet a = ATTEMPTS.oneOf()
-    any { proposePlan, approvePlan, planIntentWith(a), planOutcomeWith(a), refusePlan,
-          completePlan }
+    any { proposePlan, approvePlan, planIntentWith(a), planActWith(a), planOutcomeWith(a),
+          refusePlan, completePlan, foreignWriteWith(a) }
   }
 
   // ---- faults -------------------------------------------------------------------------------
@@ -1271,8 +1344,8 @@ module recovery {
       .then(proposePlan)
       .expect(plan.actions.get(1) == ADOPT and plan.actions.get(2) == QUARANTINE)
       .then(approvePlan)
-      .then(planIntentWith(1)).then(planOutcomeWith(1))
-      .then(planIntentWith(2)).then(planOutcomeWith(2))
+      .then(planIntentWith(1)).then(planActWith(1)).then(planOutcomeWith(1))
+      .then(planIntentWith(2)).then(planActWith(2)).then(planOutcomeWith(2))
       .then(completePlan)
       .expect(not(j.safe) and daemon.phase == DOWN and j.recs.get(2).phase == QUARANTINED)
       .then(startTo(true)).expect(not(daemon.safe))
@@ -1295,8 +1368,8 @@ module recovery {
     initWith(recWith(BUSY, 1), recWith(DELETED, 2), running(1), R_ABSENT, R_ABSENT, 1, false, Set())
       .then(startTo(true)).expect(daemon.safe)
       .then(proposePlan).then(approvePlan)
-      .then(planIntentWith(1)).then(planOutcomeWith(1))
-      .then(planIntentWith(2)).then(planOutcomeWith(2))
+      .then(planIntentWith(1)).then(planActWith(1)).then(planOutcomeWith(1))
+      .then(planIntentWith(2)).then(planActWith(2)).then(planOutcomeWith(2))
       .expect(plan.phase == "approved" and plan.done == ATTEMPTS and not(j.verifies))
   }
 
@@ -1307,6 +1380,52 @@ module recovery {
       .then(worldChangeWith(1, "vanish", 1)).then(inventoryWith(true))
       .expect(not(bound))
       .then(refusePlan).expect(plan.phase == "refused" and allInvariants)
+  }
+
+  // A foreign write to another plan stream between an action's intent and its own write: the
+  // action's unit reads the moved head and is refused, and so is the plan (I31, KER-10F).
+  run foreignWriteBeforeTheActionRefusesTest = {
+    initWith(recWith(BUSY, 1), recWith(CLONING, 2), running(1), running(2), R_ABSENT, 2, true, Set())
+      .then(startTo(true)).then(proposePlan).then(approvePlan)
+      .then(planIntentWith(1)).then(foreignWriteWith(2))
+      .expect(not(bound) and allInvariants)
+      // the action's unit reads a moved head: the store refuses it (`planActWith` disabled)
+      .expect(j.heads != plan.heads)
+      .then(refusePlan).expect(plan.phase == "refused" and allInvariants)
+  }
+
+  // A foreign write between an action's own write and its outcome: the outcome advances only
+  // the plan's own head, the plan is unbound and refused before the next action.
+  run foreignWriteBeforeTheOutcomeRefusesTest = {
+    initWith(recWith(BUSY, 1), recWith(CLONING, 2), running(1), running(2), R_ABSENT, 2, true, Set())
+      .then(startTo(true)).then(proposePlan).then(approvePlan)
+      .then(planIntentWith(1)).then(planActWith(1)).then(foreignWriteWith(2))
+      .then(planOutcomeWith(1))
+      .expect(plan.heads.get(1) == j.heads.get(1) and not(bound) and allInvariants)
+      // and no further intent is recorded (`planIntentWith` disabled)
+      .then(refusePlan).expect(plan.phase == "refused" and allInvariants)
+  }
+
+  // A foreign write to the action's own stream between its write and its outcome: the head is
+  // not where the plan's write left it, and the outcome refuses the plan.
+  run foreignWriteOnTheOwnStreamRefusesTest = {
+    initWith(recWith(BUSY, 1), recWith(CLONING, 2), running(1), running(2), R_ABSENT, 2, true, Set())
+      .then(startTo(true)).then(proposePlan).then(approvePlan)
+      .then(planIntentWith(1)).then(planActWith(1)).then(foreignWriteWith(1))
+      .then(planOutcomeWith(1))
+      .expect(not(bound) and allInvariants)
+  }
+
+  // Negative control: KER-10's outcome took the reported heads into the binding, so the same
+  // foreign write is absorbed, the next intent is accepted on a moved world and i31 fails.
+  run foreignWriteAbsorbedViolatesTest = {
+    initWith(recWith(BUSY, 1), recWith(CLONING, 2), running(1), running(2), R_ABSENT, 2, true, Set())
+      .then(startTo(true)).then(proposePlan).then(approvePlan)
+      .then(planIntentWith(1)).then(planActWith(1)).then(foreignWriteWith(2))
+      .then(planOutcomeAbsorbingWith(1))
+      .expect(bound)
+      .then(planIntentWith(2))
+      .expect(not(i31PlanBound))
   }
 
   // A message recorded, then a crash before its ack: redelivered and acked from its record;

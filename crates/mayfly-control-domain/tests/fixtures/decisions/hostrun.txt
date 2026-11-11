@@ -2,6 +2,7 @@
 code already_minted
 code already_shutting_down
 code epoch_exhausted
+code epoch_not_minted
 code in_safe_mode
 code journal_unverified
 code no_run
@@ -10,6 +11,7 @@ code not_minted
 code not_recovering
 code not_shutting_down
 code plan_not_completed
+code plan_of_another_run
 code plan_required
 code restart_required
 code stale_run
@@ -19,11 +21,15 @@ case begin_shutdown accepted
   shutdown_started/v1 {}
 case complete_recovery accepted
   recovery_completed/v1 {"counts":{"adopted":2,"retired":1,"quarantined":1,"lost":0,"reported":1}}
+case crash_loop_enters_safe_mode accepted
+  epoch_minted/v1 {"epoch":1,"floor":0,"verified":true}
+  safe_mode_entered/v1 {"reason":"crash_loop","run_no":1,"at":1000}
 case end_run accepted
   run_ended/v1 {"run_no":1}
 case enter_safe_mode accepted
   safe_mode_entered/v1 {"reason":"crash_loop","run_no":1,"at":1000}
 case epoch_exhausted refused epoch_exhausted
+case epoch_not_minted refused epoch_not_minted
 case floor_above_journal_enters_safe_mode accepted
   epoch_minted/v1 {"epoch":6,"floor":5,"verified":true}
   safe_mode_entered/v1 {"reason":"epoch_below_floor","run_no":1,"at":1000}
@@ -40,7 +46,9 @@ case not_in_safe_mode refused not_in_safe_mode
 case not_minted refused not_minted
 case not_recovering refused not_recovering
 case not_shutting_down refused not_shutting_down
+case plan_exit_requires_restart refused restart_required
 case plan_not_completed refused plan_not_completed
+case plan_of_another_run refused plan_of_another_run
 case plan_required refused plan_required
 case restart_required refused restart_required
 case same_reason_records_nothing accepted

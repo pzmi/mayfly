@@ -2,12 +2,12 @@
 
 use mayfly_control_domain::attempt::QuarantineReason;
 use mayfly_control_domain::operations::quarantine::{
-    CasePhase, Disposition, EscalationLevel, QuarantineCaseCommand,
+    CasePhase, Disposition, EscalationLevel, QuarantineCaseCommand, QuarantineCaseEvent,
 };
 
 use super::support::{
-    ACTORS, OPERATOR, apply, at, auto, by_operator, escalate, open, open_with, outcome, reach,
-    resolve,
+    ACTORS, OPERATOR, apply, at, auto, by_operator, escalate, open, open_for, open_with, outcome,
+    reach, resolve,
 };
 
 #[test]
@@ -127,5 +127,58 @@ fn should_open_a_new_case_when_a_resolved_attempt_is_quarantined_again() {
     assert_eq!(
         after.case.map(|c| c.reason),
         Some(QuarantineReason::GuestIdentityRefused)
+    );
+}
+
+#[test]
+fn should_record_the_proof_when_an_operator_resolves_a_delete() {
+    // given
+    let proven = reach([auto(open())]);
+    // when
+    let (_, events) = apply(
+        &proven,
+        by_operator(resolve(Disposition::DeleteWithProof, false)),
+    )
+    .unwrap_or_else(|r| panic!("{r:?}"));
+    let (_, keep) = apply(&proven, by_operator(resolve(Disposition::Keep, false)))
+        .unwrap_or_else(|r| panic!("{r:?}"));
+    // then: the instance id the later `DeleteVm` must carry is the case's recorded one
+    let recorded = proven.case.as_ref().and_then(|c| c.instance_id.clone());
+    assert!(recorded.is_some());
+    assert!(
+        matches!(
+            events.as_slice(),
+            [QuarantineCaseEvent::QuarantineCaseResolved(e)] if e.instance_id == recorded
+        ),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            keep.as_slice(),
+            [QuarantineCaseEvent::QuarantineCaseResolved(e)] if e.instance_id.is_none()
+        ),
+        "{keep:?}"
+    );
+}
+
+#[test]
+fn should_refuse_to_reopen_when_the_attempt_or_the_reason_differs() {
+    // given
+    let opened = reach([auto(open())]);
+    let resolved = reach([auto(open()), by_operator(resolve(Disposition::Keep, false))]);
+    // when
+    let outcomes = [
+        outcome(&opened, auto(open())),
+        outcome(
+            &opened,
+            auto(open_with(QuarantineReason::OwnershipDoubt, true)),
+        ),
+        outcome(&opened, auto(open_for(0xA002))),
+        outcome(&resolved, auto(open_for(0xA002))),
+    ];
+    // then
+    assert_eq!(
+        outcomes,
+        ["accepted", "already_open", "wrong_attempt", "wrong_attempt"]
     );
 }

@@ -618,8 +618,13 @@ directive: a retried clone by name, or a delete carrying the recorded instance i
 (a frame runs only in its own session, never in a safe one, a delete only on the proof's
 instance id and never on a base; a frame may stay on the link as a duplicate), `observe` (a
 complete inventory resolves an `Unknown` outcome, the only way out) and `github` (deliver,
-record, ack). In safe mode `proposePlan` draws a plan bound to the journal heads, the
-inventory and the epoch, an operator approves it, each action's intent precedes its outcome,
+record, ack). In safe mode `proposePlan` draws a plan bound to the journal's heads per stream (`j.heads`:
+the host run's and each attempt's revision), the inventory and the epoch, an operator approves
+it, and each action is an intent (`planIntentWith`, only while bound), the attempt command's own
+unit (`planActWith`, which reads every bound head and is disabled once any moved: ADR 0041) and
+the outcome (`planOutcomeWith`, which advances only the action's own head and only from where the
+plan bound it, KER-10F); `foreignWriteWith` is another writer appending to an attempt's stream
+in safe mode,
 the plan is refused when the world moved (`refusePlan`), and `completePlan` leaves safe mode for
 a verified restart. `restore` puts the pre-migration backup back while the daemon is down (ADR
 0043) and `worldChange` makes a VM vanish, be replaced under its name, stop or lose its shim.
@@ -688,7 +693,9 @@ expresses (`busyAdoptedTest`, `unreachableIsNotAbsentTest`, `stoppedBusyRetiresW
 `listeningAbsentRunnerRetiresTest`, `reservedVerifyingFinishedTest`), and the crashes and faults around them
 (`staleFrameNeverExecutesTest`, `replacedVmNeverDeletedTest`, `crashBeforeFloorRaisedTest`,
 `rolledBackJournalIsSafeModeTest`, `restoredBackupIsSafeModeTest`, `unknownKindIsSafeModeTest`,
-`planRefusedWhenTheWorldMovesTest`, `recordBeforeAckTest`, `safeSessionExecutesNothingTest`).
+`planRefusedWhenTheWorldMovesTest`, `foreignWriteBeforeTheActionRefusesTest`,
+`foreignWriteBeforeTheOutcomeRefusesTest`, `foreignWriteOnTheOwnStreamRefusesTest`, the negative
+control `foreignWriteAbsorbedViolatesTest`, `recordBeforeAckTest`, `safeSessionExecutesNothingTest`).
 Negative controls tried: reading an incomplete inventory as the table's input (dropping
 `classify`'s first row) makes simulation of `restartStep` report `[violation]` of
 `i25IncompleteNeverAbsence`; retiring a Busy attempt whenever GitHub shows its runner absent
@@ -718,11 +725,21 @@ without adding a model change; what they decide beyond it is pinned by Rust test
   The model has no upgrade step that would make an unknown kind known, so this exit has no
   model counterpart to check.
 - The plan's sequential order (the model applies actions in any order), its expiry, a failed
-  action that stops it resumably, the operator-only single approval, the GitHub binding (the
-  model binds journal version, epoch and inventory only), and the heads binding advanced by
-  each outcome's own `heads_after` (the model's `jv: j2.version`, taken atomically there; here
-  the use case reports the heads after the action, so a write by another stream between the
-  action and the outcome record is absorbed into the binding rather than refusing the plan).
+  action that stops it resumably, the operator-only single approval and the GitHub binding (the
+  model binds the heads, the epoch and the inventory). KER-10's outcome took the heads the caller
+  reported into the binding, absorbing another writer's append; KER-10F modelled the action as
+  intent, own write and outcome with a foreign writer, and the Rust outcome now carries the
+  plan's own write only (`foreignWriteBeforeTheActionRefusesTest`,
+  `foreignWriteBeforeTheOutcomeRefusesTest`, `foreignWriteOnTheOwnStreamRefusesTest`; the
+  absorbing outcome, `planOutcomeAbsorbingWith`, fails `i31PlanBound` in
+  `foreignWriteAbsorbedViolatesTest`).
+- The crash loop (P25) and the verified-restart exit that it must block (KER-10F M2): the model
+  has neither a crash-loop input nor a restart exit from safe mode, so `MintEpoch.crash_loop`
+  is pinned by `tests/hostrun/rules.rs::should_refuse_a_verified_restart_when_the_run_is_crash_looping`
+  and the property `should_leave_safe_mode_only_by_its_two_exits_when_commands_are_random` only.
+  The plan exit agrees with the model: a completed plan leaves safe mode and the daemon restarts
+  and verifies again before recovery completes (`completePlan` takes it down;
+  `tests/hostrun/rules.rs::should_require_a_restart_when_a_completed_plan_left_safe_mode`).
 - `QuarantineCase` entirely: opening, inspection, escalation and the operator's resolution
   (`tests/quarantine/`). The model's `quarantineNeverDeleted` covers recovery's side only.
 - The mode precedence (`tests/mode.rs`, an exhaustive table).

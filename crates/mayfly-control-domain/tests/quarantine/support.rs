@@ -55,6 +55,26 @@ pub fn open_with(reason: QuarantineReason, proven: bool) -> QuarantineCaseComman
     }
 }
 
+/// The opening of another attempt's case.
+pub fn open_for(attempt: u128) -> QuarantineCaseCommand {
+    match open() {
+        QuarantineCaseCommand::OpenCase {
+            reason,
+            instance_id,
+            holds,
+            evidence,
+            ..
+        } => QuarantineCaseCommand::OpenCase {
+            attempt_id: AttemptId::from_u128(attempt),
+            reason,
+            instance_id,
+            holds,
+            evidence,
+        },
+        other => other,
+    }
+}
+
 pub fn open() -> QuarantineCaseCommand {
     open_with(QuarantineReason::ProviderIdentityMismatch, true)
 }
@@ -151,6 +171,11 @@ pub fn matrix_states() -> Vec<(&'static str, QuarantineCaseState)> {
 pub fn stimuli() -> Vec<(String, Step)> {
     let bodies: Vec<(&str, QuarantineCaseCommand)> = vec![
         ("open", open()),
+        (
+            "open_other_reason",
+            open_with(QuarantineReason::GuestIdentityRefused, true),
+        ),
+        ("open_other_attempt", open_for(0xA002)),
         (
             "open_vanished",
             open_with(QuarantineReason::VmVanishedExternally, true),

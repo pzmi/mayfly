@@ -22,7 +22,8 @@ pub type Decision = Result<Vec<HostRunEvent>, HostRunRejection>;
 /// `StartRun` and `MintEpoch` are the commands of a run that has no epoch yet: they are fenced
 /// by I17 instead (the minted epoch is above both the journal's and the floor; a second daemon
 /// on the same state is kept out by the state directory's lock). Every other command carries
-/// the run's minted epoch, and an older one is refused (I18,
+/// the run's minted epoch: an older one is refused, and once this run minted, so is a newer one
+/// it never minted (I18,
 /// `tests/hostrun/rules.rs::should_refuse_an_older_run_epoch_when_a_newer_one_was_minted`).
 ///
 /// # Errors
@@ -45,12 +46,20 @@ pub fn decide(state: &HostRunState, command: Command<HostRunCommand>) -> Decisio
     if fenced && run_epoch < state.epoch {
         return Err(HostRunRejection::StaleRun);
     }
+    let minted = match state.phase {
+        RunPhase::Recovering | RunPhase::Operating | RunPhase::ShuttingDown => true,
+        RunPhase::NotStarted | RunPhase::Starting | RunPhase::Ended => false,
+    };
+    if fenced && minted && run_epoch > state.epoch {
+        return Err(HostRunRejection::EpochNotMinted);
+    }
     match body {
         HostRunCommand::StartRun { boot_id, version } => Ok(decide_start(state, boot_id, version)),
         HostRunCommand::MintEpoch {
             floor,
             verification,
-        } => decide_mint(state, floor, verification, issued_at),
+            crash_loop,
+        } => decide_mint(state, floor, verification, crash_loop, issued_at),
         HostRunCommand::CompleteRecovery { counts } => decide_complete(state, counts),
         HostRunCommand::EnterSafeMode { reason } => decide_enter(state, reason, issued_at),
         HostRunCommand::LeaveSafeMode { exit } => decide_leave(state, exit),
@@ -99,7 +108,9 @@ fn decide_start(state: &HostRunState, boot_id: String, version: String) -> Vec<H
 
 /// I17: the epoch is one above the higher of the journal's and the floor, and a floor above
 /// the journal's is a rolled-back journal, recorded as safe mode in the same unit as the epoch,
-/// before anything uses it; so is a verification that does not trust the journal. Pinned by
+/// before anything uses it; so is a verification that does not trust the journal, and a crash
+/// loop the service manager reports (so a crash-looping run is never a verified restart:
+/// `tests/hostrun/rules.rs::should_refuse_a_verified_restart_when_the_run_is_crash_looping`). Pinned by
 /// `tests/hostrun/rules.rs::should_mint_above_the_journal_and_the_floor_when_a_run_starts`,
 /// `should_enter_safe_mode_when_the_floor_is_above_the_journal` and
 /// `tests/hostrun/properties.rs::should_mint_strictly_increasing_epochs_when_runs_restart`.
@@ -107,6 +118,7 @@ fn decide_mint(
     state: &HostRunState,
     floor: Epoch,
     verification: Verification,
+    crash_loop: bool,
     at: Millis,
 ) -> Decision {
     match state.phase {
@@ -119,7 +131,7 @@ fn decide_mint(
     let Some(epoch) = state.epoch.max(floor).next() else {
         return Err(HostRunRejection::EpochExhausted);
     };
-    let mut reasons = Vec::with_capacity(2);
+    let mut reasons = Vec::with_capacity(3);
     if floor > state.epoch {
         reasons.push(SafeModeReason::EpochBelowFloor);
     }
@@ -134,6 +146,9 @@ fn decide_mint(
             false
         }
     };
+    if crash_loop {
+        reasons.push(SafeModeReason::CrashLoop);
+    }
     let mut events = vec![HostRunEvent::EpochMinted(EpochMinted {
         epoch,
         floor,
@@ -152,6 +167,7 @@ fn decide_mint(
 fn decide_complete(state: &HostRunState, counts: RecoveryCounts) -> Decision {
     match state.phase {
         RunPhase::Recovering => match state.safe_mode {
+            None if state.restart_required => Err(HostRunRejection::RestartRequired),
             None => Ok(vec![HostRunEvent::RecoveryCompleted(RecoveryCompleted {
                 counts,
             })]),
@@ -184,9 +200,10 @@ fn decide_enter(state: &HostRunState, reason: SafeModeReason, at: Millis) -> Dec
     })])
 }
 
-/// Safe mode is left only by a completed plan in a run whose journal verifies, or by a later
-/// run whose start-up verification trusted the journal, and a rolled-back journal only by the
-/// plan. Pinned by `tests/hostrun/rules.rs::should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_any_exit_is_tried`
+/// Safe mode is left only by a completed plan of this run with a verification of the journal
+/// taken after it (the run then restarts, as `formal/recovery.qnt`'s `completePlan` takes the
+/// daemon down), or by a later run whose start-up verification trusted the journal and found no
+/// crash loop; a rolled-back journal only by the plan. Pinned by `tests/hostrun/rules.rs::should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_any_exit_is_tried`
 /// and `tests/hostrun/properties.rs::should_leave_safe_mode_only_by_its_two_exits_when_commands_are_random`.
 fn decide_leave(state: &HostRunState, exit: SafeModeExit) -> Decision {
     match state.phase {
@@ -201,12 +218,20 @@ fn decide_leave(state: &HostRunState, exit: SafeModeExit) -> Decision {
         SafeModeExit::PlanCompleted {
             plan_id,
             completed_ref,
+            plan_epoch,
+            verification,
         } => {
             if completed_ref.is_none() {
                 return Err(HostRunRejection::PlanNotCompleted);
             }
-            if !state.verified {
-                return Err(HostRunRejection::JournalUnverified);
+            if plan_epoch != state.epoch {
+                return Err(HostRunRejection::PlanOfAnotherRun);
+            }
+            match verification {
+                Verification::Verified => {}
+                Verification::UnknownEventKind | Verification::StructureFailed => {
+                    return Err(HostRunRejection::JournalUnverified);
+                }
             }
             Some(plan_id)
         }
@@ -234,6 +259,7 @@ pub fn evolve(mut state: HostRunState, event: &HostRunEvent) -> HostRunState {
             state.phase = RunPhase::Starting;
             state.run_no = e.run_no;
             state.verified = false;
+            state.restart_required = false;
         }
         HostRunEvent::PreviousRunEndedUnclean(_) => {}
         HostRunEvent::EpochMinted(e) => {
@@ -258,7 +284,10 @@ pub fn evolve(mut state: HostRunState, event: &HostRunEvent) -> HostRunState {
                 },
             });
         }
-        HostRunEvent::SafeModeLeft(_) => state.safe_mode = None,
+        HostRunEvent::SafeModeLeft(e) => {
+            state.safe_mode = None;
+            state.restart_required = e.plan_id.is_some();
+        }
         HostRunEvent::ShutdownStarted(_) => state.phase = RunPhase::ShuttingDown,
         HostRunEvent::RunEnded(_) => state.phase = RunPhase::Ended,
     }

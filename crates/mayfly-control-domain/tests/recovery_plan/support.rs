@@ -1,8 +1,11 @@
 //! Paths through a recovery plan's life, driven through the public `decide` and `evolve`.
 
+use std::collections::BTreeMap;
+
 use mayfly_control_domain::operations::plan::{
-    ActionKind, ActionOutcome, Bindings, GithubBinding, PlanAction, RecoveryPlan,
+    ActionKind, ActionOutcome, Bindings, GithubBinding, OwnWrite, PlanAction, RecoveryPlan,
     RecoveryPlanCommand, RecoveryPlanEvent, RecoveryPlanRejection, RecoveryPlanState,
+    attempt_stream,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, Rejection};
 use mayfly_domain::{AttemptId, CommandId, Epoch, Millis, ProviderInstanceId, Sample, StateDigest};
@@ -33,19 +36,59 @@ pub fn digest(n: u128) -> StateDigest {
     StateDigest::from_u128(n)
 }
 
-/// The bindings the plan is drawn from, with the journal's heads at `heads`.
-pub fn bound(heads: u128) -> Bindings {
+pub fn attempt(n: u128) -> AttemptId {
+    AttemptId::from_u128(0xA000 + n)
+}
+
+/// The stream of attempt `n`.
+pub fn stream(n: u128) -> String {
+    attempt_stream(attempt(n))
+}
+
+/// The heads after the plan's first `own` writes: attempt 1's stream at 3 (4 after action 0),
+/// attempt 2's at 5 (6 after action 1), attempts 3 and 4 at 7, the host run's at 9.
+pub fn heads(own: u8) -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        (stream(1), if own >= 1 { 4 } else { 3 }),
+        (stream(2), if own >= 2 { 6 } else { 5 }),
+        (stream(3), 7),
+        (stream(4), 7),
+        ("hostrun-host0".to_owned(), 9),
+    ])
+}
+
+/// The bindings the plan is drawn from, after its first `own` writes.
+pub fn bound(own: u8) -> Bindings {
     Bindings {
-        heads: digest(heads),
+        heads: heads(own),
         inventory: digest(0x1A),
         github: GithubBinding::Unreachable,
         epoch: Epoch::new(1),
     }
 }
 
+/// `bindings` with `stream`'s head moved on by another writer.
+pub fn foreign(bindings: Bindings, stream: &str) -> Bindings {
+    let mut moved = bindings;
+    if let Some(head) = moved.heads.get_mut(stream) {
+        *head += 1;
+    }
+    moved
+}
+
+/// The plan's own write for action `index` (attempt `index + 1`).
+pub fn own_write(index: u32) -> OwnWrite {
+    let (n, before) = if index == 0 { (1, 3) } else { (2, 5) };
+    OwnWrite {
+        stream: stream(n),
+        before,
+        after: before + 1,
+    }
+}
+
 pub fn action(n: u128, kind: ActionKind, instance: bool) -> PlanAction {
     PlanAction {
-        attempt_id: AttemptId::from_u128(0xA000 + n),
+        attempt_id: attempt(n),
         instance_id: instance.then(ProviderInstanceId::sample),
         kind,
     }
@@ -53,7 +96,7 @@ pub fn action(n: u128, kind: ActionKind, instance: bool) -> PlanAction {
 
 pub fn propose(actions: Vec<PlanAction>) -> RecoveryPlanCommand {
     RecoveryPlanCommand::ProposePlan {
-        bindings: bound(0x10),
+        bindings: bound(0),
         actions,
         expires_at: Millis::new(EXPIRY),
     }
@@ -75,11 +118,15 @@ pub fn begin(index: u32, current: Bindings) -> RecoveryPlanCommand {
     RecoveryPlanCommand::BeginAction { index, current }
 }
 
-pub fn outcome(index: u32, outcome: ActionOutcome, heads: u128) -> RecoveryPlanCommand {
+/// The outcome of action `index`, with the plan's own write when it was applied.
+pub fn outcome(index: u32, outcome: ActionOutcome) -> RecoveryPlanCommand {
     RecoveryPlanCommand::RecordOutcome {
         index,
         outcome,
-        heads_after: digest(heads),
+        write: match outcome {
+            ActionOutcome::Applied => Some(own_write(index)),
+            ActionOutcome::Failed => None,
+        },
     }
 }
 
@@ -126,21 +173,21 @@ pub fn approved() -> Vec<Step> {
 
 pub fn intent() -> Vec<Step> {
     let mut path = approved();
-    path.push(auto(begin(0, bound(0x10))));
+    path.push(auto(begin(0, bound(0))));
     path
 }
 
 pub fn applied() -> Vec<Step> {
     let mut path = intent();
-    path.push(auto(outcome(0, ActionOutcome::Applied, 0x11)));
+    path.push(auto(outcome(0, ActionOutcome::Applied)));
     path
 }
 
 pub fn all_applied() -> Vec<Step> {
     let mut path = applied();
     path.extend([
-        auto(begin(1, bound(0x11))),
-        auto(outcome(1, ActionOutcome::Applied, 0x12)),
+        auto(begin(1, bound(1))),
+        auto(outcome(1, ActionOutcome::Applied)),
     ]);
     path
 }
@@ -154,7 +201,7 @@ pub fn matrix_states() -> Vec<(&'static str, RecoveryPlanState)> {
     };
     let moved = Bindings {
         inventory: digest(0x1B),
-        ..bound(0x10)
+        ..bound(0)
     };
     vec![
         ("unproposed", RecoveryPlan::initial()),
@@ -165,14 +212,11 @@ pub fn matrix_states() -> Vec<(&'static str, RecoveryPlanState)> {
         ("applying/done", reach(all_applied())),
         (
             "failed",
-            with(
-                intent(),
-                vec![auto(outcome(0, ActionOutcome::Failed, 0x11))],
-            ),
+            with(intent(), vec![auto(outcome(0, ActionOutcome::Failed))]),
         ),
         (
             "completed",
-            with(all_applied(), vec![auto(complete(bound(0x12)))]),
+            with(all_applied(), vec![auto(complete(bound(2)))]),
         ),
         ("refused", with(approved(), vec![auto(begin(0, moved))])),
         (
@@ -189,7 +233,7 @@ pub fn matrix_states() -> Vec<(&'static str, RecoveryPlanState)> {
 pub fn stimuli() -> Vec<(&'static str, Step)> {
     let moved = Bindings {
         inventory: digest(0x1B),
-        ..bound(0x10)
+        ..bound(0)
     };
     vec![
         ("propose", auto(plan())),
@@ -213,18 +257,12 @@ pub fn stimuli() -> Vec<(&'static str, Step)> {
             "approve_after_expiry",
             when(1, OPERATOR, LATER, RecoveryPlanCommand::ApprovePlan),
         ),
-        ("begin_first", auto(begin(0, bound(0x10)))),
-        ("begin_first_world_moved", auto(begin(0, moved))),
-        ("begin_second", auto(begin(1, bound(0x11)))),
-        (
-            "outcome_first",
-            auto(outcome(0, ActionOutcome::Applied, 0x11)),
-        ),
-        (
-            "outcome_second",
-            auto(outcome(1, ActionOutcome::Applied, 0x12)),
-        ),
-        ("complete_bound", auto(complete(bound(0x12)))),
+        ("begin_first", auto(begin(0, bound(0)))),
+        ("begin_first_world_moved", auto(begin(0, moved.clone()))),
+        ("begin_second", auto(begin(1, bound(1)))),
+        ("outcome_first", auto(outcome(0, ActionOutcome::Applied))),
+        ("outcome_second", auto(outcome(1, ActionOutcome::Applied))),
+        ("complete_bound", auto(complete(bound(2)))),
         ("complete_world_moved", auto(complete(moved))),
         (
             "expire_later",
@@ -234,6 +272,23 @@ pub fn stimuli() -> Vec<(&'static str, Step)> {
         (
             "stale_run",
             when(0, REPAIR, NOW, RecoveryPlanCommand::ExpirePlan),
+        ),
+        ("propose_other_epoch", when(2, REPAIR, NOW, plan())),
+        (
+            "begin_first_other_run",
+            when(2, REPAIR, NOW, begin(0, bound(0))),
+        ),
+        (
+            "outcome_first_after_foreign",
+            auto(RecoveryPlanCommand::RecordOutcome {
+                index: 0,
+                outcome: ActionOutcome::Applied,
+                write: Some(OwnWrite {
+                    before: 4,
+                    after: 5,
+                    ..own_write(0)
+                }),
+            }),
         ),
     ]
 }

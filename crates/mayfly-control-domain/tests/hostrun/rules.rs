@@ -7,8 +7,8 @@ use mayfly_control_domain::operations::hostrun::{
 use mayfly_domain::Epoch;
 
 use super::support::{
-    apply, at, by_plan, by_restart, complete, enter, mint, operating, outcome, reach, recovering,
-    start, unknown_kind, unknown_kind_restarted,
+    apply, at, by_plan, by_restart, complete, enter, mint, mint_looping, operating, outcome, reach,
+    recovering, start, unknown_kind, unknown_kind_restarted,
 };
 
 #[test]
@@ -113,10 +113,17 @@ fn should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_an
     // when
     let outcomes = [
         outcome(&same_run, at(1, by_restart())),
-        outcome(&same_run, at(1, by_plan(true))),
+        outcome(
+            &same_run,
+            at(1, by_plan(true, 1, Verification::UnknownEventKind)),
+        ),
         outcome(&crash_loop, at(1, by_restart())),
-        outcome(&crash_loop, at(1, by_plan(false))),
-        outcome(&crash_loop, at(1, by_plan(true))),
+        outcome(
+            &crash_loop,
+            at(1, by_plan(false, 1, Verification::Verified)),
+        ),
+        outcome(&crash_loop, at(1, by_plan(true, 0, Verification::Verified))),
+        outcome(&crash_loop, at(1, by_plan(true, 1, Verification::Verified))),
         outcome(&restarted, at(2, by_restart())),
         outcome(&restarted, at(2, complete())),
     ];
@@ -128,6 +135,7 @@ fn should_leave_safe_mode_only_by_a_completed_plan_or_a_verified_restart_when_an
             "journal_unverified",
             "restart_required",
             "plan_not_completed",
+            "plan_of_another_run",
             "accepted",
             "accepted",
             "in_safe_mode",
@@ -146,7 +154,7 @@ fn should_refuse_a_verified_restart_when_the_journal_was_rolled_back() {
     ]);
     // when
     let restart = outcome(&state, at(7, by_restart()));
-    let plan = apply(&state, at(7, by_plan(true)));
+    let plan = apply(&state, at(7, by_plan(true, 7, Verification::Verified)));
     // then
     assert_eq!(restart, "plan_required");
     let after = plan.unwrap_or_else(|r| panic!("{r:?}")).0;
@@ -189,4 +197,56 @@ fn should_record_the_previous_run_unclean_when_a_run_starts_over_a_live_one() {
         "{events:?}"
     );
     assert_eq!((after.phase, after.run_no), (RunPhase::Starting, 2));
+}
+
+#[test]
+fn should_require_a_restart_when_a_completed_plan_left_safe_mode() {
+    // given: `formal/recovery.qnt`'s `completePlan` takes the daemon down to verify again
+    let state = reach([
+        at(0, start()),
+        at(0, mint(5, Verification::Verified)),
+        at(6, by_plan(true, 6, Verification::Verified)),
+    ]);
+    // when
+    let same_run = outcome(&state, at(6, complete()));
+    let restarted = reach([
+        at(0, start()),
+        at(0, mint(5, Verification::Verified)),
+        at(6, by_plan(true, 6, Verification::Verified)),
+        at(6, start()),
+        at(6, mint(6, Verification::Verified)),
+    ]);
+    let next_run = outcome(&restarted, at(7, complete()));
+    // then
+    assert!(state.safe_mode.is_none());
+    assert_eq!(
+        (same_run.as_str(), next_run.as_str()),
+        ("restart_required", "accepted")
+    );
+}
+
+#[test]
+fn should_refuse_a_verified_restart_when_the_run_is_crash_looping() {
+    // given: safe mode for an unknown kind, then a restart that verifies but crash-loops
+    let mut path = unknown_kind();
+    path.extend([at(1, start()), at(1, mint_looping(1))]);
+    let looping = reach(path);
+    // when
+    let restart = outcome(&looping, at(2, by_restart()));
+    // then
+    assert_eq!(restart, "restart_required");
+    assert_eq!(
+        looping.safe_mode.map(|s| s.reason),
+        Some(SafeModeReason::CrashLoop)
+    );
+}
+
+#[test]
+fn should_refuse_an_epoch_it_never_minted_when_the_run_minted_one() {
+    // given
+    let state = reach(operating());
+    // when
+    let newer = outcome(&state, at(2, HostRunCommand::BeginShutdown));
+    // then
+    assert_eq!(newer, "epoch_not_minted");
 }

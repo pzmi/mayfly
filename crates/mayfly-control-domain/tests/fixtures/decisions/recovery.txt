@@ -4,6 +4,7 @@ code already_approved
 code already_proposed
 code closed
 code duplicate_target
+code epoch_mismatch
 code in_progress
 code no_evidence
 code no_intent
@@ -14,6 +15,8 @@ code operator_only
 code out_of_order
 code plan_expired
 code stale_run
+code unbound_target
+code wrong_write
 case actions_remaining refused actions_remaining
 case already_approved refused already_approved
 case already_proposed refused already_proposed
@@ -22,14 +25,23 @@ case approve_plan accepted
 case begin_action accepted
   recovery_action_started/v1 {"index":0}
 case closed refused closed
+case command_under_another_epoch_refuses_plan accepted
+  recovery_plan_refused/v1 {"stale":"epoch"}
 case complete_plan accepted
   recovery_plan_completed/v1 {}
 case duplicate_target refused duplicate_target
+case epoch_mismatch refused epoch_mismatch
 case expire_plan accepted
   recovery_plan_expired/v1 {}
+case foreign_write_before_own_refuses_plan accepted
+  recovery_action_recorded/v1 {"index":0,"outcome":"applied","write":{"stream":"attempt-0000000000000000000000000000a001","before":4,"after":5}}
+  recovery_plan_refused/v1 {"stale":"journal_heads"}
 case github_answer_refuses_completion accepted
   recovery_plan_refused/v1 {"stale":"github"}
 case in_progress refused in_progress
+case legacy_plan_is_refused accepted
+  recovery_plan_epoch_advanced/v1 {"epoch":1}
+  recovery_plan_refused/v1 {"stale":"journal_heads"}
 case newer_epoch_refuses_plan accepted
   recovery_plan_epoch_advanced/v1 {"epoch":2}
   recovery_plan_refused/v1 {"stale":"epoch"}
@@ -45,17 +57,19 @@ case out_of_order refused out_of_order
 case plan_expired refused plan_expired
 case propose_plan accepted
   recovery_plan_epoch_advanced/v1 {"epoch":1}
-  recovery_plan_proposed/v1 {"bindings":{"heads":"00000000000000000000000000000010","inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":"adopt"},{"attempt_id":"0000000000000000000000000000a002","instance_id":null,"kind":"mark_lost"}],"expires_at":10000}
+  recovery_plan_drawn/v1 {"bindings":{"heads":{"attempt-0000000000000000000000000000a001":3,"attempt-0000000000000000000000000000a002":5,"attempt-0000000000000000000000000000a003":7,"attempt-0000000000000000000000000000a004":7,"hostrun-host0":9},"inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":"adopt"},{"attempt_id":"0000000000000000000000000000a002","instance_id":null,"kind":"mark_lost"}],"expires_at":10000}
 case propose_quarantine_and_keep accepted
   recovery_plan_epoch_advanced/v1 {"epoch":1}
-  recovery_plan_proposed/v1 {"bindings":{"heads":"00000000000000000000000000000010","inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":{"quarantine":"ownership_doubt"}},{"attempt_id":"0000000000000000000000000000a002","instance_id":"0a:00:00:00:00:01","kind":"keep"},{"attempt_id":"0000000000000000000000000000a003","instance_id":"0a:00:00:00:00:01","kind":"report"},{"attempt_id":"0000000000000000000000000000a004","instance_id":null,"kind":"ignore"}],"expires_at":10000}
+  recovery_plan_drawn/v1 {"bindings":{"heads":{"attempt-0000000000000000000000000000a001":3,"attempt-0000000000000000000000000000a002":5,"attempt-0000000000000000000000000000a003":7,"attempt-0000000000000000000000000000a004":7,"hostrun-host0":9},"inventory":"0000000000000000000000000000001a","github":"unreachable","epoch":1},"actions":[{"attempt_id":"0000000000000000000000000000a001","instance_id":"0a:00:00:00:00:01","kind":{"quarantine":"ownership_doubt"}},{"attempt_id":"0000000000000000000000000000a002","instance_id":"0a:00:00:00:00:01","kind":"keep"},{"attempt_id":"0000000000000000000000000000a003","instance_id":"0a:00:00:00:00:01","kind":"report"},{"attempt_id":"0000000000000000000000000000a004","instance_id":null,"kind":"ignore"}],"expires_at":10000}
 case record_failed_outcome accepted
-  recovery_action_applied/v1 {"index":0,"outcome":"failed","heads_after":"00000000000000000000000000000011"}
+  recovery_action_recorded/v1 {"index":0,"outcome":"failed","write":null}
 case record_outcome accepted
-  recovery_action_applied/v1 {"index":0,"outcome":"applied","heads_after":"00000000000000000000000000000011"}
+  recovery_action_recorded/v1 {"index":0,"outcome":"applied","write":{"stream":"attempt-0000000000000000000000000000a001","before":3,"after":4}}
 case repeated_intent_resumes accepted
 case resume_after_failure accepted
   recovery_action_started/v1 {"index":0}
 case stale_run refused stale_run
+case unbound_target refused unbound_target
 case world_moved_refuses_plan accepted
   recovery_plan_refused/v1 {"stale":"inventory"}
+case wrong_write refused wrong_write

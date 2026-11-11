@@ -88,14 +88,32 @@ fn with_epoch(
     all
 }
 
-/// An open case stays the one case; a resolved one may be followed by a new case when the
-/// attempt is quarantined again. A vanished VM is not quarantined any more (ADR 0066 as amended
+/// An open case stays the one case: the same opening again records nothing, another reason is
+/// refused (`already_open`); a resolved one may be followed by a new case when the attempt is
+/// quarantined again. A stream holds one attempt's cases: another attempt id is refused
+/// (`wrong_attempt`); that the id is the stream's own is the store's addressing
+/// (`quarantine-<attempt_id>`, the CP-06 card). A vanished VM is not quarantined any more (ADR 0066 as amended
 /// 2026-11-11): the reason only decodes. Pinned by
 /// `tests/quarantine/rules.rs::should_refuse_to_open_a_case_when_the_vm_vanished`.
 fn decide_open(state: &QuarantineCaseState, opening: Opening, at: Millis) -> Decision {
+    if let Some(case) = state.case.as_ref()
+        && case.attempt_id != opening.attempt_id
+    {
+        return Err(QuarantineCaseRejection::WrongAttempt);
+    }
     match state.phase {
         CasePhase::NotOpened | CasePhase::Resolved(_) => {}
-        CasePhase::Open | CasePhase::Inspected => return Ok(vec![]),
+        CasePhase::Open | CasePhase::Inspected => {
+            let same = state
+                .case
+                .as_ref()
+                .is_some_and(|case| case.reason == opening.reason);
+            return if same {
+                Ok(vec![])
+            } else {
+                Err(QuarantineCaseRejection::AlreadyOpen)
+            };
+        }
     }
     if opening.reason == QuarantineReason::VmVanishedExternally {
         return Err(QuarantineCaseRejection::VanishedNotQuarantined);
@@ -148,8 +166,12 @@ fn decide_escalate(state: &QuarantineCaseState, level: EscalationLevel) -> Decis
     )])
 }
 
-/// Only an operator resolves a case, a delete only with the recorded instance id and a release
-/// only on a complete inventory's absence (I28, ADR 0025). Pinned by
+/// Only an operator resolves a case, a delete only with the recorded instance id, which the
+/// resolution records as the proof its `DeleteVm` must carry, and a release only on a complete
+/// inventory's absence (I28, ADR 0025). The aggregate checks that an observation id is named,
+/// not what it observed: the policy that issues the resolution (CP-06, RT-03) verifies against
+/// the stored observation that it is a complete inventory, taken after the case opened, that
+/// does not list this VM (its card's obligation). Pinned by
 /// `tests/quarantine/rules.rs::should_resolve_only_by_an_operator_when_any_actor_tries` and
 /// `tests/quarantine/properties.rs::should_never_resolve_or_act_when_no_operator_commands`.
 fn decide_resolve(
@@ -160,25 +182,25 @@ fn decide_resolve(
 ) -> Decision {
     open(state.phase)?;
     let operator_uid = operator(actor)?;
-    let absence = match disposition {
+    let (absence, instance_id) = match disposition {
         Disposition::DeleteWithProof => {
-            let proven = state.case.as_ref().is_some_and(|c| c.instance_id.is_some());
-            if !proven {
-                return Err(QuarantineCaseRejection::NoProof);
+            match state.case.as_ref().and_then(|c| c.instance_id.clone()) {
+                Some(instance_id) => (None, Some(instance_id)),
+                None => return Err(QuarantineCaseRejection::NoProof),
             }
-            None
         }
         Disposition::ReleasedObservedAbsent => match absence {
-            Some(observation) => Some(observation),
+            Some(observation) => (Some(observation), None),
             None => return Err(QuarantineCaseRejection::AbsenceNotObserved),
         },
-        Disposition::Keep => None,
+        Disposition::Keep => (None, None),
     };
     Ok(vec![QuarantineCaseEvent::QuarantineCaseResolved(
         QuarantineCaseResolved {
             disposition,
             operator_uid,
             absence,
+            instance_id,
         },
     )])
 }

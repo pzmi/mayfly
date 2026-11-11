@@ -962,6 +962,12 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   always clean; an unclean end is the next run's `PreviousRunEndedUnclean`. `StartRun` and
   `MintEpoch` carry no epoch of their own; every later command is fenced by the minted one.
   The plan binding of `safe_mode` (P20) is left to CP-04.
+- **As built (KER-10F):** the plan exit is `plan_completed{plan_id, completed_ref, plan_epoch,
+  verification}`: the plan of this run, a verification taken after it, and then a restart before
+  `CompleteRecovery` (`restart_required`), as the model's `completePlan` takes the daemon down.
+  `MintEpoch` carries `crash_loop` and records it as safe mode in the same unit, so a crash-looping
+  run is never a verified restart. Once the run minted, a command under a newer epoch is refused
+  (`epoch_not_minted`).
 
 ### 6.9 `RecoveryPlan` [Operations]
 
@@ -988,6 +994,16 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   binding (journal heads, inventory, GitHub, epoch) records `RecoveryPlanRefused{stale}`; a
   failed action stops the plan resumably (`Failed`); only an unstarted plan expires. Fenced by
   `RecoveryPlanEpochAdvanced`.
+- **As built (KER-10F):** the binding is per stream: `RecoveryPlanDrawn{bindings{heads: stream →
+  revision, inventory, github, epoch}}` replaces `RecoveryPlanProposed` (still decoded; such a
+  plan is refused when applied, its digest cannot separate the plan's own writes). Every action's
+  attempt stream is a bound head; `ProposePlan` is refused unless `bindings.epoch` is the
+  command's run epoch, and an intent or completion under another run epoch records
+  `RecoveryPlanRefused{epoch}`. `RecoveryActionRecorded{index, outcome, write}` replaces
+  `RecoveryActionApplied`: the write is the attempt unit's own (stream, revision before, after),
+  the bound head advances only by it, and a write that started past the bound revision records
+  `RecoveryPlanRefused{journal_heads}` with the outcome. The repair use case binds the heads as
+  ADR 0041 read conditions of each unit (CP-04 card).
 
 ### 6.10 `QuarantineCase` [Operations]
 
@@ -1010,6 +1026,10 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   `released_observed_absent` the observation id of the complete inventory without the VM. No
   case opens for `vm_vanished_externally` (ADR 0066 as amended); a resolved case may be followed
   by a new one on the same stream. Fenced by `QuarantineEpochAdvanced`.
+- **As built (KER-10F):** `QuarantineCaseResolved` v2 records `instance_id` for
+  `delete_with_proof` (v1 upcasts with none); the `DeleteVm` must carry it. A case refuses another
+  attempt (`wrong_attempt`) and, while open, another reason (`already_open`). The aggregate
+  trusts the named observation of a release; CP-06 verifies it against the stored observation.
 
 ---
 

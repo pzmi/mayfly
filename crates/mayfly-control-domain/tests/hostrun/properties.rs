@@ -8,7 +8,7 @@ use mayfly_control_domain::{Actor, Command};
 use mayfly_domain::{CommandId, Epoch, Millis};
 use proptest::prelude::*;
 
-use super::support::{apply, by_plan, by_restart, complete, enter, mint, start};
+use super::support::{apply, by_plan, by_restart, complete, enter, start};
 
 /// One random command over a small space, with the run epoch it is issued under: the current
 /// one, an older one or a newer one.
@@ -26,10 +26,15 @@ fn command() -> impl Strategy<Value = (HostRunCommand, i8)> {
     ];
     let body = prop_oneof![
         3 => Just(start()),
-        3 => (0_u64..12, verification).prop_map(|(floor, v)| mint(floor, v)),
+        3 => (0_u64..12, verification.clone(), any::<bool>()).prop_map(|(floor, v, crash_loop)| {
+            HostRunCommand::MintEpoch { floor: Epoch::new(floor), verification: v, crash_loop }
+        }),
         2 => Just(complete()),
         1 => reason.prop_map(enter),
-        2 => any::<bool>().prop_map(by_plan),
+        // a plan of this run (epoch filled in by `issue`) or of another one
+        2 => (any::<bool>(), any::<bool>(), verification).prop_map(|(completed, ours, v)| {
+            by_plan(completed, if ours { THIS_RUN } else { 0 }, v)
+        }),
         2 => Just(by_restart()),
         1 => Just(HostRunCommand::BeginShutdown),
         1 => Just(HostRunCommand::EndRun),
@@ -37,7 +42,29 @@ fn command() -> impl Strategy<Value = (HostRunCommand, i8)> {
     (body, -1_i8..=1)
 }
 
+/// Stands for the plan epoch of the state the command is issued on.
+const THIS_RUN: u64 = u64::MAX;
+
 fn issue(state: &HostRunState, body: HostRunCommand, skew: i8) -> Command<HostRunCommand> {
+    let body = match body {
+        HostRunCommand::LeaveSafeMode {
+            exit:
+                SafeModeExit::PlanCompleted {
+                    plan_id,
+                    completed_ref,
+                    plan_epoch,
+                    verification,
+                },
+        } if plan_epoch.get() == THIS_RUN => HostRunCommand::LeaveSafeMode {
+            exit: SafeModeExit::PlanCompleted {
+                plan_id,
+                completed_ref,
+                plan_epoch: state.epoch,
+                verification,
+            },
+        },
+        other => other,
+    };
     let epoch = match skew {
         -1 => state.epoch.get().saturating_sub(1),
         0 => state.epoch.get(),
@@ -107,7 +134,9 @@ proptest! {
         // when
         for (body, skew) in commands {
             let before = state.clone();
-            let exit = match &body {
+            let completes = matches!(body, HostRunCommand::CompleteRecovery { .. });
+            let command = issue(&state, body, skew);
+            let exit = match &command.body {
                 HostRunCommand::LeaveSafeMode { exit } => Some(*exit),
                 HostRunCommand::StartRun { .. }
                 | HostRunCommand::MintEpoch { .. }
@@ -116,15 +145,21 @@ proptest! {
                 | HostRunCommand::BeginShutdown
                 | HostRunCommand::EndRun => None,
             };
-            if let Ok((after, _)) = apply(&state, issue(&state, body, skew)) {
+            if let Ok((after, _)) = apply(&state, command) {
                 // then
+                if completes {
+                    prop_assert!(!before.restart_required, "recovery completed without the restart a plan exit needs");
+                }
                 if let (Some(safe), None) = (before.safe_mode, after.safe_mode) {
-                    prop_assert!(before.verified, "left on an unverified journal");
                     match exit {
-                        Some(SafeModeExit::PlanCompleted { completed_ref, .. }) => {
+                        Some(SafeModeExit::PlanCompleted { completed_ref, plan_epoch, verification, .. }) => {
                             prop_assert!(completed_ref.is_some());
+                            prop_assert_eq!(plan_epoch, before.epoch, "another run's plan");
+                            prop_assert_eq!(verification, Verification::Verified);
+                            prop_assert!(after.restart_required);
                         }
                         Some(SafeModeExit::VerifiedRestart) => {
+                            prop_assert!(before.verified, "left on an unverified journal");
                             prop_assert!(!safe.needs_plan, "a rolled-back journal left without a plan");
                             prop_assert!(safe.entered_run < before.run_no, "left without a restart");
                         }

@@ -1,0 +1,9 @@
+{
+  "index": 0,
+  "outcome": "applied",
+  "write": {
+    "stream": "attempt-0000000000000000000000000000a001",
+    "before": 3,
+    "after": 4
+  }
+}

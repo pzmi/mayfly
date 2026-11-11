@@ -2,6 +2,12 @@
 not_opened x open/operator -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
 not_opened x open/automation -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
 not_opened x open/startup -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_reason/operator -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_reason/automation -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_reason/startup -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_attempt/operator -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_attempt/automation -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
+not_opened x open_other_attempt/startup -> accepted quarantine_epoch_advanced/v1 quarantine_case_opened/v1
 not_opened x open_vanished/operator -> refused vanished_not_quarantined
 not_opened x open_vanished/automation -> refused vanished_not_quarantined
 not_opened x open_vanished/startup -> refused vanished_not_quarantined
@@ -30,9 +36,15 @@ not_opened x stale_run -> refused not_open
 open x open/operator -> accepted, no event
 open x open/automation -> accepted, no event
 open x open/startup -> accepted, no event
-open x open_vanished/operator -> accepted, no event
-open x open_vanished/automation -> accepted, no event
-open x open_vanished/startup -> accepted, no event
+open x open_other_reason/operator -> refused already_open
+open x open_other_reason/automation -> refused already_open
+open x open_other_reason/startup -> refused already_open
+open x open_other_attempt/operator -> refused wrong_attempt
+open x open_other_attempt/automation -> refused wrong_attempt
+open x open_other_attempt/startup -> refused wrong_attempt
+open x open_vanished/operator -> refused already_open
+open x open_vanished/automation -> refused already_open
+open x open_vanished/startup -> refused already_open
 open x inspect/operator -> accepted quarantine_case_inspected/v1
 open x inspect/automation -> refused operator_only
 open x inspect/startup -> refused operator_only
@@ -42,25 +54,31 @@ open x escalate_ticket/startup -> accepted quarantine_case_escalated/v1
 open x escalate_page/operator -> accepted quarantine_case_escalated/v1
 open x escalate_page/automation -> accepted quarantine_case_escalated/v1
 open x escalate_page/startup -> accepted quarantine_case_escalated/v1
-open x resolve_delete/operator -> accepted quarantine_case_resolved/v1
+open x resolve_delete/operator -> accepted quarantine_case_resolved/v2
 open x resolve_delete/automation -> refused operator_only
 open x resolve_delete/startup -> refused operator_only
-open x resolve_released/operator -> accepted quarantine_case_resolved/v1
+open x resolve_released/operator -> accepted quarantine_case_resolved/v2
 open x resolve_released/automation -> refused operator_only
 open x resolve_released/startup -> refused operator_only
 open x resolve_released_unobserved/operator -> refused absence_not_observed
 open x resolve_released_unobserved/automation -> refused operator_only
 open x resolve_released_unobserved/startup -> refused operator_only
-open x resolve_keep/operator -> accepted quarantine_case_resolved/v1
+open x resolve_keep/operator -> accepted quarantine_case_resolved/v2
 open x resolve_keep/automation -> refused operator_only
 open x resolve_keep/startup -> refused operator_only
 open x stale_run -> refused stale_run
-open/unproven x open/operator -> accepted, no event
-open/unproven x open/automation -> accepted, no event
-open/unproven x open/startup -> accepted, no event
-open/unproven x open_vanished/operator -> accepted, no event
-open/unproven x open_vanished/automation -> accepted, no event
-open/unproven x open_vanished/startup -> accepted, no event
+open/unproven x open/operator -> refused already_open
+open/unproven x open/automation -> refused already_open
+open/unproven x open/startup -> refused already_open
+open/unproven x open_other_reason/operator -> refused already_open
+open/unproven x open_other_reason/automation -> refused already_open
+open/unproven x open_other_reason/startup -> refused already_open
+open/unproven x open_other_attempt/operator -> refused wrong_attempt
+open/unproven x open_other_attempt/automation -> refused wrong_attempt
+open/unproven x open_other_attempt/startup -> refused wrong_attempt
+open/unproven x open_vanished/operator -> refused already_open
+open/unproven x open_vanished/automation -> refused already_open
+open/unproven x open_vanished/startup -> refused already_open
 open/unproven x inspect/operator -> accepted quarantine_case_inspected/v1
 open/unproven x inspect/automation -> refused operator_only
 open/unproven x inspect/startup -> refused operator_only
@@ -73,22 +91,28 @@ open/unproven x escalate_page/startup -> accepted quarantine_case_escalated/v1
 open/unproven x resolve_delete/operator -> refused no_proof
 open/unproven x resolve_delete/automation -> refused operator_only
 open/unproven x resolve_delete/startup -> refused operator_only
-open/unproven x resolve_released/operator -> accepted quarantine_case_resolved/v1
+open/unproven x resolve_released/operator -> accepted quarantine_case_resolved/v2
 open/unproven x resolve_released/automation -> refused operator_only
 open/unproven x resolve_released/startup -> refused operator_only
 open/unproven x resolve_released_unobserved/operator -> refused absence_not_observed
 open/unproven x resolve_released_unobserved/automation -> refused operator_only
 open/unproven x resolve_released_unobserved/startup -> refused operator_only
-open/unproven x resolve_keep/operator -> accepted quarantine_case_resolved/v1
+open/unproven x resolve_keep/operator -> accepted quarantine_case_resolved/v2
 open/unproven x resolve_keep/automation -> refused operator_only
 open/unproven x resolve_keep/startup -> refused operator_only
 open/unproven x stale_run -> refused stale_run
 open/paged x open/operator -> accepted, no event
 open/paged x open/automation -> accepted, no event
 open/paged x open/startup -> accepted, no event
-open/paged x open_vanished/operator -> accepted, no event
-open/paged x open_vanished/automation -> accepted, no event
-open/paged x open_vanished/startup -> accepted, no event
+open/paged x open_other_reason/operator -> refused already_open
+open/paged x open_other_reason/automation -> refused already_open
+open/paged x open_other_reason/startup -> refused already_open
+open/paged x open_other_attempt/operator -> refused wrong_attempt
+open/paged x open_other_attempt/automation -> refused wrong_attempt
+open/paged x open_other_attempt/startup -> refused wrong_attempt
+open/paged x open_vanished/operator -> refused already_open
+open/paged x open_vanished/automation -> refused already_open
+open/paged x open_vanished/startup -> refused already_open
 open/paged x inspect/operator -> accepted quarantine_case_inspected/v1
 open/paged x inspect/automation -> refused operator_only
 open/paged x inspect/startup -> refused operator_only
@@ -98,25 +122,31 @@ open/paged x escalate_ticket/startup -> accepted, no event
 open/paged x escalate_page/operator -> accepted, no event
 open/paged x escalate_page/automation -> accepted, no event
 open/paged x escalate_page/startup -> accepted, no event
-open/paged x resolve_delete/operator -> accepted quarantine_case_resolved/v1
+open/paged x resolve_delete/operator -> accepted quarantine_case_resolved/v2
 open/paged x resolve_delete/automation -> refused operator_only
 open/paged x resolve_delete/startup -> refused operator_only
-open/paged x resolve_released/operator -> accepted quarantine_case_resolved/v1
+open/paged x resolve_released/operator -> accepted quarantine_case_resolved/v2
 open/paged x resolve_released/automation -> refused operator_only
 open/paged x resolve_released/startup -> refused operator_only
 open/paged x resolve_released_unobserved/operator -> refused absence_not_observed
 open/paged x resolve_released_unobserved/automation -> refused operator_only
 open/paged x resolve_released_unobserved/startup -> refused operator_only
-open/paged x resolve_keep/operator -> accepted quarantine_case_resolved/v1
+open/paged x resolve_keep/operator -> accepted quarantine_case_resolved/v2
 open/paged x resolve_keep/automation -> refused operator_only
 open/paged x resolve_keep/startup -> refused operator_only
 open/paged x stale_run -> refused stale_run
 inspected x open/operator -> accepted, no event
 inspected x open/automation -> accepted, no event
 inspected x open/startup -> accepted, no event
-inspected x open_vanished/operator -> accepted, no event
-inspected x open_vanished/automation -> accepted, no event
-inspected x open_vanished/startup -> accepted, no event
+inspected x open_other_reason/operator -> refused already_open
+inspected x open_other_reason/automation -> refused already_open
+inspected x open_other_reason/startup -> refused already_open
+inspected x open_other_attempt/operator -> refused wrong_attempt
+inspected x open_other_attempt/automation -> refused wrong_attempt
+inspected x open_other_attempt/startup -> refused wrong_attempt
+inspected x open_vanished/operator -> refused already_open
+inspected x open_vanished/automation -> refused already_open
+inspected x open_vanished/startup -> refused already_open
 inspected x inspect/operator -> accepted quarantine_case_inspected/v1
 inspected x inspect/automation -> refused operator_only
 inspected x inspect/startup -> refused operator_only
@@ -126,22 +156,28 @@ inspected x escalate_ticket/startup -> accepted quarantine_case_escalated/v1
 inspected x escalate_page/operator -> accepted quarantine_case_escalated/v1
 inspected x escalate_page/automation -> accepted quarantine_case_escalated/v1
 inspected x escalate_page/startup -> accepted quarantine_case_escalated/v1
-inspected x resolve_delete/operator -> accepted quarantine_case_resolved/v1
+inspected x resolve_delete/operator -> accepted quarantine_case_resolved/v2
 inspected x resolve_delete/automation -> refused operator_only
 inspected x resolve_delete/startup -> refused operator_only
-inspected x resolve_released/operator -> accepted quarantine_case_resolved/v1
+inspected x resolve_released/operator -> accepted quarantine_case_resolved/v2
 inspected x resolve_released/automation -> refused operator_only
 inspected x resolve_released/startup -> refused operator_only
 inspected x resolve_released_unobserved/operator -> refused absence_not_observed
 inspected x resolve_released_unobserved/automation -> refused operator_only
 inspected x resolve_released_unobserved/startup -> refused operator_only
-inspected x resolve_keep/operator -> accepted quarantine_case_resolved/v1
+inspected x resolve_keep/operator -> accepted quarantine_case_resolved/v2
 inspected x resolve_keep/automation -> refused operator_only
 inspected x resolve_keep/startup -> refused operator_only
 inspected x stale_run -> refused stale_run
 resolved/delete_with_proof x open/operator -> accepted quarantine_case_opened/v1
 resolved/delete_with_proof x open/automation -> accepted quarantine_case_opened/v1
 resolved/delete_with_proof x open/startup -> accepted quarantine_case_opened/v1
+resolved/delete_with_proof x open_other_reason/operator -> accepted quarantine_case_opened/v1
+resolved/delete_with_proof x open_other_reason/automation -> accepted quarantine_case_opened/v1
+resolved/delete_with_proof x open_other_reason/startup -> accepted quarantine_case_opened/v1
+resolved/delete_with_proof x open_other_attempt/operator -> refused wrong_attempt
+resolved/delete_with_proof x open_other_attempt/automation -> refused wrong_attempt
+resolved/delete_with_proof x open_other_attempt/startup -> refused wrong_attempt
 resolved/delete_with_proof x open_vanished/operator -> refused vanished_not_quarantined
 resolved/delete_with_proof x open_vanished/automation -> refused vanished_not_quarantined
 resolved/delete_with_proof x open_vanished/startup -> refused vanished_not_quarantined
@@ -170,6 +206,12 @@ resolved/delete_with_proof x stale_run -> refused stale_run
 resolved/released_observed_absent x open/operator -> accepted quarantine_case_opened/v1
 resolved/released_observed_absent x open/automation -> accepted quarantine_case_opened/v1
 resolved/released_observed_absent x open/startup -> accepted quarantine_case_opened/v1
+resolved/released_observed_absent x open_other_reason/operator -> accepted quarantine_case_opened/v1
+resolved/released_observed_absent x open_other_reason/automation -> accepted quarantine_case_opened/v1
+resolved/released_observed_absent x open_other_reason/startup -> accepted quarantine_case_opened/v1
+resolved/released_observed_absent x open_other_attempt/operator -> refused wrong_attempt
+resolved/released_observed_absent x open_other_attempt/automation -> refused wrong_attempt
+resolved/released_observed_absent x open_other_attempt/startup -> refused wrong_attempt
 resolved/released_observed_absent x open_vanished/operator -> refused vanished_not_quarantined
 resolved/released_observed_absent x open_vanished/automation -> refused vanished_not_quarantined
 resolved/released_observed_absent x open_vanished/startup -> refused vanished_not_quarantined
@@ -198,6 +240,12 @@ resolved/released_observed_absent x stale_run -> refused stale_run
 resolved/keep x open/operator -> accepted quarantine_case_opened/v1
 resolved/keep x open/automation -> accepted quarantine_case_opened/v1
 resolved/keep x open/startup -> accepted quarantine_case_opened/v1
+resolved/keep x open_other_reason/operator -> accepted quarantine_case_opened/v1
+resolved/keep x open_other_reason/automation -> accepted quarantine_case_opened/v1
+resolved/keep x open_other_reason/startup -> accepted quarantine_case_opened/v1
+resolved/keep x open_other_attempt/operator -> refused wrong_attempt
+resolved/keep x open_other_attempt/automation -> refused wrong_attempt
+resolved/keep x open_other_attempt/startup -> refused wrong_attempt
 resolved/keep x open_vanished/operator -> refused vanished_not_quarantined
 resolved/keep x open_vanished/automation -> refused vanished_not_quarantined
 resolved/keep x open_vanished/startup -> refused vanished_not_quarantined

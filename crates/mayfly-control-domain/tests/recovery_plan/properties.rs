@@ -3,15 +3,15 @@
 
 use mayfly_control_domain::Actor;
 use mayfly_control_domain::operations::plan::{
-    ActionOutcome, Bindings, GithubBinding, PlanPhase, RecoveryPlanCommand, RecoveryPlanEvent,
-    RecoveryPlanState,
+    ActionOutcome, Bindings, GithubBinding, OwnWrite, PlanPhase, RecoveryPlanCommand,
+    RecoveryPlanEvent, RecoveryPlanState,
 };
 use mayfly_domain::Epoch;
 use proptest::prelude::*;
 
 use super::support::{
-    EXPIRY, LATER, NOW, OPERATOR, REPAIR, apply, begin, bound, complete, digest, outcome, plan,
-    when,
+    EXPIRY, LATER, NOW, OPERATOR, REPAIR, apply, begin, bound, complete, digest, foreign, plan,
+    stream, when,
 };
 
 /// The bindings a command reports: the plan's own, or one of four moved worlds.
@@ -25,13 +25,10 @@ enum World {
 }
 
 fn world(state: &RecoveryPlanState, world: World) -> Bindings {
-    let drawn = state.bindings.unwrap_or_else(|| bound(0x10));
+    let drawn = state.bindings.clone().unwrap_or_else(|| bound(0));
     match world {
         World::Same => drawn,
-        World::Heads => Bindings {
-            heads: digest(0x99),
-            ..drawn
-        },
+        World::Heads => foreign(drawn, &stream(2)),
         World::Inventory => Bindings {
             inventory: digest(0x1B),
             ..drawn
@@ -52,6 +49,8 @@ enum Choice {
     Propose,
     Approve(bool, bool),
     Begin(u32, World),
+    /// Action, applied, and which write: 0 the plan's own, 1 one that started after a foreign
+    /// write, 2 on another stream, 3 none.
     Outcome(u32, bool, u8),
     Complete(World),
     Expire(bool),
@@ -84,19 +83,40 @@ fn command(state: &RecoveryPlanState, choice: Choice) -> (RecoveryPlanCommand, A
             if late { LATER } else { NOW },
         ),
         Choice::Begin(i, w) => (begin(i, world(state, w)), REPAIR, NOW),
-        Choice::Outcome(i, ok, h) => (
-            outcome(
-                i,
-                if ok {
-                    ActionOutcome::Applied
-                } else {
-                    ActionOutcome::Failed
+        Choice::Outcome(i, ok, h) => {
+            let own = stream(u128::from(i) + 1);
+            let head = state
+                .bindings
+                .as_ref()
+                .and_then(|b| b.heads.get(&own).copied())
+                .unwrap_or(0);
+            let write = |stream: String, before: u64| {
+                Some(OwnWrite {
+                    stream,
+                    before,
+                    after: before + 1,
+                })
+            };
+            let write = match h {
+                0 => write(own, head),
+                1 => write(own, head + 1),
+                2 => write(stream(9), head),
+                _ => None,
+            };
+            (
+                RecoveryPlanCommand::RecordOutcome {
+                    index: i,
+                    outcome: if ok {
+                        ActionOutcome::Applied
+                    } else {
+                        ActionOutcome::Failed
+                    },
+                    write,
                 },
-                0x20 + u128::from(h),
-            ),
-            REPAIR,
-            NOW,
-        ),
+                REPAIR,
+                NOW,
+            )
+        }
         Choice::Complete(w) => (complete(world(state, w)), REPAIR, NOW),
         Choice::Expire(late) => (
             RecoveryPlanCommand::ExpirePlan,
@@ -133,28 +153,51 @@ proptest! {
             let (body, actor, ms) = command(&state, choice);
             let current = match &body {
                 RecoveryPlanCommand::BeginAction { current, .. }
-                | RecoveryPlanCommand::CompletePlan { current } => Some(*current),
+                | RecoveryPlanCommand::CompletePlan { current } => Some(current.clone()),
                 RecoveryPlanCommand::ProposePlan { .. }
                 | RecoveryPlanCommand::ApprovePlan
                 | RecoveryPlanCommand::RecordOutcome { .. }
                 | RecoveryPlanCommand::ExpirePlan => None,
             };
-            let drawn = state.bindings;
+            let drawn = state.bindings.clone();
+            let write = match &body {
+                RecoveryPlanCommand::RecordOutcome { write, .. } => write.clone(),
+                RecoveryPlanCommand::ProposePlan { .. }
+                | RecoveryPlanCommand::ApprovePlan
+                | RecoveryPlanCommand::BeginAction { .. }
+                | RecoveryPlanCommand::CompletePlan { .. }
+                | RecoveryPlanCommand::ExpirePlan => None,
+            };
             if let Ok((after, events)) = apply(&state, when(1, actor, ms, body)) {
-                // then
+                // then: a bound head moves only by the plan's own write, from where it was bound
+                if let (Some(before), Some(now)) = (&drawn, &after.bindings) {
+                    for (s, head) in &now.heads {
+                        let was = before.heads.get(s).copied();
+                        let own = write
+                            .as_ref()
+                            .is_some_and(|w| &w.stream == s && Some(w.before) == was && w.after == *head);
+                        prop_assert!(Some(*head) == was || own, "{s} moved to {head} from {was:?}");
+                    }
+                }
                 for event in &events {
                     match event {
                         RecoveryPlanEvent::RecoveryActionStarted(_)
                         | RecoveryPlanEvent::RecoveryPlanCompleted(_) => {
-                            prop_assert_eq!(current, drawn, "acted on a moved world");
+                            prop_assert_eq!(&current, &drawn, "acted on a moved world");
                         }
                         RecoveryPlanEvent::RecoveryPlanRefused(_) => {
-                            prop_assert_ne!(current, drawn, "refused a bound plan");
+                            let foreign_write = write.as_ref().is_some_and(|w| {
+                                drawn.as_ref().and_then(|d| d.heads.get(&w.stream).copied())
+                                    != Some(w.before)
+                            });
+                            prop_assert!(current != drawn || foreign_write, "refused a bound plan");
                         }
                         RecoveryPlanEvent::RecoveryPlanEpochAdvanced(_)
                         | RecoveryPlanEvent::RecoveryPlanProposed(_)
+                        | RecoveryPlanEvent::RecoveryPlanDrawn(_)
                         | RecoveryPlanEvent::RecoveryPlanApproved(_)
                         | RecoveryPlanEvent::RecoveryActionApplied(_)
+                        | RecoveryPlanEvent::RecoveryActionRecorded(_)
                         | RecoveryPlanEvent::RecoveryPlanExpired(_) => {}
                     }
                 }
@@ -193,7 +236,7 @@ proptest! {
                             prop_assert_eq!(e.index, applied, "out of order");
                             open = Some(e.index);
                         }
-                        RecoveryPlanEvent::RecoveryActionApplied(e) => {
+                        RecoveryPlanEvent::RecoveryActionRecorded(e) => {
                             prop_assert_eq!(open, Some(e.index), "an outcome without its intent");
                             open = None;
                             if e.outcome == ActionOutcome::Applied {
@@ -205,6 +248,8 @@ proptest! {
                         }
                         RecoveryPlanEvent::RecoveryPlanEpochAdvanced(_)
                         | RecoveryPlanEvent::RecoveryPlanProposed(_)
+                        | RecoveryPlanEvent::RecoveryPlanDrawn(_)
+                        | RecoveryPlanEvent::RecoveryActionApplied(_)
                         | RecoveryPlanEvent::RecoveryPlanRefused(_)
                         | RecoveryPlanEvent::RecoveryPlanExpired(_) => {}
                     }
