@@ -532,6 +532,61 @@ fn should_show_the_refusal_until_the_next_directive_when_a_clone_is_refused() {
 }
 
 #[test]
+fn should_keep_the_capacity_refusal_when_the_attempt_retries() {
+    // given: an attempt whose clone is pending
+    let memory = MemoryJournal::new();
+    let store = store(&memory);
+    let save = |id: u128, body| block_on(attempts::save(&store, 1, 10 + id, Epoch::new(1), body));
+    save(0, attempts::start(1));
+    save(
+        1,
+        AttemptCommand::IssueNext {
+            directive_id: DirectiveId::from_u128(11),
+            deadline: Deadline::at(Millis::new(1)),
+        },
+    );
+    let row = || {
+        block_on(queries::all_rows::<Attempts, _>(&memory))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .into_iter()
+            .map(|(_, row)| row)
+            .next()
+            .unwrap_or_else(|| panic!("no attempts row"))
+    };
+    let before = row();
+
+    // when: the data plane refuses it insufficient_resources, then the saga issues the retry
+    save(
+        2,
+        attempts::observe(
+            12,
+            Epoch::new(1),
+            Fact::DirectiveRefused {
+                directive_id: DirectiveId::from_u128(11),
+                reason: RefusalReason::InsufficientResources,
+            },
+        ),
+    );
+    let refused = row();
+    save(
+        3,
+        AttemptCommand::IssueNext {
+            directive_id: DirectiveId::from_u128(13),
+            deadline: Deadline::at(Millis::new(1)),
+        },
+    );
+    let retried = row();
+
+    // then: the refusal's revision stays on the row after the retry clears `refused`
+    assert_eq!(before.capacity_refused_at, None);
+    assert!(refused.capacity_refused_at.is_some());
+    assert!(refused.capacity_refused_at <= Some(refused.revision));
+    assert_eq!(retried.refused, None);
+    assert_eq!(retried.capacity_refused_at, refused.capacity_refused_at);
+    assert_eq!(retried.retirement_requested, None);
+}
+
+#[test]
 fn should_keep_the_evidence_on_the_row_when_a_lost_attempt_closes() {
     // given: an attempt whose clone is pending
     let memory = MemoryJournal::new();

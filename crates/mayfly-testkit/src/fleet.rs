@@ -5,33 +5,57 @@
 //!
 //! [`simulate`] runs a seeded sequence of world steps and reconciler passes and checks, after
 //! each step, the invariants the reconciler must keep (`doc/domain-model.md` §5.4): no slot
-//! generation reused (I02), never allocated beyond the applied report (I03), the reconciler
-//! touches no VM and only attempts and leases the journal records (I04), the reported max fits
-//! the deliverable and the carve-outs fit each host together (I07, I24), nothing admitted on a
-//! draining host (I08), acquisition within the deliverable (I23), nothing admitted while the gate
-//! or the pool's terms are closed (I26), nothing admitted for a tripped breaker (I27), and the
-//! `Host` never refuses a reservation the pass planned for capacity: the plan and the report
-//! agree.
+//! generation reused (I02), never allocated beyond the applied report (I03, computed here from
+//! the raw report, the reserves and each lease's footprint, not through `HostState`'s own
+//! arithmetic), the reconciler touches no VM and only attempts and leases the journal records
+//! (I04), the reported max fits the deliverable and the carve-outs fit each host together (I07,
+//! I24), nothing admitted on a draining host (I08), acquisition within the deliverable (I23),
+//! nothing admitted while the gate or the pool's terms are closed (I26), nothing admitted for a
+//! tripped breaker (I27), nothing reserved on a host held by a data-plane refusal until a newer
+//! report, no VM without its lease (a slot released under a live VM: I33's precondition), and,
+//! while the reconciler reads the journal's own rows, the `Host` never refuses a reservation
+//! the pass planned for capacity: the plan and the report agree.
+//!
+//! The world plays what the reconciler does not control: the data plane's real capacity
+//! ([`World::drift`], reported later or never), its `insufficient_resources` refusal of a clone
+//! that does not fit that capacity, `target_absent` answers that record a vanished VM (ADR
+//! 0066's replacement path), pool drains and resumes, image pin changes, host drains, the gate,
+//! the breaker and quarantines. [`SimOptions::lag`] makes the reconciler read the projections
+//! as they were some steps before (a read model behind the journal), and [`SimOptions::plan`]
+//! swaps the pure pass for a variant: the negative control that proves the checks are not
+//! vacuous (`tests/store/reconciler.rs::should_find_violations_when_a_plan_ignores_admission`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Mutex, PoisonError};
 
 use mayfly_control::delivery::Kicks;
+use mayfly_control::journal::{
+    ExpectedRevision, Journal, Payload, ProjectionName, StorageError, StreamId,
+};
 use mayfly_control::projection::control;
+use mayfly_control::projection::{
+    ProjectionMeta, ProjectionSpec, ProjectionStore, StreamRows, views,
+};
 use mayfly_control::reconciler::{PassReport, Reconciler, ReconcilerConfig};
-use mayfly_control::store::{AggregateStore, Clock, NoNotifier, Outcome, Rng, SaveRequest};
+use mayfly_control::store::{
+    AggregateStore, Clock, NoNotifier, Outcome, Rng, SaveError, SaveRequest, stream_of,
+};
 use mayfly_control_domain::attempt::RunnerRequestId;
 use mayfly_control_domain::attempt::{
     Attempt, AttemptCommand, AttemptState, DirectiveTag, Fact, GuestFacts, GuestOs, Observation,
     Phase, QuarantineReason, RefusalReason, RetireReason, SagaStep, Stage, StartAttempt, next_step,
 };
-use mayfly_control_domain::capacity::{Footprint, ReportedCapacity};
+use mayfly_control_domain::capacity::{self, Footprint, ReportedCapacity};
 use mayfly_control_domain::demand::Statistics;
 use mayfly_control_domain::demand::{EventName, Offer};
 use mayfly_control_domain::host::{
-    AdmissionCause, ApplyPoolTerms, Drain, Host, HostCommand, HostState,
+    AdmissionCause, ApplyPoolTerms, Drain, Holds, Host, HostCommand, HostState, LeasePhase,
+    ReleaseEvidence,
 };
-use mayfly_control_domain::pool::{ConfigurePool, Pool, PoolCommand, PoolState, TrustTier, terms};
-use mayfly_control_domain::reconcile::{PassCommand, PolicyOf};
+use mayfly_control_domain::pool::{
+    ConfigurePool, Pool, PoolCommand, PoolMode, PoolState, TrustTier, terms,
+};
+use mayfly_control_domain::reconcile::{Pass, PassCommand, PassInputs, PolicyOf, plan_pass};
 use mayfly_control_domain::registration::{JobResult, ScaleSetId};
 use mayfly_control_domain::scaleset::{
     EnsureScaleSet, JobFact, MessageId, MessageItem, RecordMessage, ScaleSet, ScaleSetCommand,
@@ -118,6 +142,13 @@ pub struct World<'s> {
     message: u64,
     request: u64,
     report_id: BTreeMap<HostId, u64>,
+    /// What each host's data plane really has: reported only by [`World::report`] and
+    /// [`World::report_truth`].
+    truth: BTreeMap<HostId, ReportedCapacity>,
+    /// Every attempt started, in start order.
+    started: Vec<AttemptId>,
+    /// The hosts whose data plane refused a clone `insufficient_resources`, since last taken.
+    refused_on: Vec<HostId>,
 }
 
 fn pool_name(name: &str) -> PoolName {
@@ -140,6 +171,9 @@ impl<'s> World<'s> {
             message: 0,
             request: 0,
             report_id: BTreeMap::new(),
+            truth: BTreeMap::new(),
+            started: Vec::new(),
+            refused_on: Vec::new(),
         }
     }
 
@@ -199,8 +233,27 @@ impl<'s> World<'s> {
         }
     }
 
-    /// Applies a newer capacity report on `host` (P22).
+    /// The data plane's capacity on `host` becomes `capacity` (foreign use grew or shrank), not
+    /// reported yet.
+    pub fn drift(&mut self, host: &HostId, capacity: ReportedCapacity) {
+        self.truth.insert(host.clone(), capacity);
+    }
+
+    /// Reports what `host`'s data plane really has (P22).
+    pub fn report_truth(&mut self, host: &HostId) {
+        if let Some(capacity) = self.truth.get(host).copied() {
+            self.report(host, capacity);
+        }
+    }
+
+    /// The hosts whose data plane refused a clone `insufficient_resources` since the last call.
+    pub fn take_refusals(&mut self) -> Vec<HostId> {
+        std::mem::take(&mut self.refused_on)
+    }
+
+    /// Applies a newer capacity report on `host` (P22): what its data plane now has.
     pub fn report(&mut self, host: &HostId, capacity: ReportedCapacity) {
+        self.truth.insert(host.clone(), capacity);
         let id = self.report_id.entry(host.clone()).or_insert(0);
         *id += 1;
         let report_id = *id;
@@ -387,26 +440,124 @@ impl<'s> World<'s> {
         out
     }
 
-    /// P2: `StartAttempt` for the lease of `attempt` on `host`.
-    pub fn start(&mut self, host: &HostId, attempt: AttemptId) {
+    /// P2: `StartAttempt` for the lease of `attempt` on `host`, with the pool's pinned image,
+    /// saved with a read of the host stream at the revision whose lease it starts from: a
+    /// release that commits in between refuses the start (CP-03F), and an attempt is never
+    /// started for a lease the host no longer holds. `false` when it did not start.
+    ///
+    /// # Panics
+    /// When the store fails other than by a conflict: the kit is wrong.
+    pub fn start(&mut self, host: &HostId, attempt: AttemptId) -> bool {
+        let stream = stream_of::<Host>(host.as_str()).unwrap_or_else(|e| panic!("{e}"));
+        let head = block_on(self.store.journal().head(&stream)).unwrap_or_else(|e| panic!("{e}"));
         let state = self.host(host);
         let Some(lease) = state.leases.get(&attempt) else {
-            return;
+            return false;
         };
+        let image_digest = self
+            .pool(&lease.pool)
+            .image_pin
+            .unwrap_or_else(ImageDigest::sample);
         let body = AttemptCommand::StartAttempt(StartAttempt {
             attempt_id: attempt,
             host_id: host.clone(),
             slot: lease.slot,
             generation: lease.generation,
             pool: lease.pool.clone(),
-            image_digest: ImageDigest::sample(),
+            image_digest,
             retry_budget: 2,
         });
-        let _ = self.command::<Attempt>(
-            &attempt.to_string(),
+        let command = Command::new(
+            self.mint(),
+            self.store.clock().now(),
+            EPOCH,
             Actor::Automation { policy: "start" },
             body,
         );
+        let request = SaveRequest::new(attempt.to_string(), command)
+            .with_read(stream, ExpectedRevision::of(head.map(|h| h.revision)));
+        match block_on(self.store.save::<Attempt>(request)) {
+            Ok(Outcome::Accepted { .. }) => {
+                self.started.push(attempt);
+                true
+            }
+            Ok(Outcome::Refused { .. }) | Err(SaveError::Conflict { .. }) => false,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// What one VM of `pool` needs, by the pool's spec.
+    fn footprint_of(&self, pool: &PoolName) -> Footprint {
+        self.pools
+            .iter()
+            .find(|p| &p.name == pool)
+            .map_or(Footprint::ZERO, |p| {
+                Footprint::vm(p.os, Resources::new(p.memory_gib * GIB, 50 * GIB))
+            })
+    }
+
+    /// Whether the data plane's own ledger on the attempt's host fits one more VM of its pool:
+    /// every VM of ours that exists there, against the host's real capacity (ADR 0024; the
+    /// data plane counts no operator reserve: that is the control plane's).
+    #[must_use]
+    pub fn clone_fits(&self, attempt: AttemptId) -> bool {
+        let Some(identity) = self.attempt(attempt).identity else {
+            return true;
+        };
+        let Some(truth) = self.truth.get(&identity.host_id) else {
+            return true;
+        };
+        let used = self
+            .started
+            .iter()
+            .filter(|a| **a != attempt)
+            .map(|a| self.attempt(*a))
+            .filter(|s| {
+                s.identity
+                    .as_ref()
+                    .is_some_and(|i| i.host_id == identity.host_id)
+                    && vm_exists(s)
+            })
+            .filter_map(|s| s.identity.map(|i| self.footprint_of(&i.pool)))
+            .fold(Footprint::ZERO, Footprint::saturating_add);
+        used.saturating_add(self.footprint_of(&identity.pool))
+            .fits_within(capacity::admissible(truth, Resources::new(0, 0)))
+    }
+
+    /// The data plane's answer to the attempt's pending directive, as the world decides it: a
+    /// clone that does not fit the host's real capacity is refused `insufficient_resources`;
+    /// otherwise `roll` (0..48) refuses `effect_failed` now and then, and answers a start or
+    /// stop `target_absent` (the VM vanished, ADR 0066) now and then.
+    #[must_use]
+    pub fn answer(&self, attempt: AttemptId, roll: usize) -> Option<RefusalReason> {
+        let tag = self.attempt(attempt).pending.map(|p| p.tag)?;
+        match tag {
+            DirectiveTag::CloneVm if !self.clone_fits(attempt) => {
+                Some(RefusalReason::InsufficientResources)
+            }
+            DirectiveTag::StartVm | DirectiveTag::StopVm if roll == 0 => {
+                Some(RefusalReason::TargetAbsent)
+            }
+            _ if roll == 1 => Some(RefusalReason::EffectFailed),
+            _ => None,
+        }
+    }
+
+    /// Every started attempt whose VM exists and whose host holds no lease for it: a slot
+    /// released under a live VM.
+    #[must_use]
+    pub fn vms_without_lease(&self) -> Vec<AttemptId> {
+        self.started
+            .iter()
+            .copied()
+            .filter(|a| {
+                let state = self.attempt(*a);
+                vm_exists(&state)
+                    && state
+                        .identity
+                        .is_some_and(|i| !self.host(&i.host_id).leases.contains_key(a))
+            })
+            .collect()
     }
 
     /// The data plane answers the attempt's pending directive with `refusal`, or with success;
@@ -423,6 +574,9 @@ impl<'s> World<'s> {
         };
         if let Some(pending) = state.pending {
             let directive_id = pending.directive_id;
+            if refusal == Some(RefusalReason::InsufficientResources) {
+                self.refused_on.push(identity.host_id.clone());
+            }
             let fact = match refusal {
                 Some(reason) => Fact::DirectiveRefused {
                     directive_id,
@@ -542,6 +696,127 @@ impl<'s> World<'s> {
     }
 }
 
+/// Whether the attempt's VM exists as far as the attempt knows: it recorded one and has not
+/// recorded it deleted or lost.
+fn vm_exists(state: &AttemptState) -> bool {
+    state.instance_id.is_some()
+        && !matches!(state.phase, Phase::Deleted | Phase::Lost | Phase::Closed)
+}
+
+/// The projections as they were some steps ago: the reconciler's read model behind the journal
+/// (or rebuilding). With no lag it reads the journal's own rows.
+#[derive(Debug)]
+pub struct LaggedReads {
+    journal: MemoryJournal,
+    lag: usize,
+    frames: Mutex<VecDeque<BTreeMap<ProjectionName, BTreeMap<String, Payload>>>>,
+}
+
+impl LaggedReads {
+    /// Reads of `journal`'s projections `lag` captures behind.
+    #[must_use]
+    pub fn new(journal: &MemoryJournal, lag: usize) -> Self {
+        let reads = Self {
+            journal: journal.clone(),
+            lag,
+            frames: Mutex::new(VecDeque::new()),
+        };
+        reads.capture();
+        reads
+    }
+
+    /// Captures the journal's rows now; the reads serve the capture `lag` ago.
+    ///
+    /// # Panics
+    /// When the journal fails: the kit is wrong.
+    pub fn capture(&self) {
+        if self.lag == 0 {
+            return;
+        }
+        let mut frame = BTreeMap::new();
+        // what the reconciler's query reads (`queries::fleet`)
+        for name in [
+            views::Hosts::NAME,
+            views::Slots::NAME,
+            views::Attempts::NAME,
+            views::Pools::NAME,
+            views::ScaleSets::NAME,
+        ] {
+            let spec = ProjectionName::new(name).unwrap_or_else(|e| panic!("{e}"));
+            let mut rows = BTreeMap::new();
+            let mut after: Option<String> = None;
+            loop {
+                let page = block_on(ProjectionStore::rows(
+                    &self.journal,
+                    &spec,
+                    after.as_deref(),
+                    500,
+                ))
+                .unwrap_or_else(|e| panic!("{e}"));
+                let Some((last, _)) = page.last() else {
+                    break;
+                };
+                after = Some(last.clone());
+                rows.extend(page);
+            }
+            frame.insert(spec, rows);
+        }
+        let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        frames.push_back(frame);
+        while frames.len() > self.lag {
+            frames.pop_front();
+        }
+    }
+
+    fn frame_rows(&self, spec: &ProjectionName) -> BTreeMap<String, Payload> {
+        self.frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .front()
+            .and_then(|f| f.get(spec).cloned())
+            .unwrap_or_default()
+    }
+}
+
+impl ProjectionStore for LaggedReads {
+    async fn meta(&self) -> Result<Vec<ProjectionMeta>, StorageError> {
+        ProjectionStore::meta(&self.journal).await
+    }
+
+    async fn stream_rows(
+        &self,
+        spec: &ProjectionName,
+        stream: &StreamId,
+    ) -> Result<StreamRows, StorageError> {
+        ProjectionStore::stream_rows(&self.journal, spec, stream).await
+    }
+
+    async fn row(&self, spec: &ProjectionName, key: &str) -> Result<Option<Payload>, StorageError> {
+        if self.lag == 0 {
+            return ProjectionStore::row(&self.journal, spec, key).await;
+        }
+        Ok(self.frame_rows(spec).get(key).cloned())
+    }
+
+    async fn rows(
+        &self,
+        spec: &ProjectionName,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(String, Payload)>, StorageError> {
+        if self.lag == 0 {
+            return ProjectionStore::rows(&self.journal, spec, after, limit).await;
+        }
+        let take = usize::try_from(limit).unwrap_or(usize::MAX);
+        Ok(self
+            .frame_rows(spec)
+            .into_iter()
+            .filter(|(key, _)| after.is_none_or(|a| key.as_str() > a))
+            .take(take)
+            .collect())
+    }
+}
+
 /// What a simulation found.
 #[derive(Debug, Clone, Default)]
 pub struct Simulation {
@@ -559,6 +834,8 @@ pub struct Simulation {
     pub capacities: u32,
     /// Offers acquired by the scale sets.
     pub acquired: u32,
+    /// Clones the data plane refused `insufficient_resources`.
+    pub refusals: u32,
 }
 
 /// What the checker keeps between steps.
@@ -597,19 +874,92 @@ fn tripped(pool: &PoolState) -> bool {
     })
 }
 
+/// What the checker carries between steps.
+#[derive(Debug, Default)]
+struct Checker {
+    /// The last generation per slot, and its holder (I02).
+    generations: BTreeMap<(HostId, Slot), (Generation, AttemptId)>,
+    /// Hosts held by a data-plane refusal: the applied report id when it was refused, and the
+    /// step from which the reconciler can read it (the refusal's step plus the read lag).
+    held: BTreeMap<HostId, (u64, usize)>,
+}
+
+fn report_id_of(host: &HostState) -> u64 {
+    host.capacity.map_or(0, |r| r.report_id)
+}
+
+/// I03 from the raw report: the total less foreign use, our base use and the operator's
+/// reserves on memory and disk, the VM slots less foreign VMs, at most two macOS guests less
+/// foreign ones (G3); against every live lease's footprint, a stopped quarantined lease's
+/// memory excluded. Computed here, not through `capacity::admissible` or
+/// `HostState::allocated`, so a fault in either is caught. Checks the dimensions a VM of `os`
+/// uses.
+fn within_report(host: &HostState, os: GuestOs) -> bool {
+    let Some(applied) = host.capacity else {
+        return false;
+    };
+    let r = applied.capacity;
+    let limit = |total: u64, foreign: u64, base: u64, reserve: u64| {
+        total
+            .saturating_sub(foreign)
+            .saturating_sub(base)
+            .saturating_sub(reserve)
+    };
+    let memory = limit(
+        r.total.memory_bytes,
+        r.foreign.memory_bytes,
+        r.base.memory_bytes,
+        host.reserves.memory_bytes,
+    );
+    let disk = limit(
+        r.total.disk_bytes,
+        r.foreign.disk_bytes,
+        r.base.disk_bytes,
+        host.reserves.disk_bytes,
+    );
+    let slots = u64::from(r.vm_slots.saturating_sub(r.foreign_vms));
+    let macos = u64::from(r.macos_guests.min(2).saturating_sub(r.foreign_macos_guests));
+    let (mut used_memory, mut used_disk, mut used_slots, mut used_macos) = (0_u64, 0_u64, 0, 0);
+    for lease in host.leases.values() {
+        let stopped = matches!(
+            lease.phase,
+            LeasePhase::Quarantined {
+                holds: Holds::DiskAndSlot
+            }
+        );
+        if !stopped {
+            used_memory = used_memory.saturating_add(lease.resources.memory_bytes);
+        }
+        used_disk = used_disk.saturating_add(lease.resources.disk_bytes);
+        used_slots += 1_u64;
+        if lease.os == GuestOs::Macos {
+            used_macos += 1_u64;
+        }
+    }
+    used_memory <= memory
+        && used_disk <= disk
+        && used_slots <= slots
+        && (os == GuestOs::Linux || used_macos <= macos)
+}
+
 /// The invariants over one step, from `before` to `after`.
 fn check(
     step: usize,
     before: &Snapshot,
     after: &Snapshot,
-    generations: &mut BTreeMap<(HostId, Slot), (Generation, AttemptId)>,
+    checker: &mut Checker,
     out: &mut Vec<String>,
 ) {
     for (host_id, host) in &after.hosts {
+        if let Some((at, _)) = checker.held.get(host_id)
+            && report_id_of(host) > *at
+        {
+            checker.held.remove(host_id);
+        }
         let prior = before.hosts.get(host_id);
         for (attempt, lease) in &host.leases {
             let key = (host_id.clone(), lease.slot);
-            match generations.get(&key) {
+            match checker.generations.get(&key) {
                 Some((generation, holder)) if holder == attempt => {
                     if *generation != lease.generation {
                         out.push(format!(
@@ -625,7 +975,9 @@ fn check(
                     ));
                 }
                 Some(_) | None => {
-                    generations.insert(key, (lease.generation, *attempt));
+                    checker
+                        .generations
+                        .insert(key, (lease.generation, *attempt));
                 }
             }
             let new = prior.is_none_or(|p| !p.leases.contains_key(attempt));
@@ -664,14 +1016,16 @@ fn check(
                     "step {step}: I27 {attempt} reserved for a tripped breaker"
                 ));
             }
-            let admissible = host.admissible();
-            let allocated = host.allocated();
-            let within = allocated.vms <= admissible.vms
-                && allocated.resources.memory_bytes <= admissible.resources.memory_bytes
-                && allocated.resources.disk_bytes <= admissible.resources.disk_bytes
-                && (lease.os == GuestOs::Linux
-                    || allocated.macos_guests <= admissible.macos_guests);
-            if !within {
+            if checker
+                .held
+                .get(host_id)
+                .is_some_and(|(_, visible)| *visible <= step)
+            {
+                out.push(format!(
+                    "step {step}: {attempt} reserved on {host_id}, held by a refusal"
+                ));
+            }
+            if !within_report(host, lease.os) {
                 out.push(format!(
                     "step {step}: I03 {host_id} allocated beyond its report"
                 ));
@@ -710,27 +1064,33 @@ fn check(
     }
 }
 
-/// The pass's own checks: the `Host` agreed with every reservation planned (the plan never
-/// allocates beyond the report it read), the reconciler only retired or released what the
-/// journal records, and each host's carve-outs fit its free capacity together (I24).
+/// The pass's own checks: while it reads the journal's own rows, the `Host` agreed with every
+/// reservation planned (the plan never allocates beyond the report it read) and each scale set
+/// with its capacity input (behind the journal, a stale revision is refused, which is the
+/// aggregates doing their work); the reconciler
+/// only retired or released what the journal records; and each host's carve-outs fit its free
+/// capacity together (I24).
 fn check_pass(
     step: usize,
     world: &World<'_>,
     before: &Snapshot,
     report: &PassReport,
+    fresh: bool,
     out: &mut Vec<String>,
 ) {
     for (command, code) in &report.refused {
         match command {
-            PassCommand::ReserveSlot { host_id, .. } => {
+            PassCommand::ReserveSlot { host_id, .. } if fresh => {
                 out.push(format!(
                     "step {step}: plan beyond report: {host_id} refused {code}"
                 ));
             }
-            PassCommand::ApplyCapacity { pool, .. } => {
+            PassCommand::ApplyCapacity { pool, .. } if fresh => {
                 out.push(format!("step {step}: capacity of {pool} refused {code}"));
             }
-            PassCommand::Retire { .. }
+            PassCommand::ReserveSlot { .. }
+            | PassCommand::ApplyCapacity { .. }
+            | PassCommand::Retire { .. }
             | PassCommand::ReleaseSlot { .. }
             | PassCommand::CompleteHostDrain { .. }
             | PassCommand::CompletePoolDrain { .. } => {}
@@ -757,11 +1117,8 @@ fn check_pass(
             } => {
                 let state = world.attempt(*attempt_id);
                 let proven = match evidence {
-                    mayfly_control_domain::host::ReleaseEvidence::AttemptNeverStarted => {
-                        state.identity.is_none()
-                    }
-                    mayfly_control_domain::host::ReleaseEvidence::VmDeleted
-                    | mayfly_control_domain::host::ReleaseEvidence::AttemptLost => {
+                    ReleaseEvidence::AttemptNeverStarted => state.identity.is_none(),
+                    ReleaseEvidence::VmDeleted | ReleaseEvidence::AttemptLost => {
                         matches!(state.phase, Phase::Deleted | Phase::Lost | Phase::Closed)
                     }
                 };
@@ -837,6 +1194,29 @@ fn policies() -> BTreeMap<PoolName, PolicyOf> {
         .collect()
 }
 
+/// The image a pin change alternates with the sample one.
+fn other_image() -> ImageDigest {
+    ImageDigest::new(&format!("sha256:{}", "b".repeat(64))).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// How a simulation runs.
+#[derive(Debug, Clone, Copy)]
+pub struct SimOptions {
+    /// How many steps behind the journal the reconciler reads the projections.
+    pub lag: usize,
+    /// The pure pass the reconciler runs: [`plan_pass`], or a variant to prove the checks.
+    pub plan: fn(&PassInputs) -> Pass,
+}
+
+impl Default for SimOptions {
+    fn default() -> Self {
+        Self {
+            lag: 0,
+            plan: plan_pass,
+        }
+    }
+}
+
 /// Runs `steps` seeded world steps and reconciler passes over two hosts and three pools (one
 /// macOS, two Linux; `exact` and `demand` mixed) and checks the invariants after every step.
 ///
@@ -844,13 +1224,24 @@ fn policies() -> BTreeMap<PoolName, PolicyOf> {
 /// When the store fails: the kit is wrong.
 #[must_use]
 pub fn simulate(seed: u64, steps: usize) -> Simulation {
+    simulate_with(seed, steps, SimOptions::default())
+}
+
+/// [`simulate`] with `options`.
+///
+/// # Panics
+/// When the store fails: the kit is wrong.
+#[must_use]
+pub fn simulate_with(seed: u64, steps: usize, options: SimOptions) -> Simulation {
     let journal = MemoryJournal::new();
     let clock = FakeClock::at(T0);
     let store = store(&journal, &clock);
     let rng = SeededRng::new(seed);
     let mut config = ReconcilerConfig::new(EPOCH);
     config.policies = policies();
-    let reconciler = Reconciler::new(&store, &journal, config, Kicks::new(64));
+    config.plan = options.plan;
+    let reads = LaggedReads::new(&journal, options.lag);
+    let reconciler = Reconciler::new(&store, &reads, config, Kicks::new(64));
     let mut world = World::new(&store);
     world.register_host("h1", report(32, 0, 6));
     world.register_host("h2", report(24, 2, 4));
@@ -858,8 +1249,9 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
         world.configure_pool(pool);
     }
     let mut sim = Simulation::default();
-    let mut generations = BTreeMap::new();
+    let mut checker = Checker::default();
     let mut before = snapshot(&world);
+    reads.capture();
     let pick = |n: usize| -> usize { usize::try_from(rng.below(n as u64)).unwrap_or(0) };
     for step in 0..steps {
         let roll = pick(100);
@@ -869,15 +1261,20 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
                 let report = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
                 pass = Some(report);
             }
-            20..=25 => {
+            20..=22 => {
+                // the data plane's real capacity moves; the control plane learns of it later
                 let host = world.hosts[pick(world.hosts.len())].clone();
                 let memory = [16, 24, 32, 40][pick(4)];
                 let foreign = [0, 0, 2, 6, 12][pick(5)];
                 let slots = [2, 4, 6][pick(3)];
-                world.report(
+                world.drift(
                     &host,
                     report(memory, foreign, u32::try_from(slots).unwrap_or(4)),
                 );
+            }
+            23..=25 => {
+                let host = world.hosts[pick(world.hosts.len())].clone();
+                world.report_truth(&host);
             }
             26..=37 => {
                 let pool = world.pools[pick(world.pools.len())].name.clone();
@@ -899,11 +1296,7 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
                     if !everyone && pick(2) == 0 {
                         continue;
                     }
-                    let refusal = match pick(32) {
-                        0 => Some(RefusalReason::InsufficientResources),
-                        1 => Some(RefusalReason::EffectFailed),
-                        _ => None,
-                    };
+                    let refusal = world.answer(attempt, pick(48));
                     world.progress(attempt, refusal);
                 }
             }
@@ -950,26 +1343,56 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
             }
             95 => {
                 let pool = world.pools[pick(world.pools.len())].name.clone();
-                let state = world.pool(&pool);
-                let body = match state.mode {
-                    mayfly_control_domain::pool::PoolMode::Paused => PoolCommand::ResumePool,
-                    _ => PoolCommand::PausePool,
+                let body = match world.pool(&pool).mode {
+                    PoolMode::Active => PoolCommand::PausePool,
+                    _ => PoolCommand::ResumePool,
                 };
                 let _ = world.command::<Pool>(pool.as_str(), Actor::Operator { uid: 501 }, body);
                 world.apply_terms(&pool);
             }
-            96..=97 => {
+            96 => {
                 let pool = world.pools[pick(world.pools.len())].name.clone();
                 if tripped(&world.pool(&pool)) {
                     let _ = world.command::<Pool>(
                         pool.as_str(),
                         Actor::Operator { uid: 501 },
                         PoolCommand::ResetBreaker {
-                            digest: ImageDigest::sample(),
+                            digest: world
+                                .pool(&pool)
+                                .image_pin
+                                .unwrap_or_else(ImageDigest::sample),
                         },
                     );
                     world.apply_terms(&pool);
                 }
+            }
+            97 => {
+                // an operator drains a pool, or resumes a draining or drained one
+                let pool = world.pools[pick(world.pools.len())].name.clone();
+                let body = match world.pool(&pool).mode {
+                    PoolMode::Draining | PoolMode::Drained => PoolCommand::ResumePool,
+                    _ => PoolCommand::StartPoolDrain,
+                };
+                let _ = world.command::<Pool>(pool.as_str(), Actor::Operator { uid: 501 }, body);
+                world.apply_terms(&pool);
+            }
+            98 => {
+                // the image pin changes (P17): prepared VMs of the old image are retired
+                let pool = world.pools[pick(world.pools.len())].name.clone();
+                let digest = if world.pool(&pool).image_pin == Some(ImageDigest::sample()) {
+                    other_image()
+                } else {
+                    ImageDigest::sample()
+                };
+                let _ = world.command::<Pool>(
+                    pool.as_str(),
+                    Actor::Automation { policy: "image" },
+                    PoolCommand::PinImage {
+                        digest,
+                        verified_ref: Some(EventId::from_u128(8)),
+                    },
+                );
+                world.apply_terms(&pool);
             }
             _ => {
                 let leased = world.leased_attempts();
@@ -980,10 +1403,27 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
             }
         }
         let after = snapshot(&world);
-        check(step, &before, &after, &mut generations, &mut sim.violations);
+        check(step, &before, &after, &mut checker, &mut sim.violations);
+        for host in world.take_refusals() {
+            // the reconciler reads it once the projections it reads include this step
+            let at = after.hosts.get(&host).map_or(0, report_id_of);
+            checker.held.insert(host, (at, step + options.lag.max(1)));
+            sim.refusals += 1;
+        }
+        for attempt in world.vms_without_lease() {
+            sim.violations
+                .push(format!("step {step}: the VM of {attempt} has no lease"));
+        }
         if let Some(report) = pass {
             sim.passes += 1;
-            check_pass(step, &world, &before, &report, &mut sim.violations);
+            check_pass(
+                step,
+                &world,
+                &before,
+                &report,
+                options.lag == 0,
+                &mut sim.violations,
+            );
             for command in &report.accepted {
                 match command {
                     PassCommand::ReserveSlot { .. } => sim.reserved += 1,
@@ -1001,6 +1441,7 @@ pub fn simulate(seed: u64, steps: usize) -> Simulation {
                 u32::try_from(scale_set.acquired.len().saturating_sub(had)).unwrap_or(0);
         }
         before = after;
+        reads.capture();
     }
     sim
 }

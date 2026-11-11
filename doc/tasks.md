@@ -906,6 +906,22 @@ its runners only) until a newer report is applied. Cleanup: `ReleaseSlot` on `vm
 inventory-driven rows stay CP-04's. Composition maps `capacity_policy` with
 `config::reconciler_policies`; RT-02 wires the driver's `Kicks` and timer. `max_prepared_age`
 retirement is not built here (it needs the prepared instant; CP-06 or OPS-06).
+Note (CP-03F, review of CP-03): `ReleaseSlot{attempt_never_started}` stays planned by the pass
+but is decided at the save: the reconciler saves it with a read of the attempt stream expecting
+no stream, and P2's `StartAttempt` (the fleet kit's `World::start`) reads the host stream at the
+revision showing the lease, so either order keeps a live VM's slot held
+(`formal/scheduling.qnt`: `startAttempt`, `releaseUnstarted`, `noVmWithoutLease`). The
+attempts projection is v4: `capacity_refused_at` (the revision of the latest
+`insufficient_resources` refusal, kept after a retry) holds the host even when the attempt
+retried before the pass, and `retirement_requested` keeps the pass from asking again or counting
+the attempt. A draining host's preparing, prepared and listening VMs are left out of the pool's
+need (no over-retirement below `min_prepared`). Reservation ids carry host, pool and terms
+revision; releases are issued before reservations. The simulation adds the data plane's real
+capacity (refusals only when a clone does not fit it), `target_absent` vanishes, pool drains,
+image pin changes, a read lag, an independent I03, a held-host check and a no-VM-without-lease
+check, and a negative control (`should_find_violations_when_a_plan_ignores_admission`). A longer
+seeded run in a slower lane is not wired: the weekly `formal.yml` lane has no `xtask` stage that
+runs the fleet simulation yet (a follow-up: a `--seeds/--steps` flag beside `conformance`).
 
 #### CP-04 Observation inbox and startup recovery
 Cites: plan §10, §3.2; dm P1, P3; event-store §5.4, §6.3; ADRs 0025, 0026, 0037. Observations enter

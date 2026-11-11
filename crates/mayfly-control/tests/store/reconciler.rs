@@ -4,16 +4,21 @@
 //! seeded simulation that checks the invariants it must keep.
 
 use mayfly_control::delivery::Kicks;
+use mayfly_control::projection::views::Attempts;
+use mayfly_control::queries;
 use mayfly_control::reconciler::{Reconciler, ReconcilerConfig};
 use mayfly_control::store::{Clock, stream_of};
 use mayfly_control_domain::attempt::{GuestOs, Phase, RefusalReason, RetireReason};
 use mayfly_control_domain::demand::WireMode;
-use mayfly_control_domain::host::Host;
-use mayfly_control_domain::reconcile::PassCommand;
+use mayfly_control_domain::host::{Host, ReleaseEvidence};
+use mayfly_control_domain::reconcile::{Pass, PassCommand, PassInputs, plan_pass};
 use mayfly_domain::{AttemptId, HostId, Millis, PoolName};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::FakeClock;
-use mayfly_testkit::fleet::{EPOCH, FleetStore, PoolSpec, T0, World, report, simulate, store};
+use mayfly_testkit::fleet::{
+    EPOCH, FleetStore, LaggedReads, PoolSpec, SimOptions, T0, World, report, simulate,
+    simulate_with, store,
+};
 use mayfly_testkit::journal::MemoryJournal;
 
 const MINUTE: u64 = 60_000;
@@ -265,6 +270,175 @@ fn should_admit_nothing_on_the_host_until_it_reports_again_when_the_data_plane_r
 }
 
 #[test]
+fn should_keep_the_slot_when_the_attempt_starts_between_the_read_and_the_release() {
+    // given: a reservation the reconciler reads unstarted, through projections it refreshes
+    // only when told (a read model behind the journal)
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reads = LaggedReads::new(&journal, 1);
+    let reconciler = Reconciler::new(&store, &reads, ReconcilerConfig::new(EPOCH), Kicks::new(8));
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    reads.capture();
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    clock.advance(Millis::new(3 * MINUTE));
+
+    // when: the attempt starts after that read, and a pass past the start grace plans its
+    // release from the stale read
+    let (host, attempt) = world.unstarted()[0].clone();
+    assert!(world.start(&host, attempt));
+    let pass = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: the release was planned, refused at the save, and the lease is still held
+    let release = PassCommand::ReleaseSlot {
+        host_id: h1(),
+        attempt_id: attempt,
+        evidence: ReleaseEvidence::AttemptNeverStarted,
+    };
+    assert!(pass.pass.commands.contains(&release), "{:?}", pass.pass);
+    assert!(
+        pass.failed.contains(&(release.clone(), "conflict")),
+        "{pass:?}"
+    );
+    assert!(!pass.accepted.contains(&release));
+    assert!(world.host(&h1()).leases.contains_key(&attempt));
+}
+
+#[test]
+fn should_release_an_unstarted_lease_and_refuse_its_late_start_when_the_release_commits_first() {
+    // given: a reservation never started past the start grace
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        Kicks::new(8),
+    );
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let (host, attempt) = world.unstarted()[0].clone();
+    world.statistics(&lin(), 0, 0, false);
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    clock.advance(Millis::new(3 * MINUTE));
+
+    // when: the release commits, then P2's start (which read the host stream before it)
+    let pass = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let started = world.start(&host, attempt);
+
+    // then
+    assert!(pass.accepted.contains(&PassCommand::ReleaseSlot {
+        host_id: h1(),
+        attempt_id: attempt,
+        evidence: ReleaseEvidence::AttemptNeverStarted,
+    }));
+    assert!(!started);
+    assert!(world.attempt(attempt).identity.is_none());
+}
+
+#[test]
+fn should_hold_the_host_until_a_newer_report_when_the_attempt_retries_before_the_pass() {
+    // given: one job reserved and started; its clone is refused insufficient_resources and the
+    // saga retries before any pass runs, while two more jobs arrive
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        Kicks::new(8),
+    );
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    for (host, attempt) in world.unstarted() {
+        world.start(&host, attempt);
+    }
+    let (_, attempt) = world.leased_attempts()[0].clone();
+    world.progress(attempt, None);
+    world.progress(attempt, Some(RefusalReason::InsufficientResources));
+    world.progress(attempt, None);
+    world.statistics(&lin(), 3, 0, false);
+    let row = block_on(queries::all_rows::<Attempts, _>(&journal))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|(_, row)| row)
+        .find(|row| row.attempt_id == attempt)
+        .unwrap_or_else(|| panic!("no attempts row"));
+
+    // when: a pass, another on the same report, then one after a newer report
+    let held = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let still = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    world.report(&h1(), report(32, 0, 8));
+    let reread = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: the retry cleared `refused`, yet the host is held until the newer report
+    assert_eq!(row.refused, None);
+    assert_eq!(row.phase, "cloning");
+    assert!(reserved(&held.pass.commands).is_empty());
+    assert!(reserved(&still.pass.commands).is_empty());
+    assert_eq!(reserved(&reread.accepted).len(), 2);
+}
+
+/// A pass that ignores admission: every host open, no hold, no refusal read.
+fn ignoring_admission(inputs: &PassInputs) -> Pass {
+    let mut open = inputs.clone();
+    for host in &mut open.hosts {
+        host.admission_open = true;
+        for lease in &mut host.leases {
+            lease.refusal = None;
+        }
+    }
+    open.memory.held.clear();
+    plan_pass(&open)
+}
+
+#[test]
+fn should_find_violations_when_a_plan_ignores_admission() {
+    // given: the negative control: the simulation's checks against a broken pass
+    let options = SimOptions {
+        plan: ignoring_admission,
+        ..SimOptions::default()
+    };
+
+    // when
+    let sim = simulate_with(1, 1000, options);
+
+    // then: the checks are not vacuous
+    assert!(!sim.violations.is_empty(), "{sim:?}");
+}
+
+#[test]
+fn should_never_violate_the_invariants_when_the_reconciler_reads_projections_behind_the_journal() {
+    // given: projections read 3 steps behind the journal
+    let options = SimOptions {
+        lag: 3,
+        ..SimOptions::default()
+    };
+
+    // when
+    let runs: Vec<_> = [4_u64, 5]
+        .iter()
+        .map(|seed| (*seed, simulate_with(*seed, 1000, options)))
+        .collect();
+
+    // then
+    for (seed, sim) in runs {
+        assert!(
+            sim.violations.is_empty(),
+            "seed {seed}: {:#?} {sim:?}",
+            sim.violations.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(sim.reserved > 0 && sim.released > 0, "seed {seed}: {sim:?}");
+    }
+}
+
+#[test]
 fn should_never_violate_the_invariants_when_a_seeded_simulation_runs_1000_steps() {
     // given
     let seeds = [1_u64, 2, 3];
@@ -289,5 +463,6 @@ fn should_never_violate_the_invariants_when_a_seeded_simulation_runs_1000_steps(
         assert!(sim.released > 0, "seed {seed}: {sim:?}");
         assert!(sim.capacities > 0, "seed {seed}: {sim:?}");
         assert!(sim.acquired > 0, "seed {seed}: {sim:?}");
+        assert!(sim.refusals > 0, "seed {seed}: {sim:?}");
     }
 }

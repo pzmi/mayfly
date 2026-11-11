@@ -10,23 +10,34 @@
 //! pass is level-triggered.
 //!
 //! **Idempotent.** Each command's id is derived from what it is about: a reservation from the
-//! revisions the pass read and its ordinal (P5's `hash(input stream versions, ordinal)`), with
-//! the attempt id derived from it; a retirement from the attempt, its revision and reason; a
-//! release from the attempt and its evidence; a capacity input from its scale set, revision and
-//! values; a drain completion from its stream's revision. The intent is part of each id, so a
-//! later pass that plans otherwise is never answered `command_id_reused`. A pass repeated over the same revisions is answered by receipts and
+//! revisions the pass read and its ordinal (P5's `hash(input stream versions, ordinal)`) and its
+//! intent (host, pool, terms revision), with the attempt id derived from it; a retirement from
+//! the attempt, its revision and reason; a release from the attempt and its evidence; a capacity
+//! input from its scale set, revision and values; a drain completion from its stream's revision.
+//! The intent is part of each id, so a later pass that plans otherwise is never answered
+//! `command_id_reused`. A pass repeated over the same revisions is answered by receipts and
 //! reserves nothing twice (pinned by
 //! `tests/store/reconciler.rs::should_reserve_nothing_twice_when_a_pass_is_repeated_over_the_same_revisions`).
 //!
 //! **Refusals.** An aggregate's refusal is the answer (P5: a `Host` refusal admits nothing, the
 //! reason goes to the report); nothing is retried within a pass, the next pass reads again.
+//!
+//! **A never-started release is decided at the save, not on the read.** The pass reads the
+//! attempts projection, which may be behind the journal or rebuilding, so a lease it sees
+//! unstarted may have an `AttemptStarted` already. `ReleaseSlot{attempt_never_started}` is
+//! therefore saved with a read of the attempt stream expecting no stream: the unit commits only
+//! while the attempt has not started, and an attempt that started since leaves the lease held
+//! (`failed` with `conflict`; the next pass reads again). P2's `StartAttempt` reads the host
+//! stream the same way, so a release that commits first refuses the start (CP-03F;
+//! `formal/scheduling.qnt`'s `staleUnstartedReadKeepsTheSlotTest`; pinned by
+//! `tests/store/reconciler.rs::should_keep_the_slot_when_the_attempt_starts_between_the_read_and_the_release`).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use mayfly_control_domain::attempt::{Attempt, AttemptCommand, RefusalReason};
+use mayfly_control_domain::attempt::{Attempt, AttemptCommand};
 use mayfly_control_domain::capacity::Footprint;
-use mayfly_control_domain::host::{Host, HostCommand, ReserveSlot};
+use mayfly_control_domain::host::{Host, HostCommand, ReleaseEvidence, ReserveSlot};
 use mayfly_control_domain::pool::{Pool, PoolCommand, PoolMode};
 use mayfly_control_domain::reconcile::{
     HostReport, HostTerms, HostView, LeaseView, Pass, PassCommand, PassInputs, PassMemory,
@@ -38,11 +49,13 @@ use mayfly_domain::{AttemptId, CommandId, Epoch, HostId, Millis, PoolName, Resou
 use sha2::{Digest, Sha256};
 
 use crate::delivery::Kicks;
-use crate::journal::Journal;
+use crate::journal::{ExpectedRevision, Journal};
 use crate::projection::ProjectionStore;
 use crate::projection::views::{AttemptRow, SlotRow};
 use crate::queries::{self, FleetView, QueryError};
-use crate::store::{AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier};
+use crate::store::{
+    AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier, stream_of,
+};
 
 /// The reconciler's name: the actor of its commands.
 pub const RECONCILER: &str = "reconciler";
@@ -61,6 +74,10 @@ pub struct ReconcilerConfig {
     /// Each pool's capacity policy (the composition root maps `capacity_policy` through
     /// `mayfly_composition::config::plan_policy`); a pool not listed is `exact`.
     pub policies: BTreeMap<PoolName, PolicyOf>,
+    /// The pure pass: [`plan_pass`]. A test substitutes a broken variant to prove that the
+    /// simulation's checks catch it (`mayfly_testkit::fleet`'s negative control); nothing else
+    /// sets it.
+    pub plan: fn(&PassInputs) -> Pass,
 }
 
 impl ReconcilerConfig {
@@ -72,6 +89,7 @@ impl ReconcilerConfig {
             interval: Millis::new(60_000),
             run_epoch,
             policies: BTreeMap::new(),
+            plan: plan_pass,
         }
     }
 }
@@ -207,7 +225,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
             safe_mode,
             memory,
         );
-        let pass = plan_pass(&inputs);
+        let pass = (self.config.plan)(&inputs);
         let digest = versions_digest(&view);
         let mut report = PassReport {
             pass: pass.clone(),
@@ -260,7 +278,16 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
                 resources,
                 terms_revision,
             } => {
-                let id = derive(b"reserve\n", &[&digest, &ordinal.to_be_bytes()]);
+                let id = derive(
+                    b"reserve\n",
+                    &[
+                        &digest,
+                        &ordinal.to_be_bytes(),
+                        host_id.as_str().as_bytes(),
+                        pool.as_str().as_bytes(),
+                        &terms_revision.to_be_bytes(),
+                    ],
+                );
                 *ordinal = ordinal.saturating_add(1);
                 let attempt_id = attempt_of(id);
                 self.save::<Host>(
@@ -304,15 +331,19 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
                     b"release\n",
                     &[&attempt_id.as_u128().to_be_bytes(), why.as_bytes()],
                 );
-                self.save::<Host>(
-                    host_id.as_str(),
-                    id,
-                    HostCommand::ReleaseSlot {
-                        attempt_id: *attempt_id,
-                        evidence: *evidence,
-                    },
-                )
-                .await
+                let body = HostCommand::ReleaseSlot {
+                    attempt_id: *attempt_id,
+                    evidence: *evidence,
+                };
+                match evidence {
+                    ReleaseEvidence::AttemptNeverStarted => {
+                        self.release_unstarted(host_id.as_str(), id, *attempt_id, body)
+                            .await
+                    }
+                    ReleaseEvidence::VmDeleted | ReleaseEvidence::AttemptLost => {
+                        self.save::<Host>(host_id.as_str(), id, body).await
+                    }
+                }
             }
             PassCommand::CompleteHostDrain { host_id } => {
                 let revision = view
@@ -341,28 +372,41 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
         }
     }
 
-    async fn save<A: Aggregate>(&self, instance: &str, id: CommandId, body: A::Body) -> Answer
-    where
-        A::Body: Clone,
-    {
-        let command = Command::new(
+    fn command<B>(&self, id: CommandId, body: B) -> Command<B> {
+        Command::new(
             id,
             self.store.clock().now(),
             self.config.run_epoch,
             Actor::Automation { policy: RECONCILER },
             body,
-        );
-        match self
-            .store
-            .execute::<A>(SaveRequest::new(instance, command))
-            .await
-        {
-            Ok(Outcome::Accepted { .. }) => Answer::Accepted,
-            Ok(Outcome::Refused { rejection, .. }) => Answer::Refused(rejection.code()),
-            Err(SaveError::CommandIdReused { .. }) => Answer::Failed("command_id_reused"),
-            Err(error) if error.is_retryable() => Answer::Failed("conflict"),
-            Err(_) => Answer::Failed("save_failed"),
-        }
+        )
+    }
+
+    async fn save<A: Aggregate>(&self, instance: &str, id: CommandId, body: A::Body) -> Answer
+    where
+        A::Body: Clone,
+    {
+        let request = SaveRequest::new(instance, self.command(id, body));
+        answer_of(self.store.execute::<A>(request).await)
+    }
+
+    /// `ReleaseSlot{attempt_never_started}` with a read of the attempt stream expecting no
+    /// stream, saved once: a started attempt (or any write to the host stream in between) fails
+    /// the unit, and the next pass reads again. Never retried here: a retry would re-check the
+    /// same expectation (see the module docs).
+    async fn release_unstarted(
+        &self,
+        host: &str,
+        id: CommandId,
+        attempt_id: AttemptId,
+        body: HostCommand,
+    ) -> Answer {
+        let Ok(attempt_stream) = stream_of::<Attempt>(&attempt_id.to_string()) else {
+            return Answer::Failed("save_failed");
+        };
+        let request = SaveRequest::new(host, self.command(id, body))
+            .with_read(attempt_stream, ExpectedRevision::NoStream);
+        answer_of(self.store.save::<Host>(request).await)
     }
 }
 
@@ -370,6 +414,16 @@ enum Answer {
     Accepted,
     Refused(&'static str),
     Failed(&'static str),
+}
+
+fn answer_of<R: Rejection>(saved: Result<Outcome<R>, SaveError>) -> Answer {
+    match saved {
+        Ok(Outcome::Accepted { .. }) => Answer::Accepted,
+        Ok(Outcome::Refused { rejection, .. }) => Answer::Refused(rejection.code()),
+        Err(SaveError::CommandIdReused { .. }) => Answer::Failed("command_id_reused"),
+        Err(error) if error.is_retryable() => Answer::Failed("conflict"),
+        Err(_) => Answer::Failed("save_failed"),
+    }
 }
 
 fn derive(tag: &[u8], parts: &[&[u8]]) -> CommandId {
@@ -502,11 +556,8 @@ pub fn inputs_of(
                                 quarantined: slot.phase == "quarantined",
                                 stage: stage_of(attempt),
                                 image: attempt.map(|a| a.image_digest.clone()),
-                                refusal: attempt
-                                    .filter(|a| {
-                                        a.refused == Some(RefusalReason::InsufficientResources)
-                                    })
-                                    .map(|a| a.revision),
+                                refusal: attempt.and_then(|a| a.capacity_refused_at),
+                                retiring: attempt.is_some_and(|a| a.retirement_requested.is_some()),
                             }
                         })
                         .collect()

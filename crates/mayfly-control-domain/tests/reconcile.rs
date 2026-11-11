@@ -95,6 +95,7 @@ fn lease(n: u128, pool_name: &str, stage: RunnerStage) -> LeaseView {
         stage,
         image: Some(ImageDigest::sample()),
         refusal: None,
+        retiring: false,
     }
 }
 
@@ -361,6 +362,100 @@ fn should_retire_prepared_and_listening_and_complete_the_drain_when_the_scope_is
     assert!(!pass.commands.contains(&PassCommand::CompleteHostDrain {
         host_id: host_id("h1")
     }));
+}
+
+#[test]
+fn should_not_retire_below_min_prepared_when_a_draining_host_holds_prepared_vms() {
+    // given: min_prepared 2, no job; two prepared VMs on a draining host and one elsewhere
+    let mut lin = linux("lin", Some(0));
+    lin.min_prepared = 2;
+    let mut draining = host("h1", &[("lin", 4)]);
+    draining.draining = true;
+    draining.admission_open = false;
+    draining.leases = vec![
+        lease(1, "lin", RunnerStage::Prepared),
+        lease(2, "lin", RunnerStage::Prepared),
+    ];
+    let mut other = host("h2", &[("lin", 4)]);
+    other.leases = vec![lease(3, "lin", RunnerStage::Prepared)];
+    let first = inputs(vec![draining, other], vec![lin]);
+
+    // when: a pass, and another one past the hysteresis
+    let pass = plan_pass(&first);
+    let mut late = first.clone();
+    late.now = Millis::new(first.now.get() + 6 * MINUTE);
+    late.memory = pass.memory.clone();
+    let late_pass = plan_pass(&late);
+
+    // then: the draining host's two are retired `drain` and replaced; the third is kept (no
+    // surplus), and one more is reserved for min_prepared on the other host
+    let need = pass.needs.get(&pool("lin")).copied().unwrap_or_default();
+    assert_eq!((need.surplus, need.waiting), (0, 1));
+    assert_eq!(
+        retired(&pass.commands),
+        vec![(1, RetireReason::Drain), (2, RetireReason::Drain)]
+    );
+    assert_eq!(retired(&late_pass.commands), retired(&pass.commands));
+    assert_eq!(
+        reserves(&pass.commands),
+        vec![("h2".to_owned(), "lin".to_owned())]
+    );
+}
+
+#[test]
+fn should_neither_retire_again_nor_count_an_attempt_when_its_retirement_is_requested() {
+    // given: min_prepared 1, no job; two prepared VMs, one of them already retiring
+    let mut lin = linux("lin", Some(0));
+    lin.min_prepared = 1;
+    let mut h = host("h1", &[("lin", 4)]);
+    let mut retiring = lease(2, "lin", RunnerStage::Prepared);
+    retiring.retiring = true;
+    h.leases = vec![lease(1, "lin", RunnerStage::Prepared), retiring];
+    let first = inputs(vec![h], vec![lin]);
+
+    // when: past the hysteresis
+    let seen = plan_pass(&first);
+    let mut late = first.clone();
+    late.now = Millis::new(first.now.get() + 6 * MINUTE);
+    late.memory = seen.memory.clone();
+    let pass = plan_pass(&late);
+
+    // then: no surplus: the retiring one is on its way out and the other is min_prepared
+    let need = pass.needs.get(&pool("lin")).copied().unwrap_or_default();
+    assert_eq!(
+        (need.runners.prepared, need.surplus, need.waiting),
+        (1, 0, 0)
+    );
+    assert!(retired(&pass.commands).is_empty());
+}
+
+#[test]
+fn should_plan_releases_before_reservations_when_a_pass_does_both() {
+    // given: a gone VM's lease and two jobs
+    let mut h = host("h1", &[("lin", 4)]);
+    h.leases = vec![lease(
+        1,
+        "lin",
+        RunnerStage::Gone(ReleaseEvidence::VmDeleted),
+    )];
+
+    // when
+    let pass = plan_pass(&inputs(vec![h], vec![linux("lin", Some(2))]));
+
+    // then
+    let release = pass
+        .commands
+        .iter()
+        .position(|c| matches!(c, PassCommand::ReleaseSlot { .. }));
+    let reserve = pass
+        .commands
+        .iter()
+        .position(|c| matches!(c, PassCommand::ReserveSlot { .. }));
+    assert!(
+        matches!((release, reserve), (Some(a), Some(b)) if a < b),
+        "{:?}",
+        pass.commands
+    );
 }
 
 #[test]

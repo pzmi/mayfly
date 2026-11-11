@@ -35,16 +35,34 @@
 //!   ones of an image no longer pinned (`image_replaced`), and prepared ones beyond the shortfall
 //!   and `min_prepared` once that surplus has lasted the **hysteresis** ([`Settings::hysteresis`],
 //!   `tests/reconcile.rs::should_retire_a_surplus_only_after_the_hysteresis_when_prepared_vms_exceed_demand`). A
-//!   reservation is never delayed: an idle VM costs capacity, a waiting job costs time.
+//!   reservation is never delayed: an idle VM costs capacity, a waiting job costs time. The
+//!   hysteresis reads the surplus at each pass only: a surplus that dips and comes back between
+//!   two passes is seen as lasting (memory holds when it was first seen, not every reading), so
+//!   it times a surplus by the passes, never by the instants in between.
+//!   An attempt whose retirement is already requested (`LeaseView::retiring`) is neither
+//!   retired again nor counted as a runner or a prepared VM.
 //! - Cleanup: `ReleaseSlot` for a lease whose attempt's VM is gone (`vm_deleted`,
 //!   `attempt_lost`) or that no `AttemptStarted` followed within [`Settings::start_grace`]
 //!   (`attempt_never_started`, P2's failure path), and `CompleteHostDrain` /
-//!   `CompletePoolDrain` once no lease is left in a draining scope (P23).
+//!   `CompletePoolDrain` once no lease is left in a draining scope (P23). The pass may read a
+//!   lease unstarted from a projection behind the journal (or rebuilding), so it only *plans*
+//!   the never-started release: the driver saves it with a read of the attempt stream
+//!   expecting no stream, and an attempt that started since refuses it at the save (CP-03F;
+//!   `formal/scheduling.qnt`'s `releaseUnstarted`, `staleUnstartedReadKeepsTheSlotTest`).
 //!
 //! **A data-plane `insufficient_resources` refusal is a definite no** (ADR 0024: the data plane
 //! accounts, its refusal wins): the host it came from admits nothing more until a report newer
-//! than the one in force when the pass read the refusal is applied; the next pass re-reads it
+//! (a strictly greater report id) than the one in force when the pass read the refusal is
+//! applied; the next pass re-reads it
 //! (`tests/reconcile.rs::should_hold_the_host_until_a_newer_report_when_the_data_plane_refuses_insufficient_resources`).
+//! The refusal is read from where it stays (the attempts row keeps the revision of the latest
+//! one), not from a flag the next directive clears, so a retry before the next pass does not
+//! hide it (CP-03F). A lost [`PassMemory`] reads every kept refusal of a live lease as new and
+//! holds its host until its next report: a delayed reservation, the safe direction.
+//!
+//! **Drain scope.** A host's draining leases are retired or finish there; the pool's need does
+//! not count them, so they are replaced elsewhere and never also retired as another host's
+//! surplus (`tests/reconcile.rs::should_not_retire_below_min_prepared_when_a_draining_host_holds_prepared_vms`).
 //!
 //! **Safe mode** plans `ApplyCapacity{SafeMode}` only: no reservation, retirement or release
 //! (I29).
@@ -136,9 +154,11 @@ pub struct LeaseView {
     pub stage: RunnerStage,
     /// Its attempt's image, once started.
     pub image: Option<ImageDigest>,
-    /// The attempt revision at which its latest directive was refused `insufficient_resources`,
-    /// while no newer directive was issued.
+    /// The attempt revision of its latest `insufficient_resources` refusal, kept after the
+    /// attempt retries (a new revision is a new refusal).
     pub refusal: Option<u64>,
+    /// Its attempt's retirement is already requested: not retired again, not counted.
+    pub retiring: bool,
 }
 
 /// A pool's terms as applied on a host.
@@ -522,10 +542,16 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
             });
         }
     }
-    // the scale sets learn the new input before any reservation is made under it
-    capacity_commands.extend(commands);
+    // the scale sets learn the new input before any reservation is made under it, and the
+    // releases go before the reservations, so a slot is given back before one is asked for
+    let reservations = commands;
     let mut commands = capacity_commands;
-    if !safe {
+    if safe {
+        commands.extend(reservations);
+    } else {
+        let (releases, completions) = cleanup(&hosts, &pools, now, inputs.settings, &mut memory);
+        commands.extend(releases);
+        commands.extend(reservations);
         commands.extend(retirements(
             &hosts,
             &pool_of,
@@ -534,7 +560,7 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
             inputs.settings,
             &mut memory,
         ));
-        commands.extend(cleanup(&hosts, &pools, now, inputs.settings, &mut memory));
+        commands.extend(completions);
     }
     Pass {
         commands,
@@ -570,11 +596,44 @@ fn read_refusals(hosts: &[HostView], before: &PassMemory) -> PassMemory {
     memory
 }
 
+/// The stage a lease counts as in its pool's need: a VM on its way to Prepared, a prepared VM
+/// or a listening runner on a draining host is retired there (P23), and an attempt whose
+/// retirement is requested is on its way out; neither serves the pool any more.
+const fn counted_stage(host: &HostView, lease: &LeaseView) -> RunnerStage {
+    match lease.stage {
+        RunnerStage::NotStarted
+        | RunnerStage::Preparing
+        | RunnerStage::Prepared
+        | RunnerStage::Listening
+            if host.draining =>
+        {
+            RunnerStage::Ending
+        }
+        RunnerStage::Prepared | RunnerStage::Listening | RunnerStage::Activating
+            if lease.retiring =>
+        {
+            RunnerStage::Ending
+        }
+        RunnerStage::NotStarted => RunnerStage::NotStarted,
+        RunnerStage::Preparing => RunnerStage::Preparing,
+        RunnerStage::Prepared => RunnerStage::Prepared,
+        RunnerStage::Activating => RunnerStage::Activating,
+        RunnerStage::Listening => RunnerStage::Listening,
+        RunnerStage::Busy => RunnerStage::Busy,
+        RunnerStage::Ending => RunnerStage::Ending,
+        RunnerStage::Gone(evidence) => RunnerStage::Gone(evidence),
+        RunnerStage::Quarantined => RunnerStage::Quarantined,
+    }
+}
+
 /// Each pool's need, counted over every host's unquarantined leases.
 fn needs_of(hosts: &[HostView], pools: &[&PoolView], safe: bool) -> BTreeMap<PoolName, PoolNeed> {
     let mut tallies: BTreeMap<&PoolName, Tally> =
         pools.iter().map(|p| (&p.pool, Tally::default())).collect();
-    for lease in hosts.iter().flat_map(|h| &h.leases) {
+    for (host, lease) in hosts
+        .iter()
+        .flat_map(|h| h.leases.iter().map(move |l| (h, l)))
+    {
         let Some(pool) = pools.iter().find(|p| p.pool == lease.pool) else {
             continue;
         };
@@ -584,7 +643,7 @@ fn needs_of(hosts: &[HostView], pools: &[&PoolView], safe: bool) -> BTreeMap<Poo
         if lease.quarantined {
             continue;
         }
-        match lease.stage {
+        match counted_stage(host, lease) {
             RunnerStage::NotStarted | RunnerStage::Preparing => {
                 tally.preparing = tally.preparing.saturating_add(1);
             }
@@ -625,7 +684,7 @@ fn retirements(
             let Some(pool) = pool_of.get(&lease.pool) else {
                 continue;
             };
-            if lease.quarantined {
+            if lease.quarantined || lease.retiring {
                 continue;
             }
             let in_drain = host.draining || drains(pool.mode);
@@ -681,15 +740,16 @@ fn retirements(
     out
 }
 
-/// Cleanup: releases on evidence, releases of reservations never started, drain completions.
+/// Cleanup: releases on evidence and of reservations never started, then drain completions.
 fn cleanup(
     hosts: &[HostView],
     pools: &[&PoolView],
     now: Millis,
     settings: Settings,
     memory: &mut PassMemory,
-) -> Vec<PassCommand> {
+) -> (Vec<PassCommand>, Vec<PassCommand>) {
     let mut out = Vec::new();
+    let mut completions = Vec::new();
     let mut unstarted = BTreeSet::new();
     for host in hosts {
         for lease in &host.leases {
@@ -721,7 +781,7 @@ fn cleanup(
             }
         }
         if host.draining && host.leases.is_empty() {
-            out.push(PassCommand::CompleteHostDrain {
+            completions.push(PassCommand::CompleteHostDrain {
                 host_id: host.host_id.clone(),
             });
         }
@@ -743,10 +803,10 @@ fn cleanup(
             .flat_map(|h| &h.leases)
             .any(|l| l.pool == pool.pool);
         if draining && !leased {
-            out.push(PassCommand::CompletePoolDrain {
+            completions.push(PassCommand::CompletePoolDrain {
                 pool: pool.pool.clone(),
             });
         }
     }
-    out
+    (out, completions)
 }

@@ -69,6 +69,17 @@ pub struct AttemptRow {
     /// that evidence (CP-03). Absent from rows written before version 3, read as none.
     #[serde(default)]
     pub vm_gone: Option<ReleaseEvidence>,
+    /// The stream revision of the latest `insufficient_resources` refusal, kept after the next
+    /// directive (unlike `refused`): the reconciler reads a new revision as a new definite no,
+    /// even when the attempt retried before the pass ran (CP-03F). Absent from rows written
+    /// before version 4, read as none.
+    #[serde(default)]
+    pub capacity_refused_at: Option<u64>,
+    /// The retirement requested and not yet confirmed or withdrawn (the attempt's
+    /// `retirement_requested`): the reconciler neither asks again nor counts the attempt
+    /// (CP-03F). Absent from rows written before version 4, read as none.
+    #[serde(default)]
+    pub retirement_requested: Option<RetireReason>,
     /// The stream revision this row is the fold of.
     pub revision: u64,
     /// When that event was recorded (display only).
@@ -81,9 +92,9 @@ pub struct Attempts;
 
 impl ProjectionSpec for Attempts {
     const NAME: &'static str = "attempts";
-    /// 2: the row's `desync` (DEC-07); 3: `refused` and `vm_gone` (CP-03); compatible
-    /// additions.
-    const VERSION: u32 = 3;
+    /// 2: the row's `desync` (DEC-07); 3: `refused` and `vm_gone` (CP-03); 4:
+    /// `capacity_refused_at` and `retirement_requested` (CP-03F); compatible additions.
+    const VERSION: u32 = 4;
     const SUBSCRIBES: &'static [EventKind] = <AttemptEvent as EventSet>::KINDS;
     type Source = Attempt;
     type Row = AttemptRow;
@@ -99,6 +110,7 @@ impl ProjectionSpec for Attempts {
             .map(|mut row| {
                 row.refused = refused(before, event);
                 row.vm_gone = vm_gone(before, after.phase);
+                row.capacity_refused_at = capacity_refused_at(before, event, at);
                 row
             })
             .map(|row| (String::new(), row))
@@ -116,6 +128,23 @@ fn refused(before: Option<&AttemptRow>, event: &AttemptEvent) -> Option<RefusalR
         AttemptEvent::DirectiveRefused(DirectiveRefused { reason, .. }) => Some(*reason),
         AttemptEvent::DirectiveIssued(..) => None,
         _ => before.and_then(|row| row.refused),
+    }
+}
+
+/// The revision of the latest `insufficient_resources` refusal: set by one, carried otherwise.
+/// Pinned by
+/// `tests/store/projections.rs::should_keep_the_capacity_refusal_when_the_attempt_retries`.
+fn capacity_refused_at(
+    before: Option<&AttemptRow>,
+    event: &AttemptEvent,
+    at: EventMeta,
+) -> Option<u64> {
+    match event {
+        AttemptEvent::DirectiveRefused(DirectiveRefused {
+            reason: RefusalReason::InsufficientResources,
+            ..
+        }) => Some(at.revision.get()),
+        _ => before.and_then(|row| row.capacity_refused_at),
     }
 }
 
@@ -204,6 +233,8 @@ fn attempt_row(state: &AttemptState, at: EventMeta) -> Option<AttemptRow> {
         desync: state.vanished,
         refused: None,
         vm_gone: None,
+        capacity_refused_at: None,
+        retirement_requested: state.retirement_requested,
         revision: at.revision.get(),
         updated_at: at.recorded_at,
     })

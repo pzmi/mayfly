@@ -75,7 +75,10 @@ module scheduling_machine {
     foreignMem: int, foreignVms: int, foreignMacos: int,
   }
 
-  type Lease = { phase: str, slot: int, gen: int, pool: str, running: bool }
+  /// `started`: the lease's attempt stream has its `AttemptStarted` (P2's `StartAttempt`, saved
+  /// with a read of the host stream at the revision showing the lease reserved). The data plane
+  /// sees no lease: it clones for a started attempt that asks (CP-03F).
+  type Lease = { phase: str, slot: int, gen: int, pool: str, running: bool, started: bool }
 
   /// `policy` and `waiting` are the capacity policy's inputs per pool (ADR 0069, DEC-06): the
   /// pool's configured `capacity_policy` (`EXACT` or `DEMAND`) and the jobs it is told are
@@ -123,6 +126,8 @@ module scheduling_machine {
     quarantineReleasedEarly: bool,
     // a quarantined VM deleted without an operator's resolution
     autoDeleteQuarantined: bool,
+    // the data plane created a VM for a lease the host no longer holds (CP-03F)
+    createdUnleased: bool,
     // an older report replaced a newer one
     staleApplied: bool,
     // a reservation for a pool whose breaker was tripped at the terms the host holds
@@ -427,7 +432,8 @@ module scheduling_machine {
     host' = {
       report: NO_REPORT, gateClosed: false, drain: NO_DRAIN, policy: policy, waiting: waiting,
     },
-    leases' = ATTEMPTS.mapBy(_ => { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false }),
+    leases' = ATTEMPTS.mapBy(_ =>
+      { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false }),
     slotGen' = SLOTS.mapBy(_ => 0),
     terms' = POOLS.mapBy(_ => { rev: 0, open: false }),
     pools' = POOLS.mapBy(_ => { rev: 1, active: true, failures: 0, tripped: false }),
@@ -440,7 +446,8 @@ module scheduling_machine {
       overAllocated: false, macosOver: false, reservedClosed: false, grantedClosed: false,
       afterDrain: false, drainedWithLeases: false, dpOvercommit: false, dpStartedUnknown: false,
       doubleCreate: false,
-      quarantineReleasedEarly: false, autoDeleteQuarantined: false, staleApplied: false,
+      quarantineReleasedEarly: false, autoDeleteQuarantined: false, createdUnleased: false,
+      staleApplied: false,
       trippedAdmitted: false,
     },
   }
@@ -474,10 +481,13 @@ module scheduling_machine {
     g' = { ...g, lastKind: "dp" },
   }
 
-  /// The data plane executes the clone and start of a lease's VM, if it fits its own ledger
-  /// (I33); a create that does not fit is refused (`insufficient_resources`) and changes nothing.
+  /// The data plane executes the clone and start of a started attempt's VM, if it fits its own
+  /// ledger (I33); a create that does not fit is refused (`insufficient_resources`) and changes
+  /// nothing. It does not see the host's lease: a started, unquarantined attempt asks, and the
+  /// guards of `startAttempt` and `releaseUnstarted` keep that attempt's lease held (CP-03F).
   action dpCreate(a: int): bool = all {
-    runner(leases.get(a)),
+    leases.get(a).started,
+    leases.get(a).phase != QUARANTINED,
     vms.get(a) == ABSENT,
     not(created.get(a)),
     dpFits(a),
@@ -487,7 +497,8 @@ module scheduling_machine {
     sent' = sent,
     g' = { ...g, lastKind: "dp", dpOvercommit: g.dpOvercommit or not(dpFits(a)),
       dpStartedUnknown: g.dpStartedUnknown or dp.memUnknown,
-      doubleCreate: g.doubleCreate or created.get(a) },
+      doubleCreate: g.doubleCreate or created.get(a),
+      createdUnleased: g.createdUnleased or not(runner(leases.get(a))) },
   }
 
   /// Automation retires and deletes an unquarantined lease's VM (the attempt's `DeleteVm`).
@@ -567,7 +578,8 @@ module scheduling_machine {
   action reserve(a: int, pool: str): bool = {
     val s = lowest(freeSlotsOf(host.report, leases))
     val gen = slotGen.get(s) + 1
-    val after = leases.set(a, { phase: RESERVED, slot: s, gen: gen, pool: pool, running: false })
+    val after =
+      leases.set(a, { phase: RESERVED, slot: s, gen: gen, pool: pool, running: false, started: false })
     val r = host.report
     all {
       canReserve(host, leases, terms, a, pool),
@@ -646,12 +658,38 @@ module scheduling_machine {
     g' = { ...g, lastKind: "command" },
   }
 
-  /// `ReleaseSlot{evidence}`: only on the observed absence of the VM (deleted, lost, never
-  /// created). No timer and no cap releases a lease (I28).
+  /// P2's `StartAttempt`: saved with a read of the host stream at the revision that shows the
+  /// lease reserved, so a release that commits first refuses the start (CP-03F).
+  def canStart(ls: int -> Lease, a: int): bool = ls.get(a).phase == RESERVED and not(ls.get(a).started)
+
+  action startAttempt(a: int): bool = {
+    val l = leases.get(a)
+    all { canStart(leases, a), commit("command", host, leases.set(a, { ...l, started: true }), g) }
+  }
+
+  /// `ReleaseSlot{attempt_never_started}`: the reconciler plans it from a read that may be stale
+  /// (the attempts projection behind the journal, or rebuilding), so the save carries a read of
+  /// the attempt stream expecting no stream: an attempt that started after the read refuses the
+  /// release, whatever the pass saw (CP-03F, `staleUnstartedReadKeepsTheSlotTest`).
+  def canReleaseUnstarted(ls: int -> Lease, a: int): bool =
+    ls.get(a).phase == RESERVED and not(ls.get(a).started)
+
+  action releaseUnstarted(a: int): bool = {
+    val l = leases.get(a)
+    all {
+      canReleaseUnstarted(leases, a),
+      commit("command", host, leases.set(a, { ...l, phase: RELEASED, running: false }), g),
+    }
+  }
+
+  /// `ReleaseSlot{vm_deleted | attempt_lost}`: only on the observed absence of a VM that was
+  /// created (deleted or lost); a VM never created is `releaseUnstarted`'s. No timer and no cap
+  /// releases a lease (I28).
   action release(a: int): bool = {
     val l = leases.get(a)
     all {
       live(l),
+      created.get(a),
       vms.get(a) == ABSENT,
       commit("command", host, leases.set(a, { ...l, phase: RELEASED, running: false }),
         { ...g, quarantineReleasedEarly: g.quarantineReleasedEarly
@@ -731,6 +769,8 @@ module scheduling_machine {
       dpCreate(a),
       dpDelete(a),
       foreignChanges,
+      startAttempt(a),
+      releaseUnstarted(a),
       vmFactsChange,
       vmVanishes(a),
       recordReport,
@@ -765,6 +805,7 @@ module scheduling_machine {
       recordReport,
       applyTerms(pool),
       reserve(a, pool),
+      startAttempt(a),
       grant(a),
       dpCreate(a),
       foreignChanges,
@@ -843,6 +884,10 @@ module scheduling_machine {
   /// I33: the data plane never starts a VM that does not fit its own ledger.
   val i33DataPlaneNeverOvercommits = not(g.dpOvercommit)
 
+  /// noVmWithoutLease (CP-03F): the data plane never creates a VM for a lease the host released
+  /// (or never held), so a slot is never reserved again under a live VM.
+  val noVmWithoutLease = not(g.createdUnleased)
+
   /// noStartWhileCapacityUnknown: the data plane never starts a VM while the memory it needs
   /// is not known; nothing unknown is assumed (ADR 0052).
   val noStartWhileCapacityUnknown = not(g.dpStartedUnknown)
@@ -904,6 +949,7 @@ module scheduling_machine {
     i27BreakerBounded,
     i28QuarantineNeverAutoDeleted,
     i33DataPlaneNeverOvercommits,
+    noVmWithoutLease,
     noStartWhileCapacityUnknown,
     generationsMonotonic,
     macosGuestsAtMostTwo,
@@ -1073,11 +1119,12 @@ module scheduling {
 
   /// Every lease one attempt can hold, as the plan reads it (its slot and generation do not
   /// matter to it).
-  pure val LEASES: Set[Lease] = Set({ phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false },
-    { phase: RELEASED, slot: NO_SLOT, gen: 0, pool: LINUX, running: false })
+  pure val LEASES: Set[Lease] = Set(
+    { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false },
+    { phase: RELEASED, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false })
     .union(tuples(Set(RESERVED, ACTIVATED, QUARANTINED), POOLS, Set(true, false))
       .filter(t => t._1 == QUARANTINED or t._3)
-      .map(t => { phase: t._1, slot: 0, gen: 0, pool: t._2, running: t._3 }))
+      .map(t => { phase: t._1, slot: 0, gen: 0, pool: t._2, running: t._3, started: false }))
 
   /// shapesFromLeases (DEC-06F): for every assignment of leases to the attempts with at most
   /// `MAX_RUNNING` live per pool, either policy and every number of waiting jobs, the gate and
@@ -1385,7 +1432,7 @@ module scheduling {
   // A released slot is reserved again under its next generation, never the same one.
   run generationsIncreaseTest = {
     initWith(0, 0).then(ready)
-      .then(reserve(1, LINUX)).then(release(1))
+      .then(reserve(1, LINUX)).then(releaseUnstarted(1))
       .then(reserve(2, LINUX))
       .expect(leases.get(2).slot == 0 and leases.get(2).gen == 2 and allInvariants)
   }
@@ -1396,7 +1443,7 @@ module scheduling {
       .expect(canReserve(host, leases, terms, 1, MACOS))
       .then(reserve(1, MACOS))
       .expect(not(canReserve(host, leases, terms, 2, MACOS)))
-      .then(dpCreate(1))
+      .then(startAttempt(1)).then(dpCreate(1))
       .expect(oursRunningMacos + dp.foreignMacos == 2 and allInvariants)
   }
 
@@ -1418,7 +1465,7 @@ module scheduling {
     initWith(0, 0).then(ready).then(reserve(1, LINUX)).then(startDrain)
       .expect(not(canReserve(host, leases, terms, 2, LINUX)))
       .expect(plan.carveLinux == 0 and reportedMaxOf(host, plan, leases, terms, LINUX) == 1)
-      .then(dpCreate(1)).then(dpDelete(1)).then(release(1))
+      .then(startAttempt(1)).then(dpCreate(1)).then(dpDelete(1)).then(release(1))
       .then(completeDrain).expect(host.drain == DRAINED and allInvariants)
   }
 
@@ -1426,7 +1473,7 @@ module scheduling {
   // released while its VM exists; only the operator's resolution frees it.
   run quarantineHoldsCapacityTest = {
     initWith(0, 0).then(ready)
-      .then(reserve(1, MACOS)).then(dpCreate(1)).then(quarantine(1))
+      .then(reserve(1, MACOS)).then(startAttempt(1)).then(dpCreate(1)).then(quarantine(1))
       .expect(plan.freeMem == 2 and plan.freeVms == 2 and plan.freeMacos == 1)
       .then(stopQuarantined(1))
       .expect(plan.freeMem == 4 and plan.freeVms == 2 and plan.freeMacos == 1)
@@ -1439,8 +1486,8 @@ module scheduling {
   // A pool whose capacity quarantined leases consume admits nothing (I28, ADR 0025).
   run quarantineConsumesPoolTest = {
     initWith(0, 0).then(ready)
-      .then(reserve(1, MACOS)).then(dpCreate(1)).then(quarantine(1)).then(stopQuarantined(1))
-      .then(reserve(2, MACOS)).then(dpCreate(2)).then(quarantine(2)).then(stopQuarantined(2))
+      .then(reserve(1, MACOS)).then(startAttempt(1)).then(dpCreate(1)).then(quarantine(1)).then(stopQuarantined(1))
+      .then(reserve(2, MACOS)).then(startAttempt(2)).then(dpCreate(2)).then(quarantine(2)).then(stopQuarantined(2))
       .expect(not(canReserve(host, leases, terms, 3, MACOS)) and plan.carveMacos == 0)
       .expect(reportedMaxOf(host, plan, leases, terms, MACOS) == 0 and allInvariants)
   }
@@ -1477,7 +1524,7 @@ module scheduling {
       .expect(not(canReserve(host, leases, terms, 2, LINUX)) and plan.carveLinux == 0)
       .then(vmFactsChangeWith(false))
       .expect(dpFits(1))
-      .then(dpCreate(1))
+      .then(startAttempt(1)).then(dpCreate(1))
       .expect(vms.get(1) == RUNNING and allInvariants)
   }
 
@@ -1487,7 +1534,54 @@ module scheduling {
     initWith(0, 0).then(ready)
       .then(reserve(1, MACOS)).then(reserve(2, LINUX))
       .then(worldWith(2, 0))
-      .then(dpCreate(2))
+      .then(startAttempt(2)).then(dpCreate(2))
       .expect(vms.get(2) == RUNNING and not(dpFits(1)) and allInvariants)
+  }
+
+  // CP-03F: a pass reads a reservation unstarted (the attempts projection lags the journal, or
+  // is rebuilding), then P2 starts the attempt; the release planned from that read is refused at
+  // the save (the attempt stream exists), so the VM the attempt creates keeps its slot.
+  run staleUnstartedReadKeepsTheSlotTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX))
+      // the pass reads the lease unstarted ...
+      .expect(canReleaseUnstarted(leases, 1))
+      // ... and the attempt starts before its release is saved
+      .then(startAttempt(1))
+      .expect(not(canReleaseUnstarted(leases, 1)))
+      .then(dpCreate(1))
+      .expect(leases.get(1).phase == RESERVED and vms.get(1) == RUNNING and allInvariants)
+      .then(reserve(2, LINUX))
+      .expect(leases.get(2).slot != leases.get(1).slot and allInvariants)
+  }
+
+  // CP-03F: the other order: the release commits first, and P2's start, which read the host
+  // stream with the lease reserved, is refused; nothing is ever created for the released lease.
+  run releasedLeaseNeverStartsTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX))
+      .then(releaseUnstarted(1))
+      .expect(not(canStart(leases, 1)) and leases.get(1).phase == RELEASED and allInvariants)
+  }
+
+  /// The negative control of `staleUnstartedReadKeepsTheSlotTest`: a never-started release
+  /// decided on the pass's read alone (no read of the attempt stream at the save).
+  action releaseOnStaleRead(a: int): bool = {
+    val l = leases.get(a)
+    all {
+      l.phase == RESERVED,
+      commit("command", host, leases.set(a, { ...l, phase: RELEASED, running: false }), g),
+    }
+  }
+
+  // Without the attempt-stream read the slot of a live VM is released and the data plane
+  // creates a VM the host no longer counts: `noVmWithoutLease` fails, so the guard is needed.
+  run staleReleaseWithoutGuardViolatesTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX))
+      .then(startAttempt(1))
+      .then(releaseOnStaleRead(1))
+      .then(dpCreate(1))
+      .expect(not(noVmWithoutLease))
   }
 }
