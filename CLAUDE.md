@@ -10,7 +10,7 @@ Binaries: `mayflyd` (daemon) and `mayfly` (operator CLI over a `0600` Unix socke
 **control plane** (stream-scoped event store on SQLite, CQRS, inbox, durable delivery,
 reconciler, scale-set listener) decides and allocates; the **data plane** (directive executor,
 observers, resource ledger) acts, enforces host resources (ADR 0024) and stores nothing durable
-but its epoch-floor marker; `architecture.toml` enforces the split. Public, open source (`MIT OR Apache-2.0`).
+but its epoch-floor marker and its registry of owned image bases (ADR 0087); `architecture.toml` enforces the split. Public, open source (`MIT OR Apache-2.0`).
 
 ## Docs
 
