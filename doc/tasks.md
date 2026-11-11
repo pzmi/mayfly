@@ -85,10 +85,14 @@ vanished VM quarantined as a desync (ADR 0066), deadlines by the handshake's clo
 store's `storeOnlyStep` kept at depth 4 (weekly), ADR 0069 accepted with a per-pool `DEMAND`
 option (default `EXACT`) and quarantine stops deregistering first (ADR 0076) (DEC-06). Decided on 2026-11-11 (DEC-07):
 ADR 0058 accepted (the secrets adapter's command runner); a vanished VM converges like a
-controller's, its desync recorded and its attempt closed (ADR 0066's amendment). Still
-planner defaults: the remaining sub-items of **OD20** (socket
-authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
-GitHub capture (GH-00).
+controller's, its desync recorded and its attempt closed (ADR 0066's amendment). Decided on
+2026-11-11 (PLAN-01): the scale-set spec is settled from public evidence first (GH-00R; read,
+never port, ADR 0048), GH-00 shrinks to the live remainder recorded in HW-02's session, and the
+real-Tart lane becomes one command the owner runs from a terminal (HW-01X, `cargo xtask hw01`;
+`hardware.yml` optional); GH-00R and HW-01X record the dated amendments of ADRs 0048 and 0015.
+Still planner defaults: the remaining sub-items of **OD20** (socket
+authorisation, audit). Owner items still pending: the branch ruleset (FND-04), the live remainder
+of the scale-set spec (GH-00, in HW-02's session) and the real-Tart report (HW-01).
 
 ## Rules for every task
 
@@ -207,8 +211,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
 | RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05 | opus | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05 | opus | ⛳ |
-| GH-00 | (owner) Capture a live scale-set session in a disposable organisation | — | sonnet | |
-| GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00, DEC-03 | opus | |
+| GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
+| GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
 | GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02, DEC-03 | sonnet | |
 | GH-03 | Scale Set client and recorded-fixture contract | GH-01, GH-02 | opus | |
 | GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06, CP-04 | opus | |
@@ -233,7 +237,9 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | OPS-08 | `mayfly restore <backup>` and `mayfly uninstall --purge` | RT-03, OPS-01, CP-07 | opus | |
 | TART-01 | Tart 2.28.0 → 2.41.1: re-check the CLI, fake-tart parity | DP-07 | opus | |
 | DEP-01 | Dependency and tool refresh | — | sonnet | |
-| HW-01 | (owner) Real Tart lane on the owner's Mac | DP-05, OPS-01 | sonnet | |
+| HW-01X | `cargo xtask hw01`: real-Tart checks from a terminal | DP-05, DP-07, SEC-02 | opus | |
+| HW-01 | (owner) Run `cargo xtask hw01` on the owner's Mac and send the report | HW-01X | sonnet | |
+| GH-00 | (owner) Live remainder of the scale-set spec, folded into HW-02 | GH-00R, GH-03 | sonnet | |
 | HW-02 | (owner) Live GitHub scale set on a disposable organisation | GH-04, HW-01, GH-00 | sonnet | |
 | HW-03 | (owner) Canary next to Tartelet, then cutover | E2E-02, HW-02, OPS-03 | sonnet | |
 
@@ -1101,7 +1107,8 @@ pipe, own lock, atomic `exit.json`) and re-adoption inputs; stop only by `tart s
 from a local base, then `tart set --random-mac` and MAC read-back; Tart commands with version
 probe, JSON parsing against version-pinned fixtures; inventory `Incomplete` on any parse or exit
 failure; `HypervisorLimitHit`. **VmProvider contract suite** run against the in-memory fake, the
-fake-tart binary, and (gated by `MAYFLY_REAL_TART_HOME`, macOS only, used by HW-01) real Tart.
+fake-tart binary, and (gated by `MAYFLY_REAL_TART_HOME`, macOS only, run by HW-01X's `cargo xtask
+hw01`) real Tart.
 Note (DP-01 review): the executor never drops an effect's future (`mayfly-data::ports`): each
 call carries the adapter's own deadline and its future completes, `Ambiguous(Deadline)` at worst,
 only once what it started is stopped and reaped; a `start` returns only once its shim is settled,
@@ -1129,7 +1136,7 @@ by handle from an in-memory `LaunchStore`, bound to its VM, instance id and dead
 link's data-plane end fills (still to be wired, RT-02); `LaunchRunner` carries the recorded
 instance id from protocol 1.3; the launch exec holds a MAC handshake before the config; the
 empty `mayfly-adapter-guest` crate is removed. The launcher's contract and Tart's run lock
-(`vms/<vm>/config.json`, `F_GETLK`) are pending HW-01 on real Tart.
+(`vms/<vm>/config.json`, `F_GETLK`) are pending HW-01 on real Tart (`cargo xtask hw01`, HW-01X).
 
 #### DP-06 Host resource probes
 Cites: plan §9; ADR 0024. Disk free for the provider's home, available memory, boot id, clock gap
@@ -1203,8 +1210,8 @@ symlink, absolute path), `env:` (read once, never passed to a child), `exec:` (a
 deadline, bounded output); re-resolution on refresh; `doctor` resolves each reference without
 printing it. The `SecretProvider` contract suite (ver §5) with `PermissiveFileProvider` and
 `ShellExecProvider` failing it.
-Accept: contract green on memory, file, env and exec; Keychain compiles on macOS and runs in the
-hardware lane; no secret in any `Debug` output.
+Accept: contract green on memory, file, env and exec; Keychain compiles on macOS and runs in
+`cargo xtask hw01` (HW-01X); no secret in any `Debug` output.
 
 #### RT-02 Composition and `mayflyd`
 Cites: plan §3, §10, §4. Wire both planes with the inproc link; supervision tree with a root
@@ -1272,31 +1279,59 @@ fake guest runner completes one "job", VM deleted, slot released; then a demand 
 never exceeds 2; then kill -9 mid-clone and restart converges without duplicates.
 Accept: these tests in the e2e level (the `e2e-tests` stage, registered here), green in CI on Linux.
 
-#### GH-00 (owner) Capture a live scale-set session
-Cites: `doc/github-scaleset.md` §12, dm §9.1, §10 [VERIFY] items, ADRs 0040, 0045, 0048. In a
-disposable organisation, a redacted capture of the whole chain (App JWT to message-queue token),
-session open, poll and 202, acquire, JIT generation, job start, completion and cancel, a second
-session (409), session and token expiry, runner removal (busy and gone), and capacity changes,
-answering every open question of `doc/github-scaleset.md` §12. Agents prepare the capture tool
-and its redaction (synthetic names, no token, no JIT config); (owner) runs it.
-Accept: the traces committed as redacted fixtures under `tests/fixtures/github-scaleset/`; each
-answered question replaces its [unverified: GH-00] mark in `doc/github-scaleset.md` and cites
-its fixture; the minimal GitHub App permission list, verified, is committed for ADR 0045.
-Pending owner item (the owner will address it later).
-
 ### Phase 4 — GitHub
+
+#### GH-00R Settle the scale-set spec from public evidence
+Cites: `doc/github-scaleset.md` (its sources, §1–§12), dm §9.1, `formal/scaleset.qnt`
+(A1–A6), ADRs 0027, 0040, 0045, 0048, 0069. The owner decided on 2026-11-11 to settle the spec
+from public evidence before any live session: mayfly reads `actions/scaleset`, ARC,
+`actions/runner` and GitHub's documentation and uses what they show, as ADR 0048 says: read,
+never port (no code, test, test vector or recorded payload is copied). The input is the GH-00R
+research, a report of findings with their citations; the output is the spec, not the report.
+- **Every open item answered or listed.** For each question of §12 and each item marked
+  [unverified: GH-00] elsewhere in the spec, the spec records the answer, its evidence strength
+  and a citation. Strengths: **server-observed** (a public source shows the service's own
+  response: a recorded payload, a status or error body quoted from a real run), **client-assumed**
+  (what a reference client sends, expects or tolerates: evidence of what the service accepts
+  from it, not of what it does), **doc-stated** (GitHub's documentation says so). A citation names
+  the repository, file and function or lines at a pinned commit (the spec's sources table pins
+  each), or a documentation page with the date it was read. The header's marks follow: the three
+  strengths replace [unverified: GH-00], and **[open: HW-02]** marks an item no public source
+  settles.
+- **Client-assumed stays an assumption.** A client-assumed answer remains a named assumption, a
+  fake knob and a test name (ADR 0048), marked client-assumed wherever it is used: the spec,
+  `formal/scaleset.qnt`'s A1–A6, GH-01's knob and the test that names it.
+- **New behaviour joins the spec.** What the research finds that the spec does not yet state is
+  added with its strength and citation. A finding that changes what the scale-set model allows or
+  assumes (an A1–A6 refuted, a new message or error class) changes `formal/scaleset.qnt`, its
+  scenarios and the conformance driver first (rule 7), then the spec and the cards that follow.
+- **§12 becomes the HW-02 remainder:** the items without server-observed evidence that a live
+  session can settle, each with what to capture, for GH-00. Item 6 (whether
+  `X-ScaleSetMaxCapacity` caps `totalAssignedJobs`) stays on it, and `capacity_policy` keeps
+  the default `exact` (ADR 0069) until item 6 is server-observed, whatever a client assumes or a
+  page states.
+- **The record follows.** ADR 0048 gets a dated amendment (owner, 2026-11-11): each fact carries
+  its evidence strength, and "until GH-00's capture settles it" becomes "until it is
+  server-observed"; plan §7.4, ver §7.3, dm §9.1 and `doc/formal-models.md` follow where they say
+  the capture answers an item.
+Accept: no §12 question and no item formerly marked [unverified: GH-00] is left without either a
+citation with its strength or an explicit entry in the HW-02 remainder list; no upstream code,
+test or payload in the repository (or each listed in `THIRD-PARTY-NOTICES`, ADR 0048); `cargo
+xtask check --only docs` green, and the formal stages and conformance replay when the model
+changed.
 
 #### GH-01 `mayfly-fake-github`
 Cites: `doc/github-scaleset.md`, ver §7.3, ADRs 0012, 0028, 0040, 0048. An Axum fake built from
-the spec and the GH-00 capture, never from upstream's tests, test server or fixtures (ADR 0048),
+the spec as GH-00R settles it, never from upstream's tests, test server or fixtures (ADR 0048),
 importing no production crate: the auth chain (installation token, registration token as an
 auth step only, runner-registration with short-lived admin JWTs signed by a key generated at
 test time), scale-set lookup and create, one live session per scale set (409 on a second),
 refresh and delete, the long poll with a 202 hold and redelivery until delete, the 50-message
 cap, statistics, acquire, JIT, runner get/list/remove, and a scripted job-queue control API for
 e2e. Fault knobs: 401, 403, 409, 422, 429 with `Retry-After`, a rate-limited 403, a response
-dropped after its effect, a stalled poll, session expiry. Every [unverified: GH-00] behaviour is
-a named knob or assumption until GH-00 settles it. A contract suite for the `ScaleSetApi` and
+dropped after its effect, a stalled poll, session expiry. Every behaviour GH-00R leaves
+client-assumed or open is a named knob or assumption until it is server-observed (GH-00, in
+HW-02's session). A contract suite for the `ScaleSetApi` and
 `RunnerRegistry` wire behaviour runs against the fake and, owner-gated, against a live
 disposable organisation (HW-02).
 Accept: its own tests; the contract suite green against the fake, and its own tests prove a
@@ -1314,7 +1349,8 @@ or bodies.
 Accept: tests against fake-github under `tokio::time::pause`; no token in Debug output or errors;
 admin-token refresh exercised by a short-lived token.
 ADR 0045: the client reads the installation's granted permissions so `mayfly doctor` can warn when
-they exceed the published minimal list (the list is filled in by GH-00/HW-02, to be verified).
+they exceed the published minimal list (the list is drafted by GH-00R from GitHub's documentation
+and verified by GH-00/HW-02).
 
 #### GH-03 Scale Set client
 Cites: `doc/github-scaleset.md` §2-§7, plan §7.2, §7.4, ADRs 0040, 0048. The `ScaleSetApi` and
@@ -1519,7 +1555,7 @@ layout, cache naming, chunk checks, new flags refused or accepted as Tart does),
 ADR 0087 assumed of 2.28.0 (the re-serialized cached manifest, unchecked blobs, the symlink of a
 requested digest).
 Accept: both versions' fixtures parse; the VmProvider, GuestTransport and ImageStore contracts green
-over fake-tart in 2.41.1 mode; HW-01 gains the 2.41.1 confirmations.
+over fake-tart in 2.41.1 mode; HW-01X's command gains the 2.41.1 confirmations.
 
 #### DEP-01 Dependency and tool refresh
 Cites: fnd §2, §7, §9; `deny.toml`; `tools/versions.toml`. `cargo update` within semver and the
@@ -1528,17 +1564,85 @@ Rust toolchain, Quint, Apalache and Node pins; the GitHub Actions SHAs (with the
 comments).
 Accept: the full gate green after each step; no new `deny.toml` exception without its audit.
 
-#### HW-01 (owner) Real Tart lane
-`hardware.yml` (manual dispatch, self-hosted label on the owner's Mac): VmProvider contract on real
-Tart in a dedicated `TART_HOME`, one-job run with a tiny Linux image. Agents write the workflow and
-docs; (owner) registers the self-hosted runner and runs it.
+#### HW-01X `cargo xtask hw01`: real-Tart checks from a terminal
+Cites: ver §2, §5; fnd §9; ADRs 0015, 0026, 0037, 0038, 0039, 0058, 0082, 0087; the DEC-01,
+SEC-02, DP-04 and DP-07 notes under HW-01. The owner decided on 2026-11-11 that the real-Tart
+lane is one command the owner runs on their Mac from a checkout (Rust and Tart installed), with
+no self-hosted runner. Agents build and test it against fake-tart; no agent runs it on real
+Tart (CLAUDE.md). `cargo xtask hw01 [--macos] [--service-mode --service-user <user>] [--report
+<file>]`:
+- **A throwaway home.** It creates a `TART_HOME` in a fresh temp dir (`0700`, checked as ADR 0087
+  checks mayfly's private home) and passes it explicitly to every `tart` call; it never reads or
+  writes `~/.tart` or the caller's `TART_HOME`, and refuses to go on if the home a call would use
+  is not the one it created.
+- **Pinned images, explicit network.** It pulls small test images by digest only, each pinned
+  with its repository, digest, size and reason in a committed `tools/hw01/images.toml` (a tag is
+  refused): an arm64 Linux image with the Tart guest agent, always; a macOS image only with
+  `--macos`, because macOS images are tens of gigabytes. The same file names every network need:
+  anonymous pulls from the public registry hosting those images, and the runner release the
+  launcher's `install-runner` downloads (host, version and SHA-256 pinned). Nothing else leaves
+  the Mac.
+- **Everything HW-01 lists today.** The real-Tart `VmProvider` contract (`cargo xtask test --only
+  real-tart --real-tart-home <its home>`: VP-01..VP-10, VP-13..VP-15) and VP-17; the generic
+  `SecretProvider` contract (SP-01..SP-08) on `KeychainProvider::system` against a disposable
+  test keychain it creates, and ADR 0058's `security -w` facts; and every DEC-01, SEC-02, DP-04
+  and DP-07 confirmation under HW-01: the pull by digest and its listing name, the cache layout
+  including the link form, `tart clone` from a cached digest not reaching the registry and
+  leaving the base's change times alone, and `tart exec` and `install-runner` in a booted base on
+  Linux (and on macOS with `--macos`). TART-01's confirmations join when it lands. The launchd
+  service-mode check runs only with `--service-mode`: the owner names an existing dedicated
+  user; the command installs a uniquely named temporary LaunchDaemon (one `sudo` prompt), boots
+  the Linux image under it without a GUI session and removes the daemon. It never creates or
+  deletes a user.
+- **The `ImageStore` contract's image.** IC-01..IC-14 need a registry holding an image with
+  mayfly's launcher. A further step of the command builds one in the throwaway home: it clones
+  the pinned Linux image, installs a test launcher (`tools/hw01/launcher`, a reviewed script that
+  implements only ADR 0082's `install-runner` and `verify`, for this test; not the product
+  launcher) through `tart exec`, and pushes it with `tart push --insecure` to a loopback OCI
+  registry the command serves itself on `127.0.0.1` (port 0) for the run; the gated contract
+  world beside `tests/tart/images.rs` (with `RegistryManifests` as its `ManifestSource`) then
+  pulls it by digest. If any step of that build fails, IC-01..IC-14 are reported `not_run` with
+  the failing step, never passed; a check that needs `--macos` or `--service-mode` without the
+  flag is `not_run` too.
+- **It cleans up what it made, and only that.** Each VM, image, keychain, LaunchDaemon, process
+  and file is written to the run's record (in the temp dir) before it is created. On every exit,
+  success, failure or Ctrl-C, the command deletes exactly what the record names: a VM by its
+  exact name after re-reading the MAC it recorded, a process by the PID it started, never by
+  prefix, pattern or listing; then the temp dir. What it could not delete is listed in the report
+  and on stderr.
+- **A redacted, machine-readable report.** A versioned JSON file: per check `pass`, `fail` (with
+  bounded evidence: exit codes, JSON shapes with values replaced by their types, the wording that
+  matters) or `not_run` (with the reason), plus the macOS, Tart and toolchain versions and the
+  image digests. Redaction happens before anything is written: no hostname, username, home path,
+  serial number, hardware UUID, token or keychain content; MACs only synthetic (each real one
+  replaced by a stable placeholder per VM); paths relative to the temp home. Evidence that fails
+  redaction makes its check `fail` and is dropped. The owner sends the report back; agents turn it
+  into fixtures (`crates/mayfly-adapter-tart/tests/fixtures/tart-<version>/`) and fixes.
+Accept: the command refuses to start off macOS; its steps are tested on Linux against fake-tart:
+a run creates and then deletes exactly its record's entries, leaving a VM and a home it did not
+create untouched, also when a check fails midway and when the run is interrupted; the report's
+schema test, and a redaction test that plants a hostname, username, serial number, real MAC and
+token in check output and finds none in the report; an unbuildable contract image yields
+`not_run` for IC-01..IC-14; `tools/hw01/images.toml` holds digests only. ADR 0015 gets a dated
+amendment (owner, 2026-11-11): the real-Tart lane is `cargo xtask hw01` from a terminal and
+`hardware.yml` is optional; the D14 row, fnd §7 and ver §2's hardware row follow. `cargo xtask
+check` green.
+
+#### HW-01 (owner) Real Tart checks: run `cargo xtask hw01` and send the report
+Reworked by the owner's decision of 2026-11-11: no self-hosted runner. (owner) on the Mac, from a
+checkout at the commit to check, runs `cargo xtask hw01` (with `--macos` for the macOS image
+checks, `--service-mode --service-user <user>` for the launchd check) and sends the report back.
+Agents turn the report into fixtures and fixes, each in its own task; a `fail` or `not_run` stays
+listed here until a later report passes it. `hardware.yml` is optional: should the owner register
+a self-hosted runner later, it runs the same command and uploads the report. What the command
+confirms, by the task that asked for it:
 DEC-01: also verifies `tart set --random-mac` and MAC read-back, `tart exec -i`, the run lock and
 its PID, shim survival across a daemon kill and `tart stop` semantics.
 SEC-02: also runs the generic `SecretProvider` contract (SP-01..SP-08) on the real Keychain
 (`KeychainProvider::system`, a disposable item in a test keychain), and confirms what ADR 0058
 assumes of `security -w`: its trailing line break, exit 44 for an absent item, 36/51 for a locked
 keychain, and hex output for a non-printable password.
-DP-04: the workflow runs `cargo xtask test --only real-tart --real-tart-home <DIR>` (feature
+DP-04: the command runs `cargo xtask test --only real-tart --real-tart-home <DIR>` (feature
 `real-tart` of `mayfly-adapter-tart`, `tests/real_tart.rs`; the home holds only a local base
 `mfb-contract`), which runs VP-01..VP-10 and VP-13..VP-15 (VP-11, VP-12 and VP-16 need injected
 faults or an environment log: fake-tart only). It also confirms what the adapter assumed and the
@@ -1548,8 +1652,8 @@ with "does not exist", the hypervisor-limit wording of `tart run`, `tart set --m
 run, and that `tart run` under the shim keeps its VM when the daemon is killed.
 DP-07: `tests/real_tart.rs` also runs VP-17 (the world records `mfb-contract` as owned and
 `Ready` with its fingerprint). The `ImageStore` contract (IC-01..IC-14) on real Tart needs a
-registry holding a mayfly image with the launcher's `install-runner` (still to build: a gated
-world beside `tests/tart/images.rs`, with `RegistryManifests` as its `ManifestSource`). HW-01 confirms
+registry holding a mayfly image with the launcher's `install-runner`: HW-01X builds that image and
+the gated world beside `tests/tart/images.rs`, or reports the contract `not_run`. HW-01 confirms
 what ADR 0087 assumes on Tart 2.28.0: `tart pull <repo>@sha256:…` and the OCI listing's `Name` for
 it; the cache layout (`cache/OCIs/<repo>/<digest>/` with `config.json`, `nvram.bin`, `disk.img`, the
 entry named by the served manifest's hash, and the link from a requested digest to it: absolute or
@@ -1559,9 +1663,29 @@ and the launcher's `install-runner`, on a macOS image and on an arm64 Linux imag
 Cirrus Ubuntu image with the Tart guest agent); and, for service mode, whether Tart runs VMs under a
 launchd daemon of a dedicated user without a GUI session.
 
+#### GH-00 (owner) Live remainder of the scale-set spec, folded into HW-02
+Cites: `doc/github-scaleset.md` §12 (the HW-02 remainder GH-00R leaves), dm §9.1, ADRs 0045,
+0048, 0069. Reworked by the owner's decision of 2026-11-11: no broad live capture. Only the items
+GH-00R leaves without server-observed evidence are recorded, during HW-02's session on its
+disposable App and organisation, not in a session of their own. Agents build a redacting capture
+mode for HW-02's gated live contract suite (GH-01, over GH-03's client): it records only the
+exchanges a remainder item names, writes synthetic names for the organisation, repository, scale
+set, runners and hosts, and never writes a token, JIT config, key or credential-bearing URL; a
+test over fake-github plants each and finds none in the recorded fixture. (owner) runs it in
+HW-02's session.
+Item 6, whether `X-ScaleSetMaxCapacity` caps `totalAssignedJobs`, keeps `capacity_policy`'s
+default `exact` (ADR 0069) until it is server-observed here; neither a client's assumption nor
+GitHub's documentation changes that default.
+Accept: each remainder item the session answers is committed as a redacted fixture under
+`tests/fixtures/github-scaleset/`, and its spec entry is raised to server-observed, citing that
+fixture (a refuted assumption changes the model first, rule 7); the minimal GitHub App permission
+list, verified, is committed for ADR 0045; an item the session could not settle stays on the
+remainder list with the reason. Pending owner item.
+
 #### HW-02 (owner) Live GitHub scale set
 Disposable repository and GitHub App with the permissions of ADR 0045's list (verified here, with the reason for each); gated live test of GH-03/GH-04;
-(owner) creates the App and secrets.
+(owner) creates the App and secrets. GH-00's remainder is recorded in the same session, with its
+capture mode.
 
 #### HW-03 (owner) Canary and cutover
 New scale set and `runs-on` label beside Tartelet; compare queue time, failures, cleanup, disk;
