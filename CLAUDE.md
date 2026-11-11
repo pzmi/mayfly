@@ -88,11 +88,14 @@ reviewable.
   (sqlite, github, secrets) reaches a `mayfly-data*` crate or DP adapter (tart, guest, host), or
   the reverse; both meet only in `mayfly-domain` and `mayfly-protocol`, and only
   `mayfly-composition` sees both. The data plane names no journal type; the control plane names
-  no process API. They talk only through protocol messages (`Directive`, `Observation`).
+  no process API, except the secrets adapter's `command` module, which runs `/usr/bin/security`
+  and `exec:` secret commands (ADR 0058). They talk only through protocol messages (`Directive`, `Observation`).
 - **Pure crates** (`mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`,
   `mayfly-data-domain`): no `std::{fs,net,process,env}`, clock, randomness, Tokio, HTTP or SQL.
   Application crates take time and ids only through ports. `std::process` only in
-  `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition` and test tools.
+  `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition`, the secrets adapter's
+  `command` module (ADR 0058) and test tools; every child starts from a cleared environment plus
+  an explicit allowlist (ARCH-child-environment).
   Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,
   locks or interior-mutable statics, no `.elapsed()` (`[purity]` in `architecture.toml`). Each pure
   crate's `clippy.toml` (`disallowed-methods`/`-types`, ARCH-pure-clippy-config) enforces this
