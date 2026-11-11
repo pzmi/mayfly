@@ -11,8 +11,12 @@ use std::fmt;
 
 use serde::de::DeserializeOwned;
 
+use mayfly_domain::AttemptId;
+
 use crate::journal::{MAX_PAGE, ProjectionName, StorageError};
-use crate::projection::views::{FailureRow, PendingEffectRow, SlotRow};
+use crate::projection::views::{
+    AttemptRow, FailureRow, HostRow, PendingEffectRow, PoolRow, ScaleSetRow, SlotRow,
+};
 use crate::projection::{ProjectionSpec, ProjectionStore, views};
 
 /// Why a query failed.
@@ -135,4 +139,51 @@ pub async fn pending_effects<P: ProjectionStore>(
         .collect();
     let unknown = rows.iter().filter(|r| r.unknown_since.is_some()).count();
     Ok((rows, unknown))
+}
+
+/// What the reconciler reads (CP-03): every host, its live leases, every attempt, every pool
+/// and every scale set, each by its stream (attempts by id). Rows of different projections are
+/// read page by page, not as one snapshot ([`all_rows`]); the reconciler is level-triggered and
+/// its commands are checked again by the aggregates that decide them, so a pass over rows a
+/// unit moved meanwhile plans at worst what the next pass corrects (P5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetView {
+    /// Each host's admission inputs, by host stream.
+    pub hosts: BTreeMap<String, HostRow>,
+    /// Each host's live leases, by host stream.
+    pub leases: BTreeMap<String, Vec<SlotRow>>,
+    /// Every started attempt, by id.
+    pub attempts: BTreeMap<AttemptId, AttemptRow>,
+    /// Every pool, by pool stream.
+    pub pools: BTreeMap<String, PoolRow>,
+    /// Every scale set, by scale-set stream.
+    pub scale_sets: BTreeMap<String, ScaleSetRow>,
+}
+
+/// The reconciler's [`FleetView`]. Pinned by
+/// `crates/mayfly-control/tests/store/reconciler.rs::should_reserve_for_assigned_jobs_when_a_pass_reads_the_fleet`.
+///
+/// # Errors
+/// [`QueryError`].
+pub async fn fleet<P: ProjectionStore>(store: &P) -> Result<FleetView, QueryError> {
+    Ok(FleetView {
+        hosts: all_rows::<views::Hosts, P>(store)
+            .await?
+            .into_iter()
+            .collect(),
+        leases: leases_by_host(store).await?,
+        attempts: all_rows::<views::Attempts, P>(store)
+            .await?
+            .into_iter()
+            .map(|(_, row)| (row.attempt_id, row))
+            .collect(),
+        pools: all_rows::<views::Pools, P>(store)
+            .await?
+            .into_iter()
+            .collect(),
+        scale_sets: all_rows::<views::ScaleSets, P>(store)
+            .await?
+            .into_iter()
+            .collect(),
+    })
 }

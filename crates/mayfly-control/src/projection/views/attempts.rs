@@ -7,10 +7,11 @@ use mayfly_control_domain::attempt::{
     Attempt, AttemptBackedOff, AttemptEvent, AttemptLost, AttemptQuarantined, AttemptRetired,
     AttemptState, DiagnosticsExported, DiagnosticsLost, DirectiveIssued,
     DirectiveObservedNotApplied, DirectiveOutcomeUnknown, DirectiveRefused, DirectiveSent,
-    DirectiveTag, GuestRejected, GuestVerified, Outcome, Phase, QuarantineReason, RetireReason,
-    RunnerLaunchUnknown, RunnerLaunched, RunnerRequestId, Stage, VanishDiscovery, VmBooted,
-    VmCloned, VmDeleted, VmStopped, VmVanished,
+    DirectiveTag, GuestRejected, GuestVerified, Outcome, Phase, QuarantineReason, RefusalReason,
+    RetireReason, RunnerLaunchUnknown, RunnerLaunched, RunnerRequestId, Stage, VanishDiscovery,
+    VmBooted, VmCloned, VmDeleted, VmStopped, VmVanished,
 };
+use mayfly_control_domain::host::ReleaseEvidence;
 use mayfly_domain::{
     AttemptId, Deadline, DirectiveId, Generation, HostId, ImageDigest, Millis, OwnedVmName,
     PoolName, Slot,
@@ -58,6 +59,16 @@ pub struct AttemptRow {
     /// diagnostics bundle surface. Absent from rows written by version 1, read as none.
     #[serde(default)]
     pub desync: Option<VanishDiscovery>,
+    /// Why the latest directive was refused, while no newer one was issued: the reconciler
+    /// reads `insufficient_resources` as the data plane's definite no (ADR 0024, CP-03).
+    /// Absent from rows written before version 3, read as none.
+    #[serde(default)]
+    pub refused: Option<RefusalReason>,
+    /// How the VM went: `vm_deleted` once the attempt observed its delete, `attempt_lost` once
+    /// it was found lost; kept after the stream closes, so the reconciler releases the lease on
+    /// that evidence (CP-03). Absent from rows written before version 3, read as none.
+    #[serde(default)]
+    pub vm_gone: Option<ReleaseEvidence>,
     /// The stream revision this row is the fold of.
     pub revision: u64,
     /// When that event was recorded (display only).
@@ -70,23 +81,65 @@ pub struct Attempts;
 
 impl ProjectionSpec for Attempts {
     const NAME: &'static str = "attempts";
-    /// 2: the row's `desync` (DEC-07), a compatible addition.
-    const VERSION: u32 = 2;
+    /// 2: the row's `desync` (DEC-07); 3: `refused` and `vm_gone` (CP-03); compatible
+    /// additions.
+    const VERSION: u32 = 3;
     const SUBSCRIBES: &'static [EventKind] = <AttemptEvent as EventSet>::KINDS;
     type Source = Attempt;
     type Row = AttemptRow;
 
     fn apply(
         rows: &Rows<AttemptRow>,
-        _event: &AttemptEvent,
+        event: &AttemptEvent,
         after: &AttemptState,
         at: EventMeta,
     ) -> Vec<RowChange<AttemptRow>> {
+        let before = rows.get("");
         let desired = attempt_row(after, at)
+            .map(|mut row| {
+                row.refused = refused(before, event);
+                row.vm_gone = vm_gone(before, after.phase);
+                row
+            })
             .map(|row| (String::new(), row))
             .into_iter()
             .collect();
         sync_rows(rows, desired)
+    }
+}
+
+/// The refusal the row shows after `event`: set by a refusal, cleared by the next directive,
+/// carried otherwise. Pinned by
+/// `tests/store/projections.rs::should_show_the_refusal_until_the_next_directive_when_a_clone_is_refused`.
+fn refused(before: Option<&AttemptRow>, event: &AttemptEvent) -> Option<RefusalReason> {
+    match event {
+        AttemptEvent::DirectiveRefused(DirectiveRefused { reason, .. }) => Some(*reason),
+        AttemptEvent::DirectiveIssued(..) => None,
+        _ => before.and_then(|row| row.refused),
+    }
+}
+
+/// The evidence that the VM is gone: from the phase that observed it, then carried. Pinned by
+/// `tests/store/projections.rs::should_keep_the_evidence_on_the_row_when_a_lost_attempt_closes`.
+fn vm_gone(before: Option<&AttemptRow>, phase: Phase) -> Option<ReleaseEvidence> {
+    match phase {
+        Phase::Deleted => Some(ReleaseEvidence::VmDeleted),
+        Phase::Lost => Some(ReleaseEvidence::AttemptLost),
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Retiring
+        | Phase::Deleting
+        | Phase::Backoff { .. }
+        | Phase::Quarantined { .. }
+        | Phase::Closed => before.and_then(|row| row.vm_gone),
     }
 }
 
@@ -149,6 +202,8 @@ fn attempt_row(state: &AttemptState, at: EventMeta) -> Option<AttemptRow> {
         job: state.job_binding,
         retire_reason: state.retire_reason,
         desync: state.vanished,
+        refused: None,
+        vm_gone: None,
         revision: at.revision.get(),
         updated_at: at.recorded_at,
     })

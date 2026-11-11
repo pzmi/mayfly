@@ -22,6 +22,7 @@ pub mod event;
 pub mod host;
 pub mod operations;
 pub mod pool;
+pub mod reconcile;
 pub mod registration;
 mod registry;
 pub mod scaleset;

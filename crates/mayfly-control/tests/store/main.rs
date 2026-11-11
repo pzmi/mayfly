@@ -9,6 +9,7 @@ mod counter;
 mod delivery;
 mod link_sink;
 mod projections;
+mod reconciler;
 mod relay;
 mod saga;
 mod save;

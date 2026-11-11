@@ -17,6 +17,8 @@
 //! - [`contracts`]: the port contract suites: the journal's, the delivery ledger's and the secret providers' (ver §5).
 //! - [`attempts`]: attempts in a real `AggregateStore` and fixed directive details, for the
 //!   saga's and the directive relay's component tests.
+//! - [`fleet`]: hosts, pools and scale sets in a real `AggregateStore`, a world that plays the
+//!   other policies, the data plane and GitHub, and the reconciler's seeded simulation (CP-03).
 //! - [`block_on`](block_on()): drives an async port from a synchronous test.
 //!
 //! The golden and determinism harnesses walk an `AggregateRegistry`, so an aggregate that joins
@@ -34,6 +36,7 @@ pub mod clock;
 pub mod contracts;
 pub mod delivery;
 pub mod determinism;
+pub mod fleet;
 pub mod golden;
 pub mod journal;
 mod projections;

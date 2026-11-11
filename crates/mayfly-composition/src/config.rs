@@ -22,12 +22,14 @@
 //!
 //! The config file itself holds no secret, so it carries no permission requirement.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use mayfly_control_domain::capacity;
+use mayfly_control_domain::reconcile::PolicyOf;
 use mayfly_domain::{PoolName, Resources, SecretRef};
 use toml::{Table, Value};
 
@@ -179,8 +181,8 @@ pub enum CapacityPolicy {
 /// `Demand { waiting }`, where `waiting` is what the pass derives for the pool (CP-03): its
 /// scale set's latest `totalAssignedJobs` beyond its live runners, plus its `min_prepared`
 /// deficit, never capped by the pool's carve-out (a capped count would feed back: carved
-/// nothing, told nothing). Without this mapping the key would be parsed and ignored. RT-02
-/// wires it where composition builds the plan's pool inputs. Pinned by
+/// nothing, told nothing). Without this mapping the key would be parsed and ignored:
+/// [`reconciler_policies`] hands it to the reconciler (CP-03), which RT-02 wires. Pinned by
 /// `tests/config.rs::should_map_the_capacity_policy_when_a_pool_is_planned`.
 #[must_use]
 pub const fn plan_policy(policy: CapacityPolicy, waiting: u32) -> capacity::CapacityPolicy {
@@ -188,6 +190,28 @@ pub const fn plan_policy(policy: CapacityPolicy, waiting: u32) -> capacity::Capa
         CapacityPolicy::Exact => capacity::CapacityPolicy::Exact,
         CapacityPolicy::Demand => capacity::CapacityPolicy::Demand { waiting },
     }
+}
+
+/// The reconciler's policy of a pool configured with `policy` (CP-03): [`plan_policy`] as a
+/// plain function of the VMs the pool waits for, which each pass derives and hands it.
+#[must_use]
+pub fn policy_of(policy: CapacityPolicy) -> PolicyOf {
+    match policy {
+        CapacityPolicy::Exact => |waiting| plan_policy(CapacityPolicy::Exact, waiting),
+        CapacityPolicy::Demand => |waiting| plan_policy(CapacityPolicy::Demand, waiting),
+    }
+}
+
+/// Every configured pool's reconciler policy, by pool: what composition hands the reconciler
+/// (`mayfly_control::reconciler::ReconcilerConfig::policies`). Pinned by
+/// `tests/reconciler.rs::should_carve_a_demand_pool_only_for_its_assigned_jobs_when_configured`.
+#[must_use]
+pub fn reconciler_policies(config: &Config) -> BTreeMap<PoolName, PolicyOf> {
+    config
+        .pools
+        .iter()
+        .map(|pool| (pool.name.clone(), policy_of(pool.capacity_policy)))
+        .collect()
 }
 
 /// The trust tier a pool serves (ADR 0027).

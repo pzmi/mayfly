@@ -894,6 +894,18 @@ deficit, never capped by the pool's carve-out or the `maxCapacity` sent (a cappe
 carved nothing, told nothing; `formal/scheduling.qnt`'s `demandStarvesWhenDemandIsInvisibleTest`).
 Accept adds: a `demand` pool with no waiting job keeps nothing ahead of a later pool, and one with
 assigned jobs beyond its runners is carved for them (component test through the config).
+Note (CP-03, as built): the pure pass is `mayfly_control_domain::reconcile::plan_pass`, the
+driver `mayfly_control::reconciler` (reads `queries::fleet` over the new `hosts` and
+`scale_sets` projections and the `attempts` row's `refused` and `vm_gone`, attempts v3).
+Hysteresis: a pool's prepared surplus (prepared beyond its shortfall and `min_prepared`) is
+retired `surplus` only once it has lasted `Settings::hysteresis` (5 min); reservations are never
+delayed. An `insufficient_resources` refusal holds its host (nothing reserved, the scale set told
+its runners only) until a newer report is applied. Cleanup: `ReleaseSlot` on `vm_deleted` /
+`attempt_lost` evidence or `attempt_never_started` after `Settings::start_grace`, and
+`CompleteHostDrain` / `CompletePoolDrain`. The recovery table is not consulted by the pass: its
+inventory-driven rows stay CP-04's. Composition maps `capacity_policy` with
+`config::reconciler_policies`; RT-02 wires the driver's `Kicks` and timer. `max_prepared_age`
+retirement is not built here (it needs the prepared instant; CP-06 or OPS-06).
 
 #### CP-04 Observation inbox and startup recovery
 Cites: plan §10, §3.2; dm P1, P3; event-store §5.4, §6.3; ADRs 0025, 0026, 0037. Observations enter

@@ -11,6 +11,8 @@
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
 //!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
 //!   over the link (`doc/event-store.md` §3.4, §5).
+//! - [`reconciler`]: the reconciler (P5): a pass that reads the fleet, plans with the pure
+//!   `reconcile::plan_pass` and issues reservations, retirements, releases and capacity inputs.
 //! - [`saga`]: the `attempt_saga` durable consumer: the next command per attempt (P6) and the
 //!   deadline timeouts that make an unanswered directive `Unknown` (P7).
 //! - [`sessions`]: the data-plane sessions by host: the epoch the relay stamps and the saga
@@ -21,6 +23,7 @@ pub mod delivery;
 pub mod journal;
 pub mod projection;
 pub mod queries;
+pub mod reconciler;
 pub mod saga;
 pub mod secrets;
 pub mod sessions;

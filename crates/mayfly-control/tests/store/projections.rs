@@ -9,16 +9,22 @@ use mayfly_control::journal::{
     InboxKey, Journal, NewEvent, Payload, ProjectionName, RecordedEvent, StorageError, StoredKind,
     StreamHead, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
-use mayfly_control::projection::views::{Attempts, PendingEffects, Pools, RecentFailures, Slots};
+use mayfly_control::projection::views::{
+    Attempts, Hosts, PendingEffects, Pools, RecentFailures, ScaleSets, Slots,
+};
 use mayfly_control::projection::{
     BuildId, ProjectionSpec, ProjectionStore, SpecEvent, control, prepare,
 };
 use mayfly_control::queries;
 use mayfly_control::store::Outcome;
 use mayfly_control::store::{AggregateStore, NoNotifier, SaveRequest, stream_of};
-use mayfly_control_domain::attempt::{AttemptCommand, Fact, GuestOs, VanishDiscovery};
+use mayfly_control_domain::attempt::{
+    AttemptCommand, Fact, GuestOs, RefusalReason, VanishDiscovery,
+};
 use mayfly_control_domain::capacity::ReportedCapacity;
-use mayfly_control_domain::host::{ApplyPoolTerms, Host, HostCommand, ReserveSlot};
+use mayfly_control_domain::host::{
+    ApplyPoolTerms, Host, HostCommand, ReleaseEvidence, ReserveSlot,
+};
 use mayfly_control_domain::pool::TrustTier;
 use mayfly_control_domain::pool::{Pool, PoolEvent};
 use mayfly_control_domain::{Actor, Command, ControlAggregates, DeterminismCases, Expect, replay};
@@ -70,6 +76,8 @@ fn should_subscribe_to_every_kind_a_projection_reacts_to_when_case_histories_are
         ("slots", subscriptions::<Slots>()),
         ("pools", subscriptions::<Pools>()),
         ("recent_failures", subscriptions::<RecentFailures>()),
+        ("hosts", subscriptions::<Hosts>()),
+        ("scale_sets", subscriptions::<ScaleSets>()),
     ];
 
     // when
@@ -465,6 +473,103 @@ fn should_show_the_desync_and_clear_the_pending_effect_when_a_recorded_vm_vanish
     );
     let pending = block_on(queries::pending_effects(&memory)).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(pending.0.len(), 1);
+}
+
+/// CP-03: a refused directive shows its reason on the `attempts` row until the next directive
+/// is issued (the reconciler reads `insufficient_resources` as the data plane's definite no),
+/// and a VM found gone keeps its evidence on the row after the stream closes.
+#[test]
+fn should_show_the_refusal_until_the_next_directive_when_a_clone_is_refused() {
+    // given: an attempt whose clone is pending
+    let memory = MemoryJournal::new();
+    let store = store(&memory);
+    let save = |id: u128, body| block_on(attempts::save(&store, 1, 10 + id, Epoch::new(1), body));
+    save(0, attempts::start(1));
+    save(
+        1,
+        AttemptCommand::IssueNext {
+            directive_id: DirectiveId::from_u128(11),
+            deadline: Deadline::at(Millis::new(1)),
+        },
+    );
+    let row = || {
+        block_on(queries::all_rows::<Attempts, _>(&memory))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .into_iter()
+            .map(|(_, row)| row)
+            .next()
+            .unwrap_or_else(|| panic!("no attempts row"))
+    };
+
+    // when: the data plane refuses it, then the saga issues the retry
+    save(
+        2,
+        attempts::observe(
+            12,
+            Epoch::new(1),
+            Fact::DirectiveRefused {
+                directive_id: DirectiveId::from_u128(11),
+                reason: RefusalReason::InsufficientResources,
+            },
+        ),
+    );
+    let refused = row();
+    save(
+        3,
+        AttemptCommand::IssueNext {
+            directive_id: DirectiveId::from_u128(13),
+            deadline: Deadline::at(Millis::new(1)),
+        },
+    );
+    let retried = row();
+
+    // then
+    assert_eq!(refused.phase, "backoff");
+    assert_eq!(refused.refused, Some(RefusalReason::InsufficientResources));
+    assert_eq!(retried.phase, "cloning");
+    assert_eq!(retried.refused, None);
+    assert_eq!(retried.vm_gone, None);
+}
+
+#[test]
+fn should_keep_the_evidence_on_the_row_when_a_lost_attempt_closes() {
+    // given: an attempt whose clone is pending
+    let memory = MemoryJournal::new();
+    let store = store(&memory);
+    let save = |id: u128, body| block_on(attempts::save(&store, 1, 10 + id, Epoch::new(1), body));
+    save(0, attempts::start(1));
+    save(
+        1,
+        AttemptCommand::IssueNext {
+            directive_id: DirectiveId::from_u128(11),
+            deadline: Deadline::at(Millis::new(1)),
+        },
+    );
+    save(
+        2,
+        attempts::observe(
+            12,
+            Epoch::new(1),
+            Fact::VmCloned {
+                directive_id: DirectiveId::from_u128(11),
+                instance_id: ProviderInstanceId::sample(),
+            },
+        ),
+    );
+
+    // when: the inventory does not list it, and the stream closes
+    save(3, attempts::observe(13, Epoch::new(1), Fact::VmAbsent));
+    let closed = save(4, AttemptCommand::Close);
+
+    // then
+    assert!(matches!(closed, Outcome::Accepted { .. }), "{closed:?}");
+    let rows =
+        block_on(queries::all_rows::<Attempts, _>(&memory)).unwrap_or_else(|e| panic!("{e}"));
+    let shown: Vec<_> = rows
+        .iter()
+        .map(|(_, row)| (row.phase.as_str(), row.vm_gone))
+        .collect();
+    assert_eq!(shown, [("closed", Some(ReleaseEvidence::AttemptLost))]);
 }
 
 proptest! {
