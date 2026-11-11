@@ -85,7 +85,7 @@ reviewable.
   added to every fixture's `absent` list. Fix an
   architecture failure in the structure, never by loosening `architecture.toml`.
 - **Control plane / data plane** (plan §3.4, D1): no `mayfly-control*` crate or CP adapter
-  (sqlite, github, secrets) reaches a `mayfly-data*` crate or DP adapter (tart, guest, host), or
+  (sqlite, github, secrets) reaches a `mayfly-data*` crate or DP adapter (tart incl. the guest transport, host), or
   the reverse; both meet only in `mayfly-domain` and `mayfly-protocol`, and only
   `mayfly-composition` sees both. The data plane names no journal type; the control plane names
   no process API, except the secrets adapter's `command` module, which runs `/usr/bin/security`
@@ -93,7 +93,7 @@ reviewable.
 - **Pure crates** (`mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`,
   `mayfly-data-domain`): no `std::{fs,net,process,env}`, clock, randomness, Tokio, HTTP or SQL.
   Application crates take time and ids only through ports. `std::process` only in
-  `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition`, the secrets adapter's
+  `mayfly-adapter-tart` (Tart and the guest transport, ADR 0082), `mayfly-composition`, the secrets adapter's
   `command` module (ADR 0058) and test tools; every child starts from a cleared environment plus
   an explicit allowlist (ARCH-child-environment).
   Pure crates also use no std `HashMap`/`HashSet` (use `BTreeMap`/`BTreeSet`), no atomics,

@@ -117,7 +117,7 @@ is HIGH.
 every call has a deadline, its own process group (killed as a group), bounded captured output,
 redaction and an env allowlist; `tart list --format json` parsed against version-pinned
 fixtures. SSH uses a pinned host key, never `StrictHostKeyChecking no`. `std::process` outside
-`mayfly-adapter-tart`, `mayfly-adapter-guest`, composition and test tools is HIGH.
+`mayfly-adapter-tart`, composition, the secrets adapter's `command` module and test tools is HIGH.
 
 **Concurrency and lifecycle** (plan §10, RT-02): every spawned task owned by the supervision
 tree, cancellable and joined or bounded on shutdown; no blocking I/O on the runtime outside
