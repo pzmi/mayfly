@@ -16,12 +16,17 @@
 //! - [`link`]: an in-memory directive source, observation sink and handshake for the executor.
 //! - [`provider_contract`]: the `VmProvider` contract suite (ver §5) and the fake's world.
 //! - [`host_contract`]: the `HostProbe` contract suite (ver §5, DP-06) and the fake's world.
+//! - [`images`]: `MemoryImages`, the in-memory image world that keeps the `ImageStore` contract,
+//!   and the broken `TagPullStore`, `BaseEvictingStore` and `NameEvictingStore`.
+//! - [`image_contract`]: the `ImageStore` contract suite (ver §5, DP-07) and the in-memory world.
 
 pub mod clock;
 pub mod guest;
 pub mod guest_contract;
 pub mod host;
 pub mod host_contract;
+pub mod image_contract;
+pub mod images;
 pub mod link;
 pub mod provider;
 pub mod provider_contract;
@@ -29,5 +34,6 @@ pub mod provider_contract;
 pub use clock::{FakeClock, SequentialIds};
 pub use guest::{MemoryGuests, MemorySecrets, UncheckedLockTransport};
 pub use host::{FakeGuest, FakeHostProbe, FakeImageStore, GuestScript, MemoryFloor};
+pub use images::{BaseEvictingStore, MemoryImages, NameEvictingStore, TagPullStore};
 pub use link::{DirectiveFeed, FeedSource, StaticWelcome, Tap, TapSink, directives, observations};
 pub use provider::{FakeVm, FakeVmProvider, Fault, Held, Op};

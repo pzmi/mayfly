@@ -458,16 +458,24 @@ fn should_record_what_the_guest_received_without_its_content_when_exec_reads_std
     assert_eq!(launch["argv"], json!(["/opt/launcher", "--jit"]));
     assert_eq!(launch["stdin_len"], json!(secret.len()));
     assert_eq!(launch["stdin_sha256"], stdin["sha256"]);
-    for entry in std::fs::read_dir(fake.home().join("vms"))
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(fake.home().join("vms"))
         .unwrap()
         .flatten()
-    {
-        let bytes = std::fs::read(entry.path()).unwrap();
-        assert!(
-            !contains(&bytes, secret),
-            "{:?} holds the secret",
-            entry.path()
-        );
+        .flat_map(|entry| {
+            if entry.path().is_dir() {
+                std::fs::read_dir(entry.path())
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.path())
+                    .collect()
+            } else {
+                vec![entry.path()]
+            }
+        })
+        .collect();
+    for entry in entries {
+        let bytes = std::fs::read(&entry).unwrap();
+        assert!(!contains(&bytes, secret), "{entry:?} holds the secret");
     }
     let log = std::fs::read(fake.home().join("invocations.jsonl")).unwrap();
     assert!(!contains(&log, secret), "the log holds the secret");
@@ -747,4 +755,197 @@ fn should_record_a_signal_when_a_hung_run_receives_one() {
     let signals = fake.events("signal");
     assert_eq!(signals.len(), 1, "{signals:?}");
     assert_eq!(signals[0]["signal"], "SIGINT");
+}
+
+fn encode(name: &str) -> String {
+    name.bytes()
+        .enumerate()
+        .map(|(i, b)| {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || (b == b'.' && i > 0) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+fn sha(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Seeds `blobs` and a manifest naming them as config, nvram and two disk chunks; returns the
+/// manifest's bytes.
+fn seed_image(
+    fake: &Fake,
+    reference: &str,
+    blobs: [&[u8]; 4],
+    manifest_for: Option<&[u8]>,
+) -> Vec<u8> {
+    let dir = fake.home().join("registry");
+    std::fs::create_dir_all(dir.join("blobs")).expect("registry");
+    let media = [
+        "application/vnd.cirruslabs.tart.config.v1",
+        "application/vnd.cirruslabs.tart.nvram.v1",
+        "application/vnd.cirruslabs.tart.disk.v2",
+        "application/vnd.cirruslabs.tart.disk.v2",
+    ];
+    let layers: Vec<serde_json::Value> = media
+        .iter()
+        .zip(blobs)
+        .map(|(m, b)| {
+            let digest = format!("sha256:{}", sha(b));
+            std::fs::write(dir.join("blobs").join(encode(&digest)), b).expect("blob");
+            serde_json::json!({"mediaType": m, "digest": digest, "size": b.len()})
+        })
+        .collect();
+    let manifest = serde_json::to_vec(&serde_json::json!({"schemaVersion": 2, "layers": layers}))
+        .expect("manifest");
+    let served = manifest_for.map_or_else(|| manifest.clone(), <[u8]>::to_vec);
+    std::fs::write(dir.join(encode(reference)), &served).expect("seed the registry");
+    served
+}
+
+#[test]
+fn should_lay_out_the_image_named_by_the_served_manifest_hash_when_pulling() {
+    // given
+    let fake = Fake::new();
+    let blobs: [&[u8]; 4] = [
+        br#"{"os":"linux","macAddress":"aa"}"#,
+        b"nvram",
+        b"chunk-1",
+        b"chunk-2",
+    ];
+    let probe = seed_image(&fake, "ghcr.io/acme/img:probe", blobs, None);
+    let digest = format!("sha256:{}", sha(&probe));
+    let reference = format!("ghcr.io/acme/img@{digest}");
+    seed_image(&fake, &reference, blobs, None);
+
+    // when
+    let pulled = fake.tart(&["pull", &reference]);
+    let unknown = fake.tart(&["pull", "ghcr.io/acme/img:latest"]);
+    let listed = fake.tart(&["list", "--source", "oci", "-q"]);
+
+    // then
+    assert_eq!(pulled.code(), Some(0));
+    assert_eq!(unknown.code(), Some(1));
+    assert!(unknown.stderr().contains("manifest unknown"));
+    assert_eq!(listed.stdout(), format!("{reference}\n"));
+    let entry = fake
+        .home()
+        .join("cache/OCIs/ghcr.io/acme/img")
+        .join(&digest);
+    assert!(!entry.is_symlink(), "served what was asked: no link");
+    let cached = std::fs::read(entry.join("manifest.json")).expect("cached");
+    assert_ne!(cached, probe, "the cached manifest is re-serialized");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&cached).expect("json"),
+        serde_json::from_slice::<serde_json::Value>(&probe).expect("json")
+    );
+    assert_eq!(
+        std::fs::read(entry.join("disk.img")).expect("disk"),
+        b"chunk-1chunk-2"
+    );
+    assert_eq!(
+        std::fs::read(entry.join("nvram.bin")).expect("nvram"),
+        b"nvram"
+    );
+    let clone = fake.tart(&["clone", &reference, "vm1"]);
+    assert_eq!(clone.code(), Some(0));
+    let got = fake.tart(&["get", "vm1", "--format", "json"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&got.stdout()).expect("get")["OS"],
+        "linux"
+    );
+    let vm_dir = fake.home().join("vms/vm1");
+    assert_eq!(
+        std::fs::read(vm_dir.join("disk.img")).expect("disk"),
+        b"chunk-1chunk-2"
+    );
+}
+
+#[test]
+fn should_link_the_asked_digest_to_another_entry_when_the_registry_serves_another_manifest() {
+    // given
+    let fake = Fake::new();
+    let asked = format!("sha256:{}", "ab".repeat(32));
+    let reference = format!("ghcr.io/acme/img@{asked}");
+    let served = seed_image(&fake, &reference, [b"{}", b"n", b"d", b"e"], None);
+
+    // when
+    let pulled = fake.tart(&["pull", &reference]);
+
+    // then
+    assert_eq!(pulled.code(), Some(0));
+    let link = fake.home().join("cache/OCIs/ghcr.io/acme/img").join(&asked);
+    assert!(link.is_symlink());
+    let own = format!("sha256:{}", sha(&served));
+    let target = std::fs::read_link(&link).expect("link");
+    assert!(target.is_absolute(), "{}", target.display());
+    assert_eq!(target, link.with_file_name(&own));
+    let listed = fake.tart(&["list", "--source", "oci", "-q"]).stdout();
+    assert!(
+        listed.contains(&format!("ghcr.io/acme/img@{own}")),
+        "{listed}"
+    );
+}
+
+#[test]
+fn should_remove_the_cached_entry_when_an_oci_entry_is_deleted() {
+    // given
+    let fake = Fake::new();
+    let reference = "ghcr.io/acme/img:1";
+    let manifest = seed_image(&fake, reference, [b"{}", b"n", b"d", b"e"], None);
+    assert_eq!(fake.tart(&["pull", reference]).code(), Some(0));
+    let cached = fake.home().join("cache/OCIs/ghcr.io/acme/img/1");
+    assert!(cached.is_symlink());
+    let own = format!("ghcr.io/acme/img@sha256:{}", sha(&manifest));
+    let entry = fake
+        .home()
+        .join("cache/OCIs/ghcr.io/acme/img")
+        .join(format!("sha256:{}", sha(&manifest)));
+
+    // when
+    let tag_deleted = fake.tart(&["delete", reference]);
+    let after_tag = fake.tart(&["list", "--source", "oci", "-q"]).stdout();
+    let own_deleted = fake.tart(&["delete", &own]);
+
+    // then
+    assert_eq!((tag_deleted.code(), own_deleted.code()), (Some(0), Some(0)));
+    assert!(!cached.exists() && !cached.is_symlink());
+    assert_eq!(
+        after_tag,
+        format!("{own}\n"),
+        "the linked entry is an image of its own"
+    );
+    assert!(!entry.exists());
+    assert_eq!(fake.tart(&["list", "--source", "oci", "-q"]).stdout(), "");
+}
+
+#[test]
+fn should_rewrite_the_config_mac_when_set_draws_a_random_mac() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    let config = || -> Value {
+        serde_json::from_slice(
+            &std::fs::read(fake.home().join("vms/vm1/config.json")).expect("config"),
+        )
+        .expect("json")
+    };
+    let before = config()["macAddress"].clone();
+
+    // when
+    let set = fake.tart(&["set", "vm1", "--random-mac"]);
+
+    // then
+    assert_eq!(set.code(), Some(0));
+    let got: Value = serde_json::from_str(&fake.tart(&["get", "vm1", "--format", "json"]).stdout())
+        .expect("get");
+    assert_ne!(config()["macAddress"], before);
+    assert_eq!(config()["macAddress"], got["MACAddress"]);
 }

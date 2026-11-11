@@ -96,7 +96,7 @@ a rewrite, and it gives each plane a narrow, testable contract.
 | | Control plane | Data plane |
 |:--|:--|:--|
 | Question it answers | *What should exist?* | *What exists, what fits, and make it so.* |
-| State | Durable: event journal, receipts, inbox, delivery ledger, projections (SQLite) | Nothing durable but the epoch-floor marker in `TART_HOME` (a fence, ADR 0026) and each VM's shim lock and `exit.json` (ADR 0037). In memory: the in-flight table and the resource ledger, rebuilt from the provider's inventory and host probes on start |
+| State | Durable: event journal, receipts, inbox, delivery ledger, projections (SQLite) | Nothing durable but the epoch-floor marker in `TART_HOME` (a fence, ADR 0026), each VM's shim lock and `exit.json` (ADR 0037), and the registry of the image bases it made with their states and ownership proofs (a host fact for local delete and clone proofs, never journal state, ADR 0087). In memory: the in-flight table and the resource ledger, rebuilt from the provider's inventory and host probes on start |
 | Talks to | GitHub, operator CLI, the data plane | Tart (or another provider), guests, the host OS |
 | Decides | Desired capacity, admission and its order within reported capacity, which VM is retired, quarantine | Nothing about demand. Whether a directive fits the host's resources (refused if not: I33) and *how* to execute it safely (timeouts, process groups, retries within a directive's deadline) |
 | Secrets | Resolves the GitHub App key through a `SecretProvider` (ADR 0033); mints JIT configs; holds them in a single-take broker scoped to `(attempt, directive, epoch)` | Receives a JIT config in memory for exactly one launch over `tart exec` stdin; never stores it |

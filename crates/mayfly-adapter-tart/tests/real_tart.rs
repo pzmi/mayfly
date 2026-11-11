@@ -2,7 +2,8 @@
 //! feature, in the dedicated `TART_HOME` the hardware lane names through
 //! `cargo xtask test --only real-tart --real-tart-home <DIR>` (which sets
 //! `MAYFLY_REAL_TART_HOME`). The home must hold a local base `mfb-contract` (the lane prepares
-//! it). With the feature on and no home, the test fails: it is never skipped.
+//! it), which the world records as the deployment's own in a record of its own (ADR 0087). With
+//! the feature on and no home, the test fails: it is never skipped.
 //!
 //! The cases that need an injected fault (VP-11 hangs, VP-12 failed listings) and the child
 //! environments (VP-16) are the fake-tart run's: real Tart cannot be made to hang on cue, and it
@@ -11,14 +12,21 @@
 
 #![cfg(all(target_os = "macos", feature = "real-tart"))]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
+use mayfly_adapter_tart::bases::{
+    BaseEntry, BaseState, RECIPE_VERSION, Signature, SignaturePolicy, SignatureResult,
+};
+use mayfly_adapter_tart::proof::vm_dir;
 use mayfly_adapter_tart::shim::{self, ExitRecord};
-use mayfly_adapter_tart::{Deadlines, ShimProgram, TartConfig, TartProvider};
+use mayfly_adapter_tart::verify;
+use mayfly_adapter_tart::{BaseRecords, Deadlines, ShimProgram, TartConfig, TartProvider};
 use mayfly_data::BaseName;
+use mayfly_domain::{ImageDigest, Sample};
 use mayfly_testkit_data::Op;
 use mayfly_testkit_data::provider_contract::{
     ListingFault, ProviderCase, ProviderWorld, check_case,
@@ -53,14 +61,20 @@ fn sibling(name: &str) -> PathBuf {
 
 struct RealTart {
     shims: tempfile::TempDir,
+    records: Arc<BaseRecords>,
     provider: TartProvider,
 }
 
 impl RealTart {
     fn new() -> Self {
         let shims = tempfile::tempdir().expect("tempdir");
-        let provider = TartProvider::new(Self::config(shims.path()));
-        Self { shims, provider }
+        let records = Arc::new(BaseRecords::open(shims.path().join("state/bases.json")));
+        let provider = TartProvider::new(Self::config(shims.path()), Arc::clone(&records));
+        Self {
+            shims,
+            records,
+            provider,
+        }
     }
 
     fn config(shims: &Path) -> TartConfig {
@@ -99,7 +113,11 @@ impl Drop for RealTart {
         let entries: Vec<serde_json::Value> =
             serde_json::from_slice(&listed.stdout).unwrap_or_default();
         for name in entries.iter().filter_map(|e| e["Name"].as_str()) {
-            if name.starts_with("mf-") || name.ends_with("-copy") || name == "foreign-vm" {
+            if name.starts_with("mf-")
+                || name.ends_with("-copy")
+                || name == "foreign-vm"
+                || name == "mfb-stray"
+            {
                 let _stopped = self.tart(&["stop", name, "--timeout", "30"]);
                 let _deleted = self.tart(&["delete", name]);
             }
@@ -115,14 +133,45 @@ impl ProviderWorld for RealTart {
     }
 
     fn restart(&mut self) {
-        self.provider = TartProvider::new(Self::config(self.shims.path()));
+        self.provider =
+            TartProvider::new(Self::config(self.shims.path()), Arc::clone(&self.records));
     }
 
     fn seed_base(&self, base: &BaseName) {
+        let got = self.tart(&["get", base.as_str(), "--format", "json"]);
         assert!(
-            self.tart(&["get", base.as_str()]).status.success(),
+            got.status.success(),
             "the hardware lane prepares the base {base}"
         );
+        let info: serde_json::Value = serde_json::from_slice(&got.stdout).expect("get json");
+        let mac = info["MACAddress"]
+            .as_str()
+            .expect("a MAC")
+            .to_ascii_lowercase();
+        let dir = vm_dir(&home(), base.as_str());
+        let entry = BaseEntry {
+            base_id: "5eed".repeat(8),
+            deployment_id: "hardware-lane".to_owned(),
+            source_ref: format!("registry.example/seed@{}", ImageDigest::sample()),
+            source_digest: ImageDigest::sample(),
+            tart_version: "2.28.0".to_owned(),
+            runner_version: "2.330.0".to_owned(),
+            runner_sha256: "5a".repeat(32),
+            build_recipe_version: RECIPE_VERSION,
+            state: BaseState::Ready,
+            quarantine: None,
+            vm_mac: Some(mac),
+            vm_file_identity: verify::identity(&dir),
+            final_fingerprint: verify::fingerprint(&dir),
+            signature: Signature {
+                policy: SignaturePolicy::DigestOnly,
+                result: SignatureResult::NotChecked,
+            },
+            clones: BTreeMap::new(),
+        };
+        self.records
+            .update(|record| record.bases.insert(base.to_string(), entry))
+            .expect("record the base");
     }
 
     fn seed_foreign(&self, name: &str) {
@@ -162,7 +211,7 @@ impl ProviderWorld for RealTart {
     }
 }
 
-const ON_REAL_TART: [ProviderCase; 13] = [
+const ON_REAL_TART: [ProviderCase; 14] = [
     ProviderCase::CloneGivesFreshIdentity,
     ProviderCase::CloneOntoExistingRefused,
     ProviderCase::CloneNeedsLocalBase,
@@ -176,6 +225,7 @@ const ON_REAL_TART: [ProviderCase; 13] = [
     ProviderCase::InventoryExact,
     ProviderCase::RestartReadopts,
     ProviderCase::NoSignalToRun,
+    ProviderCase::CloneNeedsOwnedBase,
 ];
 
 #[test]

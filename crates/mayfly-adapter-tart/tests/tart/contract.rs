@@ -196,3 +196,15 @@ fn should_give_every_child_only_the_allowlist_when_the_daemon_has_more() {
     // then
     assert_eq!(outcome, Ok(()));
 }
+
+#[test]
+fn should_refuse_definite_when_the_local_base_is_not_one_this_deployment_owns() {
+    // given
+    let world = FakeTartWorld::new;
+
+    // when
+    let outcome = check_case(&world, ProviderCase::CloneNeedsOwnedBase);
+
+    // then
+    assert_eq!(outcome, Ok(()));
+}

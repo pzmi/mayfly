@@ -80,7 +80,8 @@ pub trait ProviderWorld {
     /// restarted daemon builds it.
     fn restart(&mut self);
 
-    /// Makes `base` a local image base, listed as a stopped VM.
+    /// Makes `base` one of the deployment's own image bases (materialised and recorded), listed
+    /// as a stopped VM.
     fn seed_base(&self, base: &BaseName);
 
     /// Makes a stopped VM named `name` that the provider did not create.
@@ -154,11 +155,15 @@ pub enum ProviderCase {
     /// of the test's own environment reaches none, and no child gets a name outside
     /// [`CHILD_ALLOWLIST`].
     ChildEnvironmentCleared,
+    /// VP-17: a clone from a local `mfb-*` VM that is not one of the deployment's own bases is
+    /// refused `Definite` and creates nothing: a base must be service-owned, not merely local
+    /// (ADR 0039, ADR 0087).
+    CloneNeedsOwnedBase,
 }
 
 impl ProviderCase {
     /// Every case, in id order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::CloneGivesFreshIdentity,
         Self::CloneOntoExistingRefused,
         Self::CloneNeedsLocalBase,
@@ -175,6 +180,7 @@ impl ProviderCase {
         Self::RestartReadopts,
         Self::NoSignalToRun,
         Self::ChildEnvironmentCleared,
+        Self::CloneNeedsOwnedBase,
     ];
 
     /// The case's id, `VP-01` …
@@ -197,6 +203,7 @@ impl ProviderCase {
             Self::RestartReadopts => "VP-14",
             Self::NoSignalToRun => "VP-15",
             Self::ChildEnvironmentCleared => "VP-16",
+            Self::CloneNeedsOwnedBase => "VP-17",
         }
     }
 }
@@ -315,6 +322,7 @@ async fn run_case<W: ProviderWorld>(w: &mut W, case: ProviderCase) -> Check {
         ProviderCase::RestartReadopts => restart_readopts(w).await,
         ProviderCase::NoSignalToRun => no_signal_to_run(w).await,
         ProviderCase::ChildEnvironmentCleared => child_environment_cleared(w).await,
+        ProviderCase::CloneNeedsOwnedBase => clone_needs_owned_base(w).await,
     }
 }
 
@@ -479,6 +487,19 @@ async fn clone_needs_local_base<W: ProviderWorld>(w: &mut W) -> Check {
     let cloned = w.provider().clone_vm(&base(), &vm(1)).await;
     eq(
         "clone from a base that is not local",
+        &cloned,
+        &Err(VmError::Definite),
+    )?;
+    eq("the clone exists", &w.exists(&vm(1).to_string()), &None)
+}
+
+async fn clone_needs_owned_base<W: ProviderWorld>(w: &mut W) -> Check {
+    w.seed_base(&base());
+    let stray = BaseName::new("mfb-stray").map_err(|_| "a valid base name".to_owned())?;
+    w.seed_foreign(stray.as_str());
+    let cloned = w.provider().clone_vm(&stray, &vm(1)).await;
+    eq(
+        "clone from a local base the deployment does not own",
         &cloned,
         &Err(VmError::Definite),
     )?;

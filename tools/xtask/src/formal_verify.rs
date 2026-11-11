@@ -156,6 +156,11 @@ pub const BOUNDED: &[Bound] = &[
         step: "deliveryOnlyStep",
         steps: 8,
     },
+    Bound {
+        file: "image_store.qnt",
+        step: "step",
+        steps: 10,
+    },
 ];
 
 /// Seeds of the multi-seed simulation, derived from one printed base seed.

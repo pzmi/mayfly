@@ -208,7 +208,7 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
 | **Image** | CP | Catalog of immutable images and their placement on hosts | image, digest, manifest, image revision, runner version, verify, withdraw, placement, image base, pull, materialise, evict | `Image`, `ImagePlacement` | upstream of Fleet (pool pin) and Attempt (digest); supplier of image directives to Execution |
 | **Operations** | CP | The daemon's run, its epoch and its containment; human-in-the-loop work | run, epoch, epoch floor, safe mode, recovery (automatic), repair (plan), recovery plan, quarantine case, operator, actor, assertion | `HostRun`, `RecoveryPlan`, `QuarantineCase` | upstream of every CP context (epoch fence, mode); downstream of all (reads their state for plans) |
 | **Secrets** | CP (supporting) | Hold dangerous values; hand out single-take handles | secret, credential, secret handle, take, sweep, seal | none (service; handle *events* land on `Attempt`) | supplier to Attempt, Demand, Registration; conformist link adapter |
-| **VM Execution** | DP | Execute directives safely against the provider and guest; observe what exists; account for and enforce the host's resources and report capacity (ADR 0024) | directive, observation, fence, executor, supervisor, shim, process lost, inventory (complete/incomplete), image cache, guest session, resource ledger, capacity report | none durable (pure FSMs: executor, supervisor, image cache, guest session) | downstream of CP via published language; ACL over Tart, host OS, guest |
+| **VM Execution** | DP | Execute directives safely against the provider and guest; observe what exists; account for and enforce the host's resources and report capacity (ADR 0024) | directive, observation, fence, executor, supervisor, shim, process lost, inventory (complete/incomplete), image cache, guest session, resource ledger, capacity report | none durable but host facts: the epoch floor, the shims' files and the registry of image bases (ADR 0087); pure FSMs: executor, supervisor, image cache, guest session | downstream of CP via published language; ACL over Tart, host OS, guest |
 
 **Shared kernel** (`mayfly-domain`): ids, `OwnedVmName`, `SlotGeneration`, `Epoch`, `Fence`,
 `ImageDigest`, `Resources`, `Deadline`, `OwnershipProof`, `TrustTier`, `GuestOs`.
@@ -242,7 +242,9 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
    (GitHub's runner deprecation). Pull/materialise are effects with `Unknown` outcomes, so they
    need a journaled intent: `ImagePlacement` per (host, digest). The DP keeps a pure cache model
    rebuilt from observation, like the VM supervisor.
-6. **VM Execution: the data plane, one context.** No durable state (D6). Its language
+6. **VM Execution: the data plane, one context.** No journal and no durable decisions (D6);
+   it keeps only host facts: the epoch floor, the shims' files and the registry of image bases
+   (ADR 0087). Its language
    (process lost, inventory incomplete, guest session) is not the CP's; observations translate.
 7. **Secrets broker: a supporting context without an aggregate.** Values are memory-only and not
    replayable; the *rules* (scope, single take, epoch binding) are pure functions in the domain,
@@ -287,7 +289,7 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
   ═══════════════════ published language: mayfly-protocol (Hello/Welcome, Directive, Observation, SecretHandle) ═══════════════════
                                           │
                                 ┌─────────┴─────────┐
-                                │   VM Execution    │  DP, no durable state
+                                │   VM Execution    │  DP, no journal (host facts only)
                                 └──┬──────┬──────┬──┘
                          ACL (tart)│ ACL(guest)  │ ACL (host)
                                    ▼      ▼      ▼

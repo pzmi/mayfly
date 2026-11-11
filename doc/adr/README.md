@@ -105,3 +105,4 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted |
 | [0076](0076-quarantine-stops-deregister-first.md) | Quarantine stops deregister first | Accepted |
 | [0082](0082-jit-configs-on-the-data-plane-and-the-guest-launcher-contract.md) | JIT configs on the data plane and the guest launcher contract | Accepted |
+| [0087](0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: a durable record, a booted base and pull verification | Accepted |

@@ -62,8 +62,8 @@ async fn clone_and_start(provider: &TartProvider) -> ProviderInstanceId {
 fn should_read_alive_then_exited_when_the_shim_runs_and_tart_stop_ends_the_run() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     let id = runtime.block_on(clone_and_start(&provider));
     let name = vm(1).to_string();
@@ -98,8 +98,8 @@ fn should_read_alive_then_exited_when_the_shim_runs_and_tart_stop_ends_the_run()
 fn should_reap_and_forget_the_shim_when_its_vm_has_stopped() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     let id = runtime.block_on(clone_and_start(&provider));
     let name = vm(1).to_string();
@@ -134,8 +134,8 @@ fn should_reap_and_forget_the_shim_when_its_vm_has_stopped() {
 fn should_stop_reporting_the_shim_when_its_vm_is_deleted() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     let id = runtime.block_on(clone_and_start(&provider));
     let name = vm(1).to_string();
@@ -160,8 +160,8 @@ fn should_stop_reporting_the_shim_when_its_vm_is_deleted() {
 fn should_give_tart_run_files_for_stdio_never_a_pipe_when_the_shim_starts_it() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     runtime.block_on(clone_and_start(&provider));
     let reading = provider.shim(&vm(1).to_string());
@@ -186,11 +186,11 @@ fn should_give_tart_run_files_for_stdio_never_a_pipe_when_the_shim_starts_it() {
 fn should_answer_hypervisor_limit_when_tart_run_reports_the_vm_limit() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    fake.seed_base(base().as_str());
     fake.faults(
         "[[rule]]\ncommand = \"run\"\naction = \"fail_before_effect\"\nexit_code = 1\nstderr = \"Error: The number of virtual machines exceeds the limit. The maximum supported number of active virtual machines has been reached.\"\n",
     );
-    let provider = TartProvider::new(fake.config());
+    let provider = fake.provider();
     let runtime = runtime();
     runtime
         .block_on(provider.clone_vm(&base(), &vm(1)))
@@ -209,9 +209,9 @@ fn should_answer_hypervisor_limit_when_tart_run_reports_the_vm_limit() {
 fn should_refuse_definite_when_tart_run_exits_non_zero_at_once() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    fake.seed_base(base().as_str());
     fake.faults("[[rule]]\ncommand = \"run\"\naction = \"fail_before_effect\"\nexit_code = 1\n");
-    let provider = TartProvider::new(fake.config());
+    let provider = fake.provider();
     let runtime = runtime();
     runtime
         .block_on(provider.clone_vm(&base(), &vm(1)))
@@ -236,8 +236,7 @@ fn should_start_a_vm_then_wait_to_be_killed_when_run_as_the_daemon() {
         return;
     };
     let dir = PathBuf::from(dir);
-    let config = crate::support::config(&dir.join("tart-home"), &dir.join("shims"));
-    let provider = TartProvider::new(config);
+    let provider = crate::support::provider_at(&dir);
 
     // when
     let id = runtime().block_on(clone_and_start(&provider));
@@ -253,7 +252,7 @@ fn should_start_a_vm_then_wait_to_be_killed_when_run_as_the_daemon() {
 fn should_readopt_a_running_vm_through_its_shim_when_the_daemon_is_killed_and_restarted() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
+    fake.seed_base(base().as_str());
     let mut daemon = Daemon(
         Command::new(std::env::current_exe().expect("this test executable"))
             .args([
@@ -282,7 +281,7 @@ fn should_readopt_a_running_vm_through_its_shim_when_the_daemon_is_killed_and_re
 
     // when
     daemon.kill();
-    let restarted = TartProvider::new(fake.config());
+    let restarted = fake.provider();
     let name = vm(1).to_string();
     let adopted = restarted.shim(&name);
     let runtime = runtime();

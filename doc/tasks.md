@@ -73,6 +73,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0064](adr/0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | The GitHub client's crypto and TLS: `aws-lc-rs` as the `rustls` provider and for RS256, `rustls-platform-verifier`, `reqwest` 0.13, the App JWT built by hand (no JWT crate). Amends foundation.md §2.4. | Accepted (owner, 2026-11-10) |
 | [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
+| [ADR 0087](adr/0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: mayfly's own private `TART_HOME`; a durable, fail-closed registry of the bases it made, kept on the data plane as host evidence; the Reserved → … → Ready → Retiring state machine with recovery by observation; clone only from a revalidated Ready base, never delete a quarantined one; full verification from a raw manifest fetched by digest; signature policy recorded. Amends 0039. | Accepted (owner, 2026-11-11) |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
@@ -197,12 +198,14 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | DP-05 | Guest transport (`tart exec`) and runner launcher | DP-04 | opus | |
 | DP-06 | Host resource probes | DP-01 | sonnet | |
 | DP-07 | Image cache directives and `ImageStore` port | DP-04, KER-11 | opus | |
+| SIG-01 | Image signature verification for pools that require it | DP-07, SEC-02 | opus | |
 | NET-01 | Softnet privilege model: design, ADR, `doctor` checks | DP-04 | opus | |
 | RT-01 | Config schema, validation, state-dir lock | KER-01 | sonnet | |
 | SEC-02 | `SecretProvider` port and backends by URI | RT-01 | opus | |
 | RT-02 | Composition: wiring, supervision tree, startup, `mayflyd` | CP-04, DP-02, DP-04, DP-06, ES-05, RT-01, SEC-02 | opus | |
 | RT-03 | Operator socket API and `mayfly` CLI | RT-02 | sonnet | |
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
+| RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05 | opus | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05 | opus | ⛳ |
 | GH-00 | (owner) Capture a live scale-set session in a disposable organisation | — | sonnet | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00, DEC-03 | opus | |
@@ -218,6 +221,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | VER-05 | Curated mutants (negative controls) and mutation lane | VER-02, VER-04 | sonnet | |
 | VER-06 | Fuzz targets and nightly fuzz lane | DP-04, GH-03, RT-01 | sonnet | |
 | VER-07 | Apalache invariant verification lane | KER-07, KER-06, KER-09 | sonnet | |
+| VER-08 | Conformance driver for the image store model | VER-01, DP-07 | opus | |
 | SEC-01 | Threat model and secret-handling audit | RT-04, DP-05 | opus | |
 | OPS-01 | launchd service and foreground mode, install/uninstall, real `doctor` checks | RT-03 | sonnet | |
 | OPS-02 | Image manifest, `mayfly image verify`, digest pinning | RT-01 | sonnet | |
@@ -227,6 +231,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | OPS-06 | `mayfly image refresh <pool>` and runner-age warnings | CP-07, DP-05, OPS-02 | sonnet | |
 | OPS-07 | `mayfly diagnostics bundle` | RT-03, RT-04 | sonnet | |
 | OPS-08 | `mayfly restore <backup>` and `mayfly uninstall --purge` | RT-03, OPS-01, CP-07 | opus | |
+| TART-01 | Tart 2.28.0 → 2.41.1: re-check the CLI, fake-tart parity | DP-07 | opus | |
+| DEP-01 | Dependency and tool refresh | — | sonnet | |
 | HW-01 | (owner) Real Tart lane on the owner's Mac | DP-05, OPS-01 | sonnet | |
 | HW-02 | (owner) Live GitHub scale set on a disposable organisation | GH-04, HW-01, GH-00 | sonnet | |
 | HW-03 | (owner) Canary next to Tartelet, then cutover | E2E-02, HW-02, OPS-03 | sonnet | |
@@ -1145,6 +1151,34 @@ not counted twice (once as an image base, once as a stopped VM in the inventory)
 Note (DP-06): the host probe's foreign use (`mayfly_data_domain::foreign_use`) skips every
 `mfb-*` name, leaving bases to the image store's listing, so `ImageStore::list` must name every
 `mfb-*` VM the provider lists (one it leaves out is counted nowhere), with its disk.
+As built (DP-07, ADR 0087, revised after the owner's review): mayfly owns a private
+`TART_HOME` checked at start-up with its ancestors (root and the daemon's user are trusted, nobody
+else may write there); a durable registry of bases (`mayfly-adapter-tart::bases`: `base_id`, full
+source digest, Tart and runner versions, recipe, state, file identity, final fingerprint, MAC as a
+secondary check, clone references and intents) fails closed and is never rediscovered by name;
+each base moves Reserved → Cloning → Customizing → Verifying → Ready → Retiring (+ Quarantined),
+each state written before its step, with crash recovery by observation; `TartProvider::clone_vm`
+clones only from Ready after revalidation (VP-17), and eviction protects mayfly's own clones only
+(no Tart lineage), and never deletes a Quarantined base. Every image is verified from its raw
+manifest fetched by digest over HTTPS with a size cap,
+never the cached copy Tart 2.28.0 re-serializes: the layout (disk v2 only), config and NVRAM
+against their descriptors, every disk chunk against its uncompressed digest, on the cache and
+again on the fresh clone before its first boot; one retry, then refused. Signature policy is
+recorded per source and `required` refused until SIG-01. `list` names only Ready bases that pass
+the clone proof; every other `mfb-*` VM is counted by the inventory (DP-06F). Model:
+`formal/image_store.qnt` (driver: VER-08). A drift is answered `effect_failed`;
+`ImageDriftDetected` needs a protocol observation.
+
+#### SIG-01 Image signature verification for pools that require it
+Cites: ADR 0087 decision 8, dm §9.3, ADR 0033. DP-07 records each source's signature policy
+(`digest_only`, `optional`, `required`) and refuses `required`. Verify a signature over the pinned
+digest before the pull, against a trust anchor in the pool config (a public key by secret
+reference, or a certificate identity and issuer): a sigstore client crate (licence per `deny.toml`)
+or a `cosign` child under the process rules (argv, cleared environment, deadline); record the
+result next to the source digest; `optional` checks when a signature exists. The default path
+stays digest-only and works for unsigned images.
+Accept: `required` with a valid, an invalid and a missing signature (fixtures, synthetic keys);
+`optional` without a signature passes and records it; no key material in any log or record.
 
 #### NET-01 Softnet privilege model
 Cites: ADR 0032, plan §8.2, §13. Design and ADR choosing between Tart's softnet behind a narrow
@@ -1218,6 +1252,19 @@ anywhere (ADR 0036).
 Note (DEC-07, ADR 0066 amended): a counter of vanished VMs, `mayfly_vms_vanished_total{pool,
 discovered_by}` (`inventory`, `stop_vm`, `start_vm`), fed by `VmVanished`; the control plane has
 no metrics port yet, so DEC-07 adds none.
+
+#### RT-05 Terminal mode: a clean stop on Ctrl-C
+Cites: plan §10 (P23 drain, P24 shutdown), §11; ADR 0031; ADR 0087 decision 1. The owner runs
+`mayflyd` from a terminal as their own user (the primary deployment) and stops it with Ctrl-C.
+P24 leaves VMs running under their shims for a service restart; in terminal mode Ctrl-C means
+"stop working here": close admission and stop acquiring, retire Prepared and Listening attempts
+(deregister first, P11), let Busy jobs finish up to a configured bound (a second Ctrl-C stops
+waiting), stop and delete our VMs with their ownership proof, finish durable writes, release the
+state-dir lock and exit; never touch a base or a foreign VM. The choice between P24 and this stop
+is the run mode's, decided by the owner (an amendment to ADR 0031).
+Accept: integration test over fake-tart and fake-github: Ctrl-C with an idle, a Prepared and a Busy
+attempt ends with no runner registered, no `mf-*` VM left and the bases untouched; a second Ctrl-C
+during the wait stops at once and leaves what remains recorded for the next start.
 
 #### E2E-01 ⛳ Walking skeleton
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +
@@ -1367,6 +1414,15 @@ timings in `doc/formal-models.md`.
 Accept: every invariant listed in ver §6.1 is checked; a seeded bad invariant fails.
 DEC-01: adds `registration` and `event_store` to the lane.
 
+#### VER-08 Conformance driver for the image store model
+Cites: ver §6, ADR 0087, `doc/formal-models.md` (image_store, its conformance seam). Replay
+`formal/image_store.qnt` traces against `TartImageStore` and `TartProvider::clone_vm` over
+`mayfly-fake-tart` (crash points as a dropped store rebuilt over the same registry, the uncontrolled
+writers as direct `tart` calls), comparing the registry entry's state and identity, Tart's listing
+of the base and the listed clones after each step.
+Accept: seeded traces replay clean; a negative control (an eviction that ignores intents) diverges
+at its first step.
+
 #### SEC-01 Threat model and secret audit
 Cites: plan §13. `doc/security.md` (assets, actors, boundaries, mitigations with tests),
 audit of every secret path, fixes as needed.
@@ -1453,6 +1509,25 @@ Accept: on the fake provider and fake-github, a purge removes only owned VMs, ba
 registrations and leaves a foreign VM and a base it did not create; `--dry-run` changes nothing;
 a restore of an older backup quarantines later VMs and deletes none; (owner) on the real Mac.
 
+#### TART-01 Tart 2.28.0 → 2.41.1
+Cites: plan §8.2, ADR 0039, ADR 0087. Tart moved to github.com/openai/tart (licence FSL-1.1,
+Apache-2.0 future; mayfly drives it by argv only). Bump the pin (`parse::SUPPORTED_VERSIONS`), re-read
+every command and JSON shape the adapter parses (`list`, `get`, `clone`, `set`, `run`, `stop`,
+`delete`, `exec`, `pull`; `tart set --mac` exists since 2.41.0, so the MAC is even weaker evidence),
+record new fixtures under `tests/fixtures/tart-2.41.1/`, bring `mayfly-fake-tart` to parity (pull
+layout, cache naming, chunk checks, new flags refused or accepted as Tart does), and re-check what
+ADR 0087 assumed of 2.28.0 (the re-serialized cached manifest, unchecked blobs, the symlink of a
+requested digest).
+Accept: both versions' fixtures parse; the VmProvider, GuestTransport and ImageStore contracts green
+over fake-tart in 2.41.1 mode; HW-01 gains the 2.41.1 confirmations.
+
+#### DEP-01 Dependency and tool refresh
+Cites: fnd §2, §7, §9; `deny.toml`; `tools/versions.toml`. `cargo update` within semver and the
+gate; `cargo deny check`; each major bump one at a time, in its own commit with its reason; the
+Rust toolchain, Quint, Apalache and Node pins; the GitHub Actions SHAs (with their version
+comments).
+Accept: the full gate green after each step; no new `deny.toml` exception without its audit.
+
 #### HW-01 (owner) Real Tart lane
 `hardware.yml` (manual dispatch, self-hosted label on the owner's Mac): VmProvider contract on real
 Tart in a dedicated `TART_HOME`, one-job run with a tiny Linux image. Agents write the workflow and
@@ -1471,6 +1546,18 @@ fixtures in `crates/mayfly-adapter-tart/tests/fixtures/tart-<version>/` pin: the
 string, the `list`/`get` JSON shapes, `Memory` in MiB and `Disk` in GiB (counted 1024³), exit 2
 with "does not exist", the hypervisor-limit wording of `tart run`, `tart set --memory` before a
 run, and that `tart run` under the shim keeps its VM when the daemon is killed.
+DP-07: `tests/real_tart.rs` also runs VP-17 (the world records `mfb-contract` as owned and
+`Ready` with its fingerprint). The `ImageStore` contract (IC-01..IC-14) on real Tart needs a
+registry holding a mayfly image with the launcher's `install-runner` (still to build: a gated
+world beside `tests/tart/images.rs`, with `RegistryManifests` as its `ManifestSource`). HW-01 confirms
+what ADR 0087 assumes on Tart 2.28.0: `tart pull <repo>@sha256:…` and the OCI listing's `Name` for
+it; the cache layout (`cache/OCIs/<repo>/<digest>/` with `config.json`, `nvram.bin`, `disk.img`, the
+entry named by the served manifest's hash, and the link from a requested digest to it: absolute or
+relative, and whether `tart list`/`tart delete` know the linked entry by its digest); that `tart clone <repo>@<digest>` does not reach the
+registry once cached and leaves the base's files' change times alone; `tart exec` in a booted base
+and the launcher's `install-runner`, on a macOS image and on an arm64 Linux image (for example a
+Cirrus Ubuntu image with the Tart guest agent); and, for service mode, whether Tart runs VMs under a
+launchd daemon of a dedicated user without a GUI session.
 
 #### HW-02 (owner) Live GitHub scale set
 Disposable repository and GitHub App with the permissions of ADR 0045's list (verified here, with the reason for each); gated live test of GH-03/GH-04;

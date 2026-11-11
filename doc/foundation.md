@@ -668,8 +668,9 @@ single responsibility and its plane.
 
 ## 6. Event-sourcing rules
 
-Event sourcing and CQRS live in the control plane only (D6). The data plane holds no durable
-state. Domain code is data-oriented (ADR 0022): plain data with public fields and enums, behaviour
+Event sourcing and CQRS live in the control plane only (D6). The data plane holds no journal
+and no durable decisions, only host facts: the epoch floor, the shims' files and the registry of
+image bases (ADR 0087). Domain code is data-oriented (ADR 0022): plain data with public fields and enums, behaviour
 in free pure functions (`decide`, `evolve`, policies, tables); no getters, setters or privacy
 ceremony that adds no safety. DDD is used strategically (bounded contexts, language, consistency
 boundaries), not as an object model.

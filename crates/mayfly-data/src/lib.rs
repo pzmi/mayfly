@@ -6,8 +6,8 @@
 //! rebuilds the resource ledger from observation, enters sessions, runs directives with
 //! deadlines and bounded concurrency, re-observes before a stop or delete, observes the
 //! provider without ever applying a listing an effect overlapped ([`gate`]), and reports
-//! capacity. It stores nothing durable but the epoch floor, through its port, and names no
-//! journal type. [`launch_store`] holds the JIT configs awaiting delivery in memory, bound to
+//! capacity. It stores nothing durable but the epoch floor, through its port (the Tart adapter
+//! keeps the registry of image bases beside it, ADR 0087), and names no journal type. [`launch_store`] holds the JIT configs awaiting delivery in memory, bound to
 //! their VM (ADR 0082); [`redaction`] is what an exported guest log may keep.
 
 pub mod executor;

@@ -69,6 +69,10 @@ pub(crate) struct VmRecord {
     /// daemon reads it through `exec` (`guest`).
     #[serde(default)]
     pub runner: Option<Runner>,
+    /// The runner version the launcher's `install-runner` put into this image; a clone carries
+    /// its source's.
+    #[serde(default)]
+    pub installed_runner: Option<String>,
 }
 
 /// How many guest launches a record keeps.
@@ -93,6 +97,7 @@ impl VmRecord {
             run: None,
             guest_launches: Vec::new(),
             runner: None,
+            installed_runner: None,
         }
     }
 

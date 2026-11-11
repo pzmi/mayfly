@@ -18,4 +18,4 @@ mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
 mayfly-testkit-shared = { version = "0.1.0", path = "../mayfly-testkit-shared" }
 sha2 = "0.11.1"
-tokio = { version = "1.54.1", default-features = false, features = ["sync", "rt", "time"] }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "rt", "time", "macros"] }

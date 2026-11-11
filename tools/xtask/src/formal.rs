@@ -39,7 +39,8 @@ pub struct Model {
 }
 
 /// The registry of models (verification.md section 6). The real models arrive with the tasks
-/// that own them (`scaleset` with KER-06, `registration` with KER-09, `event_store` with ES-06).
+/// that own them (`scaleset` with KER-06, `registration` with KER-09, `event_store` with ES-06,
+/// `image_store` with DP-07).
 /// Registering a
 /// model is one entry here and one entry in [`crate::formal_verify::BOUNDED`] per step
 /// relation; `should_register_every_model_file_when_formal_is_read` and
@@ -82,6 +83,10 @@ pub const MODELS: &[Model] = &[
             "storeOnlyStep",
             "deliveryOnlyStep",
         ],
+    },
+    Model {
+        file: "image_store.qnt",
+        steps: &["step"],
     },
 ];
 

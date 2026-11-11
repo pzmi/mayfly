@@ -17,6 +17,12 @@
 //! exec <vm> <launcher> status          stdout {"v":1,"state":"none"|"running"} or
 //!                                      {"v":1,"state":"exited","code":N}: the launcher's status file
 //! exec <vm> <launcher> diagnostics     stdout the runner's log (`$TART_HOME/guest-logs/<vm>.log`)
+//! exec <vm> <launcher> install-runner <version> <sha256>
+//!                                      installs the runner `<version>` (`X.Y.Z`) whose package
+//!                                      hashes to `<sha256>` (64 hex digits) into the image, once
+//!                                      per boot of a base being materialised (ADR 0039, ADR 0087);
+//!                                      stdout {"v":1,"runner_version":..}, the version the guest
+//!                                      now reports; malformed arguments exit 64
 //! ```
 //!
 //! The answering guest is the VM's own, or the rule's `route_to` (a misrouted exec, F39): its
@@ -104,13 +110,49 @@ pub(crate) fn launcher(
             Ok(Done::out(json(&status(vm.runner.as_ref(), now_ms()))?))
         }
         Some("diagnostics") if args.len() == 1 => Ok(Done::out(ctx.home.guest_log(guest)?)),
+        Some("install-runner") if args.len() == 3 && runner_args(&args[1], &args[2]) => {
+            install(ctx, guest, &args[1])
+        }
         _ => Ok(Done {
             code: 64,
             stdout: String::new(),
-            stderr: "launcher: usage: launcher [verify|status|diagnostics]\n".to_owned(),
+            stderr: "launcher: usage: launcher [verify|status|diagnostics|install-runner]\n"
+                .to_owned(),
             wait: None,
         }),
     }
+}
+
+/// Whether `version` is `X.Y.Z` and `sha256` 64 lowercase hex digits.
+fn runner_args(version: &str, sha256: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && sha256.len() == 64
+        && sha256
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+#[derive(Serialize)]
+struct Installed<'a> {
+    v: u32,
+    runner_version: &'a str,
+}
+
+/// Records `version` as the guest's runner and answers it.
+fn install(ctx: &Ctx<'_>, guest: &str, version: &str) -> Result<Done, Fail> {
+    let _lock = ctx.home.lock()?;
+    let mut vm = local_vm(ctx.home, guest)?;
+    vm.installed_runner = Some(version.to_owned());
+    ctx.home.write_vm(&vm)?;
+    ctx.effect("runner_installed", guest)?;
+    Ok(Done::out(json(&Installed {
+        v: 1,
+        runner_version: version,
+    })?))
 }
 
 /// Reads one line of stdin, byte by byte so nothing after it is consumed.

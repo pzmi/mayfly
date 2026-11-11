@@ -8,11 +8,26 @@
 //!   faults.toml          the fault file (written by the lab, see `faults`)
 //!   invocations.jsonl    append-only record of every invocation (see `log`)
 //!   vms/<name>.json      one VM record each (name percent-encoded)
-//!   vms/<name>/config.json  the VM's run lock: a foreground `run` holds a POSIX record lock
-//!                        on it for its whole life, as Tart's `PIDLock` does, so `fcntl(F_GETLK)`
-//!                        names the process that runs the VM
+//!   vms/<name>/config.json  the VM's configuration (JSON with its `macAddress`, as Tart's) and
+//!                        its run lock: a foreground `run` holds a POSIX record lock on it for its
+//!                        whole life, as Tart's `PIDLock` does, so `fcntl(F_GETLK)` names the
+//!                        process that runs the VM
+//!   vms/<name>/nvram.bin, disk.img   the VM's other files, copied by `clone` (new inodes, as an
+//!                        APFS clone has), so a caller can fingerprint and hash them
 //!   guest-logs/<name>.log   the guest's runner log, written by the lab; the launcher's
 //!                        `diagnostics` prints it (see `guest`)
+//!   registry/<reference> the registry the lab seeds: one manifest per reference
+//!                        (`<repo>@sha256:<hex>` or `<repo>:<tag>`, name encoded), served by `pull`
+//!   registry/blobs/<digest>  the blobs its layers name (encoded), served as they are
+//!   cache/OCIs/<repo>/sha256:<hash of the manifest served>/
+//!                        what `pull` lays out, as Tart 2.28.0 does (`VMStorageOCI.pull`): the
+//!                        directory is named by the hash of the manifest it was served, never
+//!                        compared with the digest asked for; another requested name (a digest or
+//!                        a tag) is an absolute symlink to it, listed as an image of its own
+//!                        by its digest (the link form is for HW-01 to confirm); `manifest.json` is written RE-SERIALIZED
+//!                        (`manifest.toJSON()`), so its bytes are not the registry's; `config.json`,
+//!                        `nvram.bin` and `disk.img` are the layers' blobs (disk chunks concatenated
+//!                        in manifest order; the fake stores chunks uncompressed)
 //! ```
 //!
 //! Every write is a temp file in the same directory, `sync_all`, then `rename`, so a reader (the
@@ -38,6 +53,14 @@ const STATE: &str = "state.json";
 const FAULTS: &str = "faults.toml";
 const LOG: &str = "invocations.jsonl";
 const VMS: &str = "vms";
+const REGISTRY: &str = "registry";
+/// A VM's configuration file, its run lock too.
+pub(crate) const CONFIG: &str = "config.json";
+/// A VM's NVRAM file.
+pub(crate) const NVRAM: &str = "nvram.bin";
+/// A VM's disk file.
+pub(crate) const DISK: &str = "disk.img";
+const OCI_CACHE: &str = "cache/OCIs";
 
 /// Directories only a real Tart home has before the fake ever ran there.
 const REAL_HOME_SIGNS: &[&str] = &["vms", "cache", "tmp"];
@@ -163,7 +186,7 @@ impl Home {
             .truncate(false)
             .read(true)
             .write(true)
-            .open(dir.join("config.json"))
+            .open(dir.join(CONFIG))
             .map_err(|e| io("cannot open a VM's config", &e))?;
         rustix::fs::fcntl_lock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| Fail::generic(&format!("the VM \"{name}\" is already running")))?;
@@ -180,6 +203,129 @@ impl Home {
             Ok(text) => Ok(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(e) => Err(io("cannot read a guest log", &e)),
+        }
+    }
+
+    /// Whether the lab seeded a registry: then `pull` serves only what it holds.
+    pub fn registry_seeded(&self) -> bool {
+        self.dir.join(REGISTRY).is_dir()
+    }
+
+    /// The manifest the seeded registry serves for `reference`, if any.
+    pub fn registry_manifest(&self, reference: &str) -> Result<Option<Vec<u8>>, Fail> {
+        match fs::read(self.dir.join(REGISTRY).join(encode_name(reference))) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io("cannot read the registry", &e)),
+        }
+    }
+
+    /// The OCI cache directory of `reference`: `cache/OCIs/<repo>/<digest or tag>`; `None` for a
+    /// reference without that shape.
+    pub fn oci_dir(&self, reference: &str) -> Option<PathBuf> {
+        let (repository, version) = split_reference(reference)?;
+        let mut dir = self.dir.join(OCI_CACHE);
+        for part in repository.split('/') {
+            dir.push(part);
+        }
+        dir.push(version);
+        Some(dir)
+    }
+
+    /// A blob the seeded registry serves, by its descriptor's digest.
+    pub fn registry_blob(&self, digest: &str) -> Result<Option<Vec<u8>>, Fail> {
+        match fs::read(
+            self.dir
+                .join(REGISTRY)
+                .join("blobs")
+                .join(encode_name(digest)),
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io("cannot read a registry blob", &e)),
+        }
+    }
+
+    /// Lays out a pulled image the way Tart 2.28.0 does (see the module docs): the directory is
+    /// named by `served`'s hash, `reference`'s own name links to it when it differs.
+    pub fn write_oci_entry(
+        &self,
+        reference: &str,
+        served_hash: &str,
+        manifest: &[u8],
+        files: &[(&str, Vec<u8>)],
+    ) -> Result<(), Fail> {
+        let (repository, version) = split_reference(reference)
+            .ok_or_else(|| Fail::generic(&format!("{reference} is not a remote name")))?;
+        let target = self
+            .oci_dir(&format!("{repository}@{served_hash}"))
+            .ok_or_else(|| Fail::generic(&format!("{reference} is not a remote name")))?;
+        fs::create_dir_all(&target).map_err(|e| io("cannot create the OCI cache", &e))?;
+        write_atomic(&target.join("manifest.json"), manifest)?;
+        for (name, bytes) in files {
+            write_atomic(&target.join(name), bytes)?;
+        }
+        if version != served_hash {
+            let link = target.with_file_name(version);
+            let _gone = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&target, &link)
+                .map_err(|e| io("cannot link the OCI cache entry", &e))?;
+        }
+        Ok(())
+    }
+
+    /// A VM's directory, `vms/<name>/`.
+    pub fn vm_dir(&self, name: &str) -> PathBuf {
+        self.dir.join(VMS).join(encode_name(name))
+    }
+
+    /// Writes a VM's files, each atomically (a new inode, as Tart's writes are).
+    pub fn write_vm_files(&self, name: &str, files: &[(&str, &[u8])]) -> Result<(), Fail> {
+        let dir = self.vm_dir(name);
+        fs::create_dir_all(&dir).map_err(|e| io("cannot create a VM's directory", &e))?;
+        for (file, bytes) in files {
+            write_atomic(&dir.join(file), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Copies a VM's files from `from` (a VM's or an OCI entry's directory) to `name`'s.
+    pub fn copy_vm_files(&self, from: &Path, name: &str) -> Result<(), Fail> {
+        let dir = self.vm_dir(name);
+        fs::create_dir_all(&dir).map_err(|e| io("cannot create a VM's directory", &e))?;
+        for file in [CONFIG, NVRAM, DISK] {
+            match fs::read(from.join(file)) {
+                Ok(bytes) => write_atomic(&dir.join(file), &bytes)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io("cannot copy a VM's file", &e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets `macAddress` in a VM's `config.json`, as `tart set` and a cloned MAC rewrite it.
+    pub fn set_config_mac(&self, name: &str, mac: &str) -> Result<(), Fail> {
+        let path = self.vm_dir(name).join(CONFIG);
+        let mut config: serde_json::Map<String, serde_json::Value> = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        config.insert("macAddress".to_owned(), serde_json::Value::from(mac));
+        let bytes = serde_json::to_vec(&config)
+            .map_err(|e| Fail::fake(&format!("cannot encode a config: {e}")))?;
+        write_atomic(&path, &bytes)
+    }
+
+    /// Removes `reference`'s OCI cache directory, if it has one.
+    pub fn remove_oci(&self, reference: &str) -> Result<(), Fail> {
+        let Some(dir) = self.oci_dir(reference) else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(io("cannot remove an OCI cache entry", &e))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -213,6 +359,17 @@ impl Home {
         file.write_all(&line)
             .map_err(|e| io("cannot append to the invocation log", &e))
     }
+}
+
+/// A remote name's repository and its digest (`<repo>@sha256:<hex>`) or tag (`<repo>:<tag>`);
+/// `None` when it has neither or a repository part is empty, `.` or `..`.
+fn split_reference(reference: &str) -> Option<(&str, &str)> {
+    let (repository, version) = reference.split_once('@').or_else(|| {
+        let (repository, tag) = reference.rsplit_once(':')?;
+        (!tag.contains('/')).then_some((repository, tag))
+    })?;
+    let sound = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains('/');
+    (repository.split('/').all(sound) && sound(version)).then_some((repository, version))
 }
 
 /// A file name for a VM name: bytes outside `[A-Za-z0-9_-]` (and a leading dot) become `%XX`.

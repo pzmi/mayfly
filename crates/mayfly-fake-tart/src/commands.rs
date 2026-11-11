@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::cli::{Command, Format};
 use crate::fail::Fail;
 use crate::faults::{Rule, RunMode};
-use crate::home::Home;
+use crate::home::{CONFIG, DISK, Home, NVRAM};
 use crate::log::{Event, Record};
 use crate::timefmt::{iso8601, now_ms};
 use crate::vm::{
@@ -180,25 +180,121 @@ fn create(ctx: &Ctx<'_>, name: &str) -> Result<Done, Fail> {
         now_ms(),
     );
     ctx.home.write_vm(&vm)?;
+    let config = format!(
+        r#"{{"version":1,"os":"{}","arch":"arm64","macAddress":"{}"}}"#,
+        vm.os, vm.mac
+    );
+    let disk: Vec<u8> = name.bytes().cycle().take(4096).collect();
+    ctx.home.write_vm_files(
+        name,
+        &[
+            (CONFIG, config.as_bytes()),
+            (NVRAM, format!("fake-nvram:{name}").as_bytes()),
+            (DISK, &disk),
+        ],
+    )?;
     ctx.effect("vm_created", name)?;
     Ok(Done::quiet())
 }
 
+/// `pull`: an OCI-cache entry named by the remote name. With a seeded registry (`home`) it serves
+/// only a reference the registry holds, as a registry answers an unknown manifest, and lays the
+/// image out as Tart 2.28.0 does: the entry is named by the hash of the manifest it was served,
+/// never compared with the digest asked for, its `manifest.json` is re-serialized, and no blob is
+/// checked against its descriptor (`VMStorageOCI.pull`, `Registry.pullBlob`). Verifying is the
+/// caller's job (domain-model §9.3). Without a registry it pulls anything, an image with no files.
 fn pull(ctx: &Ctx<'_>, reference: &str) -> Result<Done, Fail> {
     let _lock = ctx.home.lock()?;
+    let mut os = None;
+    if ctx.home.registry_seeded() {
+        let manifest = ctx.home.registry_manifest(reference)?.ok_or_else(|| {
+            Fail::generic(&format!("failed to pull {reference}: manifest unknown"))
+        })?;
+        let (served_os, served_name) = lay_out(ctx.home, reference, &manifest)?;
+        os = Some(served_os.clone());
+        // The entry the asked name links to is an image of its own, listed by its digest.
+        if let Some(served_name) = served_name
+            && ctx.home.read_vm(&served_name)?.is_none()
+        {
+            let counter = next_counter(ctx.home)?;
+            let mut vm = VmRecord::new(
+                &served_name,
+                Source::Oci,
+                pseudo_mac(&served_name, counter),
+                octet(counter),
+                now_ms(),
+            );
+            vm.os = served_os;
+            ctx.home.write_vm(&vm)?;
+        }
+    }
     if ctx.home.read_vm(reference)?.is_none() {
         let counter = next_counter(ctx.home)?;
-        let vm = VmRecord::new(
+        let mut vm = VmRecord::new(
             reference,
             Source::Oci,
             pseudo_mac(reference, counter),
             octet(counter),
             now_ms(),
         );
+        if let Some(os) = os {
+            vm.os = os;
+        }
         ctx.home.write_vm(&vm)?;
         ctx.effect("image_pulled", reference)?;
     }
     Ok(Done::quiet())
+}
+
+/// Writes a served manifest's image into the OCI cache; returns the guest OS its config names
+/// (`darwin` when it names none) and, when the asked name is only a link to it, the entry's own
+/// name (`<repo>@sha256:<hash of the manifest served>`).
+fn lay_out(
+    home: &Home,
+    reference: &str,
+    manifest: &[u8],
+) -> Result<(String, Option<String>), Fail> {
+    let parsed: serde_json::Value = serde_json::from_slice(manifest)
+        .map_err(|_| Fail::generic(&format!("failed to pull {reference}: manifest unparseable")))?;
+    let mut config = Vec::new();
+    let mut nvram = Vec::new();
+    let mut disk = Vec::new();
+    for layer in parsed["layers"].as_array().into_iter().flatten() {
+        let digest = layer["digest"].as_str().unwrap_or_default();
+        let blob = home.registry_blob(digest)?.ok_or_else(|| {
+            Fail::generic(&format!(
+                "failed to pull {reference}: blob {digest} unknown"
+            ))
+        })?;
+        let media = layer["mediaType"].as_str().unwrap_or_default();
+        if media.ends_with(".config.v1") {
+            config = blob;
+        } else if media.ends_with(".nvram.v1") {
+            nvram = blob;
+        } else if media.contains(".disk.") {
+            disk.extend_from_slice(&blob);
+        }
+    }
+    let os = serde_json::from_slice::<serde_json::Value>(&config)
+        .ok()
+        .and_then(|c| c["os"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "darwin".to_owned());
+    let reserialized = serde_json::to_vec_pretty(&parsed)
+        .map_err(|e| Fail::fake(&format!("cannot encode a manifest: {e}")))?;
+    let served = format!("sha256:{}", hex(Sha256::digest(manifest).as_ref()));
+    home.write_oci_entry(
+        reference,
+        &served,
+        &reserialized,
+        &[(CONFIG, config), (NVRAM, nvram), (DISK, disk)],
+    )?;
+    let repository = reference
+        .split_once('@')
+        .map(|(repo, _)| repo)
+        .or_else(|| reference.rsplit_once(':').map(|(repo, _)| repo))
+        .unwrap_or(reference);
+    let own = format!("{repository}@{served}");
+    Ok((os, (own != reference).then_some(own)))
 }
 
 /// `clone` reads its source from local storage or the OCI cache and never pulls. The clone gets a
@@ -233,7 +329,17 @@ fn clone_vm(ctx: &Ctx<'_>, source: &str, name: &str, overwrite: bool) -> Result<
     };
     let mut vm = VmRecord::new(name, Source::Local, mac, octet(counter), now_ms());
     vm.cloned_from = Some(source.to_owned());
+    let files = if src.source == Source::Oci {
+        ctx.home.oci_dir(source)
+    } else {
+        Some(ctx.home.vm_dir(source))
+    };
+    if let Some(files) = files {
+        ctx.home.copy_vm_files(&files, name)?;
+    }
+    ctx.home.set_config_mac(name, &vm.mac)?;
     vm.os.clone_from(&src.os);
+    vm.installed_runner.clone_from(&src.installed_runner);
     (vm.cpu, vm.memory_mb, vm.disk_gb) = (src.cpu, src.memory_mb, src.disk_gb);
     ctx.home.write_vm(&vm)?;
     ctx.effect("vm_cloned", name)?;
@@ -460,6 +566,7 @@ fn set(
     }
     if random_mac {
         vm.mac = pseudo_mac(name, next_counter(ctx.home)?);
+        ctx.home.set_config_mac(name, &vm.mac)?;
     }
     vm.cpu = cpu.unwrap_or(vm.cpu);
     vm.memory_mb = memory.unwrap_or(vm.memory_mb);
@@ -480,6 +587,9 @@ fn delete(ctx: &Ctx<'_>, names: &[String]) -> Result<Done, Fail> {
             return Err(Fail::is_running(name));
         }
         ctx.home.remove_vm(name)?;
+        if vm.source == Source::Oci {
+            ctx.home.remove_oci(name)?;
+        }
         ctx.effect("vm_deleted", name)?;
     }
     Ok(Done::quiet())

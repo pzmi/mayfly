@@ -55,6 +55,8 @@ jobs:
             timeout: 45
           - model: event_store
             timeout: 300
+          - model: image_store
+            timeout: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

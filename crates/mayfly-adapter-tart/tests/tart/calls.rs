@@ -33,8 +33,9 @@ fn argv(record: &Value) -> Vec<String> {
 fn should_set_tart_home_and_no_auto_prune_on_every_call_when_the_adapter_runs_tart() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let seeding = fake.events("invoke").len();
+    let provider = fake.provider();
     let runtime = runtime();
     let options = mayfly_data::RunOptions {
         resources: mayfly_domain::Resources::new(START_MEMORY, 0),
@@ -54,11 +55,7 @@ fn should_set_tart_home_and_no_auto_prune_on_every_call_when_the_adapter_runs_ta
     });
 
     // then
-    let calls: Vec<Value> = fake
-        .events("invoke")
-        .into_iter()
-        .filter(|record| record["argv"][0] != "create")
-        .collect();
+    let calls: Vec<Value> = fake.events("invoke").into_iter().skip(seeding).collect();
     let commands: Vec<String> = calls.iter().map(|c| argv(c)[0].clone()).collect();
     for command in [
         "get",
@@ -90,8 +87,9 @@ fn should_set_tart_home_and_no_auto_prune_on_every_call_when_the_adapter_runs_ta
 fn should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let seeding = fake.events("invoke").len();
+    let provider = fake.provider();
 
     // when
     let id = runtime()
@@ -102,8 +100,8 @@ fn should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning() {
     let calls: Vec<Vec<String>> = fake
         .events("invoke")
         .iter()
+        .skip(seeding)
         .map(argv)
-        .filter(|args| args[0] != "create")
         .collect();
     let name = vm(1).to_string();
     assert_eq!(
@@ -129,7 +127,7 @@ fn should_refuse_to_clone_an_oci_image_when_it_is_not_a_local_base() {
     // given
     let fake = Fake::new();
     assert!(fake.tart(&["pull", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    let provider = fake.provider();
 
     // when
     let cloned = runtime().block_on(provider.clone_vm(&base(), &vm(1)));
@@ -151,7 +149,7 @@ fn should_report_incomplete_when_a_vm_description_does_not_parse() {
     fake.faults(
         "[[rule]]\ncommand = \"get\"\naction = \"corrupt_output\"\ncorrupt = \"truncate\"\n",
     );
-    let provider = TartProvider::new(fake.config());
+    let provider = fake.provider();
 
     // when
     let inventory = runtime().block_on(provider.inventory());
@@ -169,7 +167,7 @@ fn should_report_incomplete_when_a_vm_description_does_not_parse() {
 fn should_accept_the_pinned_version_and_refuse_another_when_probing() {
     // given
     let fake = Fake::new();
-    let provider = TartProvider::new(fake.config());
+    let provider = fake.provider();
     let runtime = runtime();
     let pinned = runtime.block_on(provider.probe());
 
@@ -183,8 +181,8 @@ fn should_accept_the_pinned_version_and_refuse_another_when_probing() {
 }
 
 fn started(fake: &Fake) -> (TartProvider, mayfly_domain::ProviderInstanceId) {
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let options = mayfly_data::RunOptions {
         resources: mayfly_domain::Resources::new(START_MEMORY, 0),
     };
@@ -230,8 +228,8 @@ fn should_refuse_definite_when_tart_stop_fails_and_the_vm_still_runs() {
 fn should_answer_done_when_tart_delete_fails_after_removing_the_vm() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     let id = runtime
         .block_on(provider.clone_vm(&base(), &vm(1)))
@@ -250,8 +248,8 @@ fn should_answer_done_when_tart_delete_fails_after_removing_the_vm() {
 fn should_refuse_definite_when_tart_delete_fails_and_the_vm_remains() {
     // given
     let fake = Fake::new();
-    assert!(fake.tart(&["create", base().as_str()]).status.success());
-    let provider = TartProvider::new(fake.config());
+    fake.seed_base(base().as_str());
+    let provider = fake.provider();
     let runtime = runtime();
     let id = runtime
         .block_on(provider.clone_vm(&base(), &vm(1)))

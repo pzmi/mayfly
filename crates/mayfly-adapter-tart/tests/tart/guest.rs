@@ -55,7 +55,7 @@ pub struct FakeTartGuests {
 impl FakeTartGuests {
     pub fn new() -> Self {
         let fake = Fake::new();
-        let provider = TartProvider::new(fake.config());
+        let provider = fake.provider();
         let secrets = MemorySecrets::default();
         let transport =
             TartGuestTransport::new(fake.config(), guest_config(&fake), secrets.clone());
@@ -104,10 +104,7 @@ impl GuestWorld for FakeTartGuests {
 
     async fn boot(&self, n: u32) -> Result<ProviderInstanceId, String> {
         if self.fake.exists(Self::base().as_str()).is_none() {
-            let out = self.fake.tart(&["create", Self::base().as_str()]);
-            if !out.status.success() {
-                return Err("the base was not created".to_owned());
-            }
+            self.fake.seed_base(Self::base().as_str());
         }
         let id = self
             .provider

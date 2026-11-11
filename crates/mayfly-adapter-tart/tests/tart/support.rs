@@ -9,15 +9,22 @@
 //! it) is killed by its pid from `shim.json`, a process this test started.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
+use mayfly_adapter_tart::bases::{
+    BaseEntry, BaseState, RECIPE_VERSION, Signature, SignaturePolicy, SignatureResult,
+};
+use mayfly_adapter_tart::proof::vm_dir;
 use mayfly_adapter_tart::shim::{self, RunRecord};
-use mayfly_adapter_tart::{Deadlines, ShimProgram, TartConfig, TartProvider};
+use mayfly_adapter_tart::verify;
+use mayfly_adapter_tart::{BaseRecords, Deadlines, ShimProgram, TartConfig, TartProvider};
 use mayfly_data::{BaseName, Shim};
+use mayfly_domain::{ImageDigest, Sample};
 use mayfly_testkit_data::Op;
 use mayfly_testkit_data::provider_contract::{ListingFault, ProviderWorld};
 use mayfly_testkit_shared::poll::try_wait_until;
@@ -83,6 +90,44 @@ pub fn config(home: &Path, shims: &Path) -> TartConfig {
     }
 }
 
+/// A `Ready` registry entry for the stopped VM `name` in `home` as it is now.
+pub fn ready_entry(home: &Path, name: &str, mac: &str) -> BaseEntry {
+    let dir = vm_dir(home, name);
+    BaseEntry {
+        base_id: "5eed".repeat(8),
+        deployment_id: "deployment".to_owned(),
+        source_ref: format!("registry.example/seed@{}", ImageDigest::sample()),
+        source_digest: ImageDigest::sample(),
+        tart_version: "2.28.0".to_owned(),
+        runner_version: "2.330.0".to_owned(),
+        runner_sha256: "5a".repeat(32),
+        build_recipe_version: RECIPE_VERSION,
+        state: BaseState::Ready,
+        quarantine: None,
+        vm_mac: Some(mac.to_owned()),
+        vm_file_identity: verify::identity(&dir),
+        final_fingerprint: verify::fingerprint(&dir),
+        signature: Signature {
+            policy: SignaturePolicy::DigestOnly,
+            result: SignatureResult::NotChecked,
+        },
+        clones: BTreeMap::new(),
+    }
+}
+
+/// The record of owned bases kept under `dir` (a world's tempdir).
+pub fn records_at(dir: &Path) -> Arc<BaseRecords> {
+    Arc::new(BaseRecords::open(dir.join("state").join("bases.json")))
+}
+
+/// A provider over the fake home, shims and record under `dir`.
+pub fn provider_at(dir: &Path) -> TartProvider {
+    TartProvider::new(
+        config(&dir.join("tart-home"), &dir.join("shims")),
+        records_at(dir),
+    )
+}
+
 /// A `TART_HOME` and shim directory, and the fake driven directly; cleaned up when dropped,
 /// failed test or not.
 pub struct Fake {
@@ -92,7 +137,10 @@ pub struct Fake {
 impl Fake {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(dir.path().join("tart-home")).expect("tart home");
+        let home = dir.path().join("tart-home");
+        std::fs::create_dir(&home).expect("tart home");
+        std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("a private tart home");
         Self { dir }
     }
 
@@ -106,6 +154,41 @@ impl Fake {
 
     pub fn config(&self) -> TartConfig {
         config(&self.home(), &self.shims())
+    }
+
+    /// The record of the bases this deployment owns.
+    pub fn records(&self) -> Arc<BaseRecords> {
+        records_at(self.dir.path())
+    }
+
+    /// A provider over this fake and its record.
+    pub fn provider(&self) -> TartProvider {
+        provider_at(self.dir.path())
+    }
+
+    /// Makes `name` a base this deployment owns: a local VM recorded `Ready` with the MAC,
+    /// file identity and fingerprint it has now (what the image store records once it built
+    /// one).
+    pub fn seed_base(&self, name: &str) {
+        assert!(
+            self.tart(&["create", name]).status.success(),
+            "create the base"
+        );
+        let entry = ready_entry(&self.home(), name, &self.mac(name));
+        self.records()
+            .update(|record| record.bases.insert(name.to_owned(), entry))
+            .expect("record the base");
+    }
+
+    /// The MAC Tart lists for `name`, lower case.
+    pub fn mac(&self, name: &str) -> String {
+        let info: Value =
+            serde_json::from_slice(&self.tart(&["get", name, "--format", "json"]).stdout)
+                .expect("get json");
+        info["MACAddress"]
+            .as_str()
+            .expect("a MAC")
+            .to_ascii_lowercase()
     }
 
     /// Runs the fake `tart` with only `TART_HOME` (and a coverage run's `LLVM_PROFILE_FILE`, so
@@ -200,7 +283,7 @@ pub struct FakeTartWorld {
 impl FakeTartWorld {
     pub fn new() -> Self {
         let fake = Fake::new();
-        let provider = TartProvider::new(fake.config());
+        let provider = fake.provider();
         Self {
             fake,
             provider,
@@ -228,12 +311,11 @@ impl ProviderWorld for FakeTartWorld {
     }
 
     fn restart(&mut self) {
-        self.provider = TartProvider::new(self.fake.config());
+        self.provider = self.fake.provider();
     }
 
     fn seed_base(&self, base: &BaseName) {
-        let out = self.fake.tart(&["create", base.as_str()]);
-        assert!(out.status.success(), "create the base");
+        self.fake.seed_base(base.as_str());
     }
 
     fn seed_foreign(&self, name: &str) {

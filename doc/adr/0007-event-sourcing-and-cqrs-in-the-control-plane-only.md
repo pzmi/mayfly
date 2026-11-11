@@ -32,5 +32,6 @@ ADR 0008 and ADR 0021 shape; the codec and registry are ADR 0018, and time enter
 
 Amended by later records: the data plane keeps an in-memory resource ledger rebuilt from
 observation (ADR 0024), owns one durable artefact, the epoch-floor marker in `TART_HOME`, a fence
-rather than state (ADR 0026), and leaves a per-VM shim's lock and `exit.json` beside each VM
-(ADR 0037). None of these is a journal or a record of decisions.
+rather than state (ADR 0026), leaves a per-VM shim's lock and `exit.json` beside each VM
+(ADR 0037), and keeps the registry of the image bases it made, the host evidence its delete and
+clone proofs read (ADR 0087). None of these is a journal or a record of decisions.

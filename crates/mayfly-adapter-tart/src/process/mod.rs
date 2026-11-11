@@ -2,9 +2,11 @@
 //! children (`SPAWN_MODULES`).
 //!
 //! - [`runner`]: one bounded `tart` call.
+//! - [`blocking`]: file hashing on Tokio's blocking pool.
 //! - [`launch`]: starting a VM's shim, the one child the adapter does not wait for.
 //! - [`vm_shim`]: the shim itself, the body of `mayfly vm-shim`.
 
+pub mod blocking;
 pub mod launch;
 pub mod runner;
 pub mod vm_shim;

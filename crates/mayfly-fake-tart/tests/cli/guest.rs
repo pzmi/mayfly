@@ -187,3 +187,29 @@ fn should_refuse_route_to_when_the_rule_is_not_an_exec() {
     // then
     assert_eq!(ran.code(), Some(99), "{}", ran.stderr());
 }
+
+#[test]
+fn should_record_the_runner_when_install_runner_is_given_a_version_and_its_digest() {
+    // given
+    let fake = Fake::new();
+    running(&fake, &["vm1"]);
+    let sha = "0f".repeat(32);
+
+    // when
+    let installed = fake.tart(&["exec", "vm1", LAUNCHER, "install-runner", "2.330.0", &sha]);
+    let malformed = fake.tart(&["exec", "vm1", LAUNCHER, "install-runner", "latest", &sha]);
+    let short = fake.tart(&["exec", "vm1", LAUNCHER, "install-runner", "2.330.0", "0f"]);
+
+    // then
+    assert_eq!(installed.code(), Some(0));
+    assert_eq!(
+        json(&installed.stdout()),
+        serde_json::json!({"v": 1, "runner_version": "2.330.0"})
+    );
+    assert_eq!(malformed.code(), Some(64));
+    assert_eq!(short.code(), Some(64));
+    assert_eq!(
+        fake.vm("vm1").expect("the vm")["installed_runner"],
+        "2.330.0"
+    );
+}

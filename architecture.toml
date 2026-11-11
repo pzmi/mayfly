@@ -175,13 +175,17 @@ mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test
 # The data plane's fakes share state between a test and the executor and wake waiters (a held
 # provider call, the fake clock) through Tokio's synchronisation primitives; the VmProvider
 # contract (DP-04) runs each case on its own current-thread runtime (rt), bounded by a timer
-# (time).
-mayfly-testkit-data = { sha2 = ["default"], tokio = ["sync", "rt", "time"] }
+# (time); the ImageStore contract (DP-07) overlaps two pulls of one digest with join! (macros).
+mayfly-testkit-data = { sha2 = ["default"], tokio = ["sync", "rt", "time", "macros"] }
 # The Tart adapter (DP-04, plan section 8.2): each `tart` child awaited with its deadline and its
 # stdout and stderr read together through Tokio (rt, process, io-util, time, macros for join!);
 # the process-group kill, `setsid` and the shim's flock(2) through rustix; Tart's JSON through
-# serde.
-mayfly-adapter-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], tokio = ["rt", "process", "io-util", "time", "macros"] }
+# serde. The image store (DP-07, ADR 0087): Tokio's mutex (sync) holds one pull per digest
+# and one effect per base; sha2 checks a raw manifest against its digest and every file and disk
+# chunk against the manifest's descriptors; reqwest over rustls (aws-lc-rs, the platform
+# verifier, as the GitHub adapter has it) fetches the raw manifest by digest over HTTPS,
+# independently of Tart, with a size cap while the body streams.
+mayfly-adapter-tart = { reqwest = ["rustls-no-provider"], rustix = ["default", "fs", "process"], rustls = ["aws_lc_rs", "std", "tls12"], rustls-platform-verifier = ["default"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], tokio = ["rt", "process", "io-util", "time", "macros", "sync"] }
 # The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
 # process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
 # of the file and executable checks, through Tokio.

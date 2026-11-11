@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use mayfly_data::BaseName;
 use mayfly_domain::OwnedVmName;
 use rustix::fs::{FlockOperation, flock};
 
@@ -50,13 +51,46 @@ const TICK: Duration = Duration::from_millis(100);
 /// How long the shim waits for a lock another process holds (a probe holds it for an instant).
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 
+/// What a shim may run: a managed VM, or an image base for its one boot while it is
+/// materialised (ADR 0087). Never a foreign name: one that parses as neither is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShimTarget {
+    /// A managed `mf-*` VM.
+    Vm(OwnedVmName),
+    /// An `mfb-*` image base being materialised.
+    Base(BaseName),
+}
+
+impl ShimTarget {
+    /// Parses a managed VM name or a base name.
+    ///
+    /// # Errors
+    /// Anything else (pinned by `tests::should_refuse_when_the_arguments_are_wrong`).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        OwnedVmName::parse(text)
+            .map(Self::Vm)
+            .or_else(|_| BaseName::new(text).map(Self::Base))
+            .map_err(|_| "--vm is neither a managed VM nor an image base".to_owned())
+    }
+}
+
+impl std::fmt::Display for ShimTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vm(vm) => vm.fmt(f),
+            Self::Base(base) => base.fmt(f),
+        }
+    }
+}
+
 /// The shim's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShimArgs {
     /// The `tart` executable.
     pub tart: PathBuf,
-    /// The VM: only a managed name, so the shim can never be pointed at a base or a foreign VM.
-    pub vm: OwnedVmName,
+    /// The VM: a managed name or an image base ([`ShimTarget`]), so the shim can never be
+    /// pointed at a foreign VM.
+    pub vm: ShimTarget,
     /// The shim directory.
     pub dir: PathBuf,
     /// This start's run id.
@@ -121,8 +155,7 @@ impl ShimArgs {
         if !tart.is_absolute() || !dir.is_absolute() {
             return Err("--tart and --dir must be absolute".to_owned());
         }
-        let vm = OwnedVmName::parse(&text(vm, "vm")?)
-            .map_err(|_| "--vm is not a managed VM name".to_owned())?;
+        let vm = ShimTarget::parse(&text(vm, "vm")?)?;
         Ok(Self {
             tart,
             vm,
@@ -307,7 +340,9 @@ mod tests {
     fn args() -> ShimArgs {
         ShimArgs {
             tart: "/opt/tart".into(),
-            vm: OwnedVmName::parse("mf-pool0-host0-s1-g1-00000001").expect("a managed name"),
+            vm: ShimTarget::Vm(
+                OwnedVmName::parse("mf-pool0-host0-s1-g1-00000001").expect("a managed name"),
+            ),
             dir: "/var/shims/mf-a".into(),
             run_id: "7-1".into(),
             log_limit: 1024,
@@ -331,8 +366,8 @@ mod tests {
         // given
         let mut relative = args();
         relative.tart = "tart".into();
-        let mut base_vm = args().to_args();
-        base_vm[3] = "mfb-base".into();
+        let mut foreign_vm = args().to_args();
+        foreign_vm[3] = "my-own-vm".into();
         let mut twice = args().to_args();
         twice.extend(["--vm".into(), "mf-b".into()]);
         let cases: Vec<Vec<OsString>> = vec![
@@ -340,7 +375,7 @@ mod tests {
             vec!["--vm".into()],
             vec!["--bogus".into(), "x".into()],
             relative.to_args(),
-            base_vm,
+            foreign_vm,
             twice,
         ];
 
@@ -351,6 +386,19 @@ mod tests {
             // then
             assert!(parsed.is_err(), "{case:?}");
         }
+    }
+
+    #[test]
+    fn should_accept_an_image_base_when_it_is_materialised() {
+        // given
+        let mut base = args();
+        base.vm = ShimTarget::Base(BaseName::new("mfb-0123456789ab-r2-330-0").expect("a base"));
+
+        // when
+        let parsed = ShimArgs::parse(&base.to_args());
+
+        // then
+        assert_eq!(parsed, Ok(base));
     }
 
     #[test]

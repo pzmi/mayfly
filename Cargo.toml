@@ -35,8 +35,6 @@ readme = "README.md"
 keywords = ["ci", "github-actions", "runners", "virtual-machines", "tart"]
 categories = ["development-tools", "command-line-utilities"]
 
-[workspace.dependencies]
-
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"

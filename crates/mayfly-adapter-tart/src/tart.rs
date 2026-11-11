@@ -120,6 +120,73 @@ impl TartCli {
         Ok(entries.into_iter().filter(ListEntry::is_local).collect())
     }
 
+    /// `tart list --format json --source oci`: the OCI cache's entries, local VMs left out.
+    ///
+    /// # Errors
+    /// [`CallError`]; a truncated output is [`CallError::Unparseable`].
+    pub async fn list_oci(&self) -> Result<Vec<ListEntry>, CallError> {
+        let out = self
+            .call(
+                args(&["list", "--format", "json", "--source", "oci"]),
+                self.config.deadlines.list,
+            )
+            .await?;
+        if out.truncated {
+            return Err(CallError::Unparseable);
+        }
+        let entries = parse::list(&out.stdout).map_err(|_| CallError::Unparseable)?;
+        Ok(entries.into_iter().filter(|e| !e.is_local()).collect())
+    }
+
+    /// `tart pull <reference>`, bounded by `deadline`. The image store builds `reference` from
+    /// a digest only (`images`), never a tag.
+    ///
+    /// # Errors
+    /// [`CallError`].
+    pub async fn pull(&self, reference: &str, deadline: Duration) -> Result<(), CallError> {
+        self.call(args(&["pull", reference]), deadline)
+            .await
+            .map(drop)
+    }
+
+    /// `tart exec <name> <argv>…` without stdin, bounded by `deadline`, its stdout kept up to
+    /// `limit` bytes.
+    ///
+    /// # Errors
+    /// [`CallError`]; output past `limit` is [`CallError::Unparseable`].
+    pub async fn exec(
+        &self,
+        name: &str,
+        argv: &[&str],
+        deadline: Duration,
+        limit: usize,
+    ) -> Result<Vec<u8>, CallError> {
+        let mut all = vec![OsString::from("exec"), OsString::from(name)];
+        all.extend(argv.iter().map(OsString::from));
+        let ran = runner::run(Call {
+            program: &self.config.tart,
+            args: all,
+            environment: &self.environment,
+            deadline,
+            output_limit: limit,
+            redact: &self.config.redact,
+            stdin: Stdin::Null,
+        })
+        .await;
+        match ran {
+            Ran::Exited(exited) if exited.success() && !exited.truncated => Ok(exited.stdout),
+            Ran::Exited(exited) if exited.success() => Err(CallError::Unparseable),
+            Ran::Exited(Exited {
+                code: Some(code),
+                stderr,
+                ..
+            }) => Err(CallError::Refused { code, stderr }),
+            Ran::Exited(_) | Ran::Lost(_) => Err(CallError::Lost),
+            Ran::TimedOut => Err(CallError::TimedOut),
+            Ran::SpawnFailed(_) => Err(CallError::SpawnFailed),
+        }
+    }
+
     /// The seconds `tart stop --timeout` is given for `grace`. Pinned by
     /// `tests::should_round_a_grace_up_to_whole_seconds_when_stopping`.
     #[must_use]

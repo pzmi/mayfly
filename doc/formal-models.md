@@ -106,6 +106,7 @@ then, a model's task records the one it tried.
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed; at DEC-06F, with `requestQuarantineStop` (re-keying a pending retirement), 244 s for `step` and 145 s for `raceStep`, simulation 80 s and 17 s per seed (`formal-verify --model registration`, beside a `quint test` run) | KER-09, DEC-06F |
 | scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted) (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation | KER-06 |
 | event_store | `formal/event_store.qnt` | the journal (stream heads, histories, the identity registry, receipts with intent digests and refusals bound to every stream read, the inbox, stream epochs), units of work judged in the port's reporting order and committed in one step or as split transactions with head locks in `StreamId` order and recorded waits, the `AggregateStore` write path (its epoch check and receipt read as one step or with another writer between them), the after-commit kick and a crash before it, the directive relay as a durable consumer (marks, checkpoints, fenced leases, workers), and the online rebuild's shadow generation, dual writes and cutover fence (event-store §7.3, ADRs 0034, 0041) | `ES_I1_atomicUnit`, `ES_I2_streamOrder`, `ES_I3_independentStreams`, `ES_I4_globalEventIdentity`, `ES_I5_commandIdentity`, `refusalReplayedAtSameRevision`, `ES_I6_messageIdentity`, `ES_I7_historyPreservation`, `ES_I11_rebuildEquivalence`, `ES_I12_epochSafety`, `replayWithinEpoch`, `ES_I14_durableDelivery`, `ES_I15_noSkip`, `ES_I16_lockOrder`, `directivesFromJournal`, `reactorsNeverReplayed` | `step`, `implStepSerial`, `relayStep`, `storeOnlyStep`, `deliveryOnlyStep` | 3 steps for `step` and `implStepSerial`, 4 for `relayStep` and `storeOnlyStep`, 8 for `deliveryOnlyStep` | about 12 min for `step`, 12 min for `implStepSerial`, 3.7 min for `relayStep` (re-run at ES-05F with `retire`, which ES-05 added to these three relations: no violation; `step` and `relayStep` two at a time, then `implStepSerial`, beside another lane's builds, 4-CPU sandbox), 78 min for `storeOnlyStep`, 42 min for `deliveryOnlyStep` (Apalache, two runs at a time beside another lane's builds; 4-CPU sandbox, measured at ES-06F, after the model gained `request`, `decide`, `rawRefusal` and intent 3: `step` and `implStepSerial` took 4 min at ES-06); `storeOnlyStep` at depth 5 had not finished checking its fourth state after 40 min, and depth 4 of `step` took 23 min at ES-06: checking the 31 invariant conditions at the last state is most of it; simulation about 3 min per seed and relation (300 traces of 50 steps of `step` ran at 30 traces per second) | ES-06, ES-06F, ES-05F |
+| image_store | `formal/image_store.qnt` | one image base on one host as the data plane's image store keeps it (ADR 0087): its registry entry and state machine (Reserved, Cloning, Customizing, Verifying, Ready, Retiring, Quarantined), the VM Tart lists under its name, job clones and the clone intents recorded before them, a crash between any two steps with recovery by observation, and the writers mayfly does not control (a foreign VM under the name, a look-alike in the base's place, a modified disk) | `cloneAllowedOnlyWhenOwnedReadyIntact` (CloneAllowed ⇒ Owned ∧ Ready ∧ IntegrityValid), `deleteAllowedOnlyWhenOwnedStoppedFree` (DeleteAllowed ⇒ Owned ∧ Stopped ∧ NoUnresolvedDependents, never Quarantined), `clonesRecorded` | `step` | 10 steps | 9 s, then 12 s for the stage once `recoverStop` and the Quarantined guard joined, 9 s once eviction became two steps (Apalache, beside another lane's build; 4-CPU sandbox, measured at DP-07); simulation about 32 s per seed of 5000 traces of 50 steps | DP-07 |
 
 **Not modelled: the image catalog** (`Image`, `ImagePlacement`, KER-11). Each is one stream with
 no rule over another stream's state: `Image`'s rules are a monotonic status and immutable fields,
@@ -114,8 +115,31 @@ lifecycle model already checks for an attempt. Both are pinned instead by their 
 matrices, their properties over random command sequences
 (`tests/image/properties.rs`, `tests/placement/properties.rs` in `mayfly-control-domain`) and
 their determinism cases. The cross-stream rules (P17: withdraw refused while pinned, eviction
-references counted from pools and live clones, re-checked by the data plane against its base set)
-belong to CP-07 and DP-07, which decide whether they need a model.
+references counted from pools and live clones) belong to CP-07.
+
+**The data plane's image store** (DP-07, ADR 0087) is modelled in `formal/image_store.qnt`: no
+model covered it, and its safety rests on the order of durable writes and effects across crashes,
+which tests alone sample. One base is enough: the rules are per base (`BaseRecords::hold` and the
+admission lock serialise everything on one base), and two job clones show dependents and
+intents. The checks read the world exactly (file identity, fingerprint, MAC, stopped state are
+observations); a directory swapped between a check and its effect is outside the model as it is
+outside the trust model (only root and the daemon's user write `TART_HOME`, checked at start-up),
+and clone lineage made outside mayfly is not modelled because Tart keeps none. The simulation
+found one modelling gap at DP-07, now in the model: a dropped entry (its base vanished, or an
+operator resolved its quarantine) takes its clones off its books, since a base rebuilt under the
+name has a new `base_id` and they are not its dependents. A crash while the base was booted
+is `recoverStop` (`tart stop`) before `retire`; a Quarantined base is never evicted. Eviction is
+two steps, `evict` (writes Retiring) and `retire` (the delete, shared with recovery and with
+the same dependents guard), so a crash between them is reached (`crashWhileRetiringTest`).
+Negative controls: `evictIgnoringDependentsIsFlaggedTest`, `evictQuarantinedIsFlaggedTest`,
+`evictByNameIsFlaggedTest` (no ownership or identity proof), `cloneIgnoringIntegrityIsFlaggedTest`.
+**Conformance seam:** each action is one step of `mayfly-adapter-tart`'s `images` (`reserve`,
+`beginClone`, `cloneEffect`, `prove`, `boot`, `installAndStop`, `markReady`, the `recover*`
+branches of `settle`), `provider::clone_vm` (`jobClone`, `jobCloneIntentOnly`), `evict` and
+`retire`; the
+observation is the registry entry's state and identity, Tart's listing of the name, and the clone
+names Tart lists. Until the driver exists (VER-08), the `ImageStore` contract (IC-01..IC-14) and
+the fault cases of `tests/tart/images.rs` pin the Rust side, one per scenario of the model.
 
 ### Simulation budget
 

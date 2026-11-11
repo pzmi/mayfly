@@ -115,13 +115,18 @@ pub trait VmProvider: Send + Sync {
 /// What the image store holds: pulled images and materialised bases with their guests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImageListing {
-    /// Pulled images.
+    /// Pulled images, each verified against its digest.
     pub images: BTreeSet<ImageDigest>,
-    /// Materialised bases and the guest their clones run.
+    /// The bases this deployment made that are Ready and pass the clone proof (ADR 0087), and
+    /// the guest their clones run (macOS or Linux). An `mfb-*` VM not listed here is counted by
+    /// the ledger from the inventory, in full (`Ledger::base_vm`), so every base is counted once.
     pub bases: BTreeMap<BaseName, GuestOs>,
 }
 
-/// The local image cache (plan §8.1; DP-07 completes it).
+/// The local image cache and the bases made from it (plan §8.1, domain-model §9.3, ADR 0039,
+/// ADR 0087). Every promise below is a case of the `ImageStore` contract
+/// (`mayfly-testkit-data`'s `image_contract`, IC-01..IC-14), run on the in-memory store and on
+/// the Tart adapter over `mayfly-fake-tart`; the adapter's own fault cases pin the rest.
 pub trait ImageStore: Send + Sync {
     /// What is held now.
     ///
@@ -129,13 +134,20 @@ pub trait ImageStore: Send + Sync {
     /// [`VmError`]: the listing says nothing, and the ledger keeps what it had.
     fn list(&self) -> impl Future<Output = Result<ImageListing, VmError>> + Send;
 
-    /// Pulls `digest`, by digest only.
+    /// Pulls `digest`, by digest only, never a tag (IC-01), and keeps it only when its raw
+    /// manifest hashes to the digest and its content matches that manifest (IC-02). One pull per digest at a time: a concurrent pull of the
+    /// same digest waits and finds it pulled (IC-04). A pulled image is done.
     ///
     /// # Errors
-    /// [`VmError`].
+    /// [`VmError`]: `Definite` for an unknown digest or drifted content, nothing kept.
     fn pull(&self, digest: &ImageDigest) -> impl Future<Output = Result<(), VmError>> + Send;
 
-    /// Materialises `base` from `digest` with the runner `runner_version` installed.
+    /// Materialises `base` from the pulled `digest` with the runner `runner_version` installed
+    /// (one boot, the install through `tart exec`, stopped) and records it as this deployment's
+    /// own (IC-05). `base` must be the name the digest and runner version give, and the runner
+    /// must have a pinned checksum (IC-06); the image must be pulled already (IC-07); a VM of
+    /// that name the store did not make is never touched (IC-08). A base already materialised
+    /// from the same digest and runner is done.
     ///
     /// # Errors
     /// [`VmError`].
@@ -146,10 +158,11 @@ pub trait ImageStore: Send + Sync {
         runner_version: &str,
     ) -> impl Future<Output = Result<(), VmError>> + Send;
 
-    /// Evicts `base`.
+    /// Evicts `base`: only one this deployment made, with its recorded identity (IC-11,
+    /// IC-12), that no live clone references (IC-10). A base that is gone is done (IC-09).
     ///
     /// # Errors
-    /// [`VmError`].
+    /// [`VmError`]: `Definite` for a refusal, the base left as it is.
     fn evict(&self, base: &BaseName) -> impl Future<Output = Result<(), VmError>> + Send;
 }
 
