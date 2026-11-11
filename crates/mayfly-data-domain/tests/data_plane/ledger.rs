@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mayfly_data_domain::{BaseUse, Inventory, Ledger, Receipt, Settles, Stimulus, VmUse};
+use mayfly_data_domain::{
+    BaseUse, ForeignUse, Inventory, Ledger, Receipt, Settles, Stimulus, VmUse, foreign_use,
+};
 use mayfly_domain::{DirectiveId, Epoch, Millis};
 use mayfly_protocol::{
     CapacityConstraint, DirectiveKind, GuestOs, InventoryGap, Mode, ObservationKind, RefusalReason,
@@ -629,5 +631,31 @@ fn should_count_a_malformed_mf_vm_when_a_complete_inventory_lists_it() {
         ledger.used(),
         capacity(0, 0, 0, 0),
         "gone once a complete listing omits them"
+    );
+}
+
+#[test]
+fn should_count_only_foreign_vms_and_name_the_unsized_dimensions_when_a_listing_mixes_them() {
+    // given: one of ours, a malformed `mf-` VM, a base, a described running foreign macOS VM,
+    // and a stopped foreign VM whose disk is not described
+    let listing = vec![
+        described(vm(1).to_string(), true, GuestOs::Macos, 8),
+        described("mf-not-a-name".to_owned(), true, GuestOs::Macos, 8),
+        described("mfb-macos-15".to_owned(), true, GuestOs::Macos, 8),
+        described("ci-runner".to_owned(), true, GuestOs::Macos, 4),
+        listed("old-linux".to_owned(), false),
+    ];
+
+    // when
+    let foreign = foreign_use(&listing);
+
+    // then: only the two foreign VMs count, the base and the `mf-` VMs never (no double count)
+    assert_eq!(
+        foreign,
+        ForeignUse {
+            used: capacity(2, 1, 4, 80),
+            unsized_in: BTreeSet::from([ResourceDimension::Disk]),
+            running: 1,
+        }
     );
 }

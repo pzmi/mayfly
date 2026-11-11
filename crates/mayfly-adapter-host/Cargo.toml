@@ -10,3 +10,15 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
+mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+rustix = { version = "1.1.6", features = ["fs", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sysctl = "0.7.1"
+
+[dev-dependencies]
+mayfly-testkit-data = { path = "../mayfly-testkit-data" }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }

@@ -1042,6 +1042,9 @@ Note (DP-04 review): `TartProvider::clone_vm` checks only that the base is a loc
 of which bases this deployment materialised is DP-07's, and so is the check that `CloneVm` names
 one of them. DP-06/DP-07 also decide how a base listed by `tart list` is counted, so its disk is
 not counted twice (once as an image base, once as a stopped VM in the inventory).
+Note (DP-06): the host probe's foreign use (`mayfly_data_domain::foreign_use`) skips every
+`mfb-*` name, leaving bases to the image store's listing, so `ImageStore::list` must name every
+`mfb-*` VM the provider lists (one it leaves out is counted nowhere), with its disk.
 
 #### NET-01 Softnet privilege model
 Cites: ADR 0032, plan §8.2, §13. Design and ADR choosing between Tart's softnet behind a narrow

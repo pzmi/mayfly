@@ -194,6 +194,11 @@ mayfly-adapter-secrets = { rustix = ["default", "fs", "process"], tokio = ["rt",
 # for attempt deadlines and its mutex for the single-flight refresh, tracing for the retry
 # warning.
 mayfly-adapter-github = { aws-lc-rs = ["default"], base64 = ["default"], reqwest = ["rustls-no-provider"], rustls = ["aws_lc_rs", "std", "tls12"], rustls-pki-types = ["default"], rustls-platform-verifier = ["default"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["default", "time", "sync"], tracing = ["std"], url = ["default"], zeroize = ["default"] }
+# The host probe (DP-06, plan section 9): free disk by statvfs(2) and the clocks that tell sleep
+# from wake (CLOCK_BOOTTIME on Linux, CLOCK_MONOTONIC on macOS) through rustix, safe and with no
+# libc; on macOS, which rustix has no sysctl for, memory and the boot session id by sysctl
+# names through the sysctl crate (a macOS-only target dependency).
+mayfly-adapter-host = { rustix = ["default", "fs", "time"], sysctl = ["default"] }
 # The configuration is TOML read as a raw table (plan section 11); the state-dir lock is flock(2)
 # through rustix, safe, with no libc (plan section 13).
 mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
@@ -230,6 +235,8 @@ mayfly-testkit = { tempfile = ["default"] }
 mayfly-fake-tart = { tempfile = ["default"] }
 # The Tart adapter's tests: tempdir state and fake homes, the fake's JSON log.
 mayfly-adapter-tart = { tempfile = ["default"], serde_json = ["default"] }
+# The host probe's tests drive its async port calls on a current-thread runtime (DP-06).
+mayfly-adapter-host = { tokio = ["rt", "macros"] }
 # The client's tests run on a paused current-thread runtime (ver §3.2).
 mayfly-adapter-github = { tokio = ["default", "rt", "macros", "test-util", "time", "sync"] }
 mayfly-fake-github = { tokio = ["default", "macros", "rt", "net", "sync"] }

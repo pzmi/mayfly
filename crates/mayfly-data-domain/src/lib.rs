@@ -21,6 +21,8 @@ pub use executor::{
     reobserves,
 };
 pub use inventory::Inventory;
-pub use ledger::{BaseUse, HostProbe, Ledger, Reservation, Settles, Sizing, VmUse, gaps};
+pub use ledger::{
+    BaseUse, ForeignUse, HostProbe, Ledger, Reservation, Settles, Sizing, VmUse, foreign_use, gaps,
+};
 pub use link::{Link, LinkIgnored, LinkOutcome, LinkStimulus, Session};
 pub use supervisor::{Seen, Shim, Signal, VmFact, VmFacts, VmState};

@@ -158,6 +158,11 @@ impl FakeHostProbe {
         lock(&self.state).reading = reading;
     }
 
+    /// Answers `facts` from now on.
+    pub fn set_facts(&self, facts: HostFacts) {
+        lock(&self.state).facts = facts;
+    }
+
     /// Fails every call from now on, or none.
     pub fn fail(&self, failing: bool) {
         lock(&self.state).failing = failing;

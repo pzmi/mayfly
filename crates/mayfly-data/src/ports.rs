@@ -214,7 +214,8 @@ pub struct ProbeFailed;
 /// The host's resources and facts (DP-06).
 pub trait HostProbe: Send + Sync {
     /// Totals, the operator reserve, foreign use and the pressure flags. Foreign use counts
-    /// only VMs whose names are not `mf-*`: the ledger counts malformed `mf-*` VMs itself.
+    /// only VMs whose names are neither `mf-*` nor a base's `mfb-*`: the ledger counts
+    /// malformed `mf-*` VMs and bases itself (`mayfly_data_domain::foreign_use`).
     ///
     /// # Errors
     /// [`ProbeFailed`]: foreign use is then unknown in every dimension (ADR 0052).

@@ -12,9 +12,11 @@
 //! - [`clock`]: `FakeClock` and `SequentialIds`.
 //! - [`link`]: an in-memory directive source, observation sink and handshake for the executor.
 //! - [`provider_contract`]: the `VmProvider` contract suite (ver §5) and the fake's world.
+//! - [`host_contract`]: the `HostProbe` contract suite (ver §5, DP-06) and the fake's world.
 
 pub mod clock;
 pub mod host;
+pub mod host_contract;
 pub mod link;
 pub mod provider;
 pub mod provider_contract;

@@ -62,7 +62,8 @@ pub struct HostProbe {
     pub reserve: Capacity,
     /// What VMs that are not ours use: their slots, running macOS guests, memory and disk. Only
     /// VMs whose names are not `mf-*` ([`VmNameClass::Foreign`]): a malformed `mf-*` VM is
-    /// counted by the ledger from the inventory ([`Ledger::malformed`]), never here too.
+    /// counted by the ledger from the inventory ([`Ledger::malformed`]), never here too; nor a
+    /// base's `mfb-*`, counted from the image store's listing ([`foreign_use`]).
     pub foreign: Capacity,
     /// The dimensions in which the probe could not size a VM that is not ours: `foreign` is
     /// then only what it could size, and the dimension is unknown (ADR 0052).
@@ -97,6 +98,19 @@ pub struct BaseUse {
     pub guest: Option<GuestOs>,
     /// Its disk ceiling.
     pub disk_bytes: u64,
+}
+
+/// What the VMs that are not ours use, by one complete provider listing: the host probe's
+/// [`HostProbe::foreign`], [`HostProbe::foreign_unsized`] and the running count `HostFacts`
+/// reports (DP-06). Read by [`foreign_use`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignUse {
+    /// What they are known to take, counted as the ledger counts one of ours.
+    pub used: Capacity,
+    /// The dimensions a listed foreign VM's missing facts make unknown ([`gaps`]).
+    pub unsized_in: BTreeSet<ResourceDimension>,
+    /// How many of them run.
+    pub running: u32,
 }
 
 /// Which listing shows what a held reservation's directive did.
@@ -252,6 +266,37 @@ fn described(listed: &VmObservation, before: Option<&VmUse>) -> VmUse {
         memory_bytes: listed.memory_bytes.or(memory),
         disk_bytes: listed.disk_bytes.or(before.and_then(|vm| vm.disk_bytes)),
     }
+}
+
+/// What the VMs of a complete listing that are not ours use: only names that are neither
+/// `mf-*` ([`VmNameClass::Foreign`]; the ledger counts a malformed `mf-*` VM itself) nor a
+/// base's `mfb-*` (counted by [`Ledger::apply_images`] from the image store's listing, so never
+/// twice). Each is counted by what the listing describes, as [`Ledger::apply_inventory`] counts
+/// one of ours, and a fact it lacks makes its dimension unknown, never a default (ADR 0052).
+/// Pinned by
+/// `tests/data_plane/ledger.rs::should_count_only_foreign_vms_and_name_the_unsized_dimensions_when_a_listing_mixes_them`.
+#[must_use]
+pub fn foreign_use(listed: &[VmObservation]) -> ForeignUse {
+    let mut out = ForeignUse {
+        used: ZERO,
+        unsized_in: BTreeSet::new(),
+        running: 0,
+    };
+    let foreign = listed
+        .iter()
+        .filter(|vm| match mayfly_domain::classify_vm_name(&vm.name) {
+            VmNameClass::Foreign => BaseName::new(&vm.name).is_err(),
+            VmNameClass::WellFormed(_) | VmNameClass::MalformedManaged => false,
+        });
+    for vm in foreign {
+        let counted = described(vm, None);
+        out.used = plus(out.used, known_use(&counted));
+        out.unsized_in.extend(gaps(&counted));
+        if vm.running {
+            out.running = out.running.saturating_add(1);
+        }
+    }
+    out
 }
 
 impl Ledger {
