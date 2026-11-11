@@ -52,7 +52,6 @@ pub const SPAWN_MODULES: &[(&str, &[&str])] = &[
     ("mayfly-adapter-sqlite", &["writer"]),
     ("mayfly-adapter-link", &["transport"]),
     ("mayfly-adapter-tart", &["process"]),
-    ("mayfly-adapter-guest", &["process"]),
     // The secrets adapter's blocking hand-off for its file and executable checks (ADR 0058).
     ("mayfly-adapter-secrets", &["command"]),
 ];

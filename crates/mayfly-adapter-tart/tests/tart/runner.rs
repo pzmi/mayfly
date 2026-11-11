@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 
-use mayfly_adapter_tart::process::runner::{Call, Ran, run};
+use mayfly_adapter_tart::process::runner::{Call, Fed, Handshake, Ran, Stdin, run};
 use mayfly_testkit_shared::child_env::{NOT_INHERITED, inherited_variable, probe_script};
 #[cfg(target_os = "linux")]
 use mayfly_testkit_shared::poll::wait_until;
@@ -33,6 +33,7 @@ fn sh(script: &str, deadline: Duration, output_limit: usize) -> Call<'static> {
         deadline,
         output_limit,
         redact: &[],
+        stdin: Stdin::Null,
     }
 }
 
@@ -154,6 +155,7 @@ fn should_answer_spawn_failed_when_the_program_does_not_exist() {
         deadline: Duration::from_secs(1),
         output_limit: 1024,
         redact: &[],
+        stdin: Stdin::Null,
     };
 
     // when
@@ -185,4 +187,65 @@ fn should_redact_a_secret_from_stderr_when_the_child_prints_it() {
     };
     assert_eq!(exited.code, Some(3));
     assert_eq!(exited.stderr, "token [redacted] refused\n");
+}
+
+#[test]
+fn should_write_a_secret_stdin_and_mask_it_in_stderr_when_the_child_echoes_it() {
+    // given
+    let secret = mayfly_domain::Secret::new("jit-canary-0123".to_owned());
+    let call = Call {
+        stdin: Stdin::Secret(&secret),
+        ..sh(
+            "read -r x; echo \"got $x\" >&2; printf '%s' \"${#x}\"",
+            Duration::from_secs(30),
+            1024,
+        )
+    };
+
+    // when
+    let shown = format!("{call:?}");
+    let ran = runtime().block_on(run(call));
+
+    // then
+    let Ran::Exited(exited) = ran else {
+        panic!("an exit, got {ran:?}");
+    };
+    assert_eq!(String::from_utf8_lossy(&exited.stdout), "15");
+    assert_eq!(exited.stderr, "got [redacted]\n");
+    assert!(!shown.contains("jit-canary"), "{shown}");
+}
+
+#[test]
+fn should_report_what_reached_stdin_when_a_handshake_is_accepted_declined_or_broken() {
+    // given
+    let secret = mayfly_domain::Secret::new("jit-canary-0123".to_owned());
+    let talk = "read -r h; echo \"ok $h\"; read -r x; echo \"got $x\" >&2; printf '%s' \"${#x}\"";
+    let closes_first = "read -r h; exec 0<&-; echo \"ok $h\"";
+    let call = |script: &'static str, expect: &'static [u8]| Call {
+        stdin: Stdin::Handshake(Handshake {
+            hello: b"hi\n",
+            expect,
+            secret: &secret,
+        }),
+        ..sh(script, Duration::from_secs(30), 1024)
+    };
+
+    // when
+    let accepted = runtime().block_on(run(call(talk, b"ok hi\n")));
+    let declined = runtime().block_on(run(call(talk, b"ok other\n")));
+    let broken = runtime().block_on(run(call(closes_first, b"ok hi\n")));
+
+    // then
+    let exited = |ran: Ran| match ran {
+        Ran::Exited(exited) => exited,
+        other => panic!("an exit, got {other:?}"),
+    };
+    let accepted = exited(accepted);
+    assert_eq!(accepted.fed, Fed::Written);
+    assert_eq!(String::from_utf8_lossy(&accepted.stdout), "ok hi\n15");
+    assert_eq!(accepted.stderr, "got [redacted]\n");
+    let declined = exited(declined);
+    assert_eq!(declined.fed, Fed::Declined(b"ok hi\n".to_vec()));
+    assert_eq!(String::from_utf8_lossy(&declined.stdout), "ok hi\n0");
+    assert_eq!(exited(broken).fed, Fed::Broken);
 }

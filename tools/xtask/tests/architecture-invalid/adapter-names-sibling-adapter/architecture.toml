@@ -7,4 +7,4 @@ production = ["mayfly-adapter-github"]
 mayfly-adapter-github = []
 
 [semantic]
-absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]
+absent = ["mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]

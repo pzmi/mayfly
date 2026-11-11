@@ -375,7 +375,14 @@ pub struct DirectiveSender<T> {
 }
 
 impl<T: WireTx> DirectiveSink for DirectiveSender<T> {
+    /// Writes `directive` down to the session's version
+    /// (`mayfly_protocol::DirectiveKind::written_in`: a launch's instance id from 1.3, ADR 0082)
+    /// and sends it stamped with that version.
     async fn send(&self, directive: Directive) -> Result<(), LinkError> {
+        let directive = Directive {
+            kind: directive.kind.written_in(self.version),
+            ..directive
+        };
         send_frame(&self.tx, self.version, Message::Directive(directive)).await
     }
 }

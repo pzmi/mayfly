@@ -88,12 +88,18 @@ pub enum DirectiveKind {
     /// Launch the runner with the JIT config behind `launch`, over the launcher's stdin
     /// (ADR 0038). The stored and sent form names only the handle; the link adapter resolves it
     /// from the control plane's broker at send time into a frame that is not `Serialize`
-    /// (ADR 0014, R14).
+    /// (ADR 0014, R14), and the data plane takes the config by the handle (ADR 0082).
     LaunchRunner {
         /// The VM.
         vm_name: OwnedVmName,
         /// The handle of the JIT config, never the config.
         launch: SecretHandle,
+        /// The provider instance id `VmCloned` reported (ADR 0026), which the data plane
+        /// compares with the VM's right before delivery (ADR 0038 decision 2). Written from
+        /// protocol 1.3 ([`crate::GUEST_IDENTITY`]); a launch without it is refused
+        /// `proof_mismatch`, never delivered unchecked (ADR 0082).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_id: Option<ProviderInstanceId>,
     },
     /// Export bounded, redacted diagnostics.
     ExportDiagnostics {
@@ -243,6 +249,37 @@ impl DirectiveKind {
     #[must_use]
     pub const fn needs_resource_fit(&self) -> bool {
         self.tag().needs_resource_fit()
+    }
+
+    /// The kind as a session of `version` may carry it: below [`crate::GUEST_IDENTITY`] (1.3)
+    /// a launch is written without its instance id, which an older reader would not know
+    /// (the data plane then refuses it `proof_mismatch`, ADR 0082). Pinned by
+    /// `tests::should_write_a_launch_without_its_instance_id_when_the_session_is_older_than_guest_identity`.
+    #[must_use]
+    pub fn written_in(self, version: crate::ProtocolVersion) -> Self {
+        match self {
+            Self::LaunchRunner {
+                vm_name,
+                launch,
+                instance_id,
+            } => Self::LaunchRunner {
+                vm_name,
+                launch,
+                instance_id: instance_id.filter(|_| version >= crate::GUEST_IDENTITY),
+            },
+            other @ (Self::PullImage { .. }
+            | Self::MaterialiseImage { .. }
+            | Self::EvictImage { .. }
+            | Self::CloneVm { .. }
+            | Self::StartVm { .. }
+            | Self::VerifyGuest { .. }
+            | Self::ExportDiagnostics { .. }
+            | Self::StopVm { .. }
+            | Self::DeleteVm { .. }
+            | Self::ReportInventory
+            | Self::ReportCapacity
+            | Self::ReportHostFacts) => other,
+        }
     }
 
     /// The VM a VM directive targets.
@@ -485,6 +522,7 @@ mod tests {
                 launch: SecretHandle {
                     handle_id: SecretHandleId::from_u128(1),
                 },
+                instance_id: Some(ProviderInstanceId::sample()),
             },
             DirectiveKind::ExportDiagnostics { vm_name: vm() },
             DirectiveKind::StopVm {
@@ -627,5 +665,35 @@ mod tests {
         assert_eq!(nonce.as_u128(), 0x0123_4567_89ab_cdef_0011_2233_4455_6677);
         assert!("0123456789ABCDEF0011223344556677".parse::<Nonce>().is_err());
         assert!("123".parse::<Nonce>().is_err());
+    }
+
+    #[test]
+    fn should_write_a_launch_without_its_instance_id_when_the_session_is_older_than_guest_identity()
+    {
+        // given
+        let launch = DirectiveKind::LaunchRunner {
+            vm_name: vm(),
+            launch: SecretHandle {
+                handle_id: SecretHandleId::from_u128(1),
+            },
+            instance_id: Some(ProviderInstanceId::sample()),
+        };
+        let older = crate::ProtocolVersion::new(1, 2);
+
+        // when
+        let written_older = launch.clone().written_in(older);
+        let written_current = launch.clone().written_in(crate::GUEST_IDENTITY);
+        let other = DirectiveKind::ReportInventory.written_in(older);
+
+        // then
+        assert!(matches!(
+            written_older,
+            DirectiveKind::LaunchRunner {
+                instance_id: None,
+                ..
+            }
+        ));
+        assert_eq!(written_current, launch);
+        assert_eq!(other, DirectiveKind::ReportInventory);
     }
 }

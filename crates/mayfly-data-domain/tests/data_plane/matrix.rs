@@ -67,6 +67,7 @@ fn should_define_every_pair_when_each_session_state_meets_each_stimulus() {
         ("welcome_e6_v1.1", LinkStimulus::Welcome(welcome(6, 1, 1))),
         ("welcome_e6_v1.2", LinkStimulus::Welcome(welcome(6, 1, 2))),
         ("welcome_e6_v1.3", LinkStimulus::Welcome(welcome(6, 1, 3))),
+        ("welcome_e6_v1.4", LinkStimulus::Welcome(welcome(6, 1, 4))),
         ("welcome_e6_v2.0", LinkStimulus::Welcome(welcome(6, 2, 0))),
         ("floor_raised_e5", LinkStimulus::FloorRaised(Epoch::new(5))),
         ("floor_raised_e6", LinkStimulus::FloorRaised(Epoch::new(6))),
@@ -157,6 +158,7 @@ fn should_define_every_pair_when_each_directive_phase_meets_each_stimulus() {
             Stimulus::Applied(ObservationKind::HypervisorLimitHit),
         ),
         ("failed", Stimulus::Failed),
+        ("identity_refused", Stimulus::IdentityRefused),
         (
             "ambiguous_deadline",
             Stimulus::Ambiguous(UnknownReason::Deadline),
@@ -318,9 +320,14 @@ fn admission_case(
                     vm_name: vm_on(other_host(), 1),
                     nonce,
                 },
-                DirectiveKind::LaunchRunner { launch, .. } => DirectiveKind::LaunchRunner {
+                DirectiveKind::LaunchRunner {
+                    launch,
+                    instance_id,
+                    ..
+                } => DirectiveKind::LaunchRunner {
                     vm_name: vm_on(other_host(), 1),
                     launch,
+                    instance_id,
                 },
                 DirectiveKind::ExportDiagnostics { .. } => DirectiveKind::ExportDiagnostics {
                     vm_name: vm_on(other_host(), 1),

@@ -10,4 +10,4 @@ control = ["mayfly-control"]
 mayfly-control = []
 
 [semantic]
-absent = ["mayfly-adapter-github", "mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]
+absent = ["mayfly-adapter-github", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-cli", "mayfly-composition", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-domain", "mayfly-protocol", "mayfly-testkit", "mayfly-testkit-shared"]

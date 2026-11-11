@@ -19,7 +19,7 @@ mayfly-control = { gitdep = ["default"] }
 "git+https://example.invalid/gitdep.git" = { adr = "9999" }
 
 [semantic]
-absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-protocol", "mayfly-testkit-shared"]
+absent = ["mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-adapter-sqlite", "mayfly-adapter-tart", "mayfly-conformance", "mayfly-control-domain", "mayfly-data", "mayfly-data-domain", "mayfly-protocol", "mayfly-testkit-shared"]
 
 [purity]
 pure = ["mayfly-domain"]

@@ -8,13 +8,18 @@
 //! `VmProvider` contract's, one per case, with a real clock that only bounds a whole case.
 //!
 //! - [`provider`]: `FakeVmProvider`, scripted faults per call, held calls, instance-id changes.
-//! - [`host`]: the fake image store, guest transport, host probe and floor.
+//! - [`host`]: the fake image store, scripted guest transport, host probe and floor.
+//! - [`guest`]: `MemoryGuests`, the in-memory guest world that keeps the `GuestTransport`
+//!   contract, `MemorySecrets` and the broken `UncheckedLockTransport`.
+//! - [`guest_contract`]: the `GuestTransport` contract suite (ver §5, ADR 0038, ADR 0082).
 //! - [`clock`]: `FakeClock` and `SequentialIds`.
 //! - [`link`]: an in-memory directive source, observation sink and handshake for the executor.
 //! - [`provider_contract`]: the `VmProvider` contract suite (ver §5) and the fake's world.
 //! - [`host_contract`]: the `HostProbe` contract suite (ver §5, DP-06) and the fake's world.
 
 pub mod clock;
+pub mod guest;
+pub mod guest_contract;
 pub mod host;
 pub mod host_contract;
 pub mod link;
@@ -22,6 +27,7 @@ pub mod provider;
 pub mod provider_contract;
 
 pub use clock::{FakeClock, SequentialIds};
+pub use guest::{MemoryGuests, MemorySecrets, UncheckedLockTransport};
 pub use host::{FakeGuest, FakeHostProbe, FakeImageStore, GuestScript, MemoryFloor};
 pub use link::{DirectiveFeed, FeedSource, StaticWelcome, Tap, TapSink, directives, observations};
 pub use provider::{FakeVm, FakeVmProvider, Fault, Held, Op};

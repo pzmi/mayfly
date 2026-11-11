@@ -223,7 +223,8 @@ impl Fakes {
                     os: GuestOs::Linux,
                     uptime: Millis::new(5),
                 })),
-                launch: Ok(()),
+                launch: Ok(mayfly_data::LaunchAnswer::Delivered),
+                status: Ok(mayfly_data::RunnerStatus::NotLaunched),
                 export: Ok(Diagnostics::Exported {
                     bytes: 10,
                     sha256: [7; 32],

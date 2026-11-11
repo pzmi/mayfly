@@ -8,6 +8,11 @@
 //!   faults.toml          the fault file (written by the lab, see `faults`)
 //!   invocations.jsonl    append-only record of every invocation (see `log`)
 //!   vms/<name>.json      one VM record each (name percent-encoded)
+//!   vms/<name>/config.json  the VM's run lock: a foreground `run` holds a POSIX record lock
+//!                        on it for its whole life, as Tart's `PIDLock` does, so `fcntl(F_GETLK)`
+//!                        names the process that runs the VM
+//!   guest-logs/<name>.log   the guest's runner log, written by the lab; the launcher's
+//!                        `diagnostics` prints it (see `guest`)
 //! ```
 //!
 //! Every write is a temp file in the same directory, `sync_all`, then `rename`, so a reader (the
@@ -137,9 +142,45 @@ impl Home {
         write_json(&self.vm_path(&vm.name), vm)
     }
 
-    /// Removes one VM record.
+    /// Removes one VM record and its run-lock directory.
     pub fn remove_vm(&self, name: &str) -> Result<(), Fail> {
-        fs::remove_file(self.vm_path(name)).map_err(|e| io("cannot remove a VM record", &e))
+        fs::remove_file(self.vm_path(name)).map_err(|e| io("cannot remove a VM record", &e))?;
+        match fs::remove_dir_all(self.dir.join(VMS).join(encode_name(name))) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(io("cannot remove a VM's directory", &e))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes the VM's run lock (Tart's `PIDLock` on `vms/<name>/config.json`): a POSIX record
+    /// lock, held by this process until the returned file is closed or the process ends.
+    pub fn take_run_lock(&self, name: &str) -> Result<File, Fail> {
+        let dir = self.dir.join(VMS).join(encode_name(name));
+        fs::create_dir_all(&dir).map_err(|e| io("cannot create a VM's directory", &e))?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join("config.json"))
+            .map_err(|e| io("cannot open a VM's config", &e))?;
+        rustix::fs::fcntl_lock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| Fail::generic(&format!("the VM \"{name}\" is already running")))?;
+        Ok(file)
+    }
+
+    /// The guest's runner log the lab wrote, or nothing.
+    pub fn guest_log(&self, name: &str) -> Result<String, Fail> {
+        let path = self
+            .dir
+            .join("guest-logs")
+            .join(format!("{}.log", encode_name(name)));
+        match fs::read_to_string(path) {
+            Ok(text) => Ok(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(io("cannot read a guest log", &e)),
+        }
     }
 
     /// Every VM record, in no particular order.
@@ -152,7 +193,7 @@ impl Home {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| !n.starts_with('.'));
-            if visible && path.extension().is_some_and(|e| e == "json") {
+            if visible && path.is_file() && path.extension().is_some_and(|e| e == "json") {
                 vms.extend(read_json::<VmRecord>(&path)?);
             }
         }

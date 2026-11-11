@@ -1,6 +1,6 @@
 [package]
 name = "mayfly-adapter-tart"
-description = "Data-plane adapter: the Tart CLI driven by argv, version probe and JSON parsing."
+description = "Data-plane adapter: the Tart CLI driven by argv, version probe and JSON parsing, and guests through tart exec."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,7 @@ mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "process", "io-util", "time", "macros"] }
 
 [dev-dependencies]

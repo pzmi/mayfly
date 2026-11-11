@@ -97,7 +97,7 @@ control = ["Journal", "AggregateStore"]
 data = ["VmProvider"]
 
 [semantic]
-absent = ["mayfly-adapter-guest", "mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-control-domain"]
+absent = ["mayfly-adapter-host", "mayfly-adapter-link", "mayfly-adapter-secrets", "mayfly-control-domain"]
 
 [purity]
 pure = ["mayfly-domain", "mayfly-protocol", "mayfly-data-domain"]

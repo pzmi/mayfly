@@ -53,7 +53,7 @@ use crate::gate::{ListingGate, Ticket};
 use crate::inflight::InFlight;
 use crate::ports::{
     Diagnostics, FloorFailed, FloorStore, GuestAnswer, GuestTransport, HostProbe, ImageListing,
-    ImageStore, ObservationIds, ProbeFailed, ProcessClock, VmError, VmProvider,
+    ImageStore, LaunchAnswer, ObservationIds, ProbeFailed, ProcessClock, VmError, VmProvider,
 };
 
 /// What the operator configured for this host's data plane.
@@ -697,11 +697,20 @@ where
                 GuestAnswer::Rejected(reason) => ObservationKind::GuestRejected { reason },
             },
         ),
-        DirectiveKind::LaunchRunner { vm_name, launch } => {
-            outcome(ports.guest.launch(&vm_name, launch).await, |()| {
-                ObservationKind::RunnerLaunched
-            })
-        }
+        // Without the recorded instance id there is nothing to check the VM against, so the
+        // config is never delivered unchecked (ADR 0038 decision 2, ADR 0082).
+        DirectiveKind::LaunchRunner {
+            instance_id: None, ..
+        } => Stimulus::IdentityRefused,
+        DirectiveKind::LaunchRunner {
+            vm_name,
+            launch,
+            instance_id: Some(instance_id),
+        } => match ports.guest.launch(&vm_name, &instance_id, launch).await {
+            Ok(LaunchAnswer::Delivered) => Stimulus::Applied(ObservationKind::RunnerLaunched),
+            Ok(LaunchAnswer::IdentityRefused) => Stimulus::IdentityRefused,
+            Err(error) => outcome::<()>(Err(error), |()| ObservationKind::RunnerLaunched),
+        },
         DirectiveKind::ExportDiagnostics { vm_name } => outcome(
             ports.guest.export_diagnostics(&vm_name).await,
             |exported| match exported {

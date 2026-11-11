@@ -1,0 +1,26 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 3
+  },
+  "message": {
+    "directive": {
+      "directive_id": "000000000000000000000000000000d1",
+      "epoch": 7,
+      "attempt": {
+        "attempt_id": "0000000000000000000000000a11ce01",
+        "generation": 1
+      },
+      "deadline": 1700000060000,
+      "kind": {
+        "launch_runner": {
+          "vm_name": "mf-pool0-host0-s1-g1-0a11ce01",
+          "launch": {
+            "handle_id": "000000000000000000000000000005ec"
+          },
+          "instance_id": "7e:0b:14:52:9a:c1"
+        }
+      }
+    }
+  }
+}

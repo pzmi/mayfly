@@ -305,7 +305,7 @@ CP↔DP protocol; they are cheap now and make the multi-host edition a transport
 | Secrets | Attempt, Demand, Registration | Supplier; link adapter is conformist to handle semantics | `SecretHandle`, `Secret<T>` in memory | broker port `issue/take/revoke/sweep`; no `get` |
 | Operations | all CP contexts | **Open host service** for the run epoch and mode | `run_epoch` on every automation command; safe-mode containment | command envelope field; aggregates refuse older epochs (I18) |
 | CP | DP | **Published language** (`mayfly-protocol`), versioned | directives, observations, handles, epochs | link port; at-least-once both ways |
-| DP | Tart, guest, host OS | **ACL** per adapter | argv, JSON inventory, stdin, probes | `adapter-tart`, `adapter-guest`, `adapter-host` |
+| DP | Tart, guest, host OS | **ACL** per adapter | argv, JSON inventory, stdin, probes | `adapter-tart` (with the guest transport, ADR 0082), `adapter-host` |
 | all | all | **Shared kernel** `mayfly-domain` | value objects of §3 | crate dependency; changed only with every consumer |
 
 ### 4.1 Module layout (no new crates)
@@ -1122,7 +1122,7 @@ Free disk (volume "important usage" capacity), memory pressure, boot id, OS vers
 (monotonic vs wall: wake detection), power assertions. Translation: thresholds only become
 facts (`DiskLowWaterCrossed`, `HostWoke`); raw readings are metrics with a freshness bound.
 
-### 9.5 Guest (`mayfly-adapter-guest`, DP; trust T4)
+### 9.5 Guest (`mayfly-adapter-tart`'s guest transport, DP; trust T4; ADR 0082)
 
 - **Out:** a per-attempt challenge nonce, then the JIT config over the launcher's stdin (once).
 - **In:** typed, bounded claims (runner version, image revision, clock skew, free disk, launcher
@@ -1444,7 +1444,7 @@ Removed: GH-05 (OD18). KER-04..08 must list KER-09/KER-10 where they consume the
 | F36 | Broken image: every guest fails to verify | fake-tart exec hangs for one digest | ≤ N attempts per window; breaker trips; pool terms closed; other pools unaffected | I27 | ● |
 | F37 | Foreign macOS guest running | pre-seed a running foreign macOS VM | admissible macOS tokens = 1; a third start never attempted; `HypervisorLimitHit` handled if it occurs | I03 | |
 | F38 | Host sleep/wake with many deadlines | clock jump during provisioning | no mass quarantine; re-observe; prepared VMs older than the gap retired; session reopened | I10, I09 | |
-| F39 | Wrong guest answers (IP reuse / sibling clone) | fake-tart routes exec to another VM | challenge fails; no JIT minted; quarantine `guest_identity_refused` | I22, I30 | ● |
+| F39 | Wrong guest answers (IP reuse / sibling clone) | fake-tart routes exec to another VM | challenge fails; no JIT minted; quarantine `guest_identity_refused` (a launch's lock, MAC or handshake check: `provider_identity_mismatch`, ADR 0082) | I22, I30 | ● |
 | F40 | Daemon wedged (store writer stalls) | fault knob stalls the writer | watchdog exit with its code; restart recovers; nothing duplicated | I11, I13 | |
 | F41 | 100 offers on 2 slots in one batch | none (load) | acquired ≤ deliverable at every point; others declined `no_capacity` | I23, I07 | ● |
 | F42 | Restart within the session TTL | SIGKILL, fake-github keeps the old session | 409 → backoff; reopen; desired from initial statistics; no job lost or double-served | I12, I13 | ● |

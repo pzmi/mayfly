@@ -139,6 +139,7 @@ pub fn every_kind() -> Vec<DirectiveKind> {
             launch: SecretHandle {
                 handle_id: SecretHandleId::from_u128(1),
             },
+            instance_id: None,
         },
         DirectiveKind::ExportDiagnostics { vm_name: vm(1) },
         DirectiveKind::StopVm {

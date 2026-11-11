@@ -33,6 +33,6 @@ pub use observation::{
     RefusalReason, ResourceDimension, UnknownCapacity, UnknownCause, UnknownReason, VmObservation,
 };
 pub use version::{
-    CURRENT, ProtocolVersion, SUPPORTED, UNKNOWN_FACTS, VersionRefusal, admit_frame,
-    handshake_version, negotiate,
+    CURRENT, GUEST_IDENTITY, ProtocolVersion, SUPPORTED, UNKNOWN_FACTS, VersionRefusal,
+    admit_frame, handshake_version, negotiate,
 };

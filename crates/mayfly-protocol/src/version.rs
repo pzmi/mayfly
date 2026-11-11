@@ -28,7 +28,7 @@ impl ProtocolVersion {
 }
 
 /// The version this build writes when the session allows it.
-pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 2);
+pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 3);
 
 /// The minor that added what the data plane cannot determine (ADR 0052: the refusal
 /// `capacity_unknown`, a capacity report's `unknown` dimensions, a listed VM's facts) and
@@ -43,6 +43,13 @@ pub const UNKNOWN_FACTS: ProtocolVersion = ProtocolVersion::new(1, 1);
 /// too ([`crate::ObservationKind::written_in`]); the clock reading is a handshake field an older
 /// reader ignores.
 pub const VANISHED_TARGET: ProtocolVersion = ProtocolVersion::new(1, 2);
+
+/// The minor that added a launch's instance id (ADR 0038 decision 2, ADR 0082): the data plane
+/// compares it with the VM's right before it delivers the JIT config. A session below it is
+/// written without it ([`crate::DirectiveKind::written_in`]), and the data plane refuses such a
+/// launch `proof_mismatch`, which the control plane quarantines (ADR 0038: no delivery
+/// unchecked).
+pub const GUEST_IDENTITY: ProtocolVersion = ProtocolVersion::new(1, 3);
 
 /// What this build speaks: the highest minor of each major, one entry per major.
 pub const SUPPORTED: &[ProtocolVersion] = &[CURRENT];

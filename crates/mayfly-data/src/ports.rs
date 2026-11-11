@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use mayfly_data_domain::Inventory;
-use mayfly_domain::{Epoch, ImageDigest, Millis, ObservationId, OwnedVmName, ProviderInstanceId};
+use mayfly_domain::{
+    Epoch, ImageDigest, Millis, ObservationId, OwnedVmName, ProviderInstanceId, Secret,
+};
 use mayfly_protocol::{
     BaseName, DiagnosticsLoss, GuestFacts, GuestOs, GuestRejection, HostFacts, Nonce,
     OwnershipProof, RunOptions, SecretHandle, UnknownReason,
@@ -174,7 +176,53 @@ pub enum Diagnostics {
     Lost(DiagnosticsLoss),
 }
 
-/// The guest transport (plan §8.3; `tart exec` in DP-05).
+/// What a launch did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchAnswer {
+    /// The launcher took the JIT config and started the runner, now or on an earlier delivery
+    /// (its status file says so): answered `RunnerLaunched`.
+    Delivered,
+    /// The identity check right before delivery failed (ADR 0038 decision 2): the VM's run
+    /// lock is not held by its shim's child, or its instance id is not the recorded one.
+    /// Nothing was delivered; answered `proof_mismatch`, which quarantines the attempt.
+    IdentityRefused,
+}
+
+/// What the launcher's status file in the guest says about the runner (plan §8.3: runner exit
+/// after a restart is read from it, never from `tart run`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerStatus {
+    /// No launch reached this guest's launcher.
+    NotLaunched,
+    /// The runner was started and has not exited.
+    Running,
+    /// The runner exited with `code`.
+    Exited {
+        /// Its exit code.
+        code: i32,
+    },
+}
+
+/// The JIT configs held for delivery on the data plane, by handle (ADR 0014, ADR 0082): the
+/// link's data-plane end puts each config it receives in the non-`Serialize` wire frame there,
+/// bound to its VM, instance id and deadline ([`crate::LaunchStore`]), in memory only, and the
+/// guest transport takes it once, right before the launcher's stdin, and discards the handle
+/// whatever the launch's outcome. Nothing journals, logs or persists it; a restart empties it.
+pub trait LaunchSecrets: Send + Sync {
+    /// The config behind `handle`, removed, when it was held for `vm` with `instance_id`; a
+    /// config held for another VM or instance id is discarded and `None` answered.
+    fn take(
+        &self,
+        handle: SecretHandle,
+        vm: &OwnedVmName,
+        instance_id: &ProviderInstanceId,
+    ) -> Option<Secret<String>>;
+
+    /// Drops the config behind `handle`, if any is held.
+    fn discard(&self, handle: SecretHandle);
+}
+
+/// The guest transport (plan §8.3; `tart exec` in DP-05, ADR 0038, ADR 0082).
 pub trait GuestTransport: Send + Sync {
     /// Challenges the guest of `vm` with `nonce`.
     ///
@@ -186,16 +234,34 @@ pub trait GuestTransport: Send + Sync {
         nonce: Nonce,
     ) -> impl Future<Output = Result<GuestAnswer, VmError>> + Send;
 
-    /// Launches the runner of `vm` with the JIT config behind `launch`. How the handle's config
-    /// reaches the launcher's stdin is DP-05's and the link's (ADR 0014, ADR 0038).
+    /// Launches the runner of `vm` with the JIT config behind `launch`, taken from the data
+    /// plane's [`LaunchSecrets`] and written only to the launcher's stdin (ADR 0038, ADR 0082),
+    /// after checking, right before the delivery, that the VM's run lock is held by its shim's
+    /// child (ADR 0037) and that its instance id is `instance_id` (ADR 0026); either mismatch
+    /// is [`LaunchAnswer::IdentityRefused`]. A launcher that already started a runner answers
+    /// [`LaunchAnswer::Delivered`] without a second delivery. Pinned by the `GuestTransport`
+    /// contract (`mayfly-testkit-data`'s `guest_contract`).
     ///
     /// # Errors
-    /// [`VmError`]; an ambiguous one is answered `RunnerLaunchUnknown` (I22).
+    /// [`VmError`]: `Definite` when nothing was delivered (no config behind the handle, the
+    /// launcher refused), `Ambiguous` when it may have been, answered `RunnerLaunchUnknown`
+    /// (I22).
     fn launch(
         &self,
         vm: &OwnedVmName,
+        instance_id: &ProviderInstanceId,
         launch: SecretHandle,
-    ) -> impl Future<Output = Result<(), VmError>> + Send;
+    ) -> impl Future<Output = Result<LaunchAnswer, VmError>> + Send;
+
+    /// What the launcher's status file in the guest of `vm` says, readable by a data plane
+    /// restarted since the launch.
+    ///
+    /// # Errors
+    /// [`VmError`]: the guest did not answer, or answered something that does not parse.
+    fn runner_status(
+        &self,
+        vm: &OwnedVmName,
+    ) -> impl Future<Output = Result<RunnerStatus, VmError>> + Send;
 
     /// Exports bounded, redacted diagnostics of `vm`.
     ///

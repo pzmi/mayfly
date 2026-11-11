@@ -21,7 +21,7 @@ use mayfly_control_domain::attempt::{
     OwnershipProof as DecidedProof,
 };
 use mayfly_control_domain::{Actor, Command};
-use mayfly_domain::{Deadline, DirectiveId, ImageDigest, Millis, PoolName};
+use mayfly_domain::{Deadline, DirectiveId, ImageDigest, Millis, PoolName, ProviderInstanceId};
 use mayfly_protocol::{
     AttemptRef, BaseName, Directive, DirectiveKind, DirectiveSink as Link, LinkError, Mode, Nonce,
     OwnershipProof, RunOptions, SecretHandle,
@@ -132,7 +132,8 @@ fn proof(p: &DecidedProof) -> OwnershipProof {
 }
 
 /// The protocol's kind for a decided one: the VM name and proof from the attempt's stream
-/// (`identity`), the base, run options, stop grace and nonce from `details`. Pinned by
+/// (`identity`), a launch's instance id from the `VmCloned` it recorded (`instance_id`, ADR 0038
+/// decision 2, ADR 0082), the base, run options, stop grace and nonce from `details`. Pinned by
 /// `tests/store/link_sink.rs::should_compose_every_kind_from_the_stream_and_the_details_when_sent`.
 ///
 /// # Errors
@@ -140,6 +141,7 @@ fn proof(p: &DecidedProof) -> OwnershipProof {
 /// `pool_unknown` for a start of a pool the details do not know.
 pub fn compose<D: DirectiveDetails>(
     identity: &Identity,
+    instance_id: Option<&ProviderInstanceId>,
     directive_id: DirectiveId,
     kind: &Decided,
     details: &D,
@@ -167,6 +169,7 @@ pub fn compose<D: DirectiveDetails>(
             launch: SecretHandle {
                 handle_id: *handle_id,
             },
+            instance_id: instance_id.cloned(),
         },
         Decided::ExportDiagnostics => DirectiveKind::ExportDiagnostics { vm_name },
         Decided::StopVm { proof: p } => DirectiveKind::StopVm {
@@ -282,6 +285,7 @@ where
         }
         let kind = compose(
             identity,
+            state.instance_id.as_ref(),
             directive.directive_id,
             &directive.kind,
             &self.details,

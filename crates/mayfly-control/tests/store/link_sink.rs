@@ -378,11 +378,14 @@ fn should_compose_every_kind_from_the_stream_and_the_details_when_sent() {
     // when
     let composed: Vec<DirectiveKind> = kinds
         .iter()
-        .map(|kind| compose(&identity, id, kind, &details).unwrap_or_else(|e| panic!("{e}")))
+        .map(|kind| {
+            compose(&identity, Some(&proof.instance_id), id, kind, &details)
+                .unwrap_or_else(|e| panic!("{e}"))
+        })
         .collect();
 
     // then: every VM kind names the stream's VM; the proof is the stream's; only the handle
-    // crosses for a launch
+    // crosses for a launch, beside the recorded instance id
     assert!(
         composed
             .iter()
@@ -399,7 +402,8 @@ fn should_compose_every_kind_from_the_stream_and_the_details_when_sent() {
     ));
     assert!(matches!(
         &composed[3],
-        DirectiveKind::LaunchRunner { launch, .. } if launch.handle_id == handle_id
+        DirectiveKind::LaunchRunner { launch, instance_id: Some(i), .. }
+            if launch.handle_id == handle_id && *i == proof.instance_id
     ));
     assert!(matches!(
         &composed[5],

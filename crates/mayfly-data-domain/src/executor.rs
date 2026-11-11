@@ -201,6 +201,11 @@ pub enum Stimulus {
     Applied(ObservationKind),
     /// The effect failed definitely (`VmError::Definite`): nothing happened.
     Failed,
+    /// The effect refused its target right before acting, on an identity check of its own
+    /// (a launch whose VM's run lock is not held by its shim's child or whose instance id is
+    /// not the recorded one, ADR 0038 decision 2, ADR 0082): nothing happened, and the refusal
+    /// is `proof_mismatch`, which the control plane quarantines.
+    IdentityRefused,
     /// The effect may or may not have happened (`VmError::Ambiguous`).
     Ambiguous(UnknownReason),
     /// The deadline passed before the stage could start (it waited for a free slot or its
@@ -245,6 +250,7 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             | Stimulus::Satisfied(_) => Err(Misfit::NotReObserving),
             Stimulus::Applied(_)
             | Stimulus::Failed
+            | Stimulus::IdentityRefused
             | Stimulus::Ambiguous(_)
             | Stimulus::Expired => Err(Misfit::NotRunning),
         },
@@ -258,13 +264,15 @@ pub fn step(phase: &Phase, stimulus: Stimulus) -> Result<Phase, Misfit> {
             Stimulus::Satisfied(kind) => applied(kind),
             Stimulus::Expired => Ok(Phase::Refused(RefusalReason::DeadlineExpired)),
             Stimulus::Admit(_) | Stimulus::Deny(_) => Err(Misfit::NotReceived),
-            Stimulus::Applied(_) | Stimulus::Failed | Stimulus::Ambiguous(_) => {
-                Err(Misfit::NotRunning)
-            }
+            Stimulus::Applied(_)
+            | Stimulus::Failed
+            | Stimulus::IdentityRefused
+            | Stimulus::Ambiguous(_) => Err(Misfit::NotRunning),
         },
         Phase::Executing(Stage::Effect) => match stimulus {
             Stimulus::Applied(kind) => applied(kind),
             Stimulus::Failed => Ok(Phase::Refused(RefusalReason::EffectFailed)),
+            Stimulus::IdentityRefused => Ok(Phase::Refused(RefusalReason::ProofMismatch)),
             Stimulus::Expired => Ok(Phase::Refused(RefusalReason::DeadlineExpired)),
             Stimulus::Ambiguous(reason) => match reason {
                 UnknownReason::Deadline | UnknownReason::ProcessLost | UnknownReason::HostSlept => {
@@ -587,7 +595,7 @@ impl DataPlane {
     }
 
     /// The effect of `id` under `epoch` ended with `result` ([`Stimulus::Applied`],
-    /// [`Stimulus::Failed`] or [`Stimulus::Ambiguous`]). The ledger follows: an applied effect
+    /// [`Stimulus::Failed`], [`Stimulus::IdentityRefused`] or [`Stimulus::Ambiguous`]). The ledger follows: an applied effect
     /// is recorded, a refused one released, an unknown one held. An applied observation must
     /// answer the directive's kind.
     pub fn finish(&mut self, epoch: Epoch, id: DirectiveId, result: Stimulus) -> Progress {
@@ -605,6 +613,7 @@ impl DataPlane {
             | Stimulus::ReObserveFailed
             | Stimulus::TargetAbsent
             | Stimulus::Failed
+            | Stimulus::IdentityRefused
             | Stimulus::Ambiguous(_)
             | Stimulus::Expired => Ok(result),
         })

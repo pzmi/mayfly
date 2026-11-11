@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::config::TartConfig;
 use crate::parse::{self, ListEntry, VmInfo};
-use crate::process::runner::{self, Call, Exited, Ran};
+use crate::process::runner::{self, Call, Exited, Ran, Stdin};
 
 /// Why a call did not give an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +75,7 @@ impl TartCli {
             deadline,
             output_limit: self.config.output_limit,
             redact: &self.config.redact,
+            stdin: Stdin::Null,
         })
         .await;
         match ran {

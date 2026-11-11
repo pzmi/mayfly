@@ -253,7 +253,7 @@ CQRS adapted to mayfly's crate names), adr, land, action pins, secret scan. Drop
 release, coverage, mutation, fuzz, conformance, formal for now (later tasks bring their own
 stages). Write mayfly's `architecture.toml`: production / test_only / tool_only crates, edges of
 plan §4, **CP↔DP separation**, pure crates (`mayfly-domain`, `mayfly-protocol`, `*-domain`),
-`std::process` allowed only in `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-composition`
+`std::process` allowed only in `mayfly-adapter-tart`, `mayfly-composition`
 and test tools, faultlab/fake binaries importing no production crate. Negative fixtures: a
 control crate depending on a data crate, the data plane naming a journal type, a domain crate using
 `std::fs`, faultlab importing `mayfly-control-domain`, a test without `should_` naming.
@@ -1036,6 +1036,12 @@ Accept: secret never appears in argv/env/log (the fake's recorded invocations); 
 or a changed MAC refuses delivery (F39); `UncheckedLockTransport` fails the contract.
 SEC-02 (ADR 0058): `tart exec` children get a cleared environment plus an explicit allowlist
 (`ARCH-child-environment`); the `GuestTransport` contract adds the `child_env` probe.
+Decided (DP-05, ADR 0082, accepted by the owner 2026-11-11): the data plane takes the JIT config
+by handle from an in-memory `LaunchStore`, bound to its VM, instance id and deadline, which the
+link's data-plane end fills (still to be wired, RT-02); `LaunchRunner` carries the recorded
+instance id from protocol 1.3; the launch exec holds a MAC handshake before the config; the
+empty `mayfly-adapter-guest` crate is removed. The launcher's contract and Tart's run lock
+(`vms/<vm>/config.json`, `F_GETLK`) are pending HW-01 on real Tart.
 
 #### DP-06 Host resource probes
 Cites: plan §9; ADR 0024. Disk free for the provider's home, available memory, boot id, clock gap

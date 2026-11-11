@@ -1396,7 +1396,7 @@ async fn data_plane_wire<F: LinkFactory>(
 }
 
 /// LK-08 for the control plane: every golden directive it sends is on the wire as its frame,
-/// stamped `session`; every golden observation frame the session admits, written by the peer
+/// stamped `session` and written down to it (`DirectiveKind::written_in`); every golden observation frame the session admits, written by the peer
 /// as the fixture's bytes, is read as itself.
 async fn control_plane_wire<F: LinkFactory>(
     f: &F,
@@ -1409,7 +1409,10 @@ async fn control_plane_wire<F: LinkFactory>(
     let want = set(directives.iter().map(|(_, d)| {
         frame_json(&Frame {
             protocol_version: session,
-            message: Message::Directive(d.clone()),
+            message: Message::Directive(Directive {
+                kind: d.kind.clone().written_in(session),
+                ..d.clone()
+            }),
         })
     }));
     let (sent, written) = step(

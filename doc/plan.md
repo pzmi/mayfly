@@ -115,7 +115,7 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
 - **Directive** (CP → DP): `{ directive_id, epoch, attempt_id, generation, deadline, kind }` where
   `kind` ∈ `PullImage{digest}`, `MaterialiseImage{digest, base_name, runner}`,
   `EvictImage{base_name}`, `CloneVm{base_name, vm_name}`, `StartVm{vm_name, run_options}`,
-  `VerifyGuest{vm_name, nonce}`, `LaunchRunner{vm_name, launch: SecretHandle}`,
+  `VerifyGuest{vm_name, nonce}`, `LaunchRunner{vm_name, launch: SecretHandle, instance_id}`,
   `ExportDiagnostics{vm_name}`, `StopVm{vm_name, grace, proof}`, `DeleteVm{vm_name,
   ownership_proof}`, `ReportInventory`, `ReportCapacity`, `ReportHostFacts`. Directives are
   **idempotent by `directive_id`** and by target name: a repeat returns the earlier outcome or
@@ -154,6 +154,9 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   `Welcome`'s optional `cp_clock`, the control plane's clock reading, from which the data plane
   reads every deadline of the session by an offset to its monotonic clock (ADR 0020, amended
   2026-11-10); without it, its wall clock at receipt.
+- **Protocol 1.3 (DP-05).** `LaunchRunner`'s optional `instance_id`, the one `VmCloned`
+  reported, which the data plane checks right before delivering the JIT config; a launch
+  without it (a 1.2 session) is refused `proof_mismatch` (ADR 0038, ADR 0082).
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly
@@ -217,8 +220,8 @@ crates/
   mayfly-adapter-postgres/  CP: the same stores on PostgreSQL (ES-09; tested, not deployed in v0.x)
   mayfly-adapter-github/    CP: App JWT/installation tokens, Scale Set client, JIT, runner REST
   mayfly-adapter-secrets/   CP: secret providers by URI: keychain, file (0600), env, exec (ADR 0033)
-  mayfly-adapter-tart/      DP: Tart CLI by argv, per-VM shim, version probe, JSON parsing
-  mayfly-adapter-guest/     DP: `tart exec` guest transport (no SSH, ADR 0038)
+  mayfly-adapter-tart/      DP: Tart CLI by argv, per-VM shim, version probe, JSON parsing,
+                            and the `tart exec` guest transport (no SSH, ADR 0038, ADR 0082)
   mayfly-adapter-host/      DP: disk/memory probes (cfg per OS)
   mayfly-adapter-link/      inproc and UDS transports for the protocol
   mayfly-composition/       config, wiring, runtime, supervision tree, startup sequence, roles
@@ -537,7 +540,8 @@ nonce and reads typed, bounded claims; images without the guest agent are refuse
 is delivered by `tart exec -i <exact VM> <fixed in-image launcher>` **on stdin only**, after the
 data plane checked that the PID holding the VM's run lock is its shim's child and the instance id
 matches; afterwards the control plane confirms through GitHub that the issued runner id came
-online. Never interpolated into a shell string, never written to disk unencrypted, never logged.
+online. The data plane takes the config from an in-memory store by handle, which the link fills,
+and the launcher's contract (verbs, claims, status file) is ADR 0082's. Never interpolated into a shell string, never written to disk unencrypted, never logged.
 The runner is baked into the image at a pinned, SHA-checked version with self-update off; expiry
 trips the pool's breaker with reason `runner_version` (ADR 0030). Runner exit after a restart is
 read from the launcher's status and GitHub, not from `tart run`. Runner diagnostics are exported

@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use mayfly_data::{
     Diagnostics, FloorFailed, FloorStore, GuestAnswer, GuestTransport, HostProbe, ImageListing,
-    ImageStore, ProbeFailed, VmError,
+    ImageStore, LaunchAnswer, ProbeFailed, RunnerStatus, VmError,
 };
-use mayfly_domain::{Epoch, ImageDigest, OwnedVmName};
+use mayfly_domain::{Epoch, ImageDigest, OwnedVmName, ProviderInstanceId};
 use mayfly_protocol::{BaseName, GuestOs, HostFacts, Nonce, SecretHandle};
 
 fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -82,10 +82,12 @@ impl ImageStore for FakeImageStore {
     }
 }
 
-/// A guest transport answering every call as scripted.
+/// A guest transport answering every call as scripted, for the executor's tests; the
+/// `GuestTransport` contract's world is [`crate::guest::MemoryGuests`].
 #[derive(Debug, Clone)]
 pub struct FakeGuest {
     state: Arc<Mutex<GuestScript>>,
+    launches: Arc<Mutex<usize>>,
 }
 
 /// What [`FakeGuest`] answers.
@@ -94,7 +96,9 @@ pub struct GuestScript {
     /// The answer to every challenge.
     pub verify: Result<GuestAnswer, VmError>,
     /// The answer to every launch.
-    pub launch: Result<(), VmError>,
+    pub launch: Result<LaunchAnswer, VmError>,
+    /// The answer to every status read.
+    pub status: Result<RunnerStatus, VmError>,
     /// The answer to every export.
     pub export: Result<Diagnostics, VmError>,
 }
@@ -105,12 +109,19 @@ impl FakeGuest {
     pub fn new(script: GuestScript) -> Self {
         Self {
             state: Arc::new(Mutex::new(script)),
+            launches: Arc::new(Mutex::new(0)),
         }
     }
 
     /// Answers as `script` says from now on.
     pub fn script(&self, script: GuestScript) {
         *lock(&self.state) = script;
+    }
+
+    /// How many launches reached it.
+    #[must_use]
+    pub fn launches(&self) -> usize {
+        *lock(&self.launches)
     }
 }
 
@@ -119,8 +130,18 @@ impl GuestTransport for FakeGuest {
         lock(&self.state).verify
     }
 
-    async fn launch(&self, _vm: &OwnedVmName, _launch: SecretHandle) -> Result<(), VmError> {
+    async fn launch(
+        &self,
+        _vm: &OwnedVmName,
+        _instance_id: &ProviderInstanceId,
+        _launch: SecretHandle,
+    ) -> Result<LaunchAnswer, VmError> {
+        *lock(&self.launches) += 1;
         lock(&self.state).launch
+    }
+
+    async fn runner_status(&self, _vm: &OwnedVmName) -> Result<RunnerStatus, VmError> {
+        lock(&self.state).status
     }
 
     async fn export_diagnostics(&self, _vm: &OwnedVmName) -> Result<Diagnostics, VmError> {

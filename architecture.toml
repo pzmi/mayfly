@@ -11,7 +11,7 @@ production = [
   "mayfly-control-domain", "mayfly-control",
   "mayfly-data-domain", "mayfly-data",
   "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-secrets",
-  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-adapter-tart", "mayfly-adapter-host",
   "mayfly-adapter-link",
   "mayfly-composition", "mayfly-cli",
 ]
@@ -34,7 +34,7 @@ control = [
 ]
 data = [
   "mayfly-data-domain", "mayfly-data",
-  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-adapter-tart", "mayfly-adapter-host",
   "mayfly-testkit-data",
 ]
 shared = [
@@ -57,7 +57,7 @@ data = ["VmProvider", "GuestTransport", "HostProbe", "ProcessRunner", "TartCli"]
 pure = ["mayfly-domain", "mayfly-protocol", "mayfly-control-domain", "mayfly-data-domain"]
 # Crates with process authority. One module beyond them holds it too, by the checker's
 # PROCESS_MODULES: mayfly-adapter-secrets::command, the `exec:` and Keychain runner (ADR 0058).
-process_authority = ["mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-composition"]
+process_authority = ["mayfly-adapter-tart", "mayfly-composition"]
 independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
 
 # Allowed workspace edges (foundation.md section 2.2, plan section 4). A dev-dependency may
@@ -83,7 +83,6 @@ mayfly-adapter-secrets = ["mayfly-control", "mayfly-domain"]
 
 # Data-plane adapters: the kernel and the application.
 mayfly-adapter-tart = ["mayfly-data", "mayfly-domain"]
-mayfly-adapter-guest = ["mayfly-data", "mayfly-domain"]
 mayfly-adapter-host = ["mayfly-data", "mayfly-domain"]
 
 # The CP<->DP transports carry protocol messages only.
@@ -94,7 +93,7 @@ mayfly-composition = [
   "mayfly-control-domain", "mayfly-control",
   "mayfly-data-domain", "mayfly-data",
   "mayfly-adapter-sqlite", "mayfly-adapter-github", "mayfly-adapter-secrets",
-  "mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-adapter-host",
+  "mayfly-adapter-tart", "mayfly-adapter-host",
   "mayfly-adapter-link",
 ]
 mayfly-cli = ["mayfly-composition"]
@@ -177,12 +176,12 @@ mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test
 # provider call, the fake clock) through Tokio's synchronisation primitives; the VmProvider
 # contract (DP-04) runs each case on its own current-thread runtime (rt), bounded by a timer
 # (time).
-mayfly-testkit-data = { tokio = ["sync", "rt", "time"] }
+mayfly-testkit-data = { sha2 = ["default"], tokio = ["sync", "rt", "time"] }
 # The Tart adapter (DP-04, plan section 8.2): each `tart` child awaited with its deadline and its
 # stdout and stderr read together through Tokio (rt, process, io-util, time, macros for join!);
 # the process-group kill, `setsid` and the shim's flock(2) through rustix; Tart's JSON through
 # serde.
-mayfly-adapter-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["rt", "process", "io-util", "time", "macros"] }
+mayfly-adapter-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], tokio = ["rt", "process", "io-util", "time", "macros"] }
 # The secret providers (ADR 0033, ADR 0058): `O_NOFOLLOW` opens, the daemon's uid and the
 # process-group kill through rustix; the command's exit and deadline, and the blocking hand-off
 # of the file and executable checks, through Tokio.
@@ -204,7 +203,7 @@ mayfly-adapter-host = { rustix = ["default", "fs", "time"], sysctl = ["default"]
 mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
 # signal-hook records the catchable signals a foreground `run` receives (DP-04), so a test can
 # prove mayfly never signals `tart run` (ADR 0037).
-mayfly-fake-tart = { rustix = ["default", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], signal-hook = ["iterator"], toml = ["default"] }
+mayfly-fake-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], signal-hook = ["iterator"], toml = ["default"] }
 # The fake GitHub (GH-02, GH-01): an axum HTTP/1.1 server on Tokio; RS256 checked with
 # aws-lc-rs's UnparsedPublicKey through the fake's own JWT and PEM code; synthetic PKCS#1 test
 # keys generated at run time by the rsa crate (another implementation than the provider);

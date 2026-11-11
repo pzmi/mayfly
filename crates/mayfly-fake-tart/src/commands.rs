@@ -19,6 +19,7 @@
 //! Pinned by: `tests/cli/commands.rs` (one test per command) and `tests/fixtures/*.json` through
 //! `tests/cli/commands.rs::should_print_the_pinned_list_shape_when_listing_json`.
 
+use std::fs::File;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -59,7 +60,7 @@ pub(crate) struct Done {
 }
 
 impl Done {
-    fn out(stdout: String) -> Self {
+    pub(crate) fn out(stdout: String) -> Self {
         Self {
             code: 0,
             stdout,
@@ -81,10 +82,17 @@ pub(crate) struct Ctx<'a> {
     pub run_mode: RunMode,
     pub rule: Option<&'a Rule>,
     pub stdin: &'a mut dyn Read,
+    /// The standard output, for a guest that answers before it reads on (the launcher's
+    /// handshake); everything else prints through [`Done`].
+    pub stdout: &'a mut dyn std::io::Write,
+    /// The standard error, likewise.
+    pub stderr: &'a mut dyn std::io::Write,
+    /// The VM's run lock a foreground `run` holds for as long as its process lives.
+    pub held: Option<File>,
 }
 
 impl Ctx<'_> {
-    fn effect(&self, kind: &str, vm: &str) -> Result<(), Fail> {
+    pub(crate) fn effect(&self, kind: &str, vm: &str) -> Result<(), Fail> {
         let event = Event::Effect {
             kind: kind.to_owned(),
             vm: vm.to_owned(),
@@ -136,7 +144,7 @@ pub(crate) fn execute(command: &Command, ctx: &mut Ctx<'_>) -> Result<Done, Fail
 }
 
 /// A local VM by name; an OCI-cache entry is not a local VM, as in `VMStorageLocal.open`.
-fn local_vm(home: &Home, name: &str) -> Result<VmRecord, Fail> {
+pub(crate) fn local_vm(home: &Home, name: &str) -> Result<VmRecord, Fail> {
     match home.read_vm(name)? {
         Some(vm) if vm.source == Source::Local => Ok(vm),
         _ => Err(Fail::does_not_exist(name)),
@@ -235,7 +243,7 @@ fn clone_vm(ctx: &Ctx<'_>, source: &str, name: &str, overwrite: bool) -> Result<
 /// `run` in the configured [`RunMode`]. Foreground: the VM runs while this process lives, and the
 /// process returns when `stop` or `delete` takes the VM away. Detached: the VM is recorded as
 /// running and the process exits at once, so nothing needs to survive a test or a killed daemon.
-fn run(ctx: &Ctx<'_>, name: &str) -> Result<Done, Fail> {
+fn run(ctx: &mut Ctx<'_>, name: &str) -> Result<Done, Fail> {
     let _lock = ctx.home.lock()?;
     let mut vm = local_vm(ctx.home, name)?;
     if vm.running() {
@@ -250,6 +258,9 @@ fn run(ctx: &Ctx<'_>, name: &str) -> Result<Done, Fail> {
         started_at_ms: now_ms(),
     });
     vm.accessed_ms = now_ms();
+    if !detached {
+        ctx.held = Some(ctx.home.take_run_lock(name)?);
+    }
     ctx.home.write_vm(&vm)?;
     ctx.effect("vm_started", name)?;
     let mut done = Done::quiet();
@@ -484,6 +495,13 @@ fn exec(ctx: &mut Ctx<'_>, name: &str, interactive: bool, argv: &[String]) -> Re
     if !vm.running() {
         return Err(Fail::not_running(name));
     }
+    let guest = ctx
+        .rule
+        .and_then(|r| r.route_to.clone())
+        .unwrap_or_else(|| name.to_owned());
+    if argv.first().map(String::as_str) == Some(crate::guest::LAUNCHER) {
+        return crate::guest::launcher(ctx, &guest, interactive, &argv[1..]);
+    }
     let stdin = if interactive {
         Some(digest_stdin(ctx)?)
     } else {
@@ -523,7 +541,7 @@ fn exec(ctx: &mut Ctx<'_>, name: &str, interactive: bool, argv: &[String]) -> Re
 
 /// Reads stdin to its end, logs its length and digest, and returns them; the content is dropped
 /// chunk by chunk and never held.
-fn digest_stdin(ctx: &mut Ctx<'_>) -> Result<(u64, String), Fail> {
+pub(crate) fn digest_stdin(ctx: &mut Ctx<'_>) -> Result<(u64, String), Fail> {
     let mut hasher = Sha256::new();
     let mut len = 0u64;
     let mut chunk = [0u8; 8192];

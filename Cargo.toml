@@ -11,7 +11,6 @@ members = [
     "crates/mayfly-adapter-github",
     "crates/mayfly-adapter-secrets",
     "crates/mayfly-adapter-tart",
-    "crates/mayfly-adapter-guest",
     "crates/mayfly-adapter-host",
     "crates/mayfly-adapter-link",
     "crates/mayfly-composition",

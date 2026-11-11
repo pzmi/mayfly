@@ -44,7 +44,7 @@ from the policy, or listed but absent, fails the checker.
 |:--|:--|:--|
 | **pure** (production) | `mayfly-domain`, `mayfly-protocol`, `mayfly-control-domain`, `mayfly-data-domain` | yes |
 | **application** (production) | `mayfly-control`, `mayfly-data` | yes |
-| **adapter** (production) | CP: `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`; DP: `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host`; plane-neutral: `mayfly-adapter-link` | yes |
+| **adapter** (production) | CP: `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`; DP: `mayfly-adapter-tart` (with the guest transport, ADR 0082), `mayfly-adapter-host`; plane-neutral: `mayfly-adapter-link` | yes |
 | **root** (production) | `mayfly-composition`, `mayfly-cli` | yes |
 | **test_only** | `mayfly-testkit`, `mayfly-testkit-shared`, `mayfly-testkit-data`, `mayfly-conformance`, `mayfly-fake-tart`, `mayfly-fake-github` | never |
 | **tool_only** | `xtask`, `mayfly-faultlab` (the package in `tools/faultlab`) | never |
@@ -61,7 +61,7 @@ closure stays; tools and the independent oracles are in none.
 | Plane | Crates |
 |:--|:--|
 | **control** | `mayfly-control-domain`, `mayfly-control`, `mayfly-adapter-sqlite`, `mayfly-adapter-github`, `mayfly-adapter-secrets`, `mayfly-testkit` (the control plane's test kit) |
-| **data** | `mayfly-data-domain`, `mayfly-data`, `mayfly-adapter-tart`, `mayfly-adapter-guest`, `mayfly-adapter-host`, `mayfly-testkit-data` (the data plane's test kit) |
+| **data** | `mayfly-data-domain`, `mayfly-data`, `mayfly-adapter-tart`, `mayfly-adapter-host`, `mayfly-testkit-data` (the data plane's test kit) |
 | **shared** | `mayfly-domain`, `mayfly-protocol`, `mayfly-adapter-link`, `mayfly-testkit-shared` (the shared test kit) |
 | **both** (sees CP and DP) | `mayfly-composition`, `mayfly-cli` (through composition), `mayfly-conformance` |
 
@@ -87,7 +87,6 @@ workspace crates (`[dependencies.normal]`). They are plan §4's diagram written 
 | `mayfly-adapter-github` | `mayfly-domain`, `mayfly-control` |
 | `mayfly-adapter-secrets` | `mayfly-domain`, `mayfly-control` |
 | `mayfly-adapter-tart` | `mayfly-domain`, `mayfly-data` |
-| `mayfly-adapter-guest` | `mayfly-domain`, `mayfly-data` |
 | `mayfly-adapter-host` | `mayfly-domain`, `mayfly-data` |
 | `mayfly-adapter-link` | `mayfly-domain`, `mayfly-protocol` |
 | `mayfly-composition` | every production crate except `mayfly-cli` |
@@ -206,8 +205,7 @@ executor. `serde` derive is permitted in `mayfly-protocol` and `mayfly-control-d
 journal shapes); `mayfly-domain` may derive it too, validating types only through their parsers (ADR 0017).
 
 **Process authority** (`ARCH-process-authority`): only the production crates in
-`[purity] process_authority` — `mayfly-adapter-tart`, `mayfly-adapter-guest` and
-`mayfly-composition` — and one module beyond them, `mayfly-adapter-secrets::command` (the
+`[purity] process_authority` — `mayfly-adapter-tart` and `mayfly-composition` — and one module beyond them, `mayfly-adapter-secrets::command` (the
 `exec:` and Keychain runner; the checker's `PROCESS_MODULES`, ADR 0058), name `std::process` (beyond `ExitCode` and `Termination`),
 `std::os::{unix,linux}::process`, `tokio::process`, `async_process`, `rustix::process`,
 `nix::{unistd, sys::signal}` or `duct`, also through another crate's re-export. Test-only and
@@ -244,7 +242,7 @@ v0.x; a crate enters the policy only in the commit of the task that first uses i
 | `mayfly-adapter-sqlite` | `rusqlite` (`bundled`), `serde_json`, `tokio` (`sync`, `rt`), `tracing`, `thiserror` |
 | `mayfly-adapter-github` | `reqwest` (`rustls-no-provider`), `rustls` (`aws_lc_rs`), `rustls-platform-verifier`, `rustls-pki-types`, `aws-lc-rs` (TLS provider and RS256, no JWT crate: ADR 0064), `base64`, `zeroize`, `serde`, `serde_json`, `tokio`, `url`, `tracing`, `thiserror` |
 | `mayfly-adapter-secrets` | `rustix` (`fs`, `process`), `tokio` (`rt`, `process`, `io-util`, `time`); the Keychain through `/usr/bin/security`, no binding crate (ADR 0058) |
-| `mayfly-adapter-tart`, `mayfly-adapter-guest` | `tokio` (`process`, `io-util`, `time`), `rustix` (`process`), `serde`, `serde_json`, `tracing`, `thiserror` |
+| `mayfly-adapter-tart` | `tokio` (`process`, `io-util`, `time`), `rustix` (`process`), `serde`, `serde_json`, `tracing`, `thiserror` |
 | `mayfly-adapter-host` | `rustix` or `sysinfo` (DP-06 decides), `thiserror` |
 | `mayfly-adapter-link` | `tokio` (`net`, `io-util`, `sync`), `serde_json`, `tracing`, `thiserror` |
 | `mayfly-composition` | `tokio` (`rt-multi-thread`, `signal`, `net`, `time`, `process`), `tokio-util`, `tracing`, `tracing-subscriber` (`json`, `env-filter`), `toml`, `serde`, `thiserror` |
@@ -333,7 +331,7 @@ data    = ["VmProvider", "GuestTransport", "HostProbe", "ProcessRunner", "TartCl
 
 [purity]                      # §2.3, §2.6
 pure = ["mayfly-domain", "mayfly-protocol", "mayfly-control-domain", "mayfly-data-domain"]
-process_authority = ["mayfly-adapter-tart", "mayfly-adapter-guest", "mayfly-composition"]
+process_authority = ["mayfly-adapter-tart", "mayfly-composition"]
 independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
 
 [dependencies.normal]         # §2.2, one key per crate

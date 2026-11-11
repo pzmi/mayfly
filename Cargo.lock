@@ -995,10 +995,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mayfly-adapter-guest"
-version = "0.1.0"
-
-[[package]]
 name = "mayfly-adapter-host"
 version = "0.1.0"
 dependencies = [
@@ -1057,6 +1053,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -1216,6 +1213,7 @@ dependencies = [
  "mayfly-domain",
  "mayfly-protocol",
  "mayfly-testkit-shared",
+ "sha2",
  "tokio",
 ]
 

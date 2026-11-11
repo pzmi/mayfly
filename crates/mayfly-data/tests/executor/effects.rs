@@ -1,7 +1,7 @@
 //! Each directive kind against its port: what an applied, rejected or failed effect answers.
 
-use mayfly_data::{Ambiguity, Diagnostics, GuestAnswer, VmError};
-use mayfly_domain::{Millis, SecretHandleId};
+use mayfly_data::{Ambiguity, Diagnostics, GuestAnswer, LaunchAnswer, RunnerStatus, VmError};
+use mayfly_domain::{Millis, ProviderInstanceId, SecretHandleId};
 use mayfly_protocol::{
     BaseName, DiagnosticsLoss, DirectiveKind, GuestFacts, GuestOs, GuestRejection, Nonce,
     ObservationKind, RefusalReason, SecretHandle,
@@ -12,6 +12,10 @@ use crate::support::{
     Fakes, answers, answers_to, base, described, digest, directive, facts, probe, run, run_options,
     session, vm,
 };
+
+fn instance() -> ProviderInstanceId {
+    ProviderInstanceId::new("0a:00:00:00:01:01").expect("an instance id")
+}
 
 fn every_effect() -> Vec<DirectiveKind> {
     vec![
@@ -35,6 +39,7 @@ fn every_effect() -> Vec<DirectiveKind> {
             launch: SecretHandle {
                 handle_id: SecretHandleId::from_u128(1),
             },
+            instance_id: Some(instance()),
         },
         DirectiveKind::ExportDiagnostics { vm_name: vm(1) },
         DirectiveKind::ReportHostFacts,
@@ -71,6 +76,7 @@ fn should_answer_what_each_effect_observed_when_it_is_applied() {
                 uptime: Millis::new(5),
             })),
             launch: Err(VmError::Ambiguous(Ambiguity::HostSlept)),
+            status: Ok(RunnerStatus::NotLaunched),
             export: Ok(Diagnostics::Exported {
                 bytes: 10,
                 sha256: [7; 32],
@@ -121,6 +127,7 @@ fn should_refuse_or_report_the_failure_when_an_effect_fails_definitely() {
         fakes.guest.script(GuestScript {
             verify: Ok(GuestAnswer::Rejected(GuestRejection::ChallengeFailed)),
             launch: Err(VmError::Definite),
+            status: Ok(RunnerStatus::NotLaunched),
             export: Ok(Diagnostics::Lost(DiagnosticsLoss::GuestUnreachable)),
         });
         let mut exec = fakes.open(2).await;
@@ -168,5 +175,49 @@ fn should_refuse_or_report_the_failure_when_an_effect_fails_definitely() {
             ]
         );
         assert!(exec.ledger().reservations.is_empty(), "a refusal releases");
+    });
+}
+
+#[test]
+fn should_refuse_proof_mismatch_when_the_launch_identity_check_fails_or_has_no_instance_id() {
+    run(async {
+        // given
+        let fakes = Fakes::new(probe(4));
+        fakes.guest.script(GuestScript {
+            verify: Ok(GuestAnswer::Rejected(GuestRejection::ChallengeFailed)),
+            launch: Ok(LaunchAnswer::IdentityRefused),
+            status: Ok(RunnerStatus::NotLaunched),
+            export: Ok(Diagnostics::Lost(DiagnosticsLoss::GuestUnreachable)),
+        });
+        let mut exec = fakes.open(2).await;
+        let launch = |instance_id| DirectiveKind::LaunchRunner {
+            vm_name: vm(1),
+            launch: SecretHandle {
+                handle_id: SecretHandleId::from_u128(1),
+            },
+            instance_id,
+        };
+
+        // when
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            feed.send(directive(1, launch(Some(instance())))).await;
+            tap.wait_for(answers(1)).await;
+            feed.send(directive(2, launch(None))).await;
+            tap.wait_for(answers(2)).await;
+            tap
+        })
+        .await;
+
+        // then
+        let mismatch = vec![ObservationKind::DirectiveRefused {
+            reason: RefusalReason::ProofMismatch,
+        }];
+        assert_eq!(answers_to(&seen, 1), mismatch, "the transport refused");
+        assert_eq!(answers_to(&seen, 2), mismatch, "no instance id to check");
+        assert_eq!(
+            fakes.guest.launches(),
+            1,
+            "a launch without an id never reaches it"
+        );
     });
 }

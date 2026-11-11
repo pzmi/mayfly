@@ -22,7 +22,13 @@
 //! job_exit_code = 0              # exec only: the guest command's exit code
 //! job_stdout = "done"            # exec only: what the guest command prints on stdout at the end
 //! job_stderr = "started"         # exec only: what it prints on stderr when the job starts
+//! route_to = "mf-other"          # exec only: the VM whose guest answers (a misrouted exec, F39)
+//! echo_stdin = true              # exec only: the launcher echoes the config it read on stderr
 //! ```
+//!
+//! An `exec` of the guest launcher (see `guest`) reads `job_ms` and `job_exit_code` of its
+//! rule as the runner's job instead: how long the runner runs after a launch (0: it ends at
+//! once) and its exit code; with no matching rule the runner runs until the VM stops.
 //!
 //! Every rule that matches an invocation counts it (`matched`); the first matching rule that is
 //! past its `skip` and under its `times` fires (`fired`), the others only count. Counters live in
@@ -129,6 +135,9 @@ pub(crate) struct Rule {
     pub job_exit_code: i32,
     pub job_stdout: Option<String>,
     pub job_stderr: Option<String>,
+    pub route_to: Option<String>,
+    #[serde(default)]
+    pub echo_stdin: bool,
 }
 
 /// The parsed `faults.toml`.
@@ -203,10 +212,14 @@ impl FaultFile {
             if (rule.arg0.is_some()
                 || rule.job_ms > 0
                 || rule.job_stdout.is_some()
-                || rule.job_exit_code != 0)
+                || rule.job_exit_code != 0
+                || rule.route_to.is_some()
+                || rule.echo_stdin)
                 && command != Some("exec")
             {
-                return Err(bad("arg0 and job_* need command = \"exec\""));
+                return Err(bad(
+                    "arg0, job_*, route_to and echo_stdin need command = \"exec\"",
+                ));
             }
             if rule.version.is_some() && command != Some("--version") {
                 return Err(bad("version needs command = \"--version\""));

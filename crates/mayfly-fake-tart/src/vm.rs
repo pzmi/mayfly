@@ -38,6 +38,14 @@ pub(crate) struct Launch {
     pub stdin_sha256: Option<String>,
 }
 
+/// The emulated guest launcher's runner (see `guest`): started by a launch, it runs its job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Runner {
+    pub started_at_ms: u64,
+    /// How long its job runs and its exit code; `None` runs until the VM stops.
+    pub job: Option<(u64, i32)>,
+}
+
 /// A VM as stored in `vms/<name>.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct VmRecord {
@@ -57,6 +65,10 @@ pub(crate) struct VmRecord {
     pub run: Option<Run>,
     /// The most recent guest launches, oldest first, at most [`MAX_LAUNCHES`].
     pub guest_launches: Vec<Launch>,
+    /// The guest launcher's runner, once launched; it lives in the guest, so a restarted
+    /// daemon reads it through `exec` (`guest`).
+    #[serde(default)]
+    pub runner: Option<Runner>,
 }
 
 /// How many guest launches a record keeps.
@@ -80,6 +92,7 @@ impl VmRecord {
             accessed_ms: now_ms,
             run: None,
             guest_launches: Vec::new(),
+            runner: None,
         }
     }
 

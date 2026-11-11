@@ -1,6 +1,10 @@
-//! `mayfly-adapter-tart` (data plane): the `VmProvider` port over the Tart CLI (plan §8.2, D12).
+//! `mayfly-adapter-tart` (data plane): the `VmProvider` and `GuestTransport` ports over the Tart
+//! CLI (plan §8.2, §8.3, D12).
 //!
 //! - [`provider`]: `TartProvider`, the port's implementation, bounded by per-call deadlines.
+//! - [`guest`]: `TartGuestTransport`, guests through `tart exec` only (ADR 0038, ADR 0082): the
+//!   nonce challenge, the launch after the run-lock and instance-id check, the launcher's
+//!   status, bounded and redacted diagnostics.
 //! - [`tart`]: the `tart` commands it runs; [`parse`]: their output, against version-pinned
 //!   fixtures.
 //! - [`process`]: the process runner (argv only, cleared environment plus an allowlist,
@@ -13,6 +17,7 @@
 //! Tart only in the hardware lane (HW-01).
 
 pub mod config;
+pub mod guest;
 pub mod parse;
 pub mod process;
 pub mod provider;
@@ -20,5 +25,6 @@ pub mod shim;
 pub mod tart;
 
 pub use config::{Deadlines, ShimProgram, TartConfig};
+pub use guest::{GuestConfig, GuestDeadlines, TartGuestTransport};
 pub use provider::{ProbeError, TartProvider};
 pub use shim::ShimReading;

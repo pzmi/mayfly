@@ -104,3 +104,4 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0066](0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A vanished VM is quarantined as a desync | Accepted. Amended 2026-11-11 |
 | [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted |
 | [0076](0076-quarantine-stops-deregister-first.md) | Quarantine stops deregister first | Accepted |
+| [0082](0082-jit-configs-on-the-data-plane-and-the-guest-launcher-contract.md) | JIT configs on the data plane and the guest launcher contract | Accepted |

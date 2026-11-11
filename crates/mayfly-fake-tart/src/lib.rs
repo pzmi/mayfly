@@ -47,6 +47,7 @@ mod cli;
 mod commands;
 mod fail;
 mod faults;
+mod guest;
 mod home;
 mod log;
 mod signals;
@@ -271,8 +272,14 @@ fn drive(
         run_mode: picked.file.run_mode,
         rule,
         stdin,
+        stdout: &mut *stdout,
+        stderr: &mut *stderr,
+        held: None,
     };
-    let done = match execute(&command, &mut ctx) {
+    let executed = execute(&command, &mut ctx);
+    // the run lock, if this is a foreground `run`, lives as long as this invocation
+    let held = ctx.held.take();
+    let done = match executed {
         Ok(done) => done,
         Err(fail) => return exit(fail.code, stderr, Some(&fail.message)),
     };
@@ -280,6 +287,8 @@ fn drive(
     if let Some(r) = rule {
         match action {
             Action::HangAfterEffect => {
+                // a hung `run` still holds its VM's run lock, as a hung `tart run` would
+                std::mem::forget(held);
                 fault(r, rule_id.clone(), "after_effect")?;
                 drop(writeln!(
                     stderr,
@@ -324,7 +333,9 @@ fn drive(
     }
     drop(stdout.write_all(text.as_bytes()));
     drop(stdout.flush());
-    exit(code, stderr, None)
+    let exited = exit(code, stderr, None);
+    drop(held);
+    exited
 }
 
 /// Variables whose values the log keeps: the state directory and the fake's own controls.
