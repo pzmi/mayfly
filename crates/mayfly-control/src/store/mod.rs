@@ -115,6 +115,13 @@ pub struct SaveRequest<B> {
     /// starting an attempt), each at the revision read: the unit is refused if one moved, and
     /// a refusal receipt is bound to them too (ADR 0041).
     pub reads: Vec<ReadCondition>,
+    /// The revision the instance's own stream must be at for the command to be decided: `None`
+    /// decides on whatever the load finds (the usual case). A recovery plan's attempt command
+    /// sets it to the revision the plan bound, since its own stream cannot be one of its reads
+    /// (`MalformedUnit::DuplicateStream`): a stream found elsewhere is
+    /// [`SaveError::Conflict`] before any decision (pinned by
+    /// `tests/store/save.rs::should_refuse_as_a_conflict_when_the_own_stream_is_not_where_expected`).
+    pub expected: Option<ExpectedRevision>,
     /// The inbound message the command consumes on acceptance (ES-I6).
     pub inbox: Option<InboxKey>,
 }
@@ -126,8 +133,16 @@ impl<B> SaveRequest<B> {
             instance: instance.to_string(),
             command,
             reads: Vec::new(),
+            expected: None,
             inbox: None,
         }
+    }
+
+    /// Requires the instance's own stream at `expected` when the command is decided.
+    #[must_use]
+    pub const fn with_expected(mut self, expected: ExpectedRevision) -> Self {
+        self.expected = Some(expected);
+        self
     }
 
     /// Adds a stream the decision read, at the revision read.
@@ -282,6 +297,15 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
             }
         }
         let (state, head, history) = self.fold::<A>(&stream).await?;
+        if let Some(required) = request.expected
+            && !required.matches(head)
+        {
+            return Err(SaveError::Conflict {
+                stream,
+                expected: required,
+                actual: head,
+            });
+        }
         let expected = ExpectedRevision::of(head);
         let receipt = |decision| NewReceipt {
             command_id,
@@ -370,8 +394,23 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
     /// [`SaveError::InvalidName`], [`SaveError::Storage`], [`SaveError::UnknownKind`] or
     /// [`SaveError::Codec`].
     pub async fn load<A: Aggregate>(&self, instance: &str) -> Result<A::State, SaveError> {
+        Ok(self.load_with_head::<A>(instance).await?.0)
+    }
+
+    /// [`AggregateStore::load`] with the revision of the last event folded (`None` for a stream
+    /// with no event): the revision a caller conditions a later unit on (ADR 0041) when it
+    /// decides from this state, so the state and the revision are one read and a write between
+    /// them cannot be missed.
+    ///
+    /// # Errors
+    /// As [`AggregateStore::load`].
+    pub async fn load_with_head<A: Aggregate>(
+        &self,
+        instance: &str,
+    ) -> Result<(A::State, Option<StreamRevision>), SaveError> {
         let stream = stream_of::<A>(instance).map_err(SaveError::InvalidName)?;
-        Ok(self.fold::<A>(&stream).await?.0)
+        let (state, head, _) = self.fold::<A>(&stream).await?;
+        Ok((state, head))
     }
 
     /// Reads and folds `stream`; returns the state, the head revision read and the events.
@@ -417,7 +456,8 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
 
     /// [`AggregateStore::save`] under [`AggregateStore::with_revision_retry`]: the usual way to
     /// run a command whose decision reads only its own stream. A request with
-    /// [`SaveRequest::reads`] is refused [`SaveError::ReadsOutsideRetry`] before any read: the
+    /// [`SaveRequest::reads`] or [`SaveRequest::expected`] is refused
+    /// [`SaveError::ReadsOutsideRetry`] before any read: the
     /// retry would re-check the same stale revisions, so such a caller builds its reads inside
     /// its own `with_revision_retry` closure (pinned by
     /// `tests/store/save.rs::should_refuse_reads_in_execute_when_a_retry_could_not_rebuild_them`
@@ -429,7 +469,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         &self,
         request: SaveRequest<A::Body>,
     ) -> Result<Outcome<A::Rejection>, SaveError> {
-        if !request.reads.is_empty() {
+        if !request.reads.is_empty() || request.expected.is_some() {
             return Err(SaveError::ReadsOutsideRetry);
         }
         self.with_revision_retry(|| self.save::<A>(request.clone()))

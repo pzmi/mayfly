@@ -192,6 +192,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-02 | Attempt saga and directive relay as durable consumers | ES-05, KER-04, KER-02 | opus | |
 | CP-03 | Reconciler: desired vs reported capacity, admission, retirement | CP-02, KER-07 | opus | |
 | CP-04 | Observation inbox and startup recovery / safe mode | CP-03, KER-10 | opus | |
+| CP-04B | Our non-VM use in the capacity report | CP-04, DP-07 | sonnet | |
+| CP-04C | Hold an attempt's cleanup after adoption | CP-04 | opus | |
 | CP-05 | Registration manager and reaper | KER-09, GH-03, CP-02 | opus | |
 | CP-06 | Breaker, quarantine and Unknown-escalation policies | KER-10, CP-03 | sonnet | |
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | |
@@ -1010,6 +1012,74 @@ run epoch refuses the plan
 and a verification taken after `RecoveryPlanCompleted`; the daemon then restarts
 (`restart_required` refuses `CompleteRecovery` in that run). `MintEpoch.crash_loop` is the
 service manager's start count of P25.
+
+Note (CP-04, as built): `mayfly_control::start` (P2: the lease and the host's revision read in
+one fold, `AggregateStore::load_with_head`, the unit conditioned on that revision),
+`mayfly_control::inbox` (P8: `InboxKey{dp-<host digest>, <epoch>/<observation id>}`, since a data
+plane restarted under a new epoch may reuse ids; one unit per target with a command id derived
+from host, epoch, observation and target; `Ok` is the licence to ack; a refusal is handled and
+consumes no key; an inventory becomes `VmPresent`, `VmObservedStopped` or `VmAbsent` per attempt
+the `Host` leases, keyed `<epoch>/<observation>/<attempt>/<n>`, the host's leases being the
+bounded, host-scoped index of attempts that may have a VM; `RunnerExited` and
+`VmObservedStopped` routed by exact VM name among them; a capacity report zeroes each unknown
+dimension), `mayfly_control::recovery` (P1: verify through the `StructureCheck` port,
+`projection::prepare` before any writer unless a kind is unknown, `StartRun`, hello,
+`MintEpoch` with the floor and the `crash_loop` input OPS-05 computes, a verified restart,
+`CloseAdmission{recovering}` on a registered host, `Welcome` with `cp_clock`,
+`HostSessions::open`; then per inventory: wait on an incomplete one, propose only in safe mode,
+else adopt, record the inventory through the inbox, `RequestRetirement`/`Quarantine` for the
+rows that ask, `AttemptSaga::reconsider` per adopted attempt, and, unless a listed VM said
+nothing (`Recovery::Waiting`), `CompleteRecovery` and `OpenAdmission{recovering}`;
+`enter_safe_mode` calls `set_mode`, `session_ended` calls `close`) and
+`mayfly_control::recovery::repair` (P20 application: plan units read now and conditioned on the
+current heads, the attempt command on the bound ones through `SaveRequest::with_expected` for its
+own stream, an open intent resumed by re-running the attempt command so its receipt answers, the
+outcome from the attempt unit's receipt, `LeaveSafeMode{plan_completed}` with a verification taken
+after the completion). Left for later tasks: `DeleteLeaked` and `Report` rows are reported (no
+attempt command deletes for a terminal attempt). `SuspendCleanup`: the model adopts the attempt
+with its effect held (`hold`), but the `Attempt` aggregate cannot hold a directive in flight after
+an adoption (the relay would send the pending delete again; `Quarantine` is refused while a
+directive is in flight), so the attempt is left unadopted: the sink holds its delete, its lease
+keeps its slot, recovery completes and reopens admission with it in `Recovered::held`, and
+`Startup::resume_held` classifies it again on every later inventory (RT-02 calls it) until GitHub
+shows the runner neither online nor busy. The divergence is recorded in `doc/formal-models.md`;
+CP-04C closes it model first. A pass that waits keeps its counts for the one that completes. A
+plan's quarantine adopts first, after checking purely that the quarantine would be accepted on
+the adopted state. A shared
+`inventory_ref` derives an adoption's reference from the inventory observation or the plan's
+inventory digest (no inventory event); a plan's `report`/`ignore` actions have no command
+(`Applied::NoCommand`: the drawer leaves them out); the listing carries no shim or `exit.json`
+facts (a running VM's shim is read as alive); a reconnect's new epoch, the per-consumer
+`catch_up` and the wiring are RT-02's; F42 (restart within the session TTL) needs the listener
+and moves to GH-04; the capacity report's `base` is recorded as zero (CP-04B).
+
+#### CP-04B Our non-VM use in the capacity report
+Cites: ADR 0024, ADR 0052, plan §3.2, `doc/event-store.md` §6 (compatibility). The protocol's
+`CapacityReport` does not separate our own use outside any VM (image files, bases, pulls in
+flight) from `used`, so CP-04's inbox records `ReportedCapacity::base` as zero and the control
+plane may propose a VM the data plane's ledger then refuses `insufficient_resources` (the host is
+held until a newer report, CP-03). Add an optional `base: Capacity` to `CapacityReport`
+(additive; a reader that ignores it stays correct), written by the data plane's ledger
+(`images` + `bases` + in-flight pulls) in a release that only writes it, read by the inbox in the
+next (prepare, then activate). Interim, until then: the inbox derives a conservative `base` as
+`used − foreign − Σ` the footprints of the host's leases, floored at zero per dimension, so the
+control plane over-estimates our own use and under-admits rather than proposing what will be
+refused.
+Accept: a report with `base` records it; one without it records the interim estimate, never
+more admissible than with it (property); a session older than the field gets none (`written_in`).
+
+#### CP-04C Hold an attempt's cleanup after adoption
+Cites: plan §10 ("Deleting | present | active"), `formal/recovery.qnt` (`apply`'s `hold`,
+`activeRunnerSuspendsCleanupTest`), `doc/formal-models.md` (recovery, "Code diverges from the
+model"), ADRs 0025, 0034. CP-04 leaves a held cleanup's attempt unadopted, because the `Attempt`
+cannot hold a directive in flight after an adoption. Model first in `formal/lifecycle.qnt`: an
+adoption reads a directive in flight as `Unknown` (as `recovery.qnt` already assumes), and a
+`HoldCleanup` command (with its release) records the hold that the saga's next step and the
+relay's sink respect; then the aggregate, its matrix, goldens and determinism cases, and start-up
+adopting a held attempt with its cleanup held, as the model does.
+Accept: the model's scenarios pass with a negative control (a hold the sink ignores sends the
+delete); a held attempt is adopted and no delete is sent until the hold is released; the
+divergence note in `doc/formal-models.md` is removed.
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per

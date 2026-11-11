@@ -1,11 +1,11 @@
 //! The data-plane sessions the control plane holds: per host, the run epoch its last
 //! `Welcome` opened and the session's mode (plan §3.2, ADR 0026).
 //!
-//! The handshake (CP-04's startup and reconnect) writes it; the attempt saga reads the epoch
-//! its commands are issued under (I18), and the directive relay's sink stamps it on every frame
-//! at send time and holds the kinds safe mode refuses (I29). The epoch is never stored with a
-//! directive: a directive decided once is sent under whichever session is current when it is
-//! sent (`doc/event-store.md` §5.3).
+//! Start-up's handshake writes it (`crate::recovery::Startup::open`; a reconnect, RT-02); the
+//! attempt saga reads the epoch its commands are issued under (I18), and the directive relay's
+//! sink stamps it on every frame at send time and holds the kinds safe mode refuses (I29). The
+//! epoch is never stored with a directive: a directive decided once is sent under whichever
+//! session is current when it is sent (`doc/event-store.md` §5.3).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};

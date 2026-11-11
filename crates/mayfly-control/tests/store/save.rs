@@ -703,6 +703,61 @@ fn should_refuse_reads_in_execute_when_a_retry_could_not_rebuild_them() {
 }
 
 #[test]
+fn should_refuse_as_a_conflict_when_the_own_stream_is_not_where_expected() {
+    // given a stream at revision 0, and a request that requires it at none
+    let h = harness(&MemoryJournal::new());
+    save(&h.store, inc(1, 1, 9)).unwrap_or_else(|e| panic!("{e}"));
+
+    // when
+    let moved = save(
+        &h.store,
+        inc(2, 1, 9).with_expected(ExpectedRevision::NoStream),
+    );
+    let held = save(&h.store, inc(3, 1, 9).with_expected(at(0)));
+    let executed = block_on(
+        h.store
+            .execute::<Counter>(inc(4, 1, 9).with_expected(at(1))),
+    );
+
+    // then
+    assert_eq!(
+        moved,
+        Err(SaveError::Conflict {
+            stream: stream("counter-1"),
+            expected: ExpectedRevision::NoStream,
+            actual: Some(StreamRevision::new(0)),
+        }),
+        "never decided on a stream found elsewhere"
+    );
+    let receipt =
+        block_on(h.journal.receipt(CommandId::from_u128(2))).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(receipt, None, "no receipt: nothing was decided");
+    assert_eq!(held, Ok(accepted("counter-1", 1, &[(3, 0)], false)));
+    assert_eq!(executed, Err(SaveError::ReadsOutsideRetry));
+}
+
+#[test]
+fn should_refuse_the_commit_when_the_own_stream_moves_after_the_expected_load() {
+    // given a competitor that commits between the load and the append
+    let h = harness(&MemoryJournal::new());
+    save(&h.store, inc(1, 1, 9)).unwrap_or_else(|e| panic!("{e}"));
+    h.journal.play(Script::Race {
+        stream: stream("counter-1"),
+        n: 1,
+    });
+
+    // when
+    let outcome = save(&h.store, inc(2, 1, 9).with_expected(at(0)));
+
+    // then
+    assert!(
+        matches!(outcome, Err(SaveError::Conflict { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(head(&h.journal, "counter-1"), Some(StreamRevision::new(1)));
+}
+
+#[test]
 fn should_rebuild_reads_in_the_closure_when_a_read_stream_moves() {
     // given
     let h = harness(&MemoryJournal::new());

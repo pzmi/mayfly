@@ -49,12 +49,49 @@ impl std::fmt::Debug for BeforeReceipt {
     }
 }
 
+/// Work that runs once, right before the next append that writes `stream` (as an append or a
+/// read condition): another writer committing between a use case's read and its commit.
+pub struct BeforeAppend {
+    stream: StreamId,
+    reads_too: bool,
+    work: Box<dyn FnOnce() + Send>,
+}
+
+impl BeforeAppend {
+    /// Before the next unit that appends to or reads `stream`.
+    pub fn new(stream: StreamId, work: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            stream,
+            reads_too: true,
+            work: Box::new(work),
+        }
+    }
+
+    /// Before the next unit that appends to `stream`.
+    pub fn appending(stream: StreamId, work: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            stream,
+            reads_too: false,
+            work: Box::new(work),
+        }
+    }
+}
+
+impl std::fmt::Debug for BeforeAppend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeforeAppend")
+            .field("stream", &self.stream)
+            .finish_non_exhaustive()
+    }
+}
+
 /// See the module docs. Clones share the script and the store.
 #[derive(Debug, Clone)]
 pub struct ScriptedJournal {
     pub inner: MemoryJournal,
     script: Arc<Mutex<(Script, u128)>>,
     before_receipt: Arc<Mutex<Option<BeforeReceipt>>>,
+    before_append: Arc<Mutex<Option<BeforeAppend>>>,
 }
 
 impl ScriptedJournal {
@@ -63,6 +100,30 @@ impl ScriptedJournal {
             inner,
             script: Arc::new(Mutex::new((Script::Plain, 0))),
             before_receipt: Arc::default(),
+            before_append: Arc::default(),
+        }
+    }
+
+    /// Runs `work` right before the next append whose unit writes or reads its stream.
+    pub fn before_next_append(&self, work: BeforeAppend) {
+        *self
+            .before_append
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(work);
+    }
+
+    fn run_before_append(&self, unit: &UnitOfWork) {
+        let mut slot = self
+            .before_append
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let touches = slot.as_ref().is_some_and(|hook| {
+            unit.appends.iter().any(|a| a.stream == hook.stream)
+                || (hook.reads_too && unit.reads.iter().any(|r| r.stream == hook.stream))
+        });
+        if touches && let Some(hook) = slot.take() {
+            drop(slot);
+            (hook.work)();
         }
     }
 
@@ -121,6 +182,7 @@ fn lost() -> AppendError {
 
 impl Journal for ScriptedJournal {
     async fn append(&self, unit: UnitOfWork) -> Result<Appended, AppendError> {
+        self.run_before_append(&unit);
         let (script, call) = self.step();
         match script {
             Script::Plain => self.inner.append(unit).await,

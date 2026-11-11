@@ -3,9 +3,9 @@
 //! the data plane's executor on the fake provider; the in-process link between them, opened by
 //! a real handshake.
 //!
-//! The observation inbox is CP-04's: [`Cp::record`] stands in for it, mapping the few answers
-//! these tests need onto `RecordObservation`, and a test that loses a reply simply does not
-//! record it.
+//! [`Cp::record`] hands an answer to the control plane's observation inbox
+//! (`mayfly_control::inbox`), as the link's receiving half will; a test that loses a reply simply
+//! does not record it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -19,21 +19,21 @@ use mayfly_adapter_sqlite::{SqliteJournal, SqliteLedger, SqliteOptions};
 use mayfly_control::delivery::{
     DeliveryConfig, DeliveryLedger, DeliveryWorker, DirectiveRelay, Kicks, LinkSink, SinkConfig,
 };
+use mayfly_control::inbox::Inbox;
 use mayfly_control::journal::{Journal, StreamId};
 use mayfly_control::saga::{AttemptSaga, SagaConfig};
 use mayfly_control::sessions::{HostSession, HostSessions};
 use mayfly_control::store::{AggregateStore, Clock, decode_event};
 use mayfly_control_domain::ControlAggregates;
-use mayfly_control_domain::attempt::{Attempt, AttemptEvent, AttemptState, DirectiveIssued, Fact};
+use mayfly_control_domain::attempt::{Attempt, AttemptEvent, AttemptState, DirectiveIssued};
 use mayfly_data::{Config, Diagnostics, Executor, GuestAnswer, ImageListing, Ports};
 use mayfly_data_domain::{HostProbe, Sizing};
 use mayfly_domain::{Epoch, HostId, ImageDigest, Millis, Resources, Sample};
 use mayfly_protocol::{
     BaseName, CURRENT, Capacity, Directive, GuestFacts, GuestOs, HandshakeResponder as _,
-    HostFacts, Mode, Observation, ObservationKind, ObservationSource as _, RefusalReason,
-    SUPPORTED, Welcome, negotiate,
+    HostFacts, Mode, Observation, ObservationSource as _, SUPPORTED, Welcome, negotiate,
 };
-use mayfly_testkit::attempts::{FixedDetails, GIB, instance, observe, save, start};
+use mayfly_testkit::attempts::{FixedDetails, GIB, instance, save, start};
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use mayfly_testkit::delivery::MemoryLedger;
 use mayfly_testkit::journal::MemoryJournal;
@@ -232,44 +232,22 @@ impl<B: Backend> Cp<B> {
             .unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// What the inbox (CP-04) will do with an answer: `RecordObservation` on attempt `n`.
+    /// The observation inbox records an answer (P8); `n` names the attempt the answer is
+    /// expected to reach.
     pub async fn record(&self, n: u128, observation: &Observation) {
-        let fact = fact_of(observation);
-        save(
-            &self.store,
-            n,
-            0x9000 + observation.observation_id.as_u128(),
-            EPOCH,
-            observe(
-                observation.observation_id.as_u128(),
-                observation.epoch,
-                fact,
-            ),
-        )
-        .await;
-    }
-}
-
-/// The few answers these tests record, as the attempt reads them.
-fn fact_of(observation: &Observation) -> Fact {
-    let directive_id = observation
-        .answers
-        .map(|a| a.directive_id)
-        .unwrap_or_else(|| panic!("not an answer: {observation:?}"));
-    match &observation.kind {
-        ObservationKind::VmCloned { instance_id } => Fact::VmCloned {
-            directive_id,
-            instance_id: instance_id.clone(),
-        },
-        ObservationKind::VmBooted => Fact::VmBooted { directive_id },
-        ObservationKind::DirectiveRefused {
-            reason: RefusalReason::SafeMode,
-        } => Fact::DirectiveRefused {
-            directive_id,
-            reason: mayfly_control_domain::attempt::RefusalReason::SafeMode,
-        },
-        ObservationKind::OutcomeUnknown { .. } => Fact::OutcomeUnknown { directive_id },
-        other => panic!("not mapped here: {other:?}"),
+        assert_eq!(
+            observation
+                .answers
+                .and_then(|a| a.attempt)
+                .map(|a| a.attempt_id),
+            Some(mayfly_domain::AttemptId::from_u128(n)),
+            "an answer about attempt {n}"
+        );
+        let recorded = Inbox::new(&self.store, HostId::sample(), EPOCH)
+            .record(observation)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(recorded.accepted, 1, "{recorded:?}");
     }
 }
 

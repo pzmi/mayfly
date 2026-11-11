@@ -17,14 +17,23 @@
 //!   deadline timeouts that make an unanswered directive `Unknown` (P7).
 //! - [`sessions`]: the data-plane sessions by host: the epoch the relay stamps and the saga
 //!   issues under, and the mode that holds effects (I29).
+//! - [`start`]: policy P2, an attempt started from its host's lease under a read of the host
+//!   stream at the revision the lease was read at.
+//! - [`inbox`]: the observation inbox (P8): observations as the units they map to, keyed by
+//!   data plane and observation, acked only after they commit.
+//! - [`recovery`]: the startup use case (P1) and the application of a recovery plan (P20).
 //! - [`secrets`]: the `SecretProvider` port, its refusals and the `doctor` check (ADR 0033).
 
 pub mod delivery;
+mod ids;
+pub mod inbox;
 pub mod journal;
 pub mod projection;
 pub mod queries;
 pub mod reconciler;
+pub mod recovery;
 pub mod saga;
 pub mod secrets;
 pub mod sessions;
+pub mod start;
 pub mod store;

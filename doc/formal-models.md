@@ -778,6 +778,18 @@ without adding a model change; what they decide beyond it is pinned by Rust test
   (`tests/quarantine/`). The model's `quarantineNeverDeleted` covers recovery's side only.
 - The mode precedence (`tests/mode.rs`, an exhaustive table).
 
+**Code diverges from the model (CP-04, until CP-04C):** a held cleanup. In the model,
+`suspend_cleanup` adopts the attempt with its effect held (`apply` sets `hold`, `nextDirective`
+issues nothing while it holds; `activeRunnerSuspendsCleanupTest`), so it is seen and
+`complete` holds. In the code the `Attempt` aggregate cannot hold a directive in flight after an
+adoption (adopting lets the relay's sink send the pending delete again, and `Quarantine` is
+refused while a directive is in flight), so start-up leaves a held attempt **unadopted**: the
+sink holds its delete (`attempt_not_adopted`), its lease keeps its slot, recovery completes and
+reopens admission with the attempt reported held, and every later inventory classifies it again
+(`Startup::resume_held`), adopting it and resuming its cleanup once GitHub shows its runner
+neither online nor busy (`crates/mayfly-control/tests/store/recovery.rs::should_resume_a_held_cleanup_when_github_reports_the_runner_offline`).
+CP-04C closes the gap model first.
+
 ### registration
 
 Two attempts, each with its registration stream (`regs`) and the retirement side of its
