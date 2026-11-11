@@ -28,7 +28,7 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -312,15 +312,11 @@ fn classify_java(probe: Option<(bool, &str)>) -> Result<(), String> {
 
 /// `java -version` writes to stderr.
 pub(crate) fn require_java() -> Result<(), String> {
-    let probe = std::process::Command::new("java")
-        .arg("-version")
-        .output()
-        .ok()
-        .map(|o| {
-            let text = String::from_utf8_lossy(&o.stderr).into_owned()
-                + &String::from_utf8_lossy(&o.stdout);
-            (o.status.success(), text)
-        });
+    let probe = Command::new("java").arg("-version").output().ok().map(|o| {
+        let text =
+            String::from_utf8_lossy(&o.stderr).into_owned() + &String::from_utf8_lossy(&o.stdout);
+        (o.status.success(), text)
+    });
     classify_java(probe.as_ref().map(|(ok, t)| (*ok, t.as_str())))
 }
 
@@ -492,9 +488,12 @@ struct Job<'a> {
     invariants: Vec<String>,
 }
 
-/// Runs one bounded verification and returns its output and duration.
-fn verify_one(ctx: &Context, job: &Job<'_>) -> (Option<Output>, Duration) {
-    let start = Instant::now();
+/// The `quint verify` command of one bounded run. It runs in [`out_dir`]: the Apalache server
+/// Quint starts inherits that directory and writes its run directories to `_apalache-out`
+/// under it, inside the ignored `target/`, never into the checkout (DEC-06 committed 37 such
+/// files from runs started at the repository root). Pinned by
+/// `should_run_apalache_under_the_target_dir_when_a_bounded_run_starts`.
+fn verify_command(ctx: &Context, job: &Job<'_>, port: u16) -> Command {
     let file = ctx.formal.join(job.bound.file);
     let mut command = quint(&ctx.formal);
     command
@@ -504,10 +503,17 @@ fn verify_one(ctx: &Context, job: &Job<'_>) -> (Option<Output>, Duration) {
             &job.invariants,
             &ctx.apalache,
             &ctx.out.join(APALACHE_CONFIG_FILE),
-            free_port(),
+            port,
         ))
         .current_dir(&ctx.out)
         .env("JVM_ARGS", jvm_args());
+    command
+}
+
+/// Runs one bounded verification and returns its output and duration.
+fn verify_one(ctx: &Context, job: &Job<'_>) -> (Option<Output>, Duration) {
+    let start = Instant::now();
+    let command = verify_command(ctx, job, free_port());
     let output = output_of(command, "quint verify");
     if let Some(output) = &output {
         keep_log(
@@ -953,6 +959,34 @@ mod tests {
                 "localhost:9000",
             ]
         );
+    }
+
+    #[test]
+    fn should_run_apalache_under_the_target_dir_when_a_bounded_run_starts() {
+        // given
+        let ctx = Context {
+            formal: formal_dir(),
+            out: out_dir(),
+            apalache: "0.62.1".to_owned(),
+            fetched: true,
+        };
+        let bound = Bound {
+            file: "registration.qnt",
+            step: "step",
+            steps: 8,
+        };
+        let job = Job {
+            bound: &bound,
+            invariants: Vec::new(),
+        };
+
+        // when
+        let command = verify_command(&ctx, &job, 9000);
+
+        // then
+        let dir = command.get_current_dir().map(Path::to_path_buf);
+        assert_eq!(dir, Some(out_dir()));
+        assert!(out_dir().starts_with(repo::root().join("target")));
     }
 
     #[test]

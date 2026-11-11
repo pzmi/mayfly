@@ -26,7 +26,9 @@ always safe; only the answer can be missing.
 1. **Quarantine whenever ownership or an outcome cannot be proven** (closed reason set,
    `doc/domain-model.md` §6.10). The VM is kept (stopped unless a job is live; since ADR 0076,
    only after its runner's deregistration when one may be registered in it), its lease keeps
-   its resources and it is never reused.
+   its resources and it is never reused. After GitHub answers busy for that deregistration,
+   only a `RunnerExited` lets the stop go (ADR 0076): an exit nobody observes keeps the VM
+   running until an operator resolves the case, a capacity loss decision 3 accepts.
 2. **A quarantined VM is never deleted automatically**: no retention timer, no cap-driven
    deletion, no deletion to make room. It is deleted only by an operator's resolution, with
    ownership proof re-checked by the data plane, or released when a complete inventory observes

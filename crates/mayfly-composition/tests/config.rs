@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use mayfly_composition::config::{
     CapacityPolicy, Config, ConfigErrorKind, GithubScope, GuestOs, LoadError, ProviderKind, Tier,
-    TimeOfDay,
+    TimeOfDay, plan_policy,
 };
+use mayfly_control_domain::capacity;
 use mayfly_domain::SecretRef;
 
 fn fixtures(family: &str) -> PathBuf {
@@ -195,6 +196,26 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     );
     assert_eq!(mac.capacity_policy, CapacityPolicy::Demand);
     assert_eq!(config.pools[1].guest_os, GuestOs::Linux);
+}
+
+#[test]
+fn should_map_the_capacity_policy_when_a_pool_is_planned() {
+    // given
+    let text = read("valid", "full.toml");
+    let config = Config::parse(&text).unwrap();
+    let demand = config
+        .pools
+        .iter()
+        .find(|p| p.capacity_policy == CapacityPolicy::Demand)
+        .unwrap();
+
+    // when
+    let planned = plan_policy(demand.capacity_policy, 3);
+    let exact = plan_policy(CapacityPolicy::Exact, 3);
+
+    // then
+    assert_eq!(planned, capacity::CapacityPolicy::Demand { waiting: 3 });
+    assert_eq!(exact, capacity::CapacityPolicy::Exact);
 }
 
 #[test]

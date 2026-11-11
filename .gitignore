@@ -1,3 +1,5 @@
 /target
 /.work/
 /formal/node_modules/
+/_apalache-out/
+/formal/_apalache-out/

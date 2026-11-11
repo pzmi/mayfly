@@ -27,6 +27,7 @@ use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use mayfly_control_domain::capacity;
 use mayfly_domain::{PoolName, Resources, SecretRef};
 use toml::{Table, Value};
 
@@ -171,6 +172,22 @@ pub enum CapacityPolicy {
     /// if GitHub counts only the jobs it assigned under the `maxCapacity` mayfly sent, a pool
     /// carved nothing never learns of its job and starves.
     Demand,
+}
+
+/// The capacity policy a reconciler pass hands `capacity::plan` for a pool configured with
+/// `policy` (ADR 0069, DEC-06F): `exact` is `Exact` whatever waits; `demand` is
+/// `Demand { waiting }`, where `waiting` is what the pass derives for the pool (CP-03): its
+/// scale set's latest `totalAssignedJobs` beyond its live runners, plus its `min_prepared`
+/// deficit, never capped by the pool's carve-out (a capped count would feed back: carved
+/// nothing, told nothing). Without this mapping the key would be parsed and ignored. RT-02
+/// wires it where composition builds the plan's pool inputs. Pinned by
+/// `tests/config.rs::should_map_the_capacity_policy_when_a_pool_is_planned`.
+#[must_use]
+pub const fn plan_policy(policy: CapacityPolicy, waiting: u32) -> capacity::CapacityPolicy {
+    match policy {
+        CapacityPolicy::Exact => capacity::CapacityPolicy::Exact,
+        CapacityPolicy::Demand => capacity::CapacityPolicy::Demand { waiting },
+    }
 }
 
 /// The trust tier a pool serves (ADR 0027).

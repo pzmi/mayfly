@@ -708,10 +708,12 @@ module lifecycle {
   }
 
   /// `RunnerExited{code}`: the runner process ended. Inside quarantine it is only recorded:
-  /// an exited runner takes no job, so the stop no longer waits for its deregistration.
+  /// an exited runner takes no job, so the stop no longer waits for its deregistration. Inside
+  /// quarantine it is accepted whatever the JIT, as `decide` accepts it (DEC-06F): the
+  /// observation is a fact, and with no JIT issued it changes nothing the stop reads.
   action runnerExited = all {
     Set(LISTENING, BUSY).contains(a.phase) or (a.phase == ACTIVATING and a.jit == "taken")
-      or (a.phase == QUARANTINED and a.jit != "none"),
+      or a.phase == QUARANTINED,
     not(a.runnerExited),
     commit("observation",
       { ...a, phase: if (a.phase == QUARANTINED) QUARANTINED else FINISHED, runnerExited: true },

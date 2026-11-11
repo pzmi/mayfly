@@ -361,11 +361,16 @@ module registration {
   /// registration's phase: a quarantine does not wait for the job to end, and a job the attempt
   /// never saw bound may be running; GitHub then answers busy, the stop is withdrawn and the VM
   /// keeps running (its quarantine holds its capacity anyway). While GitHub cannot be reached
-  /// nothing answers, and the stop waits.
+  /// nothing answers, and the stop waits. A quarantine during a pending retirement re-keys it:
+  /// the attempt's `AttemptQuarantined` clears its `RetirementRequested` and its
+  /// `StopDeregistrationRequested` is the new key (DEC-06F), so a busy answer to the old
+  /// retirement's request does not withdraw the stop, and a removal still in flight for it
+  /// serves the stop when it answers (`quarantineDuringPendingRetirementTest`). Only a confirmed
+  /// retirement is not re-keyed: P11 has already answered it (`Retiring` in the attempt).
   action requestQuarantineStop(i: int): bool = {
     val at = atts.get(i)
     all {
-      at.retire == NOT_RETIRING,
+      at.retire != RETIRE_CONFIRMED,
       at.vm,
       commit("command", regs,
         atts.set(i, { ...at, retire: RETIRE_REQUESTED, retirements: at.retirements + 1 }),
@@ -756,6 +761,31 @@ module registration {
       .then(ghToggles).then(deregisterCall(1, false))
       .then(confirmRetirement(1)).then(stopVm(1))
       .expect(not(atts.get(1).vm) and allInvariants)
+  }
+
+  // DEC-06F: a quarantine while a retirement's removal is in flight re-keys the request; the
+  // removal answers 204 and the stop follows it.
+  run quarantineDuringPendingRetirementTest = {
+    init.then(toConnected(1)).then(requestRetirement(1)).then(requestDeregistration(1))
+      .expect(regs.get(1).deregFor == 1)
+      .then(requestQuarantineStop(1))
+      .expect(atts.get(1).retirements == 2 and stepOf(regs.get(1), atts.get(1)) == WAIT)
+      .then(deregisterCall(1, false)).expect(stepOf(regs.get(1), atts.get(1)) == CONFIRM)
+      .then(confirmRetirement(1)).then(stopVm(1))
+      .expect(not(atts.get(1).vm) and deregisterBeforeStop and allInvariants)
+  }
+
+  // ...and when a job started under the old retirement's removal, its busy answer belongs to the
+  // old key: the stop asks again, is answered busy itself, and only then is withdrawn.
+  run quarantineDuringPendingRetirementBusyTest = {
+    init.then(toConnected(1)).then(requestRetirement(1)).then(requestDeregistration(1))
+      .then(jobStarts(1)).then(requestQuarantineStop(1))
+      .then(deregisterCall(1, false))
+      .expect(regs.get(1).busyFor == 1 and stepOf(regs.get(1), atts.get(1)) == DEREGISTER)
+      .then(requestDeregistration(1)).then(deregisterCall(1, false))
+      .expect(stepOf(regs.get(1), atts.get(1)) == WITHDRAW)
+      .then(withdrawRetirement(1))
+      .expect(atts.get(1).vm and atts.get(1).retire == NOT_RETIRING and allInvariants)
   }
 
   /// KER-04F's quarantine stop before ADR 0076, a negative control kept out of every step

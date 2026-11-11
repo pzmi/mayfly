@@ -1669,6 +1669,42 @@ fn should_stop_a_quarantined_vm_at_once_when_no_runner_can_be_registered_in_it()
 }
 
 #[test]
+fn should_request_the_stop_deregistration_when_quarantined_during_a_pending_retirement() {
+    // given: a retirement waits for P11 when the attempt is quarantined (DEC-06F, the model's
+    // `quarantineDuringPendingRetirementTest`): the stop's request is the new key P11 answers,
+    // so a busy answer to the retirement's own request cannot withdraw the stop
+    let (waiting, _) = reach(&then(
+        listening(),
+        [AttemptCommand::RequestRetirement {
+            reason: RetireReason::Surplus,
+        }],
+    ));
+    // when
+    let quarantined = apply(
+        &waiting,
+        saga(AttemptCommand::Quarantine {
+            reason: QuarantineReason::ForensicRetention,
+        }),
+    );
+    // then
+    let (state, events) = quarantined.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(waiting.retirement_requested.is_some());
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AttemptEvent::AttemptQuarantined(..),
+            AttemptEvent::StopDeregistrationRequested(..)
+        ]
+    ));
+    assert_eq!(state.retirement_requested, None);
+    assert_eq!(state.stop_deregistration, StopDeregistration::Requested);
+    assert_eq!(
+        code(apply(&state, saga(issue(10)))),
+        Some("nothing_to_issue")
+    );
+}
+
+#[test]
 fn should_request_the_deregistration_once_when_a_quarantined_attempt_is_quarantined_again() {
     // given: the quarantined runner's VM replaced behind its back (ADR 0026), seen by the
     // inventory: the case gains its reason, and the request already made is not repeated

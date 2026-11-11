@@ -886,6 +886,14 @@ the capacity policy and the recovery table; a data-plane `insufficient_resources
 definite no and re-read next pass.
 Accept: 1,000-step seeded simulation in testkit never violates I02/I03/I04/I07/I08/I23/I24/I26/I27
 and never allocates beyond a report.
+Note (DEC-06F, ADR 0069): each pass hands `capacity::plan` every pool's policy through
+`mayfly_composition::config::plan_policy` (a pool's `capacity_policy`; RT-02 wires it where
+composition builds the plan's pool inputs). For a `demand` pool the pass derives `waiting` = the
+pool's scale set's latest `totalAssignedJobs` beyond its live runners, plus its `min_prepared`
+deficit, never capped by the pool's carve-out or the `maxCapacity` sent (a capped count feeds back:
+carved nothing, told nothing; `formal/scheduling.qnt`'s `demandStarvesWhenDemandIsInvisibleTest`).
+Accept adds: a `demand` pool with no waiting job keeps nothing ahead of a later pool, and one with
+assigned jobs beyond its runners is carved for them (component test through the config).
 
 #### CP-04 Observation inbox and startup recovery
 Cites: plan §10, §3.2; dm P1, P3; event-store §5.4, §6.3; ADRs 0025, 0026, 0037. Observations enter
@@ -922,6 +930,16 @@ only journaled ids; unrecognised reported). After an unknown issue, record `Reco
 after a second listing by name past a grace period (GitHub's listing may lag a lost mint; KER-09).
 Accept: F06, F07, F32 component tests; only journaled ids deleted; unrecognised reported; no
 name-pattern deletion (`NameGuessingRegistry` fails the contract).
+Note (DEC-06F, ADR 0076): P11 serves the quarantine stop too. It reads an attempt's
+`StopDeregistrationRequested` as a retirement key (`registration::retirement_step`, the model's
+`requestQuarantineStop`) and answers it with `RequestDeregistration{Retirement}`, then
+`ConfirmRetirement` or `WithdrawRetirement` on the attempt, which inside quarantine records
+`StopDeregistrationConfirmed` or `StopDeregistrationRefusedBusy`. Without it a quarantined VM
+whose runner may be registered is never stopped. A quarantine during a pending retirement
+re-keys it: the newer event is the key, and a busy answer to the older request does not withdraw
+the stop (`quarantineDuringPendingRetirementBusyTest`). Accept adds: a component test in which a
+quarantined VM's idle runner is deregistered and the VM then stopped, and one in which a busy
+answer keeps it running.
 
 #### CP-06 Breaker, quarantine and Unknown-escalation policies
 Cites: dm P15, P16, P19; ADR 0025. Breaker counting and trips per (pool, digest); quarantine opening

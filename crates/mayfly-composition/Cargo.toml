@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 mayfly-adapter-tart = { version = "0.1.0", path = "../mayfly-adapter-tart" }
+mayfly-control-domain = { version = "0.1.0", path = "../mayfly-control-domain" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 toml = "1.2.1"
@@ -21,7 +22,6 @@ toml = "1.2.1"
 mayfly-adapter-link = { path = "../mayfly-adapter-link" }
 mayfly-adapter-sqlite = { path = "../mayfly-adapter-sqlite" }
 mayfly-control = { path = "../mayfly-control" }
-mayfly-control-domain = { path = "../mayfly-control-domain" }
 mayfly-data = { path = "../mayfly-data" }
 mayfly-data-domain = { path = "../mayfly-data-domain" }
 mayfly-protocol = { path = "../mayfly-protocol" }

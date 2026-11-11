@@ -274,7 +274,8 @@ module scheduling_machine {
   /// an operator's argument at every use, keeps the plan small: a `Shape` read field by field,
   /// the floors of `less` and the nested minima of `fitIn` copied the plan's terms until KER-05D's
   /// carve ran it out of memory before it checked anything (DEC-06). Equal to `carveTwo` on
-  /// every such input (`carveCountsTest` in `scheduling`).
+  /// every such input, and `countsOf` gives the shapes KER-05D folded from the leases
+  /// (`carveCountsTest` in `scheduling`).
   pure def carveCounts(f: Free, a: Counts, b: Counts): (int, int) = {
     val headA = min2(max0(MAX_RUNNING - a.live), a.cap)
     val headB = min2(max0(MAX_RUNNING - b.live), b.cap)
@@ -1021,21 +1022,79 @@ module scheduling {
     demandShape(exact, c.cap)
   }
 
-  /// carveCounts (DEC-06): the state machine's `carveCounts` is `carveTwo` over the shapes the
-  /// counts give, on every free capacity of a small host, both pool orders, every count of
-  /// runners and of running and stopped quarantined leases of the first pool, every live count
-  /// of the second, every cap (`MAX_RUNNING` is `EXACT`), open or closed.
-  pure val carveCountsAgree = FREES.forall(f => ORDERS.forall(o =>
-    tuples(0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING),
-      0.to(MAX_RUNNING), Set(true, false)).forall(t => {
-      val a = { pool: o._1, open: true, live: t._1 + t._2, runners: t._1, stopped: t._3, cap: t._5 }
-      val b = { pool: o._2, open: t._6, live: t._4, runners: t._4, stopped: 0, cap: MAX_RUNNING }
-      (t._3 > t._2 or t._1 + t._2 > MAX_RUNNING) or and {
-        carveCounts(f, a, b) == carveTwo(f, shapeOfCounts(a), shapeOfCounts(b)),
-        carveCounts(f, { ...a, open: false }, b)
-          == carveTwo(f, shapeOfCounts({ ...a, open: false }), shapeOfCounts(b)),
-      }
-    })))
+  /// One pool's counts a state can hold: (runners, quarantined leases, stopped ones among them)
+  /// with at most `MAX_RUNNING` live and no more stopped than quarantined.
+  pure val POOL_COUNTS: Set[(int, int, int)] =
+    tuples(0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING))
+      .filter(t => t._1 + t._2 <= MAX_RUNNING and t._3 <= t._2)
+
+  /// One pool's counts with its cap: every `POOL_COUNTS` with every cap (`MAX_RUNNING` is
+  /// `EXACT`, below it `DEMAND`'s waiting jobs).
+  pure def countsFor(pool: str, open: bool, t: ((int, int, int), int)): Counts = {
+    pool: pool, open: open, live: t._1._1 + t._1._2, runners: t._1._1, stopped: t._1._3,
+    cap: t._2,
+  }
+  pure val COUNTS_CAPS: Set[((int, int, int), int)] = tuples(POOL_COUNTS, 0.to(MAX_RUNNING))
+
+  /// carveCounts (DEC-06, DEC-06F): the state machine's `carveCounts` is `carveTwo` over the
+  /// shapes the counts give, on every free capacity of a small host, both pool orders, every
+  /// count of runners and of running and stopped quarantined leases of either pool and every cap
+  /// of either pool, both open; and with either pool closed, every count and cap of the other.
+  /// With `shapesFromLeasesAgree` it pins the state machine's plan to `carveTwo` over KER-05D's
+  /// lease fold.
+  pure def carveAgrees(f: Free, a: Counts, b: Counts): bool =
+    carveCounts(f, a, b) == carveTwo(f, shapeOfCounts(a), shapeOfCounts(b))
+  pure val carveCountsAgree = FREES.forall(f => ORDERS.forall(o => and {
+    tuples(COUNTS_CAPS, COUNTS_CAPS).forall(t =>
+      carveAgrees(f, countsFor(o._1, true, t._1), countsFor(o._2, true, t._2))),
+    COUNTS_CAPS.forall(t => and {
+      carveAgrees(f, countsFor(o._1, false, t), countsFor(o._2, true, t)),
+      carveAgrees(f, countsFor(o._1, true, t), countsFor(o._2, false, t)),
+    }),
+  }))
+
+  /// KER-05D's `Shape` of a pool, folded from the leases (what each quarantined lease falls
+  /// short of a VM, `vm − holdsOf`), open with the host's gate and the pool's terms, and cut by
+  /// `demandShape` to the pool's waiting jobs under `DEMAND`: written from the leases and the
+  /// host's policy, not from `countsOf`.
+  pure def shapeOf(h: Host, ls: int -> Lease, ts: str -> Terms, pool: str): Shape = {
+    val exact = {
+      vm: vmOf(pool),
+      head: max0(MAX_RUNNING - countOf(ls, pool, live)),
+      room: max0(MAX_RUNNING - countOf(ls, pool, runner)),
+      owed: ATTEMPTS.fold(NOTHING, (s, a) =>
+        if (ls.get(a).phase == QUARANTINED and ls.get(a).pool == pool)
+          plus(s, less(vmOf(pool), holdsOf(ls.get(a))))
+        else s),
+      open: gateOpen(h) and ts.get(pool).open,
+    }
+    if (h.policy.get(pool) == DEMAND) demandShape(exact, h.waiting.get(pool)) else exact
+  }
+
+  /// Every lease one attempt can hold, as the plan reads it (its slot and generation do not
+  /// matter to it).
+  pure val LEASES: Set[Lease] = Set({ phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false },
+    { phase: RELEASED, slot: NO_SLOT, gen: 0, pool: LINUX, running: false })
+    .union(tuples(Set(RESERVED, ACTIVATED, QUARANTINED), POOLS, Set(true, false))
+      .filter(t => t._1 == QUARANTINED or t._3)
+      .map(t => { phase: t._1, slot: 0, gen: 0, pool: t._2, running: t._3 }))
+
+  /// shapesFromLeases (DEC-06F): for every assignment of leases to the attempts with at most
+  /// `MAX_RUNNING` live per pool, either policy and every number of waiting jobs, the gate and
+  /// the terms open or closed, `shapeOfCounts(countsOf(..))` (what the state machine's plan
+  /// carves from, through `carveCounts`) is KER-05D's lease fold `shapeOf`.
+  pure val shapesFromLeasesAgree = tuples(LEASES, LEASES, LEASES)
+    .map(t => Map(1 -> t._1, 2 -> t._2, 3 -> t._3))
+    .filter(ls => POOLS.forall(p => countOf(ls, p, live) <= MAX_RUNNING))
+    .forall(ls => tuples(POOLS, Set(EXACT, DEMAND), 0.to(MAX_RUNNING + 1), Set(true, false),
+      Set(true, false)).forall(t => {
+        val h = {
+          report: { ...NO_REPORT, id: 1 }, gateClosed: not(t._4), drain: NO_DRAIN,
+          policy: POOLS.mapBy(_ => t._2), waiting: POOLS.mapBy(_ => t._3),
+        }
+        val ts = POOLS.mapBy(_ => { rev: 0, open: t._5 })
+        shapeOf(h, ls, ts, t._1) == shapeOfCounts(countsOf(h, ls, ts, t._1))
+      }))
 
   // ---- KER-05D: candidate carve policies (ADR 0069, doc/domain-model.md §6.3.1) --------------
   //
@@ -1258,8 +1317,9 @@ module scheduling {
     sustainedLoad(DEMAND, false) == -1,
   })
 
-  // DEC-06: the state machine's carve, from counts, is `carveTwo` over the pools' shapes.
-  run carveCountsTest = initWith(0, 0).expect(carveCountsAgree)
+  // DEC-06: the state machine's carve, from counts, is `carveTwo` over the pools' shapes, and
+  // (DEC-06F) those shapes are the ones KER-05D folded from the leases.
+  run carveCountsTest = initWith(0, 0).expect(carveCountsAgree and shapesFromLeasesAgree)
 
   // DEC-06: `DEMAND` keeps `carveMonotone`'s properties for every fixed number of waiting jobs,
   // and never carves the later pool less than `EXACT`.
