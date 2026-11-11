@@ -1,8 +1,10 @@
-//! Integration level: the projection contract (PC-01..PC-06) against a real SQLite file in a
-//! tempdir (`doc/event-store.md` §7.1): fresh, reopened between steps, with two writer
-//! connections, and crashed (the process dies holding the file, which is then reopened). A
-//! lower level cannot fail for these reasons: the generations, the meta row and the applied
-//! revisions are rows of the file, read and written in the unit's transaction.
+//! Integration level: the projection contract (PC-01..PC-06, PC-10..PC-12) against a real
+//! SQLite file in a tempdir (`doc/event-store.md` §7.1): fresh, reopened between steps, with
+//! two writer connections (PC-11's unit in the middle of a rebuild then commits on the other
+//! connection), and crashed (the process dies holding the file, which is then reopened); and
+//! "rebuild equals live" over a bounded set of seeded pool, host and attempt histories. A lower
+//! level cannot fail for these reasons: the generations, the claims, the meta row and the
+//! applied revisions are rows of the file, read and written in the unit's transaction.
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -14,7 +16,8 @@ use mayfly_domain::Millis;
 use mayfly_testkit::block_on;
 use mayfly_testkit::contracts::journal::InjectedFault;
 use mayfly_testkit::contracts::projections::{
-    ProjectionContractReport, ProjectionFactory, check_projection_contract,
+    ProjectionContractReport, ProjectionFactory, SuiteOptions, attempt_rebuild_equals_live,
+    check_projection_contract, host_rebuild_equals_live, rebuild_equals_live,
 };
 use tempfile::TempDir;
 
@@ -178,4 +181,67 @@ fn should_pass_projection_contract_when_sqlite_crashes_and_is_reopened() {
 
     // then
     assert!(report.is_green(), "{report}");
+}
+
+/// The seeds and length of the bounded "rebuild equals live" runs on SQLite (the property runs
+/// many more on memory: `crates/mayfly-control/tests/store/projections.rs`).
+const SEEDS: std::ops::Range<u64> = 0..4;
+const STEPS: usize = 40;
+
+#[test]
+fn should_equal_the_live_rows_when_sqlite_rebuilds_seeded_pool_histories() {
+    // given
+    let factory = SqliteFactory::new(Mode {
+        writers: 2,
+        reopen: Reopen::Keep,
+    });
+
+    // when
+    let checked: Vec<_> = SEEDS
+        .map(|seed| {
+            block_on(rebuild_equals_live(
+                &factory,
+                &SuiteOptions::default(),
+                seed,
+                STEPS,
+            ))
+        })
+        .collect();
+
+    // then
+    assert!(checked.iter().all(Result::is_ok), "{checked:?}");
+}
+
+#[test]
+fn should_equal_the_live_rows_when_sqlite_rebuilds_seeded_host_histories() {
+    // given
+    let factory = SqliteFactory::new(Mode {
+        writers: 2,
+        reopen: Reopen::Keep,
+    });
+
+    // when
+    let checked: Vec<_> = SEEDS
+        .map(|seed| block_on(host_rebuild_equals_live(&factory, seed, STEPS)))
+        .collect();
+
+    // then
+    assert!(checked.iter().all(Result::is_ok), "{checked:?}");
+}
+
+#[test]
+fn should_equal_the_live_rows_when_sqlite_rebuilds_seeded_attempt_histories() {
+    // given
+    let factory = SqliteFactory::new(Mode {
+        writers: 2,
+        reopen: Reopen::Keep,
+    });
+
+    // when
+    let checked: Vec<_> = SEEDS
+        .map(|seed| block_on(attempt_rebuild_equals_live(&factory, seed, STEPS)))
+        .collect();
+
+    // then
+    assert!(checked.iter().all(Result::is_ok), "{checked:?}");
 }

@@ -541,21 +541,35 @@ impl CommandReceipt {
     }
 }
 
-/// One row of an inline projection: its key and its new encoded document, or `None` to delete
-/// it (a delete target: a resolved pending effect, a released slot, a failure out of its window).
+/// The longest row key a journal stores, in bytes (`MalformedUnit::InvalidProjectionKey`
+/// above it). The inline fold keeps every key within it by hashing a long suffix
+/// (`crate::projection::Projection::fold`), so a valid command never builds a key the journal
+/// refuses.
+pub const MAX_ROW_KEY: usize = 256;
+
+/// One row of an inline projection: its key and its encoded document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowWrite {
     /// The row's key: the stream id itself or `<stream>/<suffix>` ([`row_key_in_stream`]), 1 to
-    /// 256 bytes, no control character.
+    /// [`MAX_ROW_KEY`] bytes, no control character.
     pub key: String,
-    /// The new encoded row, or `None` to remove it.
-    pub row: Option<Payload>,
+    /// The encoded row.
+    pub row: Payload,
 }
 
-/// One inline projection's writes for one stream the unit appends to, committed with the unit
+/// One inline projection's rows for one stream the unit appends to, committed with the unit
 /// (ES-I9) in the projection's active generation (ES-04; ES-12 adds the shadow). The journal
 /// records the stream's new head as the revision the projection has applied for the stream,
 /// so a unit names every projection of the stream's aggregate, even with no row to write.
+///
+/// **The stream's whole row set (ES-04F).** `rows` are every row the stream has in the
+/// projection after the unit, not a change to what is stored: the journal replaces the stream's
+/// rows in the active generation with them, so a row the unit does not list is gone. Rows the
+/// store holds from a missed write (an older build that appended without the projection, a
+/// store opened without it) are therefore replaced by the fold at the new head instead of
+/// being patched by a difference computed against rows the store does not have; the next
+/// start rebuilds a projection with any stream behind its head (`crate::projection::prepare`).
+/// Pinned by `crates/mayfly-testkit/src/contracts/projections.rs::missed_rows_heal` (PC-10).
 ///
 /// **Locality (ES-I10).** `stream` must be one the unit appends to, and every key must be that
 /// stream's ([`row_key_in_stream`]): a unit can neither name another stream nor reach one of its
@@ -569,7 +583,7 @@ pub struct ProjectionWrite {
     pub projection: ProjectionName,
     /// The stream whose rows these are; one the unit appends to.
     pub stream: StreamId,
-    /// The rows written or removed, each key at most once.
+    /// Every row of the stream after the unit, each key at most once.
     pub rows: Vec<RowWrite>,
 }
 

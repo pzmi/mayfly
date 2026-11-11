@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use mayfly_control::journal::{
-    MAX_PAGE, Payload, ProjectionName, ProjectionWrite, StorageError, StreamId, StreamRevision,
-    row_key_in_stream,
+    AggregateName, MAX_PAGE, Payload, ProjectionName, ProjectionWrite, StorageError, StreamHead,
+    StreamId, StreamRevision, row_key_in_stream,
 };
 use mayfly_control::projection::{
-    BuildId, Generation, ProjectionMeta, ProjectionRebuild, ProjectionStore, StreamRows,
+    BuildId, Cutover, Generation, ProjectionMeta, ProjectionRebuild, ProjectionStore, StreamRows,
 };
 
 use crate::journal::MemoryJournal;
@@ -22,6 +22,8 @@ pub(crate) struct ProjectionRows {
     rows: BTreeMap<(ProjectionName, Generation, String), (StreamId, Payload)>,
     applied: BTreeMap<(ProjectionName, Generation, StreamId), StreamRevision>,
     meta: BTreeMap<ProjectionName, ProjectionMeta>,
+    /// The generation each spec's rebuild claims (`begin_rebuild`), until its cutover.
+    claims: BTreeMap<ProjectionName, Generation>,
 }
 
 impl ProjectionRows {
@@ -31,19 +33,68 @@ impl ProjectionRows {
         self.meta.get(spec).map_or(0, |m| m.active_generation)
     }
 
-    /// Writes a committed unit's rows for `write.stream` in the active generation, with
-    /// `applied` (the stream's new head) as the revision applied.
+    /// Puts a committed unit's rows for `write.stream` in place of the stream's rows in the
+    /// active generation (the whole set, ES-04F), with `applied` (the stream's new head) as the
+    /// revision applied.
     pub(crate) fn write(&mut self, write: ProjectionWrite, applied: StreamRevision) {
         let generation = self.active(&write.projection);
-        for row in write.rows {
-            let key = (write.projection.clone(), generation, row.key);
-            match row.row {
-                Some(payload) => self.rows.insert(key, (write.stream.clone(), payload)),
-                None => self.rows.remove(&key),
-            };
+        let rows = write.rows.into_iter().map(|r| (r.key, r.row)).collect();
+        self.replace(&write.projection, generation, &write.stream, rows, applied);
+    }
+
+    /// Replaces `stream`'s rows of `spec` in `generation` with `rows`, applied at `applied`.
+    fn replace(
+        &mut self,
+        spec: &ProjectionName,
+        generation: Generation,
+        stream: &StreamId,
+        rows: BTreeMap<String, Payload>,
+        applied: StreamRevision,
+    ) {
+        self.rows
+            .retain(|(s, g, _), (owner, _)| s != spec || *g != generation || owner != stream);
+        for (key, payload) in rows {
+            self.rows
+                .insert((spec.clone(), generation, key), (stream.clone(), payload));
         }
         self.applied
-            .insert((write.projection, generation, write.stream), applied);
+            .insert((spec.clone(), generation, stream.clone()), applied);
+    }
+
+    /// Whether a stream of `aggregate` (among `heads`) has, in `generation`, no applied
+    /// revision or one other than its head.
+    fn behind(
+        &self,
+        spec: &ProjectionName,
+        generation: Generation,
+        aggregate: &AggregateName,
+        heads: &BTreeMap<StreamId, StreamHead>,
+    ) -> bool {
+        heads
+            .values()
+            .filter(|h| h.aggregate == *aggregate)
+            .any(|h| {
+                self.applied
+                    .get(&(spec.clone(), generation, h.stream.clone()))
+                    != Some(&h.revision)
+            })
+    }
+
+    /// The highest generation `spec` has used: active, claimed or holding a row.
+    fn highest(&self, spec: &ProjectionName) -> Generation {
+        let used = self
+            .rows
+            .keys()
+            .filter(|(s, _, _)| s == spec)
+            .map(|(_, g, _)| *g)
+            .chain(
+                self.applied
+                    .keys()
+                    .filter(|(s, _, _)| s == spec)
+                    .map(|(_, g, _)| *g),
+            );
+        used.chain(self.claims.get(spec).copied())
+            .fold(self.active(spec), Generation::max)
     }
 
     /// The row `key` of `spec` in the active generation.
@@ -133,10 +184,12 @@ impl ProjectionRebuild for MemoryJournal {
         let mut shared = self.lock();
         let projections = &mut shared.state.projections;
         let generation = projections
-            .active(spec)
+            .highest(spec)
             .checked_add(1)
             .ok_or(StorageError::new("generation_exhausted"))?;
-        projections.clear(spec, |g| g != generation);
+        let active = projections.active(spec);
+        projections.clear(spec, |g| g == active);
+        projections.claims.insert(spec.clone(), generation);
         Ok(generation)
     }
 
@@ -150,36 +203,68 @@ impl ProjectionRebuild for MemoryJournal {
     ) -> Result<(), StorageError> {
         let mut shared = self.lock();
         let projections = &mut shared.state.projections;
+        if projections.claims.get(spec) != Some(&generation) {
+            return Err(StorageError::new("rebuild_superseded"));
+        }
         if generation == projections.active(spec) {
             return Err(StorageError::new("generation_active"));
         }
         if !rows.keys().all(|key| row_key_in_stream(stream, key)) {
             return Err(StorageError::new("row_outside_stream"));
         }
-        projections
-            .rows
-            .retain(|(s, g, _), (owner, _)| s != spec || *g != generation || owner != stream);
-        for (key, payload) in rows {
-            projections
-                .rows
-                .insert((spec.clone(), generation, key), (stream.clone(), payload));
-        }
-        projections
-            .applied
-            .insert((spec.clone(), generation, stream.clone()), applied);
+        projections.replace(spec, generation, stream, rows, applied);
         Ok(())
     }
 
     async fn cutover(
         &self,
         spec: &ProjectionName,
+        aggregate: &AggregateName,
         generation: Generation,
         version: u32,
         written_by: &BuildId,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Cutover, StorageError> {
         let mut shared = self.lock();
-        let projections = &mut shared.state.projections;
-        projections.meta.insert(
+        let state = &mut shared.state;
+        if state.projections.claims.get(spec) != Some(&generation) {
+            return Err(StorageError::new("rebuild_superseded"));
+        }
+        if state
+            .projections
+            .behind(spec, generation, aggregate, &state.heads)
+        {
+            return Ok(Cutover::StreamsMoved);
+        }
+        state
+            .projections
+            .activate(spec, generation, version, written_by);
+        Ok(Cutover::Active)
+    }
+
+    async fn behind(
+        &self,
+        spec: &ProjectionName,
+        aggregate: &AggregateName,
+    ) -> Result<bool, StorageError> {
+        let shared = self.lock();
+        let state = &shared.state;
+        let active = state.projections.active(spec);
+        Ok(state
+            .projections
+            .behind(spec, active, aggregate, &state.heads))
+    }
+}
+
+impl ProjectionRows {
+    /// The cutover's writes: `generation` active, every other one gone, the claim ended.
+    fn activate(
+        &mut self,
+        spec: &ProjectionName,
+        generation: Generation,
+        version: u32,
+        written_by: &BuildId,
+    ) {
+        self.meta.insert(
             spec.clone(),
             ProjectionMeta {
                 spec: spec.clone(),
@@ -188,16 +273,40 @@ impl ProjectionRebuild for MemoryJournal {
                 written_by: written_by.clone(),
             },
         );
-        projections.clear(spec, |g| g == generation);
-        Ok(())
+        self.clear(spec, |g| g == generation);
+        self.claims.remove(spec);
     }
 }
 
+/// Writes that judge nothing, for the broken stores of the projection contract's own tests
+/// (`tests/projection_contract.rs`, `doc/event-store.md` §7.6): each is what a store with one
+/// fault would do.
 impl MemoryJournal {
     /// Writes `write`'s rows in the active generation with `applied`, judging nothing: for
     /// broken stores built over this one (rows outside their unit, PC-04 and PC-05 must catch).
     pub fn force_rows(&self, write: ProjectionWrite, applied: StreamRevision) {
         self.lock().state.projections.write(write, applied);
+    }
+
+    /// Puts `rows` back among `stream`'s rows of `spec` in the active generation, over what is
+    /// stored and removing nothing: with the rows a stream had before a unit, what a store that
+    /// patches its rows instead of replacing them keeps (`MergingRowsJournal`; PC-03 and PC-10
+    /// must catch it).
+    pub fn keep_rows(
+        &self,
+        spec: &ProjectionName,
+        stream: &StreamId,
+        rows: BTreeMap<String, Payload>,
+    ) {
+        let mut shared = self.lock();
+        let projections = &mut shared.state.projections;
+        let generation = projections.active(spec);
+        for (key, payload) in rows {
+            projections
+                .rows
+                .entry((spec.clone(), generation, key))
+                .or_insert_with(|| (stream.clone(), payload));
+        }
     }
 
     /// Replaces `stream`'s rows of `spec` in the **active** generation, judging nothing: for
@@ -212,16 +321,58 @@ impl MemoryJournal {
         let mut shared = self.lock();
         let projections = &mut shared.state.projections;
         let generation = projections.active(spec);
-        projections
-            .rows
-            .retain(|(s, g, _), (owner, _)| s != spec || *g != generation || owner != stream);
-        for (key, payload) in rows {
-            projections
-                .rows
-                .insert((spec.clone(), generation, key), (stream.clone(), payload));
+        projections.replace(spec, generation, stream, rows, applied);
+    }
+
+    /// Starts a rebuild at the active generation plus one, clearing it, and claims it, as the
+    /// store did before claims (`SharedGenerationStore`: a second rebuild takes the first's
+    /// generation; PC-12 must catch it).
+    pub fn begin_rebuild_unclaimed(&self, spec: &ProjectionName) -> Generation {
+        let mut shared = self.lock();
+        let projections = &mut shared.state.projections;
+        let generation = projections.active(spec).saturating_add(1);
+        projections.clear(spec, |g| g != generation);
+        projections.claims.insert(spec.clone(), generation);
+        generation
+    }
+
+    /// Writes a rebuild's rows into `generation` whatever claims it (refusing the active one
+    /// only), for `SharedGenerationStore`.
+    pub fn apply_stream_unclaimed(
+        &self,
+        spec: &ProjectionName,
+        generation: Generation,
+        stream: &StreamId,
+        rows: BTreeMap<String, Payload>,
+        applied: StreamRevision,
+    ) -> Result<(), StorageError> {
+        let mut shared = self.lock();
+        let projections = &mut shared.state.projections;
+        if generation == projections.active(spec) {
+            return Err(StorageError::new("generation_active"));
         }
-        projections
-            .applied
-            .insert((spec.clone(), generation, stream.clone()), applied);
+        projections.replace(spec, generation, stream, rows, applied);
+        Ok(())
+    }
+
+    /// Makes `generation` active with no check of its streams against their heads, the claim
+    /// still checked (`UncheckedCutoverStore`; PC-11 must catch it).
+    ///
+    /// # Errors
+    /// `rebuild_superseded` when `generation` is not the claimed one.
+    pub fn cutover_unchecked(
+        &self,
+        spec: &ProjectionName,
+        generation: Generation,
+        version: u32,
+        written_by: &BuildId,
+    ) -> Result<(), StorageError> {
+        let mut shared = self.lock();
+        let projections = &mut shared.state.projections;
+        if projections.claims.get(spec) != Some(&generation) {
+            return Err(StorageError::new("rebuild_superseded"));
+        }
+        projections.activate(spec, generation, version, written_by);
+        Ok(())
     }
 }

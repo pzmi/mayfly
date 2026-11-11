@@ -34,8 +34,10 @@ pub struct EventMeta {
 /// One row the fold writes or removes, by suffix within the stream ([`Rows`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowChange<R> {
-    /// `""` for the stream's own row, else the part after `<stream>/`. Never empty after the
-    /// `/` and never with a control character; the stored key is at most 256 bytes.
+    /// `""` for the stream's own row, else the part after `<stream>/`. Never with a control
+    /// character (the fold refuses it, `ProjectionError::Row`). Any length: a suffix that would
+    /// make the stored key longer than `MAX_ROW_KEY`, or that starts with `#`, is stored under
+    /// `<stream>/#<its SHA-256>` (the fold's `key_of`).
     pub suffix: String,
     /// The new row, or `None` to delete it (a delete target).
     pub row: Option<R>,

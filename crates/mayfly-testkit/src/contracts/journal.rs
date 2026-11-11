@@ -559,13 +559,13 @@ fn row_key(s: &StreamId, tag: &str) -> String {
     format!("{s}/{tag}")
 }
 
-fn row(s: &StreamId, tag: &str, value: Option<&str>) -> ProjectionWrite {
+fn row(s: &StreamId, tag: &str, value: &str) -> ProjectionWrite {
     ProjectionWrite {
         projection: projection_name(),
         stream: s.clone(),
         rows: vec![RowWrite {
             key: row_key(s, tag),
-            row: value.map(Payload::new),
+            row: Payload::new(value),
         }],
     }
 }
@@ -760,7 +760,7 @@ fn tagged(n: u128, s: &StreamId, expected: ExpectedRevision, event_id: u128) -> 
     appending(unit(5_000), s, expected, &[event_id])
         .with_receipt(accepted(n, 1))
         .with_inbox(key("scaleset-1", &n.to_string()))
-        .with_projection(row(s, &n.to_string(), Some("{}")))
+        .with_projection(row(s, &n.to_string(), "{}"))
 }
 
 /// Whether the event, receipt, inbox entry and row of [`tagged`] unit `n` are stored.
@@ -1209,25 +1209,17 @@ async fn malformed_unit<F: JournalFactory>(factory: &F) -> Check {
         (
             extras(
                 appending(unit(2_000), &s2, NEW, &[2])
-                    .with_projection(row(&s2, "a", Some("{}")))
-                    .with_projection(row(&s2, "a", None)),
+                    .with_projection(row(&s2, "a", "{}"))
+                    .with_projection(row(&s2, "a", "{\"again\":true}")),
             ),
             MalformedUnit::DuplicateProjectionRow,
         ),
         (
-            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(
-                &s1,
-                "a",
-                Some("{}"),
-            ))),
+            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(&s1, "a", "{}"))),
             MalformedUnit::ProjectionOutsideUnit,
         ),
         (
-            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(
-                &s2,
-                "a\nb",
-                Some("{}"),
-            ))),
+            extras(appending(unit(2_000), &s2, NEW, &[2]).with_projection(row(&s2, "a\nb", "{}"))),
             MalformedUnit::InvalidProjectionKey,
         ),
     ];
@@ -1393,8 +1385,8 @@ async fn multi_stream_all_or_nothing<F: JournalFactory>(factory: &F) -> Check {
         )
         .with_receipt(accepted(1, 1))
         .with_inbox(key("scaleset-1", "m-1"))
-        .with_projection(row(&s1, "k1", Some("{\"v\":1}")))
-        .with_projection(row(&s2, "k2", Some("{\"v\":2}")))
+        .with_projection(row(&s1, "k1", "{\"v\":1}"))
+        .with_projection(row(&s2, "k2", "{\"v\":2}"))
     };
     let refusals = [
         (
@@ -2698,8 +2690,8 @@ fn whole_unit(command: u128, s1: &StreamId, s2: &StreamId, ids: [u128; 2]) -> Un
     )
     .with_receipt(accepted(command, 1))
     .with_inbox(key("scaleset-1", &command.to_string()))
-    .with_projection(row(s1, "r1", Some("{}")))
-    .with_projection(row(s2, "r2", Some("{}")))
+    .with_projection(row(s1, "r1", "{}"))
+    .with_projection(row(s2, "r2", "{}"))
 }
 
 async fn crash_atomicity<F: JournalFactory>(factory: &F) -> Check {
@@ -2770,7 +2762,7 @@ async fn survives_reopen<F: JournalFactory>(factory: &F) -> Check {
                     .with_append(s1.clone(), aggregate("attempt"), NEW, vec![at_epoch(1, 2)])
                     .with_receipt(accepted(1, 1))
                     .with_inbox(message.clone())
-                    .with_projection(row(&s1, "r", Some("{\"v\":1}"))),
+                    .with_projection(row(&s1, "r", "{\"v\":1}")),
             )
             .await,
     )?;

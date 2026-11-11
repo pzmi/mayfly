@@ -51,12 +51,25 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         compat_floor: 2,
         sql: include_str!("migrations/0003_dispatch_mark_rises.sql"),
     },
-    // Expand-only, and no build before it writes a projection row (none registered a spec), so
-    // one that ignores the generations writes nothing they would miss: the floor stays at 2.
+    // Expand-only. A build before it keeps no projection, so its units append events without
+    // the rows: a missed write, not a wrong one. A build that keeps projections heals it: each
+    // of its units puts the stream's whole row set in place of what is stored, and its start
+    // rebuilds a projection with a stream whose applied revision is not the head
+    // (`ProjectionRebuild::behind`, PC-10). So an older build may run on this store and the
+    // floor stays at 2 (ES-04F; `doc/event-store.md` section 6.4).
     Migration {
         version: 4,
         compat_floor: 2,
         sql: include_str!("migrations/0004_projection_generations.sql"),
+    },
+    // Expand-only: a build at 4 ignores the claims. Its rebuild takes the active generation
+    // plus one and never removes a claim, but a build at 5 claims above every generation used
+    // and supersedes a stale claim, and the build at 4 runs alone (one control plane per
+    // store, section 4.5): the floor stays at 2.
+    Migration {
+        version: 5,
+        compat_floor: 2,
+        sql: include_str!("migrations/0005_projection_rebuild_claims.sql"),
     },
 ];
 
@@ -172,14 +185,14 @@ mod tests {
     use super::*;
 
     const EXTRA: Migration = Migration {
-        version: 5,
+        version: 6,
         compat_floor: 2,
         sql: "CREATE TABLE extra_fact (id TEXT NOT NULL, CONSTRAINT extra_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
     const BREAKING: Migration = Migration {
-        version: 5,
-        compat_floor: 5,
+        version: 6,
+        compat_floor: 6,
         sql: "CREATE TABLE breaking_fact (id TEXT NOT NULL, CONSTRAINT breaking_fact_pkey PRIMARY KEY (id)) STRICT;",
     };
 
@@ -221,6 +234,7 @@ mod tests {
                 "journal_event",
                 "journal_identity",
                 "projection_meta",
+                "projection_rebuild",
                 "projection_row",
                 "projection_stream",
                 "schema_meta",
@@ -228,10 +242,12 @@ mod tests {
                 "stream_head"
             ]
         );
-        assert_eq!(stored_version(&conn), Ok((4, 2)));
+        assert_eq!(stored_version(&conn), Ok((5, 2)));
         assert!(!backup_path(&path, 1).exists());
         assert!(!backup_path(&path, 2).exists());
         assert!(!backup_path(&path, 3).exists());
+        assert!(!backup_path(&path, 4).exists());
+        assert!(!backup_path(&path, 5).exists());
     }
 
     #[test]
@@ -244,6 +260,7 @@ mod tests {
             MIGRATIONS[1],
             MIGRATIONS[2],
             MIGRATIONS[3],
+            MIGRATIONS[4],
             EXTRA,
         ];
 
@@ -252,9 +269,9 @@ mod tests {
 
         // then
         assert_eq!(migrated, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((5, 2)));
-        let backup = Connection::open(backup_path(&path, 5)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(stored_version(&backup), Ok((4, 2)));
+        assert_eq!(stored_version(&conn), Ok((6, 2)));
+        let backup = Connection::open(backup_path(&path, 6)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(stored_version(&backup), Ok((5, 2)));
         assert!(!tables(&backup).contains(&"extra_fact".to_owned()));
         assert_eq!(
             migrate(&conn, &with_extra, Some(&path), Millis::new(9)),
@@ -273,6 +290,7 @@ mod tests {
                 MIGRATIONS[1],
                 MIGRATIONS[2],
                 MIGRATIONS[3],
+                MIGRATIONS[4],
                 EXTRA,
             ],
             Some(&path),
@@ -285,7 +303,7 @@ mod tests {
 
         // then
         assert_eq!(older, Ok(()));
-        assert_eq!(stored_version(&conn), Ok((5, 2)));
+        assert_eq!(stored_version(&conn), Ok((6, 2)));
     }
 
     #[test]
@@ -299,6 +317,7 @@ mod tests {
                 MIGRATIONS[1],
                 MIGRATIONS[2],
                 MIGRATIONS[3],
+                MIGRATIONS[4],
                 BREAKING,
             ],
             Some(&path),
@@ -313,9 +332,9 @@ mod tests {
         assert_eq!(
             older,
             Err(OpenError::SchemaAboveBuild {
-                store: 5,
-                compat_floor: 5,
-                build: 4
+                store: 6,
+                compat_floor: 6,
+                build: 5
             })
         );
     }

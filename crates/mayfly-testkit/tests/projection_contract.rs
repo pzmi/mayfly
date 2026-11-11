@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mayfly_control::journal::{
-    AppendError, Appended, CommandReceipt, EventLocation, InboxKey, Journal, Payload,
-    ProjectionName, RecordedEvent, StorageError, StoredKind, StreamHead, StreamId, StreamRevision,
-    UnitOfWork, row_key_in_stream,
+    AggregateName, AppendError, Appended, CommandReceipt, EventLocation, InboxKey, Journal,
+    Payload, ProjectionName, RecordedEvent, StorageError, StoredKind, StreamHead, StreamId,
+    StreamRevision, UnitOfWork, row_key_in_stream,
 };
 use mayfly_control::projection::{
-    BuildId, EventMeta, Generation, Projection, ProjectionMeta, ProjectionRebuild, ProjectionSpec,
-    ProjectionStore, Projections, RowChange, Rows, StreamRows,
+    BuildId, Cutover, EventMeta, Generation, Projection, ProjectionMeta, ProjectionRebuild,
+    ProjectionSpec, ProjectionStore, Projections, RowChange, Rows, StreamRows,
 };
 use mayfly_control_domain::pool::{Pool, PoolEvent, PoolState};
 use mayfly_control_domain::{EventKind, EventSet};
@@ -30,14 +30,20 @@ use mayfly_testkit::journal::{MemoryJournal, MemoryProjectionFactory};
 enum Flaw {
     /// `RowlessJournal`: commits a unit's events without its projection rows.
     Rowless,
-    /// `UndeletingJournal`: drops a unit's row deletes (the delete targets).
-    Undeleting,
+    /// `MergingRowsJournal`: puts a unit's rows over the stream's stored ones and keeps those
+    /// the unit no longer lists (the delete targets, and what a missed write left).
+    Merging,
     /// `LeakyRowsJournal`: writes a refused unit's rows anyway.
     Leaky,
     /// `UnscopedRowsJournal`: no locality check; a write outside the unit lands.
     Unscoped,
     /// `InPlaceRebuildStore`: a rebuild writes the active generation, not a new one.
     InPlaceRebuild,
+    /// `UncheckedCutoverStore`: the cutover activates whatever the generation holds.
+    UncheckedCutover,
+    /// `SharedGenerationStore`: every rebuild takes the active generation plus one, so a second
+    /// rebuild shares (and clears) the first's.
+    SharedGeneration,
 }
 
 #[derive(Debug, Clone)]
@@ -50,10 +56,21 @@ impl Journal for Broken {
     async fn append(&self, mut unit: UnitOfWork) -> Result<Appended, AppendError> {
         match self.flaw {
             Flaw::Rowless => unit.projections.clear(),
-            Flaw::Undeleting => {
-                for write in &mut unit.projections {
-                    write.rows.retain(|r| r.row.is_some());
+            Flaw::Merging => {
+                let mut stored = Vec::new();
+                for write in &unit.projections {
+                    let rows = self
+                        .inner
+                        .stream_rows(&write.projection, &write.stream)
+                        .await
+                        .map_err(AppendError::Storage)?;
+                    stored.push((write.projection.clone(), write.stream.clone(), rows.rows));
                 }
+                let appended = self.inner.append(unit).await?;
+                for (spec, stream, rows) in stored {
+                    self.inner.keep_rows(&spec, &stream, rows);
+                }
+                return Ok(appended);
             }
             Flaw::Leaky => {
                 let writes = unit.projections.clone();
@@ -82,7 +99,7 @@ impl Journal for Broken {
                 }
                 return result;
             }
-            Flaw::InPlaceRebuild => {}
+            Flaw::InPlaceRebuild | Flaw::UncheckedCutover | Flaw::SharedGeneration => {}
         }
         self.inner.append(unit).await
     }
@@ -162,6 +179,9 @@ impl ProjectionStore for Broken {
 
 impl ProjectionRebuild for Broken {
     async fn begin_rebuild(&self, spec: &ProjectionName) -> Result<Generation, StorageError> {
+        if self.flaw == Flaw::SharedGeneration {
+            return Ok(self.inner.begin_rebuild_unclaimed(spec));
+        }
         self.inner.begin_rebuild(spec).await
     }
 
@@ -173,26 +193,47 @@ impl ProjectionRebuild for Broken {
         rows: BTreeMap<String, Payload>,
         applied: StreamRevision,
     ) -> Result<(), StorageError> {
-        if self.flaw == Flaw::InPlaceRebuild {
-            self.inner
-                .overwrite_active_rows(spec, stream, rows, applied);
-            return Ok(());
+        match self.flaw {
+            Flaw::InPlaceRebuild => {
+                self.inner
+                    .overwrite_active_rows(spec, stream, rows, applied);
+                Ok(())
+            }
+            Flaw::SharedGeneration => self
+                .inner
+                .apply_stream_unclaimed(spec, generation, stream, rows, applied),
+            _ => {
+                self.inner
+                    .apply_stream(spec, generation, stream, rows, applied)
+                    .await
+            }
         }
-        self.inner
-            .apply_stream(spec, generation, stream, rows, applied)
-            .await
     }
 
     async fn cutover(
         &self,
         spec: &ProjectionName,
+        aggregate: &AggregateName,
         generation: Generation,
         version: u32,
         written_by: &BuildId,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Cutover, StorageError> {
+        if self.flaw == Flaw::UncheckedCutover {
+            self.inner
+                .cutover_unchecked(spec, generation, version, written_by)?;
+            return Ok(Cutover::Active);
+        }
         self.inner
-            .cutover(spec, generation, version, written_by)
+            .cutover(spec, aggregate, generation, version, written_by)
             .await
+    }
+
+    async fn behind(
+        &self,
+        spec: &ProjectionName,
+        aggregate: &AggregateName,
+    ) -> Result<bool, StorageError> {
+        self.inner.behind(spec, aggregate).await
     }
 }
 
@@ -325,19 +366,24 @@ fn should_fail_every_case_reading_rows_when_a_store_drops_the_rows() {
     let failed = failed_with(flaw);
 
     // then
-    assert_eq!(failed, ["PC-01", "PC-02", "PC-03", "PC-05", "PC-06"]);
+    assert_eq!(
+        failed,
+        [
+            "PC-01", "PC-02", "PC-03", "PC-05", "PC-06", "PC-10", "PC-11", "PC-12"
+        ]
+    );
 }
 
 #[test]
-fn should_fail_inline_rows_commit_when_a_store_drops_row_deletes() {
+fn should_fail_inline_rows_commit_when_a_store_merges_rows_over_the_stored_ones() {
     // given
-    let flaw = Flaw::Undeleting;
+    let flaw = Flaw::Merging;
 
     // when
     let failed = failed_with(flaw);
 
     // then
-    assert_eq!(failed, ["PC-01", "PC-03"]);
+    assert_eq!(failed, ["PC-01", "PC-03", "PC-10", "PC-11", "PC-12"]);
 }
 
 #[test]
@@ -373,7 +419,10 @@ fn should_fail_version_bump_rebuilds_when_a_rebuild_writes_the_active_generation
     let failed = failed_with(flaw);
 
     // then
-    assert_eq!(failed, ["PC-01", "PC-02", "PC-06"]);
+    assert_eq!(
+        failed,
+        ["PC-01", "PC-02", "PC-06", "PC-10", "PC-11", "PC-12"]
+    );
 }
 
 #[test]
@@ -385,7 +434,7 @@ fn should_fail_rebuild_equals_live_when_a_projection_reads_a_clock() {
     let failed = failed_with_spec(spec);
 
     // then
-    assert_eq!(failed, ["PC-01", "PC-03"]);
+    assert_eq!(failed, ["PC-01", "PC-03", "PC-10", "PC-11", "PC-12"]);
 }
 
 #[test]
@@ -397,7 +446,7 @@ fn should_fail_rebuild_equals_live_when_a_projection_depends_on_stream_order() {
     let failed = failed_with_spec(spec);
 
     // then
-    assert_eq!(failed, ["PC-01", "PC-03"]);
+    assert_eq!(failed, ["PC-01", "PC-03", "PC-10", "PC-11", "PC-12"]);
 }
 
 #[test]
@@ -409,7 +458,7 @@ fn should_fail_version_below_rebuilds_when_a_start_rebuilds_only_upward() {
     let failed = failed_with_prepare(prepare);
 
     // then
-    assert_eq!(failed, ["PC-06"]);
+    assert_eq!(failed, ["PC-06", "PC-10"]);
 }
 
 #[test]
@@ -421,5 +470,41 @@ fn should_fail_both_version_cases_when_a_start_ignores_versions() {
     let failed = failed_with_prepare(prepare);
 
     // then
-    assert_eq!(failed, ["PC-02", "PC-06"]);
+    assert_eq!(failed, ["PC-02", "PC-06", "PC-10"]);
+}
+
+#[test]
+fn should_fail_rebuild_waits_for_units_when_a_cutover_checks_no_stream() {
+    // given
+    let flaw = Flaw::UncheckedCutover;
+
+    // when
+    let failed = failed_with(flaw);
+
+    // then
+    assert_eq!(failed, ["PC-11"]);
+}
+
+#[test]
+fn should_fail_one_rebuild_wins_when_rebuilds_share_a_generation() {
+    // given
+    let flaw = Flaw::SharedGeneration;
+
+    // when
+    let failed = failed_with(flaw);
+
+    // then
+    assert_eq!(failed, ["PC-12"]);
+}
+
+#[test]
+fn should_fail_missed_rows_heal_when_a_start_ignores_streams_behind_their_head() {
+    // given
+    let prepare = SuitePrepare::StaleBlind;
+
+    // when
+    let failed = failed_with_prepare(prepare);
+
+    // then
+    assert_eq!(failed, ["PC-10"]);
 }

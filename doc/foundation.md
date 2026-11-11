@@ -514,6 +514,25 @@ value, an associated type) and calls `.spawn()` on it names no process path; the
 names, not types. A returned `Command` is an API smell the review catches; the pure crates are
 covered anyway by their `clippy.toml` (`std::process::Command` is a disallowed type).
 
+Known gaps of `ARCH-projection-locality` (ES-04F review), left open on purpose because the rule
+is **defence in depth**, not the guarantee: the journal refuses every write outside its unit at
+run time (`Malformed(ProjectionOutsideUnit)`, PC-05), and each unit's rows are its streams'
+whole sets, so a forged row is replaced by the next unit of its stream (PC-10). The name-based
+rule does not see:
+
+- **an alias** (`type W = ProjectionWrite;`, `use .. as W`) used for the struct expression, or a
+  re-export under another name;
+- **a helper function** that builds the write in an allowed file (the fold, the journal module,
+  the contract suites) and is called from elsewhere: the rule checks where the expression is
+  written, not who calls it;
+- **field mutation** of a write that already exists (`write.stream = other;`,
+  `write.rows.push(..)`, `unit.projections.push(..)`), which needs no struct expression;
+- **the `journal/` exemption**: the journal's own module may build writes, and production code
+  added there is trusted like the fold.
+
+A finding that one of these is used in production code is closed as the passes below were: a
+negative fixture, then the rule.
+
 Three adversarial passes over the FND-04 checkpoint ran on 2026-11-09:
 
 1. **ARCH-01** aligned the checker with this document and closed the first pass: the plane and

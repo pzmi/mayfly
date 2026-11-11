@@ -1,7 +1,8 @@
 //! Projections over the in-memory store (component level): the control plane's specs subscribe
 //! to every kind they react to, the offline rebuild records the revision it folded, the
 //! queries count across streams over stream-local rows, and "rebuild equals live" holds over
-//! random pool histories (ES-I11, `doc/event-store.md` §3.6).
+//! random pool, host and attempt histories, the last two the views whose rows are deleted
+//! (`slots`, `pending_effects`; ES-I11, `doc/event-store.md` §3.6).
 
 use mayfly_control::journal::{
     AggregateName, AppendError, Appended, CommandReceipt, EventLocation, ExpectedRevision,
@@ -26,7 +27,8 @@ use mayfly_domain::{
 };
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use mayfly_testkit::contracts::projections::{
-    SuiteOptions, check_subscriptions, pool_history, rebuild_equals_live,
+    SuiteOptions, attempt_rebuild_equals_live, check_subscriptions, host_rebuild_equals_live,
+    pool_history, rebuild_equals_live,
 };
 use mayfly_testkit::journal::{MemoryJournal, MemoryProjectionFactory};
 use mayfly_testkit::{attempts, block_on};
@@ -404,6 +406,30 @@ proptest! {
 
         // when
         let checked = block_on(rebuild_equals_live(&MemoryProjectionFactory, &options, seed, len));
+
+        // then
+        prop_assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    #[test]
+    fn should_equal_the_live_rows_when_rebuilt_over_random_host_histories(seed in any::<u64>(), len in 0_usize..60) {
+        // given
+        let factory = MemoryProjectionFactory;
+
+        // when
+        let checked = block_on(host_rebuild_equals_live(&factory, seed, len));
+
+        // then
+        prop_assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    #[test]
+    fn should_equal_the_live_rows_when_rebuilt_over_random_attempt_histories(seed in any::<u64>(), len in 0_usize..60) {
+        // given
+        let factory = MemoryProjectionFactory;
+
+        // when
+        let checked = block_on(attempt_rebuild_equals_live(&factory, seed, len));
 
         // then
         prop_assert!(checked.is_ok(), "{checked:?}");

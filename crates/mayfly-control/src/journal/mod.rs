@@ -42,9 +42,10 @@ pub use unit::{Appended, AppendedStream, MalformedUnit, StreamAppend, UnitOfWork
 pub(crate) use values::valid_snake_name;
 pub use values::{
     AggregateName, CommandReceipt, CommandType, Decision, EventLocation, ExpectedRevision,
-    InboxKey, InboxSource, IntentDigest, JournalValueError, MessageId, NewEvent, NewReceipt,
-    Payload, ProjectionName, ProjectionWrite, ReadCondition, ReceiptOutcome, RecordedEvent,
-    RowWrite, StoredKind, StreamHead, StreamId, StreamRevision, SupportedEpochs, row_key_in_stream,
+    InboxKey, InboxSource, IntentDigest, JournalValueError, MAX_ROW_KEY, MessageId, NewEvent,
+    NewReceipt, Payload, ProjectionName, ProjectionWrite, ReadCondition, ReceiptOutcome,
+    RecordedEvent, RowWrite, StoredKind, StreamHead, StreamId, StreamRevision, SupportedEpochs,
+    row_key_in_stream,
 };
 
 /// The largest page [`Journal::streams`] returns; a larger `limit` is clamped to it, so a

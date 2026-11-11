@@ -3,12 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 
 use mayfly_control_domain::{Aggregate, EventKind, EventSet};
+use sha2::{Digest, Sha256};
 
 use crate::journal::{
-    AggregateName, JournalValueError, Payload, ProjectionName, ProjectionWrite, RecordedEvent,
-    RowWrite, StreamId,
+    AggregateName, JournalValueError, MAX_ROW_KEY, Payload, ProjectionName, ProjectionWrite,
+    RecordedEvent, RowWrite, StreamId,
 };
 use crate::projection::spec::{EventMeta, ProjectionSpec, Rows};
 use crate::store::{EventDecodeError, decode_event};
@@ -58,9 +60,6 @@ impl fmt::Display for ProjectionError {
 
 impl std::error::Error for ProjectionError {}
 
-/// The rows of a stream before its last events and after all of them.
-type Folded = Result<(EncodedRows, EncodedRows), ProjectionError>;
-
 /// A [`ProjectionSpec`] with its types erased, so specs of different aggregates sit in one
 /// [`Projections`] list (a function pointer per spec; no trait object, D8).
 #[derive(Clone)]
@@ -70,7 +69,7 @@ pub struct Projection {
     version: u32,
     aggregate: AggregateName,
     subscribes: &'static [EventKind],
-    fold: fn(&'static str, &StreamId, &[RecordedEvent], usize) -> Folded,
+    fold: fn(&'static str, &StreamId, &[RecordedEvent]) -> Result<EncodedRows, ProjectionError>,
 }
 
 impl fmt::Debug for Projection {
@@ -138,20 +137,23 @@ impl Projection {
         stream: &StreamId,
         events: &[RecordedEvent],
     ) -> Result<EncodedRows, ProjectionError> {
-        (self.fold)(self.spec, stream, events, events.len()).map(|(_, after)| after)
+        (self.fold)(self.spec, stream, events)
     }
 
-    /// The writes that take `stream`'s rows from the fold of `history` (the stream at the
-    /// unit's expected revision) to the fold of `history` then `batch` (the events the unit
-    /// appends): puts for new and changed rows, deletes for rows gone.
+    /// The rows a unit writes for `stream`: **every** row of the fold of `history` (the stream
+    /// at the unit's expected revision) then `batch` (the events the unit appends), which the
+    /// journal puts in place of the stream's stored rows (ES-04F, [`ProjectionWrite`]).
     ///
-    /// Both folds start at revision 0 from the events the decision was made on, so the rows
-    /// the unit writes are exactly those at its expected revision plus its batch, whatever
-    /// another unit wrote meanwhile; that unit moved the head, so this one is refused
+    /// The fold starts at revision 0 from the events the decision was made on, so the rows the
+    /// unit writes are exactly those at its expected revision plus its batch, whatever another
+    /// unit wrote meanwhile; that unit moved the head, so this one is refused
     /// `WrongExpectedRevision` and decided again (the model's `rowAfter`; a fold from the rows
-    /// read *now* was the bug ES-06's first Apalache run found in the model). Pinned by
-    /// `crates/mayfly-testkit/src/contracts/projections.rs::inline_rows_commit` (PC-03) and
-    /// `rebuild_equals_live` (PC-01).
+    /// read *now* was the bug ES-06's first Apalache run found in the model). The whole set,
+    /// not the difference from the fold of `history`: a difference applied to stored rows that
+    /// missed a write (an older build appended without this projection) would leave the gap in
+    /// place for ever, while the whole set replaces it. Pinned by
+    /// `crates/mayfly-testkit/src/contracts/projections.rs::inline_rows_commit` (PC-03),
+    /// `rebuild_equals_live` (PC-01) and `missed_rows_heal` (PC-10).
     ///
     /// # Errors
     /// [`ProjectionError::Decode`] or [`ProjectionError::Row`].
@@ -164,25 +166,10 @@ impl Projection {
         let mut events = Vec::with_capacity(history.len() + batch.len());
         events.extend_from_slice(history);
         events.extend_from_slice(batch);
-        let (before, after) = (self.fold)(self.spec, stream, &events, history.len())?;
-        let mut rows: Vec<RowWrite> = before
-            .keys()
-            .filter(|key| !after.contains_key(*key))
-            .map(|key| RowWrite {
-                key: key.clone(),
-                row: None,
-            })
+        let rows = (self.fold)(self.spec, stream, &events)?
+            .into_iter()
+            .map(|(key, row)| RowWrite { key, row })
             .collect();
-        rows.extend(
-            after
-                .into_iter()
-                .filter(|(key, row)| before.get(key) != Some(row))
-                .map(|(key, row)| RowWrite {
-                    key,
-                    row: Some(row),
-                }),
-        );
-        rows.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(ProjectionWrite {
             projection: self.name.clone(),
             stream: stream.clone(),
@@ -227,13 +214,31 @@ impl Projections {
     }
 }
 
-/// The key of the row `suffix` of `stream`: the stream id for `""`, else `<stream>/<suffix>`.
+/// The first character of a hashed suffix ([`key_of`]).
+const HASHED: char = '#';
+
+/// The key of the row `suffix` of `stream`: the stream id for `""`, else `<stream>/<suffix>`,
+/// or `<stream>/#<SHA-256 of the suffix, hex>` when that would be longer than [`MAX_ROW_KEY`]
+/// or the suffix itself starts with `#`. A spec's suffix is unbounded (an image digest and an
+/// attempt id, say), but a stream id is at most 128 bytes, so the hashed key (at most 194) is
+/// always one the journal accepts and a valid command never becomes
+/// `Malformed(InvalidProjectionKey)`; hashing every `#` suffix keeps a hashed key from ever
+/// meeting a spec's own suffix. Rows keep their suffix inside the fold, and queries split a key
+/// at its first `/` only, so nothing reads the suffix back from the key. Pinned by
+/// `should_hash_a_long_suffix_when_the_key_would_be_too_long`.
 fn key_of(stream: &StreamId, suffix: &str) -> String {
     if suffix.is_empty() {
-        stream.as_str().to_owned()
-    } else {
-        format!("{stream}/{suffix}")
+        return stream.as_str().to_owned();
     }
+    if stream.as_str().len() + 1 + suffix.len() <= MAX_ROW_KEY && !suffix.starts_with(HASHED) {
+        return format!("{stream}/{suffix}");
+    }
+    let digest = Sha256::digest(suffix.as_bytes());
+    let mut key = format!("{stream}/{HASHED}");
+    for byte in digest {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 fn encode<R: serde::Serialize>(
@@ -255,21 +260,16 @@ fn encode<R: serde::Serialize>(
 }
 
 /// Folds `events` (the stream from revision 0) through `S`: the aggregate's state evolves on
-/// every event and `S::apply` runs on the subscribed ones. Returns the encoded rows after the
-/// first `split` events and after all of them.
+/// every event and `S::apply` runs on the subscribed ones. Returns the encoded rows after all
+/// of them.
 fn fold_spec<S: ProjectionSpec>(
     projection: &'static str,
     stream: &StreamId,
     events: &[RecordedEvent],
-    split: usize,
-) -> Folded {
+) -> Result<EncodedRows, ProjectionError> {
     let mut state = <S::Source as Aggregate>::initial();
     let mut rows: Rows<S::Row> = BTreeMap::new();
-    let mut before = None;
-    for (index, recorded) in events.iter().enumerate() {
-        if index == split {
-            before = Some(encode(projection, stream, &rows)?);
-        }
+    for recorded in events {
         let event = decode_event::<<S::Source as Aggregate>::Event>(recorded).map_err(|e| {
             ProjectionError::Decode {
                 stream: stream.clone(),
@@ -299,6 +299,55 @@ fn fold_spec<S: ProjectionSpec>(
             }
         }
     }
-    let after = encode(projection, stream, &rows)?;
-    Ok((before.unwrap_or_else(|| after.clone()), after))
+    encode(projection, stream, &rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(name: &str) -> StreamId {
+        StreamId::new(name).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn should_hash_a_long_suffix_when_the_key_would_be_too_long() {
+        // given
+        let longest = stream(&format!("pool-{}", "a".repeat(123)));
+        let short = stream("pool-a");
+        let suffixes = [
+            ("", short.clone()),
+            ("sha256:abc/7", short.clone()),
+            ("#mine", short.clone()),
+            (&*"x".repeat(127), longest.clone()),
+            (&*"x".repeat(128), longest.clone()),
+            (&*"y".repeat(10_000), longest.clone()),
+        ];
+
+        // when
+        let keys: Vec<String> = suffixes.iter().map(|(s, at)| key_of(at, s)).collect();
+
+        // then
+        let hashed = |k: &String| k.split_once('/').is_some_and(|(_, s)| s.starts_with('#'));
+        let shape: Vec<(bool, bool)> = keys
+            .iter()
+            .zip(&suffixes)
+            .map(|(k, (_, at))| (hashed(k), crate::journal::row_key_in_stream(at, k)))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (false, true),
+                (false, true),
+                (true, true),
+                (false, true),
+                (true, true),
+                (true, true),
+            ]
+        );
+        assert_eq!(keys[0], "pool-a");
+        assert_eq!(keys[1], "pool-a/sha256:abc/7");
+        assert!(keys.iter().all(|k| k.len() <= MAX_ROW_KEY), "{keys:?}");
+        assert_ne!(keys[4], keys[5]);
+    }
 }

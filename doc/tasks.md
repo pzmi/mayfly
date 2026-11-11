@@ -665,6 +665,12 @@ use cases' read side; ES-08 must read the rows at the snapshot's revision (`stre
 `applied`) instead of folding from revision 0 once a load starts from a snapshot; ES-09 ports
 migration 0004 and runs PC on PostgreSQL; ES-12 adds dual writes into the shadow generation and
 the cutover fence to the unit.
+Note (ES-04F, the ES-04 checkpoint review; event-store §3.6 "As fixed (ES-04F)"): a unit writes
+its streams' whole row sets, `prepare` also rebuilds a projection with a stream behind its head,
+the offline cutover is refused while a stream moved after its fold, and a rebuild claims its
+generation (migration 0005, floor 2); PC-10..PC-12 and "rebuild equals live" over pool, host and
+attempt histories run on memory and SQLite. ES-09 ports migration 0005 and the `behind` and
+cutover checks; ES-12 keeps the claim for its shadow generation.
 
 #### ES-06 Event-store model
 Cites: event-store §7.3, D10, ver §6; ADR 0034 (E7: before delivery). `formal/event_store.qnt` and

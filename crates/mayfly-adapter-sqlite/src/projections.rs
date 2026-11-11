@@ -3,26 +3,30 @@
 //!
 //! Rows are documents `(spec, generation, key) -> (stream_id, payload)`, with no
 //! projection-specific SQL; `projection_stream` holds the revision each stream's rows applied,
-//! `projection_meta` the active generation. Readers read the active generation inside the
-//! statement that reads the rows, so a read sees one generation; a rebuild writes another one
-//! stream per transaction and the cutover flips `projection_meta` and drops the other
-//! generations in one `BEGIN IMMEDIATE` transaction (PC-02). Rows are paged by key, never by
-//! time or position (ES-I17).
+//! `projection_meta` the active generation, `projection_rebuild` (migration 0005) the
+//! generation a running rebuild claims. Readers read the active generation inside the
+//! statement that reads the rows, so a read sees one generation, and `stream_rows` reads the
+//! applied revision and the rows in one read transaction; a rebuild writes its claimed
+//! generation one stream per transaction and the cutover checks every stream of the aggregate
+//! against its head, then flips `projection_meta`, drops the other generations and ends the
+//! claim in one `BEGIN IMMEDIATE` transaction (PC-02, PC-11, PC-12). Rows are paged by key,
+//! never by time or position (ES-I17).
 
 use std::collections::BTreeMap;
 
 use mayfly_control::journal::{
-    MAX_PAGE, Payload, ProjectionName, StorageError, StreamId, StreamRevision, row_key_in_stream,
+    AggregateName, MAX_PAGE, Payload, ProjectionName, StorageError, StreamId, StreamRevision,
+    row_key_in_stream,
 };
 use mayfly_control::projection::{
-    BuildId, Generation, ProjectionMeta, ProjectionRebuild, ProjectionStore, StreamRows,
+    BuildId, Cutover, Generation, ProjectionMeta, ProjectionRebuild, ProjectionStore, StreamRows,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::classify::{Failure, classify};
 use crate::hooks::StoreHooks;
 use crate::journal::SqliteJournal;
-use crate::ledger::{exec, transaction};
+use crate::ledger::{exec, read_transaction, transaction};
 use crate::rows::{ACTIVE_GENERATION, revision_of, sql_revision, unreadable};
 
 fn engine(error: &rusqlite::Error) -> Failure {
@@ -75,38 +79,45 @@ fn meta(conn: &Connection) -> Result<Vec<ProjectionMeta>, Failure> {
         .collect()
 }
 
+/// `stream`'s applied revision and rows of `spec` in the active generation, read in one read
+/// transaction so a unit committing between the two statements cannot pair one state's
+/// revision with another's rows; `between` runs between them (a test's seam, a no-op here).
 fn stream_rows(
     conn: &Connection,
     spec: &ProjectionName,
     stream: &StreamId,
+    between: impl FnOnce(),
 ) -> Result<StreamRows, Failure> {
-    let applied = conn
-        .prepare_cached(&format!(
-            "SELECT applied FROM projection_stream WHERE spec = ?1 \
-             AND generation = {ACTIVE_GENERATION} AND stream_id = ?2"
-        ))
-        .and_then(|mut s| {
-            s.query_row(params![spec.as_str(), stream.as_str()], |r| {
-                r.get::<_, i64>(0)
+    read_transaction(conn, |conn| {
+        let applied = conn
+            .prepare_cached(&format!(
+                "SELECT applied FROM projection_stream WHERE spec = ?1 \
+                 AND generation = {ACTIVE_GENERATION} AND stream_id = ?2"
+            ))
+            .and_then(|mut s| {
+                s.query_row(params![spec.as_str(), stream.as_str()], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .optional()
             })
-            .optional()
-        })
-        .map_err(|e| engine(&e))?
-        .map(revision_of)
-        .transpose()?;
-    let rows = conn
-        .prepare_cached(&format!(
-            "SELECT key, payload FROM projection_row WHERE spec = ?1 \
-             AND generation = {ACTIVE_GENERATION} AND stream_id = ?2 ORDER BY key"
-        ))
-        .and_then(|mut s| {
-            s.query_map(params![spec.as_str(), stream.as_str()], |r| {
-                Ok((r.get::<_, String>(0)?, Payload::new(r.get::<_, String>(1)?)))
+            .map_err(|e| engine(&e))?
+            .map(revision_of)
+            .transpose()?;
+        between();
+        let rows = conn
+            .prepare_cached(&format!(
+                "SELECT key, payload FROM projection_row WHERE spec = ?1 \
+                 AND generation = {ACTIVE_GENERATION} AND stream_id = ?2 ORDER BY key"
+            ))
+            .and_then(|mut s| {
+                s.query_map(params![spec.as_str(), stream.as_str()], |r| {
+                    Ok((r.get::<_, String>(0)?, Payload::new(r.get::<_, String>(1)?)))
+                })
+                .and_then(Iterator::collect::<Result<BTreeMap<_, _>, _>>)
             })
-            .and_then(Iterator::collect::<Result<BTreeMap<_, _>, _>>)
-        })
-        .map_err(|e| engine(&e))?;
-    Ok(StreamRows { applied, rows })
+            .map_err(|e| engine(&e))?;
+        Ok(StreamRows { applied, rows })
+    })
 }
 
 fn page(
@@ -161,7 +172,8 @@ impl<H: StoreHooks> ProjectionStore for SqliteJournal<H> {
         stream: &StreamId,
     ) -> Result<StreamRows, StorageError> {
         let (spec, stream) = (spec.clone(), stream.clone());
-        self.read(move |c| stream_rows(c, &spec, &stream)).await
+        self.read(move |c| stream_rows(c, &spec, &stream, || {}))
+            .await
     }
 
     async fn row(&self, spec: &ProjectionName, key: &str) -> Result<Option<Payload>, StorageError> {
@@ -183,16 +195,78 @@ impl<H: StoreHooks> ProjectionStore for SqliteJournal<H> {
     }
 }
 
+/// The generation `spec`'s rebuild claims, if one runs.
+fn claim(conn: &Connection, spec: &ProjectionName) -> Result<Option<i64>, Failure> {
+    conn.prepare_cached("SELECT generation FROM projection_rebuild WHERE spec = ?1")
+        .and_then(|mut s| {
+            s.query_row(params![spec.as_str()], |r| r.get::<_, i64>(0))
+                .optional()
+        })
+        .map_err(|e| engine(&e))
+}
+
+/// Refused `rebuild_superseded` unless `generation` is the one `spec`'s rebuild claims.
+fn claimed(conn: &Connection, spec: &ProjectionName, generation: i64) -> Result<(), Failure> {
+    if claim(conn, spec)? == Some(generation) {
+        Ok(())
+    } else {
+        Err(Failure::Storage(StorageError::new("rebuild_superseded")))
+    }
+}
+
+/// Whether a stream of `aggregate` has, in `spec`'s `generation` (`None`: the active one), no
+/// applied revision or one other than its head: one statement over the heads of the aggregate.
+fn behind(
+    conn: &Connection,
+    spec: &ProjectionName,
+    aggregate: &AggregateName,
+    generation: Option<i64>,
+) -> Result<bool, Failure> {
+    conn.prepare_cached(&format!(
+        "SELECT EXISTS (SELECT 1 FROM stream_head h WHERE h.aggregate = ?2 AND NOT EXISTS ( \
+         SELECT 1 FROM projection_stream p WHERE p.spec = ?1 \
+         AND p.generation = coalesce(?3, {ACTIVE_GENERATION}) \
+         AND p.stream_id = h.stream_id AND p.applied = h.revision))"
+    ))
+    .and_then(|mut s| {
+        s.query_row(
+            params![spec.as_str(), aggregate.as_str(), generation],
+            |r| r.get::<_, bool>(0),
+        )
+    })
+    .map_err(|e| engine(&e))
+}
+
 impl<H: StoreHooks> ProjectionRebuild for SqliteJournal<H> {
     async fn begin_rebuild(&self, spec: &ProjectionName) -> Result<Generation, StorageError> {
         let spec = spec.clone();
         self.write(move |c| {
             transaction(c, |c| {
-                let next = active(c, &spec)?
+                let active = sql_generation(active(c, &spec)?)?;
+                let used = c
+                    .prepare_cached(
+                        "SELECT max(generation) FROM (\
+                         SELECT generation FROM projection_rebuild WHERE spec = ?1 UNION ALL \
+                         SELECT generation FROM projection_stream WHERE spec = ?1 UNION ALL \
+                         SELECT generation FROM projection_row WHERE spec = ?1)",
+                    )
+                    .and_then(|mut s| {
+                        s.query_row(params![spec.as_str()], |r| r.get::<_, Option<i64>>(0))
+                    })
+                    .map_err(|e| engine(&e))?;
+                let next = used
+                    .unwrap_or(active)
+                    .max(active)
                     .checked_add(1)
                     .ok_or(Failure::Storage(StorageError::new("generation_exhausted")))?;
-                clear(c, &spec, sql_generation(next)?, false)?;
-                Ok(next)
+                clear(c, &spec, active, true)?;
+                exec(
+                    c,
+                    "INSERT INTO projection_rebuild (spec, generation) VALUES (?1, ?2) \
+                     ON CONFLICT (spec) DO UPDATE SET generation = excluded.generation",
+                    params![spec.as_str(), next],
+                )?;
+                generation_of(next)
             })
         })
         .await
@@ -212,10 +286,12 @@ impl<H: StoreHooks> ProjectionRebuild for SqliteJournal<H> {
         let (spec, stream) = (spec.clone(), stream.clone());
         self.write(move |c| {
             transaction(c, |c| {
+                let sql_gen = sql_generation(generation)?;
+                claimed(c, &spec, sql_gen)?;
                 if active(c, &spec)? == generation {
                     return Err(Failure::Storage(StorageError::new("generation_active")));
                 }
-                let generation = sql_generation(generation)?;
+                let generation = sql_gen;
                 exec(
                     c,
                     "DELETE FROM projection_row WHERE spec = ?1 AND generation = ?2 \
@@ -262,14 +338,19 @@ impl<H: StoreHooks> ProjectionRebuild for SqliteJournal<H> {
     async fn cutover(
         &self,
         spec: &ProjectionName,
+        aggregate: &AggregateName,
         generation: Generation,
         version: u32,
         written_by: &BuildId,
-    ) -> Result<(), StorageError> {
-        let (spec, written_by) = (spec.clone(), written_by.clone());
+    ) -> Result<Cutover, StorageError> {
+        let (spec, aggregate, written_by) = (spec.clone(), aggregate.clone(), written_by.clone());
         self.write(move |c| {
             transaction(c, |c| {
                 let generation = sql_generation(generation)?;
+                claimed(c, &spec, generation)?;
+                if behind(c, &spec, &aggregate, Some(generation))? {
+                    return Ok(Cutover::StreamsMoved);
+                }
                 exec(
                     c,
                     "INSERT INTO projection_meta (spec, version, active_generation, written_by) \
@@ -283,9 +364,80 @@ impl<H: StoreHooks> ProjectionRebuild for SqliteJournal<H> {
                         written_by.as_str()
                     ],
                 )?;
-                clear(c, &spec, generation, true)
+                clear(c, &spec, generation, true)?;
+                exec(
+                    c,
+                    "DELETE FROM projection_rebuild WHERE spec = ?1",
+                    params![spec.as_str()],
+                )?;
+                Ok(Cutover::Active)
             })
         })
         .await
+    }
+
+    async fn behind(
+        &self,
+        spec: &ProjectionName,
+        aggregate: &AggregateName,
+    ) -> Result<bool, StorageError> {
+        let (spec, aggregate) = (spec.clone(), aggregate.clone());
+        self.read(move |c| behind(c, &spec, &aggregate, None)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SqliteJournal, SqliteOptions};
+    use mayfly_domain::Millis;
+
+    fn exec_raw(conn: &Connection, sql: &str) {
+        conn.execute_batch(sql).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[test]
+    fn should_read_rows_and_applied_together_when_a_unit_commits_between_them() {
+        // given
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("journal.sqlite");
+        drop(
+            SqliteJournal::open(&path, SqliteOptions::new(Millis::new(1)))
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        let reader = Connection::open(&path).unwrap_or_else(|e| panic!("{e}"));
+        let writer = Connection::open(&path).unwrap_or_else(|e| panic!("{e}"));
+        exec_raw(
+            &writer,
+            "INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
+             VALUES ('pools', 0, 'pool-a', 'pool-a', '{\"v\":1}'); \
+             INSERT INTO projection_stream (spec, generation, stream_id, applied) \
+             VALUES ('pools', 0, 'pool-a', 0);",
+        );
+        let spec = ProjectionName::new("pools").unwrap_or_else(|e| panic!("{e}"));
+        let stream = StreamId::new("pool-a").unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            stream_rows(&reader, &spec, &stream, || {}).unwrap_or_else(|e| panic!("{e:?}"));
+
+        // when
+        let read = stream_rows(&reader, &spec, &stream, || {
+            exec_raw(
+                &writer,
+                "BEGIN IMMEDIATE; \
+                 INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
+                 VALUES ('pools', 0, 'pool-a/x', 'pool-a', '{\"v\":2}'); \
+                 UPDATE projection_stream SET applied = 1 WHERE spec = 'pools' \
+                 AND generation = 0 AND stream_id = 'pool-a'; COMMIT;",
+            );
+        });
+
+        // then
+        assert_eq!(read, Ok(before));
+        let after = stream_rows(&reader, &spec, &stream, || {}).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            (after.applied.map(StreamRevision::get), after.rows.len()),
+            (Some(1), 2)
+        );
+        assert!(reader.is_autocommit());
     }
 }

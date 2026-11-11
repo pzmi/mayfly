@@ -7,7 +7,7 @@ use std::fmt;
 use mayfly_domain::{EventId, Millis};
 
 use crate::journal::values::{
-    AggregateName, Decision, ExpectedRevision, InboxKey, NewEvent, NewReceipt, Payload,
+    AggregateName, Decision, ExpectedRevision, InboxKey, MAX_ROW_KEY, NewEvent, NewReceipt,
     ProjectionWrite, ReadCondition, StreamId, StreamRevision, SupportedEpochs, row_key_in_stream,
     valid_snake_name,
 };
@@ -183,8 +183,7 @@ impl UnitOfWork {
                 .projections
                 .iter()
                 .flat_map(|p| &p.rows)
-                .filter_map(|r| r.row.as_ref())
-                .any(Payload::holds_nul)
+                .any(|r| r.row.holds_nul())
             || rejection.is_some_and(|r| r.holds_nul());
         if holds_nul {
             return Err(MalformedUnit::NulInPayload);
@@ -211,12 +210,9 @@ impl UnitOfWork {
         if !local {
             return Err(MalformedUnit::ProjectionOutsideUnit);
         }
-        if !self
-            .projections
-            .iter()
-            .flat_map(|p| &p.rows)
-            .all(|r| (1..=256).contains(&r.key.len()) && !r.key.chars().any(char::is_control))
-        {
+        if !self.projections.iter().flat_map(|p| &p.rows).all(|r| {
+            (1..=MAX_ROW_KEY).contains(&r.key.len()) && !r.key.chars().any(char::is_control)
+        }) {
             return Err(MalformedUnit::InvalidProjectionKey);
         }
         Ok(())
@@ -277,7 +273,7 @@ pub enum MalformedUnit {
     /// A projection write names a stream the unit does not append to, or a row key outside its
     /// stream (ES-I10, contract case PC-05).
     ProjectionOutsideUnit,
-    /// A projection key is empty, longer than 256 bytes or holds a control character.
+    /// A projection key is empty, longer than [`MAX_ROW_KEY`] bytes or holds a control character.
     InvalidProjectionKey,
 }
 
@@ -374,7 +370,7 @@ mod tests {
             stream: stream(stream_name),
             rows: vec![RowWrite {
                 key: key.to_owned(),
-                row: Some(Payload::new(value)),
+                row: Payload::new(value),
             }],
         }
     }

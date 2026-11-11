@@ -486,36 +486,34 @@ impl<H: StoreHooks> Tx<'_, H> {
             )?;
         }
         // Projection rows (stream-local, §4.2's eighth lock), in each spec's active generation
-        // read in this transaction, with the stream's new head as the revision applied.
+        // read in this transaction, with the stream's new head as the revision applied. A
+        // unit's rows are the stream's whole set (ES-04F): the stream's stored rows go first,
+        // so rows a missed write left behind are replaced, never patched.
         for write in &unit.projections {
             let Some((_, placed)) = appends.iter().find(|(a, _)| a.stream == write.stream) else {
                 continue;
             };
             let applied = sql_revision(placed.last).map_err(refused)?;
+            self.exec(
+                &format!(
+                    "DELETE FROM projection_row WHERE spec = ?1 \
+                     AND generation = {ACTIVE_GENERATION} AND stream_id = ?2"
+                ),
+                params![write.projection.as_str(), write.stream.as_str()],
+            )?;
             for row in &write.rows {
-                match &row.row {
-                    Some(payload) => self.exec(
-                        &format!(
-                            "INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
-                             VALUES (?1, {ACTIVE_GENERATION}, ?2, ?3, ?4) \
-                             ON CONFLICT (spec, generation, key) \
-                             DO UPDATE SET stream_id = excluded.stream_id, payload = excluded.payload"
-                        ),
-                        params![
-                            write.projection.as_str(),
-                            row.key,
-                            write.stream.as_str(),
-                            payload.as_str()
-                        ],
-                    )?,
-                    None => self.exec(
-                        &format!(
-                            "DELETE FROM projection_row WHERE spec = ?1 \
-                             AND generation = {ACTIVE_GENERATION} AND key = ?2"
-                        ),
-                        params![write.projection.as_str(), row.key],
-                    )?,
-                };
+                self.exec(
+                    &format!(
+                        "INSERT INTO projection_row (spec, generation, key, stream_id, payload) \
+                         VALUES (?1, {ACTIVE_GENERATION}, ?2, ?3, ?4)"
+                    ),
+                    params![
+                        write.projection.as_str(),
+                        row.key,
+                        write.stream.as_str(),
+                        row.row.as_str()
+                    ],
+                )?;
             }
             self.exec(
                 &format!(

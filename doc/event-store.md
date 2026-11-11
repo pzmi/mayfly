@@ -159,7 +159,9 @@ never decreases. Pinned by SC-01..SC-11; a property over random histories; model
 `snapshotFormatsCoexist`); `BlindSnapshotUpsert`, `ResealingSnapshots`.
 
 **ES-I9 Inline projection atomicity**. An accepted unit's inline projection rows are
-visible with its events; a refused or failed unit leaves none. Pinned by PC-03, PC-04.
+visible with its events; a refused or failed unit leaves none; an accepted unit's rows are its
+streams' whole row sets, so a write a stream missed is healed by its next unit. Pinned by PC-03,
+PC-04, PC-10.
 
 **ES-I10 Projection locality**. An inline projection reads and writes only rows keyed by
 a stream the unit appends to. This is what makes rows computable outside the transaction (their
@@ -171,7 +173,9 @@ by another stream: `Malformed`) and `ARCH-projection-locality`.
 equals the live one; a rebuild enumerates stream heads, folds each stream from revision 0 into a
 shadow generation while live units dual-write it, and records the revision it last *applied*, never
 one read from a head; the cutover fence makes the switch atomic and refuses a unit computed for
-the old generation set. Pinned by PC-01, PC-02, PC-06, PC-07..PC-09; model scenarios
+the old generation set. Offline (ES-04F), the cutover is refused while a stream moved after its
+fold, and a generation belongs to the rebuild that claimed it. Pinned by PC-01, PC-02, PC-06,
+PC-07..PC-09, PC-10..PC-12; model scenarios
 `shadowRebuildDualWrite`, `cutoverFence`; property
 "rebuild equals live" over random histories; F21; ver §9 mutant 18.
 
@@ -557,12 +561,42 @@ before any writer; it pages `Journal::streams` by key, folds each stream of the 
 from revision 0 and records the revision of the last event it folded, never the paged head's.
 ES-12 adds the dual writes and the cutover fence (`ProjectionGenerationMoved`). (6) *Storage*:
 migration 0004 adds `projection_meta` and `projection_stream (spec, generation, stream_id) →
-applied`, the per-stream applied revision of ES-I11 (floor 2: no earlier build writes a row).
+applied`, the per-stream applied revision of ES-I11 (floor 2: see (8)).
 (7) *First read models*: `attempts`, `pending_effects` (attempt streams; a pending row is deleted
 when its directive resolves), `slots` (host streams; deleted on release), `pools` and
 `recent_failures` (pool streams; deleted when the breaker's window drops a failure or a reset
 clears it). Counts across streams (`failures_by_pool`, `leases_by_host`, unknown effects) are
 query-time views over those rows.
+
+**As fixed (ES-04F, the ES-04 checkpoint review).** (8) *Whole row sets.* A unit's
+`ProjectionWrite` carries every row of the stream after the unit (`RowWrite { key, row }`, no
+delete marker), and the journal deletes the stream's rows in the active generation before it
+inserts them; ES-04 sent the difference between the fold at the expected revision and the fold
+after the batch and applied it to whatever was stored, so a write the projection missed (a
+build without it appended, a store kept without `with_projections`, a unit that overtook an
+offline rebuild) stayed wrong for ever and the next difference hid the gap. Rows are
+stream-local and few, so the whole set costs little and heals: it is also what the model's
+`rowAfter` already writes (the row of a stream is one value, replaced). A refusal unless the
+stored applied revision equals the expected one was the alternative; it would wedge a stream
+until a rebuild instead of healing it. `prepare` also rebuilds a projection with a stream whose
+applied revision in the active generation is missing or not its head
+(`ProjectionRebuild::behind`, one statement on SQLite), so streams no unit touched since are
+healed at the next start (PC-10). Hence the floor stays 2 for migrations 0004 and 0005: an older
+build's appends are missed writes the next start finds and rebuilds, never wrong rows (§6.4).
+(9) *Guarded offline rebuild.* `cutover(spec, aggregate, generation, ..)` answers
+`Cutover::StreamsMoved`, changing nothing, unless every stream of the aggregate has the new
+generation's applied revision equal to its head; `rebuild_projection` then folds again, at most
+`REBUILD_PASSES` (3) passes (PC-11). `begin_rebuild` claims a generation above every one used
+(migration 0005's `projection_rebuild`, a claim per spec that only rises), and `apply_stream` and
+`cutover` refuse any other generation `rebuild_superseded`: a second rebuild supersedes the
+first instead of clearing and sharing its generation (PC-12). (10) *One read.* `stream_rows`
+reads the applied revision and the rows in one read transaction on SQLite (`BEGIN DEFERRED`). A
+listing paged through `rows` is one read per page, documented as such on `queries::all_rows`.
+(11) *Keys.* A suffix that would make a key longer than `MAX_ROW_KEY` (256 bytes), or that starts
+with `#`, is stored as `<stream>/#<SHA-256 hex>`, so a valid command never builds a key the
+journal refuses `InvalidProjectionKey`. (12) *Properties.* "Rebuild equals live" runs over
+seeded pool, host (`slots`) and attempt (`attempts`, `pending_effects`) histories on memory
+(proptest) and on SQLite (four seeds each).
 
 ### 3.7 What `AggregateStore::save` does, and transaction scopes
 
@@ -909,7 +943,10 @@ At start-up, after migrations and before any writer, composition compares `store
 ### 6.4 Rollback and the derived stores
 
 Projections rebuild (online, into a shadow generation) on any version mismatch, so N never reads rows N+1 wrote with a meaning N does
-not know, and N+1 rebuilds again on its return. Dispatch marks are written for every registered
+not know, and N+1 rebuilds again on its return. A build that does not keep a projection (one
+before it, or one that dropped it) appends without its rows: the next build that keeps it finds
+a stream whose applied revision is not its head and rebuilds (ES-04F, PC-10), and every unit
+writes its stream's whole row set, so the gap never survives. Dispatch marks are written for every registered
 consumer, so N marks N+1's consumers and N+1 finds no gap on its return (a release that
 appended without marking a consumer a newer release registered would lose that consumer's
 deliveries). Snapshots under unknown keys are ignored.
@@ -1030,7 +1067,12 @@ leaves none; PC-05 a row keyed by a stream outside the unit is `Malformed`; PC-0
 the stored one rebuilds too (§6.1). PC-07 during an online rebuild every unit writes both
 generations and readers see the active one only; PC-08 the cutover flips the generation in one
 transaction and refuses a unit computed for the old generation set; PC-09 a crash mid-rebuild
-resumes from the applied revisions, never from a head (E9).
+resumes from the applied revisions, never from a head (E9). PC-10 events appended without their
+rows heal: the stream's next unit writes its whole fold and a restart under the same build
+rebuilds every projection with a stream behind its head; PC-11 an offline cutover is refused
+while a stream is missing from the new generation or moved after its fold, and the rebuild folds
+again; PC-12 a second rebuild supersedes the first, whose writes and cutover are refused, and
+readers never see a partial generation (ES-04F).
 
 ### 7.2 Concurrency cases beyond the contract
 
@@ -1215,14 +1257,17 @@ then a fix.
 | `CursorlessLedger` (discovery restarts from the lowest key at every claim) | contract | DC-28 |
 | A worker without its `handle` deadline (`SuiteWorker::WithoutHandleDeadline`) | contract | DC-26 |
 | `BlindSnapshotUpsert`, `ResealingSnapshots` | contract | SC-09, SC-08 |
-| `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01, PC-03 |
-| `RowlessJournal` (commits events without their rows) | contract | PC-01, PC-02, PC-03, PC-05, PC-06 |
-| `UndeletingJournal` (drops row deletes) | contract | PC-01, PC-03 |
+| `ClockReadingProjection`, `OrderDependentProjection` | contract | PC-01, PC-03, PC-10, PC-11, PC-12 |
+| `RowlessJournal` (commits events without their rows) | contract | PC-01, PC-02, PC-03, PC-05, PC-06, PC-10, PC-11, PC-12 |
+| `MergingRowsJournal` (puts a unit's rows over the stored ones, keeping those it no longer lists: deletes and missed writes survive; replaces ES-04's `UndeletingJournal`) | contract | PC-01, PC-03, PC-10, PC-11, PC-12 |
 | `LeakyRowsJournal` (writes a refused unit's rows) | contract | PC-04, PC-05 |
 | `UnscopedRowsJournal` (no locality check) | contract | PC-05 |
-| `InPlaceRebuildStore` (a rebuild writes the active generation) | contract | PC-01, PC-02, PC-06 |
-| A start that rebuilds only upward (`SuitePrepare::UpwardOnly`) | contract | PC-06 |
-| A start blind to versions (`SuitePrepare::VersionBlind`) | contract | PC-02, PC-06 |
+| `InPlaceRebuildStore` (a rebuild writes the active generation) | contract | PC-01, PC-02, PC-06, PC-10, PC-11, PC-12 |
+| `UncheckedCutoverStore` (a cutover checks no stream against its head) | contract | PC-11 |
+| `SharedGenerationStore` (every rebuild takes the active generation plus one) | contract | PC-12 |
+| A start that rebuilds only upward (`SuitePrepare::UpwardOnly`) | contract | PC-06, PC-10 |
+| A start blind to versions (`SuitePrepare::VersionBlind`) | contract | PC-02, PC-06, PC-10 |
+| A start blind to streams behind their head (`SuitePrepare::StaleBlind`) | contract | PC-10 |
 
 The curated-mutant table of ver §9 gains the store rows that are not already contract fixtures.
 

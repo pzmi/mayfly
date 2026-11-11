@@ -42,6 +42,14 @@ impl std::error::Error for QueryError {}
 
 /// Every row of projection `S`, by key.
 ///
+/// Paged through [`ProjectionStore::rows`], one read per page, so the result is not one
+/// snapshot of the store: a unit that commits between two pages shows on a later page only, and
+/// a cutover between two pages switches generation from that page on. Each row is still the
+/// committed fold of its stream, which is what every query here counts; a view that needs
+/// several streams at one instant cannot be computed from this (none does). A single read
+/// transaction across the pages would need a port method returning every row at once, which
+/// the paging by key (ES-I17, bounded pages) rules out.
+///
 /// # Errors
 /// [`QueryError`].
 pub async fn all_rows<S: ProjectionSpec, P: ProjectionStore>(

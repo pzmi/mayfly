@@ -92,6 +92,25 @@ pub(crate) fn transaction<T>(
     }
 }
 
+/// Runs `f` in one read transaction (`BEGIN DEFERRED`): every statement of `f` reads the same
+/// committed state of the store, whatever a writer commits meanwhile (WAL keeps the snapshot
+/// the first read took until the end). Ended with `COMMIT` either way: it wrote nothing.
+pub(crate) fn read_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    conn.execute_batch("BEGIN DEFERRED")
+        .map_err(|e| classify(&e))?;
+    let read = f(conn);
+    if !conn.is_autocommit() {
+        let ended = conn.execute_batch("COMMIT");
+        if let (Ok(_), Err(e)) = (&read, ended) {
+            return Err(classify(&e));
+        }
+    }
+    read
+}
+
 pub(crate) fn exec(
     conn: &Connection,
     sql: &str,

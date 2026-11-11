@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 
-use crate::journal::{Payload, ProjectionName, StorageError, StreamId, StreamRevision};
+use crate::journal::{
+    AggregateName, Payload, ProjectionName, StorageError, StreamId, StreamRevision,
+};
 
 /// The build that wrote a projection's rows, as `projection_meta.written_by` records it: a
 /// start whose build differs rebuilds (`doc/event-store.md` §6.1, §6.4), so a rolled-back build
@@ -89,9 +91,13 @@ pub struct StreamRows {
 ///
 /// A native async trait used through generics (D8). Implemented by the store that commits the
 /// units (`MemoryJournal`, `SqliteJournal`), since inline rows commit in the unit's
-/// transaction (ES-I9). Every read is one statement and cancel-safe.
+/// transaction (ES-I9). Every read sees one committed state of the store (one statement, or
+/// [`ProjectionStore::stream_rows`]'s two in one read transaction) and is cancel-safe. A
+/// listing paged through [`ProjectionStore::rows`] is one such read per page, not one
+/// snapshot: a unit committing between two pages shows on the later page only (each row is
+/// still its stream's committed fold).
 ///
-/// Pinned by: `crates/mayfly-testkit/src/contracts/projections.rs` (PC-01..PC-06), run on memory
+/// Pinned by: `crates/mayfly-testkit/src/contracts/projections.rs` (PC-01..PC-06, PC-10..PC-12), run on memory
 /// by `crates/mayfly-testkit/tests/projection_contract.rs` and on SQLite by
 /// `crates/mayfly-adapter-sqlite/tests/projection_contract.rs`.
 pub trait ProjectionStore: Send + Sync {
@@ -101,7 +107,9 @@ pub trait ProjectionStore: Send + Sync {
     /// [`StorageError`] when the store fails.
     fn meta(&self) -> impl Future<Output = Result<Vec<ProjectionMeta>, StorageError>> + Send;
 
-    /// `stream`'s rows of `spec` in the active generation.
+    /// `stream`'s rows of `spec` in the active generation, with the revision they applied, read
+    /// in one read transaction so the two always belong together. Pinned on SQLite by
+    /// `crates/mayfly-adapter-sqlite/src/projections.rs::should_read_rows_and_applied_together_when_a_unit_commits_between_them`.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
@@ -135,16 +143,35 @@ pub trait ProjectionStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<(String, Payload)>, StorageError>> + Send;
 }
 
+/// How a [`ProjectionRebuild::cutover`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cutover {
+    /// The generation is active.
+    Active,
+    /// Refused: a stream of the aggregate has no applied revision in the generation, or one
+    /// other than its head (a unit committed after the rebuild folded it). Nothing changed;
+    /// the rebuild folds again and retries.
+    StreamsMoved,
+}
+
 /// The offline rebuild's writes (`doc/event-store.md` §3.6; ES-12 makes it online): a new
 /// generation, built stream by stream, made active in one transaction.
 ///
-/// **Offline.** Units that commit while a rebuild runs write the active generation only, so a
-/// rebuild runs where no unit does: at start-up, after the migrations and the stored-kinds
-/// check, before any writer (`crate::projection::prepare`). ES-12 adds the dual writes and the
-/// cutover fence that let it run beside writers.
+/// **Offline, and guarded (ES-04F).** Units that commit while a rebuild runs write the active
+/// generation only, so a rebuild runs where no unit does: at start-up, after the migrations and
+/// the stored-kinds check, before any writer (`crate::projection::prepare`). The store does not
+/// trust that: the cutover is refused ([`Cutover::StreamsMoved`]) unless every stream of the
+/// aggregate has the new generation's applied revision equal to its head, and a generation is
+/// claimed by the [`ProjectionRebuild::begin_rebuild`] that handed it out, so a second rebuild
+/// of the same spec supersedes the first (whose writes and cutover are then refused
+/// `rebuild_superseded`) instead of sharing its generation. ES-12 adds the dual writes and the
+/// cutover fence that let a rebuild run beside writers. Pinned by
+/// `crates/mayfly-testkit/src/contracts/projections.rs` (PC-11, PC-12).
 pub trait ProjectionRebuild: Send + Sync {
-    /// Starts a rebuild of `spec`: returns a generation above the active one, emptied of
-    /// anything an earlier, interrupted rebuild left there.
+    /// Starts a rebuild of `spec`: claims and returns a generation above the active one and
+    /// above every generation handed out before (so never one another rebuild holds), and
+    /// removes the rows of every generation but the active one (what an interrupted or
+    /// superseded rebuild left). The claim replaces any earlier one.
     ///
     /// # Errors
     /// [`StorageError`] when the store fails.
@@ -154,8 +181,9 @@ pub trait ProjectionRebuild: Send + Sync {
     ) -> impl Future<Output = Result<Generation, StorageError>> + Send;
 
     /// Replaces `stream`'s rows of `spec` in `generation` with `rows`, folded through revision
-    /// `applied`, in one transaction. Refused when `generation` is the active one (readers
-    /// would see a half-built projection, PC-02) or a key is not one of `stream`'s
+    /// `applied`, in one transaction. Refused when `generation` is not the one `spec`'s rebuild
+    /// claims (`rebuild_superseded`), when it is the active one (readers would see a half-built
+    /// projection, PC-02: `generation_active`), or when a key is not one of `stream`'s
     /// (`row_outside_stream`, ES-I10).
     ///
     /// # Errors
@@ -169,17 +197,34 @@ pub trait ProjectionRebuild: Send + Sync {
         applied: StreamRevision,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// Makes `generation` the active one of `spec`, recording `version` and `written_by`, and
-    /// removes every other generation's rows, in one transaction: readers see the old rows or
-    /// the new, never a mix (PC-02).
+    /// Makes `generation` the active one of `spec`, recording `version` and `written_by`,
+    /// removes every other generation's rows and ends the claim, in one transaction: readers
+    /// see the old rows or the new, never a mix (PC-02). Answers [`Cutover::StreamsMoved`],
+    /// changing nothing, unless every stream of `aggregate` has `generation`'s applied
+    /// revision equal to its head (PC-11).
     ///
     /// # Errors
+    /// `rebuild_superseded` when `generation` is not the one `spec`'s rebuild claims (PC-12);
     /// [`StorageError`] when the store fails.
     fn cutover(
         &self,
         spec: &ProjectionName,
+        aggregate: &AggregateName,
         generation: Generation,
         version: u32,
         written_by: &BuildId,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<Cutover, StorageError>> + Send;
+
+    /// Whether a stream of `aggregate` has, in `spec`'s active generation, no applied revision
+    /// or one other than its head: a write the projection missed (an older build appended
+    /// without it, a store kept without it), which `crate::projection::prepare` rebuilds.
+    /// One read of the store (one statement on SQLite).
+    ///
+    /// # Errors
+    /// [`StorageError`] when the store fails.
+    fn behind(
+        &self,
+        spec: &ProjectionName,
+        aggregate: &AggregateName,
+    ) -> impl Future<Output = Result<bool, StorageError>> + Send;
 }

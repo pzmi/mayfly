@@ -1,12 +1,20 @@
 //! The offline rebuild (`doc/event-store.md` §3.6, ES-I11; mayfly I16): at start-up, every
-//! projection whose stored version or build differs from this build's is rebuilt into a new
-//! generation by enumerating the journal's streams by key, then made active in one transaction.
+//! projection whose stored version or build differs from this build's, or with a stream behind
+//! its head, is rebuilt into a new generation by enumerating the journal's streams by key, then
+//! made active in one transaction.
 
 use std::fmt;
 
 use crate::journal::{Journal, MAX_PAGE, StorageError, StreamId};
 use crate::projection::fold::{Projection, ProjectionError, Projections};
-use crate::projection::ports::{BuildId, ProjectionMeta, ProjectionRebuild, ProjectionStore};
+use crate::projection::ports::{
+    BuildId, Cutover, Generation, ProjectionMeta, ProjectionRebuild, ProjectionStore,
+};
+
+/// How many times [`rebuild_projection`] folds the streams again after a refused cutover before
+/// it gives up: at start-up no unit runs, so one pass is the rule and the others are for a
+/// writer that should not be there.
+pub const REBUILD_PASSES: u32 = 3;
 
 /// Why `prepare` stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +24,9 @@ pub enum RebuildError {
     Storage(StorageError),
     /// A stream did not fold (an unknown kind: safe mode, `doc/event-store.md` §6.3).
     Projection(ProjectionError),
+    /// Every cutover of [`REBUILD_PASSES`] passes was refused because a stream moved after it
+    /// was folded: units keep committing during an offline rebuild.
+    StreamsMoved,
 }
 
 impl fmt::Display for RebuildError {
@@ -23,6 +34,9 @@ impl fmt::Display for RebuildError {
         match self {
             Self::Storage(e) => write!(f, "projection rebuild failed: {e}"),
             Self::Projection(e) => write!(f, "projection rebuild failed: {e}"),
+            Self::StreamsMoved => {
+                f.write_str("projection rebuild failed: streams kept moving under it")
+            }
         }
     }
 }
@@ -34,7 +48,8 @@ impl std::error::Error for RebuildError {}
 pub struct Prepared {
     /// The projection.
     pub spec: String,
-    /// Whether it was rebuilt; `false` when its rows were already this build's.
+    /// Whether it was rebuilt; `false` when its rows were already this build's and no stream
+    /// was behind its head.
     pub rebuilt: bool,
     /// The streams folded into the new generation.
     pub streams: u64,
@@ -53,19 +68,17 @@ pub fn needs_rebuild(
     stored.is_none_or(|meta| meta.version != projection.version() || meta.written_by != *build)
 }
 
-/// Rebuilds, offline, every projection of `projections` that [`needs_rebuild`]; leaves the
-/// others as they are. Runs before any writer (the rebuild's writes are not fenced against
-/// units until ES-12): composition calls it at start-up after the migrations and the
-/// stored-kinds check (`doc/event-store.md` §6.3, CP-04).
+/// Rebuilds, offline, every projection of `projections` that [`needs_rebuild`] or has a stream
+/// behind its head ([`ProjectionRebuild::behind`]: a write it missed, such as the events an
+/// older build without the projection appended, PC-10); leaves the others as they are. Runs
+/// before any writer (the rebuild's writes are not fenced against units until ES-12; the
+/// cutover refuses a generation a unit overtook, PC-11): composition calls it at start-up after
+/// the migrations and the stored-kinds check (`doc/event-store.md` §6.3, CP-04).
 ///
-/// Per projection: [`ProjectionRebuild::begin_rebuild`]; the journal's streams paged by key
-/// ([`Journal::streams`], never by time or position, ES-I17), each of the projection's
-/// aggregate read whole and folded from revision 0 into the new generation with the revision
-/// of the **last event it folded** as applied, never the enumerated head's (ES-I11: a unit
-/// that lands between the page and the read is folded and recorded as applied); then
-/// [`ProjectionRebuild::cutover`]. A crash before the cutover leaves the old generation active,
-/// and the next start begins again. Pinned by `crates/mayfly-testkit/src/contracts/projections.rs`
-/// (PC-01, PC-02, PC-06) and `crates/mayfly-control/tests/store/projections.rs::should_record_the_revision_folded_when_a_stream_moves_after_its_head_was_paged`.
+/// Per projection: [`rebuild_projection`]. A crash before the cutover leaves the old generation
+/// active, and the next start begins again. Pinned by
+/// `crates/mayfly-testkit/src/contracts/projections.rs` (PC-01, PC-02, PC-06, PC-10..PC-12) and
+/// `crates/mayfly-control/tests/store/projections.rs::should_record_the_revision_folded_when_a_stream_moves_after_its_head_was_paged`.
 ///
 /// # Errors
 /// [`RebuildError`]; the projection being rebuilt keeps its old generation.
@@ -83,7 +96,12 @@ where
     let mut report = Vec::with_capacity(projections.all().len());
     for projection in projections.all() {
         let meta = stored.iter().find(|m| m.spec == *projection.name());
-        if !needs_rebuild(projection, meta, build) {
+        let rebuild = needs_rebuild(projection, meta, build)
+            || store
+                .behind(projection.name(), projection.aggregate())
+                .await
+                .map_err(RebuildError::Storage)?;
+        if !rebuild {
             report.push(Prepared {
                 spec: projection.name().as_str().to_owned(),
                 rebuilt: false,
@@ -102,7 +120,15 @@ where
 }
 
 /// Rebuilds `projection` offline whatever the store holds (what [`prepare`] does for each
-/// projection that [`needs_rebuild`]); returns how many streams it folded.
+/// projection it rebuilds); returns how many streams it folded in its last pass.
+///
+/// [`ProjectionRebuild::begin_rebuild`] claims a new generation; a pass pages the journal's
+/// streams by key ([`Journal::streams`], never by time or position, ES-I17), reads each stream
+/// of the projection's aggregate whole and folds it from revision 0 into the new generation
+/// with the revision of the **last event it folded** as applied, never the paged head's (ES-I11:
+/// a unit that lands between the page and the read is folded and recorded as applied); then
+/// [`ProjectionRebuild::cutover`]. A cutover refused because a stream moved after its fold
+/// ([`Cutover::StreamsMoved`]) runs another pass, at most [`REBUILD_PASSES`] in all.
 ///
 /// # Errors
 /// [`RebuildError`]; the projection keeps its old generation.
@@ -121,6 +147,37 @@ where
         .begin_rebuild(spec)
         .await
         .map_err(RebuildError::Storage)?;
+    for _ in 0..REBUILD_PASSES {
+        let folded = fold_streams(journal, store, projection, generation).await?;
+        let cutover = store
+            .cutover(
+                spec,
+                projection.aggregate(),
+                generation,
+                projection.version(),
+                build,
+            )
+            .await
+            .map_err(RebuildError::Storage)?;
+        if cutover == Cutover::Active {
+            return Ok(folded);
+        }
+    }
+    Err(RebuildError::StreamsMoved)
+}
+
+/// One pass of [`rebuild_projection`]: every stream of the projection's aggregate folded into
+/// `generation`.
+async fn fold_streams<J, P>(
+    journal: &J,
+    store: &P,
+    projection: &Projection,
+    generation: Generation,
+) -> Result<u64, RebuildError>
+where
+    J: Journal,
+    P: ProjectionRebuild,
+{
     let mut after: Option<StreamId> = None;
     let mut folded = 0_u64;
     loop {
@@ -129,7 +186,7 @@ where
             .await
             .map_err(RebuildError::Storage)?;
         let Some(last) = page.last() else {
-            break;
+            return Ok(folded);
         };
         after = Some(last.stream.clone());
         for head in page
@@ -147,17 +204,12 @@ where
                 .fold(&head.stream, &events)
                 .map_err(RebuildError::Projection)?;
             store
-                .apply_stream(spec, generation, &head.stream, rows, applied)
+                .apply_stream(projection.name(), generation, &head.stream, rows, applied)
                 .await
                 .map_err(RebuildError::Storage)?;
             folded += 1;
         }
     }
-    store
-        .cutover(spec, generation, projection.version(), build)
-        .await
-        .map_err(RebuildError::Storage)?;
-    Ok(folded)
 }
 
 #[cfg(test)]
