@@ -61,15 +61,16 @@ pub use events::{
     DirectiveRefused, DirectiveSent, GuestRejected, GuestVerified, JitHandleIssued,
     JitHandleOrphaned, JitHandleTaken, JobBound, LostEvidence, RetirementRequested,
     RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
-    StaleObservationIgnored, Staleness, VmBooted, VmCloned, VmDeleted, VmObservedStopped,
-    VmStopped,
+    StaleObservationIgnored, Staleness, StopDeregistrationConfirmed, StopDeregistrationRefusedBusy,
+    StopDeregistrationRequested, VmBooted, VmCloned, VmDeleted, VmObservedStopped, VmStopped,
 };
 pub use evolve::evolve;
 pub use rejection::AttemptRejection;
 pub use saga::{SagaStep, next_step};
 pub use state::{
     AttemptState, Diagnostics, DirectiveKind, DirectiveTag, Identity, Jit, Outcome, OwnershipProof,
-    Pending, Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, VmCondition,
+    Pending, Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, StopDeregistration,
+    VmCondition,
 };
 
 use crate::aggregate::{Aggregate, DeterminismCase, DeterminismCases};

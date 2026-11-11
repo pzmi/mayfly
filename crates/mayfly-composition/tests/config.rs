@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mayfly_composition::config::{
-    Config, ConfigErrorKind, GithubScope, GuestOs, LoadError, ProviderKind, Tier, TimeOfDay,
+    CapacityPolicy, Config, ConfigErrorKind, GithubScope, GuestOs, LoadError, ProviderKind, Tier,
+    TimeOfDay,
 };
 use mayfly_domain::SecretRef;
 
@@ -192,6 +193,7 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
             minute: 30
         })
     );
+    assert_eq!(mac.capacity_policy, CapacityPolicy::Demand);
     assert_eq!(config.pools[1].guest_os, GuestOs::Linux);
 }
 
@@ -210,6 +212,7 @@ fn should_apply_the_defaults_when_the_optional_keys_are_absent() {
         (3, Duration::from_secs(1800))
     );
     assert_eq!(pool.runner_refresh_at, None);
+    assert_eq!(pool.capacity_policy, CapacityPolicy::Exact);
     assert_eq!(config.host.reserve_memory_mib, 4096);
     assert_eq!(config.host.reserve_disk_gib, 50);
     assert_eq!(config.provider.kind, ProviderKind::Tart);

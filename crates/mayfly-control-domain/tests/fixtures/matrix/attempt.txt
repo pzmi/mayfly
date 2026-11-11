@@ -511,7 +511,7 @@ activating/launching x vm_booted -> refused observation_mismatch
 activating/launching x guest_verified -> refused observation_mismatch
 activating/launching x guest_rejected -> refused observation_mismatch
 activating/launching x directive_refused -> accepted directive_refused/v1 attempt_retired/v1
-activating/launching x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1
+activating/launching x directive_refused_proof -> accepted directive_refused/v1 attempt_quarantined/v1 stop_deregistration_requested/v1
 activating/launching x directive_refused_absent -> accepted directive_refused/v1 attempt_retired/v1
 activating/launching x outcome_unknown -> accepted directive_outcome_unknown/v1
 activating/launching x runner_launched -> accepted jit_handle_taken/v1 runner_launched/v1
@@ -523,7 +523,7 @@ activating/launching x vm_deleted -> refused observation_mismatch
 activating/launching x runner_exited -> refused observation_mismatch
 activating/launching x vm_observed_stopped -> accepted vm_observed_stopped/v1
 activating/launching x vm_present -> accepted, no event
-activating/launching x vm_present_replaced -> accepted attempt_quarantined/v1
+activating/launching x vm_present_replaced -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 activating/launching x vm_absent -> accepted attempt_lost/v1
 activating/launching x directive_sent -> accepted directive_sent/v1
 activating/launching x directive_timeout -> refused directive_not_sent
@@ -535,7 +535,7 @@ listening x bind_job -> accepted job_bound/v1
 listening x request_retirement -> accepted retirement_requested/v1
 listening x confirm_retirement -> refused no_retirement_requested
 listening x withdraw_retirement -> refused no_retirement_requested
-listening x quarantine -> accepted attempt_quarantined/v1
+listening x quarantine -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 listening x adopt -> accepted attempt_adopted/v1
 listening x resolve_quarantine -> refused not_quarantined
 listening x close -> refused not_terminal
@@ -556,7 +556,7 @@ listening x vm_deleted -> accepted stale_observation_ignored/v1
 listening x runner_exited -> accepted runner_exited/v1
 listening x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retired/v1
 listening x vm_present -> accepted, no event
-listening x vm_present_replaced -> accepted attempt_quarantined/v1
+listening x vm_present_replaced -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 listening x vm_absent -> accepted attempt_lost/v1
 listening x directive_sent -> refused directive_not_pending
 listening x directive_timeout -> refused directive_not_pending
@@ -568,7 +568,7 @@ listening/leaked x bind_job -> refused jit_presumed_leaked
 listening/leaked x request_retirement -> accepted retirement_requested/v1
 listening/leaked x confirm_retirement -> refused no_retirement_requested
 listening/leaked x withdraw_retirement -> refused no_retirement_requested
-listening/leaked x quarantine -> accepted attempt_quarantined/v1
+listening/leaked x quarantine -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 listening/leaked x adopt -> accepted attempt_adopted/v1
 listening/leaked x resolve_quarantine -> refused not_quarantined
 listening/leaked x close -> refused not_terminal
@@ -589,7 +589,7 @@ listening/leaked x vm_deleted -> accepted stale_observation_ignored/v1
 listening/leaked x runner_exited -> accepted runner_exited/v1
 listening/leaked x vm_observed_stopped -> accepted vm_observed_stopped/v1 attempt_retired/v1
 listening/leaked x vm_present -> accepted, no event
-listening/leaked x vm_present_replaced -> accepted attempt_quarantined/v1
+listening/leaked x vm_present_replaced -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 listening/leaked x vm_absent -> accepted attempt_lost/v1
 listening/leaked x directive_sent -> refused directive_not_pending
 listening/leaked x directive_timeout -> refused directive_not_pending
@@ -964,7 +964,7 @@ backoff/registered x bind_job -> refused not_listening
 backoff/registered x request_retirement -> accepted retirement_requested/v1
 backoff/registered x confirm_retirement -> refused no_retirement_requested
 backoff/registered x withdraw_retirement -> refused no_retirement_requested
-backoff/registered x quarantine -> accepted attempt_quarantined/v1
+backoff/registered x quarantine -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 backoff/registered x adopt -> accepted attempt_adopted/v1
 backoff/registered x resolve_quarantine -> refused not_quarantined
 backoff/registered x close -> refused not_terminal
@@ -985,7 +985,7 @@ backoff/registered x vm_deleted -> accepted stale_observation_ignored/v1
 backoff/registered x runner_exited -> refused observation_mismatch
 backoff/registered x vm_observed_stopped -> accepted vm_observed_stopped/v1
 backoff/registered x vm_present -> accepted, no event
-backoff/registered x vm_present_replaced -> accepted attempt_quarantined/v1
+backoff/registered x vm_present_replaced -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 backoff/registered x vm_absent -> accepted attempt_lost/v1
 backoff/registered x directive_sent -> refused directive_not_pending
 backoff/registered x directive_timeout -> refused directive_not_pending
@@ -997,7 +997,7 @@ backoff/retirement_waiting x bind_job -> refused not_listening
 backoff/retirement_waiting x request_retirement -> refused already_retiring
 backoff/retirement_waiting x confirm_retirement -> accepted attempt_retired/v1
 backoff/retirement_waiting x withdraw_retirement -> accepted retirement_withdrawn/v1
-backoff/retirement_waiting x quarantine -> accepted attempt_quarantined/v1
+backoff/retirement_waiting x quarantine -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 backoff/retirement_waiting x adopt -> accepted attempt_adopted/v1
 backoff/retirement_waiting x resolve_quarantine -> refused not_quarantined
 backoff/retirement_waiting x close -> refused not_terminal
@@ -1018,7 +1018,7 @@ backoff/retirement_waiting x vm_deleted -> accepted stale_observation_ignored/v1
 backoff/retirement_waiting x runner_exited -> refused observation_mismatch
 backoff/retirement_waiting x vm_observed_stopped -> accepted vm_observed_stopped/v1
 backoff/retirement_waiting x vm_present -> accepted, no event
-backoff/retirement_waiting x vm_present_replaced -> accepted attempt_quarantined/v1
+backoff/retirement_waiting x vm_present_replaced -> accepted attempt_quarantined/v1 stop_deregistration_requested/v1
 backoff/retirement_waiting x vm_absent -> accepted attempt_lost/v1
 backoff/retirement_waiting x directive_sent -> refused directive_not_pending
 backoff/retirement_waiting x directive_timeout -> refused directive_not_pending
@@ -1187,6 +1187,72 @@ quarantined/vanished x vm_present_replaced -> accepted, no event
 quarantined/vanished x vm_absent -> accepted, no event
 quarantined/vanished x directive_sent -> refused directive_not_pending
 quarantined/vanished x directive_timeout -> refused directive_not_pending
+quarantined/deregistering x start_attempt -> refused already_started
+quarantined/deregistering x issue_next -> refused nothing_to_issue
+quarantined/deregistering x begin_activation -> refused not_prepared
+quarantined/deregistering x record_jit_handle -> refused not_activating
+quarantined/deregistering x bind_job -> refused not_listening
+quarantined/deregistering x request_retirement -> refused quarantined
+quarantined/deregistering x confirm_retirement -> accepted stop_deregistration_confirmed/v1
+quarantined/deregistering x withdraw_retirement -> accepted stop_deregistration_refused_busy/v1
+quarantined/deregistering x quarantine -> refused already_quarantined
+quarantined/deregistering x adopt -> accepted attempt_adopted/v1
+quarantined/deregistering x resolve_quarantine -> accepted attempt_retired/v1
+quarantined/deregistering x close -> refused not_terminal
+quarantined/deregistering x vm_cloned -> accepted stale_observation_ignored/v1
+quarantined/deregistering x vm_booted -> accepted stale_observation_ignored/v1
+quarantined/deregistering x guest_verified -> accepted stale_observation_ignored/v1
+quarantined/deregistering x guest_rejected -> accepted stale_observation_ignored/v1
+quarantined/deregistering x directive_refused -> accepted stale_observation_ignored/v1
+quarantined/deregistering x directive_refused_proof -> accepted stale_observation_ignored/v1
+quarantined/deregistering x directive_refused_absent -> accepted stale_observation_ignored/v1
+quarantined/deregistering x outcome_unknown -> accepted stale_observation_ignored/v1
+quarantined/deregistering x runner_launched -> accepted stale_observation_ignored/v1
+quarantined/deregistering x runner_launch_unknown -> accepted stale_observation_ignored/v1
+quarantined/deregistering x diagnostics_exported -> accepted stale_observation_ignored/v1
+quarantined/deregistering x diagnostics_lost -> accepted stale_observation_ignored/v1
+quarantined/deregistering x vm_stopped -> accepted stale_observation_ignored/v1
+quarantined/deregistering x vm_deleted -> accepted stale_observation_ignored/v1
+quarantined/deregistering x runner_exited -> accepted runner_exited/v1
+quarantined/deregistering x vm_observed_stopped -> accepted vm_observed_stopped/v1
+quarantined/deregistering x vm_present -> accepted, no event
+quarantined/deregistering x vm_present_replaced -> accepted attempt_quarantined/v1
+quarantined/deregistering x vm_absent -> accepted attempt_lost/v1
+quarantined/deregistering x directive_sent -> refused directive_not_pending
+quarantined/deregistering x directive_timeout -> refused directive_not_pending
+quarantined/busy x start_attempt -> refused already_started
+quarantined/busy x issue_next -> refused nothing_to_issue
+quarantined/busy x begin_activation -> refused not_prepared
+quarantined/busy x record_jit_handle -> refused not_activating
+quarantined/busy x bind_job -> refused not_listening
+quarantined/busy x request_retirement -> refused quarantined
+quarantined/busy x confirm_retirement -> refused no_retirement_requested
+quarantined/busy x withdraw_retirement -> refused no_retirement_requested
+quarantined/busy x quarantine -> refused already_quarantined
+quarantined/busy x adopt -> accepted attempt_adopted/v1
+quarantined/busy x resolve_quarantine -> accepted attempt_retired/v1
+quarantined/busy x close -> refused not_terminal
+quarantined/busy x vm_cloned -> accepted stale_observation_ignored/v1
+quarantined/busy x vm_booted -> accepted stale_observation_ignored/v1
+quarantined/busy x guest_verified -> accepted stale_observation_ignored/v1
+quarantined/busy x guest_rejected -> accepted stale_observation_ignored/v1
+quarantined/busy x directive_refused -> accepted stale_observation_ignored/v1
+quarantined/busy x directive_refused_proof -> accepted stale_observation_ignored/v1
+quarantined/busy x directive_refused_absent -> accepted stale_observation_ignored/v1
+quarantined/busy x outcome_unknown -> accepted stale_observation_ignored/v1
+quarantined/busy x runner_launched -> accepted stale_observation_ignored/v1
+quarantined/busy x runner_launch_unknown -> accepted stale_observation_ignored/v1
+quarantined/busy x diagnostics_exported -> accepted stale_observation_ignored/v1
+quarantined/busy x diagnostics_lost -> accepted stale_observation_ignored/v1
+quarantined/busy x vm_stopped -> accepted stale_observation_ignored/v1
+quarantined/busy x vm_deleted -> accepted stale_observation_ignored/v1
+quarantined/busy x runner_exited -> accepted runner_exited/v1
+quarantined/busy x vm_observed_stopped -> accepted vm_observed_stopped/v1
+quarantined/busy x vm_present -> accepted, no event
+quarantined/busy x vm_present_replaced -> accepted attempt_quarantined/v1
+quarantined/busy x vm_absent -> accepted attempt_lost/v1
+quarantined/busy x directive_sent -> refused directive_not_pending
+quarantined/busy x directive_timeout -> refused directive_not_pending
 closed x start_attempt -> refused closed
 closed x issue_next -> refused closed
 closed x begin_activation -> refused closed

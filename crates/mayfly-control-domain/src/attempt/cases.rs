@@ -261,6 +261,16 @@ fn closed() -> Vec<Step> {
     then(deleted(), [AttemptCommand::Close])
 }
 
+/// A listening runner quarantined: its stop waits for the deregistration (ADR 0076).
+fn quarantined_registered() -> Vec<Step> {
+    then(
+        listening(),
+        [AttemptCommand::Quarantine {
+            reason: QuarantineReason::ForensicRetention,
+        }],
+    )
+}
+
 fn quarantined() -> Vec<Step> {
     then(
         verifying(),
@@ -458,6 +468,7 @@ pub(super) fn paths() -> Vec<Vec<Step>> {
         deleted(),
         closed(),
         quarantined(),
+        quarantined_registered(),
         unknown_clone(),
         doubted(),
         adopted(),
@@ -554,6 +565,33 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
                 },
             ),
             Expect::Refused,
+        ),
+        accepted(
+            "quarantine_requests_the_deregistration_before_its_stop",
+            listening(),
+            AttemptCommand::Quarantine {
+                reason: QuarantineReason::ForensicRetention,
+            },
+        ),
+        accepted(
+            "quarantine_stop_deregistration_confirmed",
+            quarantined_registered(),
+            AttemptCommand::ConfirmRetirement,
+        ),
+        accepted(
+            "quarantine_stop_deregistration_refused_busy",
+            quarantined_registered(),
+            AttemptCommand::WithdrawRetirement,
+        ),
+        refused(
+            "quarantine_stop_waits_for_the_deregistration",
+            quarantined_registered(),
+            issue(10),
+        ),
+        refused(
+            "quarantine_stop_needs_no_confirmation_without_a_registration",
+            quarantined(),
+            AttemptCommand::ConfirmRetirement,
         ),
         accepted(
             "withdraw_retirement_when_github_says_busy",

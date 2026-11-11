@@ -3,8 +3,8 @@
 
 use mayfly_control_domain::attempt::{
     AttemptCommand, AttemptEvent, AttemptRejection, AttemptState, DirectiveKind, Fact, Jit,
-    Outcome, Phase, QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, Stage,
-    VmCondition,
+    Outcome, Phase, QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, SagaStep,
+    Stage, StopDeregistration, VmCondition, next_step,
 };
 use mayfly_control_domain::{Actor, Rejection};
 
@@ -12,8 +12,9 @@ use super::support::Step;
 use super::support::{
     OPERATOR, SAGA, activating, apply, at, backoff_holding_registration, booting, busy, cloning,
     directive, doubted, event, facts, finished, handle, instance, issue, jit_issued, listening,
-    observe, observe_in, prepared, quarantined, reach, retiring, saga, stimuli, stopped, then,
-    unknown_clone, vanished, verified_activation, verifying,
+    observe, observe_in, prepared, quarantined, quarantined_busy, quarantined_registered, reach,
+    retiring, saga, stimuli, stopped, then, unknown_clone, vanished, verified_activation,
+    verifying,
 };
 
 fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
@@ -49,6 +50,9 @@ fn issued_kind(events: &[AttemptEvent]) -> Option<DirectiveKind> {
         | AttemptEvent::AttemptLost(..)
         | AttemptEvent::AttemptQuarantined(..)
         | AttemptEvent::AttemptAdopted(..)
+        | AttemptEvent::StopDeregistrationRequested(..)
+        | AttemptEvent::StopDeregistrationConfirmed(..)
+        | AttemptEvent::StopDeregistrationRefusedBusy(..)
         | AttemptEvent::StaleObservationIgnored(..)
         | AttemptEvent::AttemptClosed(..) => None,
     })
@@ -1319,4 +1323,140 @@ fn should_refuse_a_confirmation_when_the_vm_was_lost_while_a_retirement_waited()
     // then
     assert_eq!(lost.phase, Phase::Lost);
     assert_eq!(code(confirmed), Some("no_retirement_requested"));
+}
+
+#[test]
+fn should_stop_a_quarantined_vm_only_after_the_deregistration_when_a_runner_may_be_registered() {
+    // given: a listening runner quarantined (ADR 0076)
+    let (held, history) = reach(&quarantined_registered());
+    // when
+    let early = apply(&held, saga(issue(10)));
+    let confirmed = apply(&held, saga(AttemptCommand::ConfirmRetirement));
+    let (cleared, confirmation) = confirmed.unwrap_or_else(|r| panic!("{r:?}"));
+    let stop = apply(&cleared, saga(issue(10)));
+    // then
+    assert!(matches!(
+        history.last(),
+        Some(AttemptEvent::StopDeregistrationRequested(..))
+    ));
+    assert_eq!(held.stop_deregistration, StopDeregistration::Requested);
+    assert_eq!(next_step(&held), SagaStep::Idle);
+    assert_eq!(code(early), Some("nothing_to_issue"));
+    assert!(matches!(
+        confirmation.as_slice(),
+        [AttemptEvent::StopDeregistrationConfirmed(..)]
+    ));
+    assert!(matches!(cleared.phase, Phase::Quarantined { .. }));
+    assert_eq!(cleared.retire_reason, None);
+    assert!(matches!(
+        stop.map(|(_, events)| issued_kind(&events)),
+        Ok(Some(DirectiveKind::StopVm { .. }))
+    ));
+}
+
+#[test]
+fn should_keep_a_quarantined_vm_running_when_github_answers_busy_for_its_deregistration() {
+    // given: a job runs on the quarantined VM's runner (ADR 0076)
+    let (busy_answer, _) = reach(&quarantined_busy());
+    // when
+    let under_job = apply(&busy_answer, saga(issue(10)));
+    let confirmed = apply(&busy_answer, saga(AttemptCommand::ConfirmRetirement));
+    let exited = apply(&busy_answer, saga(observe(Fact::RunnerExited { code: 0 })));
+    let (after_exit, _) = exited.unwrap_or_else(|r| panic!("{r:?}"));
+    let stop = apply(&after_exit, saga(issue(10)));
+    // then
+    assert_eq!(
+        busy_answer.stop_deregistration,
+        StopDeregistration::RefusedBusy
+    );
+    assert!(busy_answer.vm_running);
+    assert_eq!(code(under_job), Some("nothing_to_issue"));
+    assert_eq!(code(confirmed), Some("no_retirement_requested"));
+    assert!(matches!(after_exit.phase, Phase::Quarantined { .. }));
+    assert!(matches!(
+        stop.map(|(_, events)| issued_kind(&events)),
+        Ok(Some(DirectiveKind::StopVm { .. }))
+    ));
+}
+
+#[test]
+fn should_keep_waiting_when_the_deregistration_of_a_quarantine_stop_is_not_answered() {
+    // given: GitHub cannot be reached, so P11 records no answer; the daemon restarts meanwhile
+    let mut path = quarantined_registered();
+    path.push(at(
+        2,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(9),
+        },
+    ));
+    // when
+    let (adopted, _) = reach(&path);
+    // then: the VM keeps running and nothing stops it; the quarantine holds its capacity
+    assert_eq!(adopted.stop_deregistration, StopDeregistration::Requested);
+    assert!(adopted.vm_running);
+    assert_eq!(next_step(&adopted), SagaStep::Idle);
+    assert_eq!(
+        code(apply(&adopted, at(2, SAGA, issue(10)))),
+        Some("nothing_to_issue")
+    );
+}
+
+#[test]
+fn should_stop_a_quarantined_vm_at_once_when_no_runner_can_be_registered_in_it() {
+    // given: negative controls of ADR 0076: no JIT was ever issued, or the runner exited
+    let (unregistered, unregistered_history) = reach(&quarantined());
+    let (exited, exited_history) = reach(&then(
+        finished(),
+        [AttemptCommand::Quarantine {
+            reason: QuarantineReason::ForensicRetention,
+        }],
+    ));
+    // when
+    let stops: Vec<Option<DirectiveKind>> = [&unregistered, &exited]
+        .into_iter()
+        .map(|state| {
+            apply(state, saga(issue(10)))
+                .ok()
+                .and_then(|(_, events)| issued_kind(&events))
+        })
+        .collect();
+    // then
+    for history in [&unregistered_history, &exited_history] {
+        assert!(
+            !history
+                .iter()
+                .any(|e| matches!(e, AttemptEvent::StopDeregistrationRequested(..))),
+            "{history:?}"
+        );
+    }
+    assert!(
+        stops
+            .iter()
+            .all(|kind| matches!(kind, Some(DirectiveKind::StopVm { .. }))),
+        "{stops:?}"
+    );
+}
+
+#[test]
+fn should_request_the_deregistration_once_when_a_quarantined_attempt_is_quarantined_again() {
+    // given: the quarantined runner's VM replaced behind its back (ADR 0026), seen by the
+    // inventory: the case gains its reason, and the request already made is not repeated
+    let (held, _) = reach(&quarantined_registered());
+    // when
+    let seen = apply(
+        &held,
+        saga(observe(Fact::VmPresent {
+            instance_id: mayfly_domain::ProviderInstanceId::new("02:00:00:00:00:99")
+                .unwrap_or_else(|e| panic!("{e:?}")),
+            running: true,
+        })),
+    );
+    // then
+    let (state, events) = seen.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::AttemptQuarantined(..)]
+    ));
+    assert_eq!(state.stop_deregistration, StopDeregistration::Requested);
 }

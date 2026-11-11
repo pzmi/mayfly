@@ -216,6 +216,24 @@ pub enum Jit {
     Orphaned(SecretHandleId),
 }
 
+/// Where the automatic stop of a quarantined VM stands with the deregistration of the
+/// attempt's runner (ADR 0076): a runner that may be registered and idle in the running VM is
+/// deregistered by P11 before the stop, as a retirement's would be (I21). The model is
+/// `formal/lifecycle.qnt`'s `dereg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopDeregistration {
+    /// Nothing to wait for: no runner could be registered in the VM, or the attempt is not
+    /// quarantined.
+    NotNeeded,
+    /// `StopDeregistrationRequested`: the stop waits for P11's answer.
+    Requested,
+    /// `StopDeregistrationConfirmed`: the runner was removed or not found; the stop may go.
+    Confirmed,
+    /// `StopDeregistrationRefusedBusy`: a job runs on the runner; the VM is not stopped until
+    /// the runner is seen exiting.
+    RefusedBusy,
+}
+
 /// Whether diagnostics were exported before the stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Diagnostics {
@@ -331,6 +349,8 @@ pub struct AttemptState {
     pub retire_reason: Option<RetireReason>,
     /// Diagnostics before the stop.
     pub diagnostics: Diagnostics,
+    /// The quarantine stop's deregistration (ADR 0076).
+    pub stop_deregistration: StopDeregistration,
 }
 
 impl AttemptState {
@@ -353,6 +373,7 @@ impl AttemptState {
             retirement_requested: None,
             retire_reason: None,
             diagnostics: Diagnostics::NotTaken,
+            stop_deregistration: StopDeregistration::NotNeeded,
         }
     }
 }

@@ -235,6 +235,63 @@ fn should_catch_a_mutated_evolve_at_the_first_divergent_step_when_a_stop_is_forg
     assert_eq!(mutant.actual.0["vm_running"], "true");
 }
 
+/// `Attempt` with KER-04F's quarantine stop: a `Quarantine` command is decided as if no runner
+/// could be registered in the VM, so nothing waits for the deregistration (ADR 0076's row).
+#[derive(Debug, Clone, Copy, Default)]
+struct QuarantineStopsAtOnce;
+
+impl Aggregate for QuarantineStopsAtOnce {
+    const NAME: &'static str = Attempt::NAME;
+    type State = AttemptState;
+    type Body = AttemptCommand;
+    type Event = AttemptEvent;
+    type Rejection = AttemptRejection;
+
+    fn initial() -> AttemptState {
+        Attempt::initial()
+    }
+
+    fn decide(
+        state: &AttemptState,
+        command: Command<AttemptCommand>,
+    ) -> Result<Vec<AttemptEvent>, AttemptRejection> {
+        match command.body {
+            AttemptCommand::Quarantine { .. } => {
+                let unregistered = AttemptState {
+                    jit: Jit::None,
+                    ..state.clone()
+                };
+                Attempt::decide(&unregistered, command)
+            }
+            _ => Attempt::decide(state, command),
+        }
+    }
+
+    fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
+        Attempt::evolve(state, event)
+    }
+}
+
+#[test]
+fn should_catch_a_quarantine_stop_that_skips_the_deregistration_when_its_trace_is_replayed() {
+    // given: a listening runner quarantined at step 13 (ADR 0076)
+    let manifest = regression();
+    let (entry, trace) = load(&manifest, "quarantineStopWaitsForDeregistration");
+
+    // when
+    let real = lifecycle::replay::<Attempt>(&entry, &trace);
+    let mutant = divergence(lifecycle::replay::<QuarantineStopsAtOnce>(&entry, &trace));
+
+    // then
+    assert!(real.is_ok(), "{real:?}");
+    assert_eq!(mutant.step, 13, "{mutant}");
+    assert_eq!(mutant.action, "quarantineCommand");
+    assert_eq!(mutant.fields, ["dereg"], "{mutant}");
+    assert_eq!(mutant.expected.0["dereg"], "requested");
+    assert_eq!(mutant.actual.0["dereg"], "none");
+    assert_eq!(lifecycle::known(&mutant), None);
+}
+
 /// Sets field `field` of the model's `a` at state `index`.
 fn edit(trace: &mut Trace, index: usize, field: &str, value: Value) {
     let Some(Value::Record(a)) = trace.states[index].vars.get_mut("a") else {
@@ -298,6 +355,13 @@ fn should_diverge_exactly_there_when_one_model_variable_is_edited_for_each_obser
             "vanished",
             Value::Bool(false),
             "vanished",
+        ),
+        (
+            "quarantineStopWaitsForDeregistration",
+            13,
+            "dereg",
+            text("none"),
+            "dereg",
         ),
     ];
     let manifest = regression();

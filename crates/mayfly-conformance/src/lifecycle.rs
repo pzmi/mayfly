@@ -29,6 +29,7 @@
 //! | `diagnostics` | `diagnostics` | `diagnostics` |
 //! | `runner_exited` | `runnerExited` | `runner_exited` |
 //! | `vanished` | `vanished` | quarantined `vm_vanished_externally` |
+//! | `dereg` | `dereg` | `stop_deregistration` (`none`, `requested`, `confirmed`, `busy`) |
 //! | `refused` | `-`: every model step is an accepted transition | the last command's refusal code, else `-` |
 //!
 //! # What is abstracted
@@ -73,7 +74,7 @@ use mayfly_control_domain::attempt::{
     AttemptCommand, AttemptEvent, AttemptState, Diagnostics, DirectiveTag, Fact, GuestFacts,
     GuestOs, GuestRejection, Jit, Observation as Seen, Outcome as PendingOutcome, Phase,
     QuarantineReason, RefusalReason, RetireReason, RunnerRequestId, SagaStep, Stage, StartAttempt,
-    next_step,
+    StopDeregistration, next_step,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, ControlAggregates, Rejection};
 use mayfly_domain::{
@@ -183,6 +184,7 @@ pub fn expected(state: &State) -> Result<Observation, DriverError> {
     o.set("retire_requested", flag("retireRequested")?);
     o.set("diagnostics", text("diagnostics")?);
     o.set("runner_exited", flag("runnerExited")?);
+    o.set("dereg", text("dereg")?);
     o.set("refused", "-");
     Ok(o)
 }
@@ -282,6 +284,15 @@ pub fn observe_state(state: &AttemptState, refused: Option<&str>) -> Observation
         },
     );
     o.set("runner_exited", state.runner_exited);
+    o.set(
+        "dereg",
+        match state.stop_deregistration {
+            StopDeregistration::NotNeeded => "none",
+            StopDeregistration::Requested => "requested",
+            StopDeregistration::Confirmed => "confirmed",
+            StopDeregistration::RefusedBusy => "busy",
+        },
+    );
     o.set(
         "vanished",
         matches!(

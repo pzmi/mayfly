@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::aggregate::{CommandBody, Rejection};
 use crate::attempt::GuestOs;
-use crate::capacity::{self, Footprint, LeaseInput, PlanInputs, PoolInput, ReportedCapacity};
+use crate::capacity::{
+    self, CapacityPolicy, Footprint, LeaseInput, PlanInputs, PoolInput, ReportedCapacity,
+};
 use crate::pool::TrustTier;
 
 /// What a quarantined lease holds (plan §9): everything while its VM may run, disk and slots
@@ -234,6 +236,7 @@ impl HostState {
                         open: terms.is_some_and(|t| t.open),
                         max_running: terms.map_or(0, |t| t.max_running),
                         wanted: demand.wanted,
+                        policy: demand.policy,
                     }
                 })
                 .collect(),
@@ -260,6 +263,8 @@ pub struct PoolDemand {
     pub vm: Resources,
     /// New attempts wanted.
     pub wanted: u32,
+    /// The pool's capacity policy (ADR 0069, DEC-06).
+    pub policy: CapacityPolicy,
 }
 
 /// Evidence that a lease's VM is gone, the only reason a slot is released (I28).

@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].capacity_policy: "greedy" is not a capacity policy (fix: use `capacity_policy = "exact"` (the default) or `capacity_policy = "demand"`)

@@ -708,14 +708,28 @@ an earlier pool has a quarantined lease (S4, S5: pinned by
 `should_keep_only_what_a_quarantined_lease_does_not_hold_when_an_earlier_pool_has_one`,
 `should_keep_the_memory_a_stopped_quarantined_lease_owes_when_slots_bind`), and keeps S, M1,
 M2 and U1. A quarantined VM, kept until an operator resolves it (ADR 0025), now costs its pool
-one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0069:
+one VM's capacity, not two. Beyond it, two options were put to the owner in ADR 0069:
 
 - **`DEMAND`** fixes S1 (Linux runs beside an idle macOS pool) and keeps every property, **if**
   the demand it reads does not depend on the `maxCapacity` it sends. Our demand is `desired =
   min(deliverable, totalAssignedJobs)` (plan §7.2), and whether `X-ScaleSetMaxCapacity` caps
   `totalAssignedJobs` is unverified (`doc/github-scaleset.md` §12 item 6). If it caps it, a pool
   carved nothing is never assigned its job, never keeps room for it and starves (the `never`
-  of footnote 3). Decide after GH-00 answers item 6.
+  of footnote 3). **Decided (owner, 2026-11-10, DEC-06): "implement both now".** Each pool's
+  `capacity_policy` is `exact` (the default) or `demand`; a `demand` pool is carved, and keeps
+  ahead of later pools, only for the VMs it waits for (`CapacityPolicy::Demand { waiting }`:
+  its scale set's latest `totalAssignedJobs` beyond its live runners plus its `min_prepared`
+  deficit, never capped by its own carve-out, which would feed back). The default stays `exact`
+  until GH-00 answers item 6. Per pool, not per host: the keep is what each earlier pool holds
+  back, so the operator relaxes exactly the pool whose idle headroom starves the others, and
+  each pool's keep still depends only on its own inputs, so the properties hold pool by pool
+  for a fixed demand (model `carveMonotoneDemand`, `demandFixesThe13GiBCaseTest`,
+  `demandStarvesWhenDemandIsInvisibleTest`, `demandLetsTheLaterPoolInTest`; Rust
+  `tests/capacity.rs::should_fit_and_stay_monotone_when_pools_mix_policies_and_inputs_are_random`,
+  `should_carve_no_pool_less_when_a_quarantine_is_released_and_pools_mix_policies`,
+  `should_carve_later_pools_at_least_exact_when_earlier_pools_keep_only_for_demand`,
+  `should_carve_as_exact_when_every_demand_covers_its_headroom`,
+  `should_carve_a_later_pool_beside_an_idle_one_when_the_earlier_keeps_only_for_demand`).
 - **Cap the keep at what the host can hold** (S6: a macOS `max_running` the host cannot run
   keeps room it can never use) would carve S6's Linux pool two VMs, but makes the keep depend
   on the report's totals: a host whose totals shrink would carve a later pool more. Refusing or
@@ -733,7 +747,8 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
   `retire_reason`, highest `run_epoch`.
 - **Commands:** `StartAttempt` (from `SlotReserved`), `IssueNext` (saga), `RecordObservation{obs}`,
   `BeginActivation{grant_ref}`, `RecordJitHandle{handle_id, registration_ref}`, `BindJob`,
-  `RequestRetirement{reason}`, `ConfirmRetirement` (after deregistration or when no registration),
+  `RequestRetirement{reason}`, `ConfirmRetirement` (after deregistration or when no registration;
+  inside quarantine, the answer to the quarantine stop's deregistration, ADR 0076),
   `WithdrawRetirement` (busy), `Quarantine{reason}`, `Adopt{epoch, inventory_ref}`,
   `ResolveQuarantine{disposition}`, `Close`, and from CP-02 `RecordDirectiveSent{directive_id,
   deadline}` (the relay) and `RecordDirectiveTimeout{directive_id}` (the saga's timer). (No
@@ -747,7 +762,8 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
   `RunnerExited{code}`, `VmObservedStopped`, `AttemptBackedOff`, `RetirementRequested`,
   `RetirementWithdrawn`, `AttemptRetired{reason}`, `DiagnosticsExported{bytes, hash}`,
   `DiagnosticsLost{reason}`, `VmStopped`, `VmDeleted`, `AttemptLost{evidence}`,
-  `AttemptQuarantined{reason, vm}`, `AttemptAdopted{epoch}`,
+  `AttemptQuarantined{reason, vm}`, `StopDeregistrationRequested`, `StopDeregistrationConfirmed`,
+  `StopDeregistrationRefusedBusy` (ADR 0076), `AttemptAdopted{epoch}`,
   `StaleObservationIgnored{generation|epoch|directive}` (sampled), `AttemptClosed`. An operator's
   resolution of the quarantine case is `AttemptRetired{quarantine_resolved}`: cleanup then stops
   and deletes with proof (KER-04).
@@ -798,9 +814,22 @@ one VM's capacity, not two. Beyond it, two options are put to the owner in ADR 0
     instead of `AttemptRetired{stage_failed}`; the confirmation retires it with that reason.
   - *No retry while the retirement waits.* The saga issues nothing in a Backoff whose retirement
     waits; a busy answer (`WithdrawRetirement`) lets it retry the stage.
-  - *Outside it:* a quarantine's automatic stop (KER-04F: unless a job is live) and an
-    operator's resolution are not gated on the deregistration; a definitely refused launch and an
-    exited runner leave no idle runner in the VM, so their retirement stops at once.
+  - *Outside it:* an operator's resolution is not gated on the deregistration; a definitely
+    refused launch and an exited runner leave no idle runner in the VM, so their retirement stops
+    at once. A quarantine's automatic stop was outside it too until ADR 0076 (below).
+- **Behaviour decided by the owner on 2026-11-10** (ADR 0076, DEC-06: "deregister"; I21 for the
+  quarantine stop, `doc/formal-models.md`, lifecycle, `i21DeregisterBeforeStop`):
+  - *The quarantine stop deregisters first.* Entering quarantine with the VM running, its
+    instance id recorded, no job live and a runner of the registration that may be registered
+    in it (a JIT was issued, the runner was not seen exiting, and no retirement passed P11
+    before) records `StopDeregistrationRequested` after `AttemptQuarantined`. The automatic stop
+    waits for P11, which serves it as a retirement (`retirement_step`, keyed by that event):
+    `ConfirmRetirement` records `StopDeregistrationConfirmed` (removed or not found) and the stop
+    follows; `WithdrawRetirement` records `StopDeregistrationRefusedBusy` (a job runs there) and
+    the VM is not stopped until the runner is seen exiting. While GitHub cannot be reached
+    nothing answers, so the VM keeps running; its quarantine holds its capacity anyway (I28).
+    Neither confirmation retires the attempt: it stays quarantined, and only an operator
+    resolves it.
 - **Protects alone:** I06 and `busyNeverWarm` (no path from Listening/Busy/Finished back to
   Prepared; Retired never activates), I10 (`pending.Unknown` leaves only on an observation or an
   nothing else: no timeout, no assertion), I13 (retries reuse name and generation; at most one in-flight directive per

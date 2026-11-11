@@ -247,8 +247,32 @@ pub struct LeaseInput {
     pub quarantined: bool,
 }
 
-/// One pool's admission inputs: its applied terms on the host, its VM shape, and how many new
-/// attempts the reconciler wants for it (demand plus the `min_prepared` deficit).
+/// What a pool keeps ahead of the pools after it, and how far it is carved: the operator's
+/// `capacity_policy` of the pool (ADR 0069, DEC-06). The model is `formal/scheduling.qnt`'s
+/// `countsOf` (a pool's `cap`) with `carveCounts`, and `demandShape` (`EXACT`, `DEMAND`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapacityPolicy {
+    /// Keep the pool's whole `max_running` headroom of its VMs (KER-05D), and carve it up to that
+    /// headroom. Safe whatever GitHub does with `maxCapacity`; the default.
+    #[default]
+    Exact,
+    /// Keep, and carve, only for the VMs the pool waits for, at most its headroom: a later pool
+    /// may run beside an idle one (the 13 GiB case). Correct only if a pool carved nothing still
+    /// learns of its jobs, which depends on whether GitHub's `totalAssignedJobs` is capped by
+    /// the `maxCapacity` mayfly sends (`doc/github-scaleset.md` §12 item 6, unverified until
+    /// GH-00): if it is, a pool carved nothing never sees its job and starves
+    /// (`formal/scheduling.qnt`'s `demandStarvesWhenDemandIsInvisibleTest`).
+    Demand {
+        /// The new VMs the pool waits for, not capped by its carve-out (a capped count would
+        /// feed back: carved nothing, told nothing): its scale set's latest
+        /// `totalAssignedJobs` beyond its live runners, plus its `min_prepared` deficit.
+        waiting: u32,
+    },
+}
+
+/// One pool's admission inputs: its applied terms on the host, its VM shape, its capacity
+/// policy, and how many new attempts the reconciler wants for it (demand plus the
+/// `min_prepared` deficit).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolInput {
     /// The pool.
@@ -263,6 +287,8 @@ pub struct PoolInput {
     pub max_running: u32,
     /// New attempts wanted now.
     pub wanted: u32,
+    /// What it keeps ahead of later pools, and how far it is carved.
+    pub policy: CapacityPolicy,
 }
 
 /// Everything [`plan`] reads: plain data, so the policy is a pure function of it.
@@ -291,6 +317,8 @@ pub enum HoldReason {
     TermsClosed,
     /// The pool runs `max_running` attempts.
     PoolFull,
+    /// The pool's policy is [`CapacityPolicy::Demand`] and it waits for nothing more.
+    NoDemand,
     /// Quarantined leases consume what the pool would need (I28, ADR 0025).
     QuarantineHeld,
     /// The host's free capacity does not fit one more VM of the pool.
@@ -422,6 +450,15 @@ fn times(vm: Footprint, n: u32) -> Footprint {
 /// A pool whose terms or host gate are closed is carved nothing, keeps nothing and reports only
 /// its runners. A reservation decision is never more than the carve-out, so the `Host` admits
 /// every one of them (`formal/scheduling.qnt`'s `carveOutAdmissible`).
+///
+/// A pool whose policy is [`CapacityPolicy::Demand`] has its headroom cut to the VMs it waits
+/// for: it is carved, and keeps ahead of later pools, only for them, and what it keeps for its
+/// quarantined places is unchanged (DEC-06, ADR 0069). For a fixed `waiting` this is the keep
+/// above over a smaller headroom, so every property above holds pool by pool (pinned by
+/// `tests/capacity.rs::should_fit_and_stay_monotone_when_pools_mix_policies_and_inputs_are_random`
+/// and `should_carve_no_pool_less_when_a_quarantine_is_released_and_pools_mix_policies`), and a
+/// later pool is never carved less than under [`CapacityPolicy::Exact`]
+/// (`should_carve_later_pools_at_least_exact_when_earlier_pools_keep_only_for_demand`).
 #[must_use]
 pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
     let admissible_now = inputs
@@ -449,9 +486,14 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
     for pool in pools {
         let runners = count(&inputs.leases, &pool.pool, false);
         let held = count(&inputs.leases, &pool.pool, true);
-        let headroom = pool
+        let exact_headroom = pool
             .max_running
             .saturating_sub(runners.saturating_add(held));
+        let headroom = match pool.policy {
+            CapacityPolicy::Exact => exact_headroom,
+            CapacityPolicy::Demand { waiting } => exact_headroom.min(waiting),
+        };
+        let uncalled = exact_headroom.saturating_sub(headroom);
         let vm = Footprint::vm(pool.os, pool.vm);
         let open = inputs.report.is_some() && inputs.admission_open && pool.open;
         let available = free.saturating_sub(kept_ahead);
@@ -461,12 +503,15 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
             0
         };
         if open {
-            let room = pool.max_running.saturating_sub(runners);
+            let room = pool
+                .max_running
+                .saturating_sub(runners)
+                .saturating_sub(uncalled);
             let owed = owed_by_quarantine(&inputs.leases, &pool.pool, vm);
             kept_ahead = kept_ahead.saturating_add(kept_ahead_of(vm, headroom, room, owed));
         }
         let remaining = available.saturating_sub(times(vm, carve_out));
-        let next = hold_reason(
+        let reason = hold_reason(
             inputs,
             pool,
             held,
@@ -475,6 +520,19 @@ pub fn plan(inputs: &PlanInputs) -> (CapacityReport, Vec<PlanDecision>) {
             quarantined,
             vm,
         );
+        // a full pool under DEMAND is one that waits for nothing more
+        let next = match reason {
+            HoldReason::PoolFull | HoldReason::QuarantineHeld if headroom == 0 && uncalled > 0 => {
+                HoldReason::NoDemand
+            }
+            HoldReason::NoReport
+            | HoldReason::AdmissionClosed
+            | HoldReason::TermsClosed
+            | HoldReason::PoolFull
+            | HoldReason::NoDemand
+            | HoldReason::QuarantineHeld
+            | HoldReason::NoCapacity(..) => reason,
+        };
         let hold = if carve_out > 0 { None } else { Some(next) };
         let deliverable = runners.saturating_add(carve_out);
         lines.push(PoolCapacity {

@@ -355,6 +355,24 @@ module registration {
     }
   }
 
+  /// The automatic stop of a quarantined VM (KER-04F) asks for the deregistration first, as a
+  /// retirement does, and P11 serves it the same way (ADR 0076: the attempt's
+  /// `StopDeregistrationRequested` is its key). Unlike a retirement it is asked whatever the
+  /// registration's phase: a quarantine does not wait for the job to end, and a job the attempt
+  /// never saw bound may be running; GitHub then answers busy, the stop is withdrawn and the VM
+  /// keeps running (its quarantine holds its capacity anyway). While GitHub cannot be reached
+  /// nothing answers, and the stop waits.
+  action requestQuarantineStop(i: int): bool = {
+    val at = atts.get(i)
+    all {
+      at.retire == NOT_RETIRING,
+      at.vm,
+      commit("command", regs,
+        atts.set(i, { ...at, retire: RETIRE_REQUESTED, retirements: at.retirements + 1 }),
+        gh, vmRunner, g),
+    }
+  }
+
   /// `RequestDeregistration{reason}`: for a retirement (P11), or for a leaked runner (P13, P14);
   /// only with a journaled runner id (I19).
   action requestDeregistration(i: int): bool = {
@@ -467,6 +485,7 @@ module registration {
       jobStarts(i),
       jobCompletes(i),
       requestRetirement(i),
+      requestQuarantineStop(i),
       requestDeregistration(i),
       deregisterCall(i, flag),
       confirmRetirement(i),
@@ -494,6 +513,7 @@ module registration {
       jobStarts(1),
       jobCompletes(1),
       requestRetirement(1),
+      requestQuarantineStop(1),
       requestDeregistration(1),
       deregisterCall(1, flag),
       confirmRetirement(1),
@@ -705,6 +725,55 @@ module registration {
   run mutant21StopBeforeDeregisterViolatesTest = {
     init.then(toConnected(1)).then(requestRetirement(1))
       .then(confirmRetirementStopFirst(1)).then(stopVm(1))
+      .expect(not(deregisterBeforeStop) and not(allInvariants))
+  }
+
+  // ADR 0076: a quarantined VM's idle registered runner is deregistered before the stop.
+  run quarantineStopDeregistersFirstTest = {
+    init.then(toConnected(1)).then(requestQuarantineStop(1))
+      .expect(stepOf(regs.get(1), atts.get(1)) == DEREGISTER)
+      .then(requestDeregistration(1)).then(deregisterCall(1, false))
+      .then(confirmRetirement(1)).then(stopVm(1))
+      .expect(not(atts.get(1).vm) and deregisterBeforeStop and allInvariants)
+  }
+
+  // ADR 0076: a job runs on the quarantined VM's runner: GitHub answers busy, the stop is
+  // withdrawn, and the VM keeps running under its job.
+  run quarantineStopBusyKeepsRunningTest = {
+    init.then(toConnected(1)).then(jobStarts(1)).then(requestQuarantineStop(1))
+      .then(requestDeregistration(1)).then(deregisterCall(1, false))
+      .expect(stepOf(regs.get(1), atts.get(1)) == WITHDRAW)
+      .then(withdrawRetirement(1))
+      .expect(atts.get(1).vm and atts.get(1).retire == NOT_RETIRING and allInvariants)
+  }
+
+  // ADR 0076: while GitHub cannot be reached the removal is never answered and the quarantined
+  // VM keeps running; once it answers, the stop follows the deregistration.
+  run quarantineStopWaitsForGitHubTest = {
+    init.then(toConnected(1)).then(ghToggles).then(requestQuarantineStop(1))
+      .then(requestDeregistration(1))
+      .expect(not(ghUp) and stepOf(regs.get(1), atts.get(1)) == WAIT and atts.get(1).vm)
+      .then(ghToggles).then(deregisterCall(1, false))
+      .then(confirmRetirement(1)).then(stopVm(1))
+      .expect(not(atts.get(1).vm) and allInvariants)
+  }
+
+  /// KER-04F's quarantine stop before ADR 0076, a negative control kept out of every step
+  /// relation: the stop of a quarantined VM went ahead without asking the registration.
+  action quarantineStopAtOnce(i: int): bool = {
+    val at = atts.get(i)
+    all {
+      at.retire == NOT_RETIRING,
+      at.vm,
+      commit("command", regs,
+        atts.set(i, { ...at, retire: RETIRE_CONFIRMED, retirements: at.retirements + 1 }),
+        gh, vmRunner, g),
+    }
+  }
+
+  // ...which `deregisterBeforeStop` flags with an idle runner registered in the VM.
+  run quarantineStopAtOnceViolatesTest = {
+    init.then(toConnected(1)).then(quarantineStopAtOnce(1)).then(stopVm(1))
       .expect(not(deregisterBeforeStop) and not(allInvariants))
   }
 }

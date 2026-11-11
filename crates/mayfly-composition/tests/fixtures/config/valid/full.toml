@@ -30,6 +30,7 @@ max_running = 2
 breaker_failures = 5
 breaker_window = "1h"
 runner_refresh_at = "03:30"
+capacity_policy = "demand"
 
 [[pools]]
 name = "lin"

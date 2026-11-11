@@ -4,7 +4,7 @@
 use super::events::AttemptEvent;
 use super::state::{
     AttemptState, Diagnostics, DirectiveTag, Identity, Jit, Outcome, Pending, Phase,
-    QuarantineReason, Stage, VmCondition,
+    QuarantineReason, Stage, StopDeregistration, VmCondition,
 };
 
 /// Applies one event to the state.
@@ -135,6 +135,7 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
         AttemptEvent::AttemptRetired(e) => {
             s.retire_reason = Some(e.reason);
             s.retirement_requested = None;
+            s.stop_deregistration = StopDeregistration::NotNeeded;
             s.pending = None;
             s.tries = 0;
             s.phase = match s.instance_id {
@@ -167,9 +168,10 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
             s.phase = Phase::Lost;
         }
         AttemptEvent::AttemptQuarantined(e) => {
-            // entering quarantine restarts the count of stops; staying in it does not
-            s.tries = match s.phase {
-                Phase::Quarantined { .. } => s.tries,
+            // entering quarantine restarts the count of stops and has nothing to wait for
+            // until its `StopDeregistrationRequested`; staying in it changes neither
+            let entering = match s.phase {
+                Phase::Quarantined { .. } => false,
                 Phase::NotStarted
                 | Phase::Reserved
                 | Phase::Cloning
@@ -185,8 +187,12 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
                 | Phase::Deleted
                 | Phase::Lost
                 | Phase::Backoff { .. }
-                | Phase::Closed => 0,
+                | Phase::Closed => true,
             };
+            if entering {
+                s.tries = 0;
+                s.stop_deregistration = StopDeregistration::NotNeeded;
+            }
             s.pending = None;
             s.retirement_requested = None;
             // a VM that vanished is not running: no stop is issued for it (ADR 0066)
@@ -201,6 +207,15 @@ pub fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
         AttemptEvent::AttemptAdopted(e) => {
             s.epoch = e.epoch;
             s.fresh_verification = false;
+        }
+        AttemptEvent::StopDeregistrationRequested(..) => {
+            s.stop_deregistration = StopDeregistration::Requested;
+        }
+        AttemptEvent::StopDeregistrationConfirmed(..) => {
+            s.stop_deregistration = StopDeregistration::Confirmed;
+        }
+        AttemptEvent::StopDeregistrationRefusedBusy(..) => {
+            s.stop_deregistration = StopDeregistration::RefusedBusy;
         }
         AttemptEvent::AttemptClosed(..) => s.phase = Phase::Closed,
     }

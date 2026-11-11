@@ -377,6 +377,40 @@ impl DomainEvent for RetirementWithdrawn {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// The attempt was quarantined with its VM running and a runner of its registration that may
+/// be registered and idle in it: the automatic stop waits for P11 to deregister that runner
+/// first, as a retirement does (I21, ADR 0076). This event is P11's key for the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StopDeregistrationRequested {}
+
+impl DomainEvent for StopDeregistrationRequested {
+    const EVENT_TYPE: &'static str = "stop_deregistration_requested";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// P11 had the deregistration's answer (removed, or not found): the quarantine stop may go
+/// (ADR 0076). The attempt stays quarantined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StopDeregistrationConfirmed {}
+
+impl DomainEvent for StopDeregistrationConfirmed {
+    const EVENT_TYPE: &'static str = "stop_deregistration_confirmed";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// GitHub answered busy for the quarantine stop's deregistration: a job runs on the runner, so
+/// the quarantined VM is not stopped until the runner is seen exiting (ADR 0076).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StopDeregistrationRefusedBusy {}
+
+impl DomainEvent for StopDeregistrationRefusedBusy {
+    const EVENT_TYPE: &'static str = "stop_deregistration_refused_busy";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// The attempt will serve no (further) job; cleanup begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -581,6 +615,12 @@ event_set! {
         AttemptQuarantined(AttemptQuarantined),
         /// See [`AttemptAdopted`].
         AttemptAdopted(AttemptAdopted),
+        /// See [`StopDeregistrationRequested`].
+        StopDeregistrationRequested(StopDeregistrationRequested),
+        /// See [`StopDeregistrationConfirmed`].
+        StopDeregistrationConfirmed(StopDeregistrationConfirmed),
+        /// See [`StopDeregistrationRefusedBusy`].
+        StopDeregistrationRefusedBusy(StopDeregistrationRefusedBusy),
         /// See [`StaleObservationIgnored`].
         StaleObservationIgnored(StaleObservationIgnored),
         /// See [`AttemptClosed`].

@@ -1,0 +1,21 @@
+schema_version = 1
+state_dir = "/var/lib/mayfly"
+
+[github]
+organisation = "example-org"
+app_client_id = "Iv1.0123456789abcdef"
+installation_id = 12345678
+private_key = "file:/etc/mayfly/app-key.pem"
+
+[provider]
+tart_home = "/var/lib/mayfly/tart"
+
+[[pools]]
+name = "mac"
+tier = "trusted"
+capacity_policy = "greedy"
+image_manifest = "/etc/mayfly/images/mac.toml"
+guest_os = "macos"
+cpu = 4
+memory_mib = 8192
+max_running = 2

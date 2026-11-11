@@ -382,6 +382,23 @@ fn free_port() -> u16 {
         .map_or(FIRST_PORT, |a| a.port())
 }
 
+/// The module Apalache checks for a model file whose main module is not the state machine
+/// alone: Apalache's inliner expands every definition of the module it is given, used or not,
+/// so a model keeps its pure studies and scenarios (which only `quint test` and `quint run`
+/// read) in its main module and its state machine in the module named here (DEC-06:
+/// `scheduling`'s candidate carve policies ran Apalache out of memory before it checked
+/// anything). A file not listed is checked through its main module. Pinned by
+/// `should_name_the_state_machine_module_when_a_model_file_lists_one`.
+pub const VERIFY_MAIN: &[(&str, &str)] = &[("scheduling.qnt", "scheduling_machine")];
+
+/// The module `quint verify` checks for `file`, if not its main module.
+fn verify_main(file: &str) -> Option<&'static str> {
+    VERIFY_MAIN
+        .iter()
+        .find(|(listed, _)| *listed == file)
+        .map(|(_, main)| *main)
+}
+
 /// `quint verify` arguments for `bound`, checking `invariants`.
 fn verify_args(
     file: &Path,
@@ -396,8 +413,11 @@ fn verify_args(
         file.display().to_string(),
         "--step".to_owned(),
         bound.step.to_owned(),
-        "--invariants".to_owned(),
     ];
+    if let Some(main) = verify_main(bound.file) {
+        args.extend(["--main".to_owned(), main.to_owned()]);
+    }
+    args.push("--invariants".to_owned());
     args.extend(invariants.iter().cloned());
     args.extend([
         "--max-steps".to_owned(),
@@ -933,6 +953,40 @@ mod tests {
                 "localhost:9000",
             ]
         );
+    }
+
+    #[test]
+    fn should_name_the_state_machine_module_when_a_model_file_lists_one() {
+        // given
+        let bound = Bound {
+            file: "scheduling.qnt",
+            step: "step",
+            steps: 8,
+        };
+        // when
+        let args = verify_args(
+            Path::new("/f/scheduling.qnt"),
+            &bound,
+            &[],
+            "0.62.1",
+            Path::new("/o/c.json"),
+            9000,
+        );
+
+        // then
+        assert_eq!(args[4..6], ["--main", "scheduling_machine"]);
+        for (file, main) in VERIFY_MAIN {
+            assert!(
+                MODELS.iter().any(|m| m.file == *file),
+                "{file} is not a model"
+            );
+            let source = std::fs::read_to_string(repo::root().join("formal").join(file))
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                source.contains(&format!("module {main} {{")),
+                "{file} has no module {main}"
+            );
+        }
     }
 
     #[test]

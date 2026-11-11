@@ -3,8 +3,8 @@
 
 use mayfly_control_domain::attempt::GuestOs;
 use mayfly_control_domain::capacity::{
-    self, CapacityReport, Dimension, Footprint, HoldReason, LeaseInput, PlanDecision, PlanInputs,
-    PoolInput, ReportedCapacity,
+    self, CapacityPolicy, CapacityReport, Dimension, Footprint, HoldReason, LeaseInput,
+    PlanDecision, PlanInputs, PoolInput, ReportedCapacity,
 };
 use mayfly_domain::{PoolName, Resources};
 use proptest::prelude::*;
@@ -97,6 +97,7 @@ fn pool_input() -> impl Strategy<Value = PoolInput> {
                 open,
                 max_running,
                 wanted,
+                policy: CapacityPolicy::Exact,
             },
         )
 }
@@ -385,6 +386,7 @@ fn demand(name: &str, os: GuestOs, memory_gib: u64, max_running: u32, wanted: u3
         open: true,
         max_running,
         wanted,
+        policy: CapacityPolicy::Exact,
     }
 }
 
@@ -541,6 +543,7 @@ fn should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit() {
                 open: true,
                 max_running: 3,
                 wanted: 0,
+                policy: CapacityPolicy::Exact,
             },
             PoolInput {
                 pool: pool("p0"),
@@ -549,6 +552,7 @@ fn should_carve_no_more_when_foreign_use_leaves_a_large_vm_unfit() {
                 open: true,
                 max_running: 2,
                 wanted: 0,
+                policy: CapacityPolicy::Exact,
             },
         ],
     };
@@ -623,6 +627,7 @@ fn quarantined_mac(total_gib: u64, slots: u32, holds: Footprint) -> PlanInputs {
                 open: true,
                 max_running: 2,
                 wanted: 1,
+                policy: CapacityPolicy::Exact,
             },
             demand("p1", GuestOs::Linux, 4, 12, 12),
         ],
@@ -670,4 +675,180 @@ fn should_keep_the_memory_a_stopped_quarantined_lease_owes_when_slots_bind() {
     assert_eq!(carve_outs(&held), [("p0", 1), ("p1", 2)]);
     assert_eq!(whole_place_carves(&inputs, held.free)[1].1, 1);
     assert_eq!(carve_outs(&freed), [("p0", 2), ("p1", 2)]);
+}
+
+// ---- DEC-06: the DEMAND policy (ADR 0069), beside EXACT -----------------------------------
+
+fn policy() -> impl Strategy<Value = CapacityPolicy> {
+    prop_oneof![
+        Just(CapacityPolicy::Exact),
+        (0_u32..6).prop_map(|waiting| CapacityPolicy::Demand { waiting }),
+    ]
+}
+
+/// Generated inputs whose pools each take a generated policy.
+fn mixed_inputs() -> impl Strategy<Value = PlanInputs> {
+    (inputs(), prop::collection::vec(policy(), 4)).prop_map(|(mut inputs, policies)| {
+        for (pool, policy) in inputs.pools.iter_mut().zip(policies) {
+            pool.policy = policy;
+        }
+        inputs
+    })
+}
+
+/// The same inputs with every pool `EXACT`.
+fn all_exact(inputs: &PlanInputs) -> PlanInputs {
+    let mut exact = inputs.clone();
+    for pool in &mut exact.pools {
+        pool.policy = CapacityPolicy::Exact;
+    }
+    exact
+}
+
+/// The policy `plan` applied to a pool's line: the first input of that name, as `plan` dedups.
+fn policy_of(inputs: &PlanInputs, pool: &PoolName) -> CapacityPolicy {
+    inputs
+        .pools
+        .iter()
+        .find(|p| &p.pool == pool)
+        .map_or(CapacityPolicy::Exact, |p| p.policy)
+}
+
+proptest! {
+    #[test]
+    fn should_fit_and_stay_monotone_when_pools_mix_policies_and_inputs_are_random(
+        inputs in mixed_inputs(),
+        more in 1_u64..8,
+    ) {
+        // given
+        let mut grown = inputs.clone();
+        if let Some(r) = grown.report.as_mut() {
+            r.foreign.memory_bytes += more * GIB;
+            r.foreign.disk_bytes += more * GIB;
+            r.foreign_vms += 1;
+            r.foreign_macos_guests += 1;
+        }
+        // when
+        let (report, decisions) = capacity::plan(&inputs);
+        let (after, _) = capacity::plan(&grown);
+        // then: I24 and I07 under either policy, a DEMAND pool carved only for what it waits
+        // for, and monotone pool by pool for a fixed demand (KER-05D's M1)
+        prop_assert!(carved(&inputs, &report).fits_within(report.free));
+        prop_assert!(report.allocated.saturating_add(reserved(&decisions)).fits_within(
+            report.admissible.saturating_add(report.allocated)
+        ));
+        for line in &report.pools {
+            prop_assert!(line.reported_max <= line.deliverable);
+            if let CapacityPolicy::Demand { waiting } = policy_of(&inputs, &line.pool) {
+                prop_assert!(line.carve_out <= waiting);
+            }
+        }
+        prop_assert!(no_pool_more(&after, &report), "{:?} then {:?}", carve_by_pool(&report), carve_by_pool(&after));
+    }
+
+    #[test]
+    fn should_carve_no_pool_less_when_a_quarantine_is_released_and_pools_mix_policies(
+        generated in mixed_inputs(),
+        extra in lease(),
+        which in any::<prop::sample::Index>(),
+    ) {
+        // given: one of the quarantined leases (at least `extra`) released, demand unchanged
+        let mut inputs = generated;
+        inputs.leases.push(LeaseInput { quarantined: true, ..extra });
+        let quarantined: Vec<usize> = inputs
+            .leases
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.quarantined.then_some(i))
+            .collect();
+        let mut released = inputs.clone();
+        released.leases.remove(quarantined[which.index(quarantined.len())]);
+        // when
+        let (held, _) = capacity::plan(&inputs);
+        let (freed, _) = capacity::plan(&released);
+        // then: KER-05D's M2 for a fixed demand
+        prop_assert!(no_pool_more(&held, &freed), "{:?} then {:?}", carve_by_pool(&held), carve_by_pool(&freed));
+    }
+
+    #[test]
+    fn should_carve_later_pools_at_least_exact_when_earlier_pools_keep_only_for_demand(
+        inputs in mixed_inputs(),
+    ) {
+        // given: the same inputs with every pool EXACT
+        let exact = all_exact(&inputs);
+        // when
+        let (mixed, _) = capacity::plan(&inputs);
+        let (baseline, _) = capacity::plan(&exact);
+        // then: a DEMAND pool keeps no more than EXACT would, so every EXACT pool is carved at
+        // least as much, whatever the pools before it chose
+        for (line, base) in mixed.pools.iter().zip(&baseline.pools) {
+            prop_assert_eq!(&line.pool, &base.pool);
+            if policy_of(&inputs, &line.pool) == CapacityPolicy::Exact {
+                prop_assert!(line.carve_out >= base.carve_out, "{}: {} < {}", line.pool, line.carve_out, base.carve_out);
+            }
+        }
+    }
+
+    #[test]
+    fn should_carve_as_exact_when_every_demand_covers_its_headroom(inputs in inputs()) {
+        // given: every pool DEMAND, waiting for more than its max_running
+        let mut covered = inputs.clone();
+        for pool in &mut covered.pools {
+            pool.policy = CapacityPolicy::Demand { waiting: pool.max_running.saturating_add(1) };
+        }
+        // when
+        let (exact, exact_decisions) = capacity::plan(&inputs);
+        let (demand, demand_decisions) = capacity::plan(&covered);
+        // then
+        prop_assert_eq!(exact, demand);
+        prop_assert_eq!(exact_decisions, demand_decisions);
+    }
+}
+
+/// The 13 GiB case of ADR 0069 (`formal/scheduling.qnt`'s S1): a macOS pool first in name order
+/// whose 15 GiB VM does not fit, a Linux pool after it.
+fn thirteen_gib(mac: CapacityPolicy) -> PlanInputs {
+    PlanInputs {
+        report: Some(host(13, 8)),
+        reserves: Resources::new(0, 0),
+        admission_open: true,
+        leases: Vec::new(),
+        pools: vec![
+            PoolInput {
+                policy: mac,
+                ..demand("amac", GuestOs::Macos, 15, 2, 0)
+            },
+            demand("blin", GuestOs::Linux, 4, 8, 3),
+        ],
+    }
+}
+
+#[test]
+fn should_carve_a_later_pool_beside_an_idle_one_when_the_earlier_keeps_only_for_demand() {
+    // given
+    let exact = thirteen_gib(CapacityPolicy::Exact);
+    let idle = thirteen_gib(CapacityPolicy::Demand { waiting: 0 });
+    // when
+    let (exact_report, _) = capacity::plan(&exact);
+    let (demand_report, decisions) = capacity::plan(&idle);
+    // then: EXACT keeps the macOS headroom and starves the Linux pool; DEMAND does not
+    assert_eq!(carve_outs(&exact_report), [("amac", 0), ("blin", 0)]);
+    assert_eq!(carve_outs(&demand_report), [("amac", 0), ("blin", 3)]);
+    assert_eq!(demand_report.pools[0].hold, Some(HoldReason::NoDemand));
+    assert_eq!(demand_report.pools[0].reported_max, 0);
+    assert_eq!(reserved(&decisions).vms, 3);
+}
+
+#[test]
+fn should_keep_room_for_a_waiting_job_when_the_earlier_pool_keeps_only_for_demand() {
+    // given: one macOS job waits (S2)
+    let waiting = thirteen_gib(CapacityPolicy::Demand { waiting: 1 });
+    // when
+    let (report, _) = capacity::plan(&waiting);
+    // then: the room for its VM is kept, as EXACT keeps it
+    assert_eq!(carve_outs(&report), [("amac", 0), ("blin", 0)]);
+    assert_eq!(
+        report.pools[0].hold,
+        Some(HoldReason::NoCapacity(Dimension::Memory))
+    );
 }

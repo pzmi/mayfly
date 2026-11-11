@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 
 use mayfly_control_domain::attempt::GuestOs;
-use mayfly_control_domain::capacity::{self, Footprint, PlanDecision, ReportedCapacity};
+use mayfly_control_domain::capacity::{
+    self, CapacityPolicy, Footprint, PlanDecision, ReportedCapacity,
+};
 use mayfly_control_domain::host::{
     Drain, HostCommand, HostEvent, HostState, PoolDemand, ReleaseEvidence, ReserveSlot,
     ResourceThreshold,
@@ -239,8 +241,8 @@ proptest! {
             }
         }
         let demand = [
-            PoolDemand { pool: pool("pool0"), os: GuestOs::Macos, vm: Resources::new(8 * GIB, 20 * GIB), wanted: wanted.0 },
-            PoolDemand { pool: pool("pool1"), os: GuestOs::Linux, vm: Resources::new(4 * GIB, 20 * GIB), wanted: wanted.1 },
+            PoolDemand { pool: pool("pool0"), os: GuestOs::Macos, vm: Resources::new(8 * GIB, 20 * GIB), wanted: wanted.0, policy: CapacityPolicy::Exact },
+            PoolDemand { pool: pool("pool1"), os: GuestOs::Linux, vm: Resources::new(4 * GIB, 20 * GIB), wanted: wanted.1, policy: CapacityPolicy::Exact },
         ];
         // when: the policy's reservations are decided one by one
         let (_, decisions) = capacity::plan(&state.plan_inputs(&demand));

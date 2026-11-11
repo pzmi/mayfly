@@ -150,6 +150,27 @@ pub struct PoolConfig {
     pub breaker: BreakerConfig,
     /// A daily runner-only refresh, host local time (ADR 0039); none by default.
     pub runner_refresh_at: Option<TimeOfDay>,
+    /// What the pool keeps ahead of the pools after it (ADR 0069); `exact` by default.
+    pub capacity_policy: CapacityPolicy,
+}
+
+/// `capacity_policy`: what a pool keeps of the host's free capacity ahead of the pools after it
+/// in name order (ADR 0069, DEC-06).
+///
+/// Optional, `"exact"` when absent. A build older than this key refuses a file that has it
+/// (unknown keys are refused, never ignored), so a rollback fails loudly instead of running
+/// another policy than the operator chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapacityPolicy {
+    /// `"exact"`: keep the pool's whole `max_running` headroom, whether jobs wait or not. Safe
+    /// whatever GitHub does with the `maxCapacity` mayfly sends.
+    #[default]
+    Exact,
+    /// `"demand"`: keep room only for the VMs the pool waits for, so later pools run beside an
+    /// idle one. Depends on a fact not verified yet (`doc/github-scaleset.md` §12 item 6, GH-00):
+    /// if GitHub counts only the jobs it assigned under the `maxCapacity` mayfly sent, a pool
+    /// carved nothing never learns of its job and starves.
+    Demand,
 }
 
 /// The trust tier a pool serves (ADR 0027).
@@ -669,6 +690,7 @@ const POOL_KEYS: &[&str] = &[
     "breaker_failures",
     "breaker_window",
     "runner_refresh_at",
+    "capacity_policy",
 ];
 
 fn parse_duration(text: &str) -> Option<Duration> {
@@ -981,6 +1003,22 @@ fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
             parsed
         });
 
+    let capacity_policy = reader
+        .string("capacity_policy", "capacity_policy = \"exact\"", false)
+        .and_then(|text| match text.as_str() {
+            "exact" => Some(CapacityPolicy::Exact),
+            "demand" => Some(CapacityPolicy::Demand),
+            _ => {
+                reader.push(
+                    "capacity_policy",
+                    ConfigErrorKind::Invalid,
+                    format!("{} is not a capacity policy", enum_text(&text)),
+                    "use `capacity_policy = \"exact\"` (the default) or `capacity_policy = \"demand\"`",
+                );
+                None
+            }
+        });
+
     let min_prepared_value = min_prepared.unwrap_or(0);
     if let Some(running) = max_running
         && min_prepared_value > running
@@ -1006,6 +1044,7 @@ fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
             window: breaker_window.unwrap_or(Duration::from_secs(1800)),
         },
         runner_refresh_at,
+        capacity_policy: capacity_policy.unwrap_or_default(),
     })
 }
 

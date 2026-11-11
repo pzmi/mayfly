@@ -98,9 +98,9 @@ then, a model's task records the one it tried.
 | Model | File | Governs | Invariants (`allInvariants`) | Step relations | Bounded depth | Duration | Task |
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
-| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i21DeregisterBeforeStop`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside); at KER-04G, with `i21DeregisterBeforeStop`, 119 s, 56 s and 155 s | KER-04, KER-04F, DEC-04, DEC-05, VER-01F, KER-04G |
+| lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i21DeregisterBeforeStop`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `vanishedStaysQuarantined`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside); at KER-04G, with `i21DeregisterBeforeStop`, 119 s, 56 s and 155 s; at DEC-06, with the quarantine stop's deregistration, 187 s, 101 s and 195 s (beside a simulation run) | KER-04, KER-04F, DEC-04, DEC-05, VER-01F, KER-04G, DEC-06 |
 | link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
-| scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); simulation about 3 min per seed and relation | KER-05, DEC-04 |
+| scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy and the data plane's resource ledger (plan §9, dm §6.2, §6.3, ADR 0024) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); KER-05D's carve ran Apalache out of memory before it checked anything; at DEC-06, the state machine in `scheduling_machine` with the plan carved from counts and both capacity policies chosen by `init`, 489 s and 293 s (`formal-verify --model scheduling`); simulation about 3 min per seed and relation | KER-05, DEC-04, DEC-06 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed | KER-09 |
@@ -204,6 +204,28 @@ Backoff whose retirement waits issues nothing, and a second request is refused w
 waits. Scripts `retirementInBackoffWaitsForDeregistration` and
 `stageFailureHoldingRegistrationWaitsForDeregistration` keep it as regression traces.
 
+**Deregister before the quarantine stop (DEC-06, ADR 0076).** KER-04G left the automatic stop of
+a quarantined VM outside `i21DeregisterBeforeStop`; the owner decided on 2026-11-10 that it
+deregisters first ("deregister"). The ghost now also flags a `StopVm` issued in `Quarantined`
+while a runner may be registered and idle in the VM (`runnerMayLive`, not exited) before any
+`ConfirmRetirement`, unless an operator resolved a quarantine before. On the model as it stood
+the extended invariant fails: simulation of `activationStep` (seed 7) found Listening,
+`quarantineCommand`, `issueNext` → `StopVm` in 1.2 s, and `quarantineStopWaitsForDeregistrationTest`
+failed. The fix: the attempt's `dereg` (`none`, `requested`, `confirmed`, `busy`) is set to
+`requested` on entering quarantine when `stopNeedsDeregistration` holds (a JIT issued, the
+runner not exited, not Retiring or Deleting, the VM running with an instance id, no live job);
+`nextDirective` issues the quarantine stop only once `stopCleared` (`none`, `confirmed`, or the
+runner exited); `confirmRetirement` and `withdrawRetirement` answer it inside quarantine (to
+`confirmed` and `busy`, the attempt staying quarantined); and `runnerExited` is recorded inside
+quarantine, as the aggregate already did. Scenarios `quarantineStopWaitsForDeregistrationTest`,
+`quarantineStopBusyKeepsRunningTest`, the negative controls
+`quarantineStopWithoutRegistrationNeedsNoDeregistrationTest` and
+`quarantineStopAfterRunnerExitedNeedsNoDeregistrationTest`, and the positive control
+`quarantineStopBeforeDeregistrationIsFlaggedTest`; scripts `quarantineStopWaitsForDeregistration`
+and `quarantineStopBusyKeepsRunning` keep it as regression traces, and the conformance driver
+compares `dereg` with the aggregate's `stop_deregistration`. `registration.qnt` gains
+`requestQuarantineStop`, served by P11 like a retirement under `deregisterBeforeStop`.
+
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
 | `withinLimit` | `0 <= count <= LIMIT` in every reachable state | `formal-verify-bounded` (Apalache, 6 steps), `formal-verify-simulate` |
@@ -275,7 +297,7 @@ was changed: which side is wrong is the follow-up's decision (ver §6.2 item 9).
 | `i10UnknownLeavesOnlyOnObservation` | I10: when the pending outcome stops being `Unknown`, the last stimulus was an observation | `formal-verify`; `tests/attempt/lifecycle.rs::should_leave_unknown_only_on_an_observation_when_every_command_is_tried` (mutant 27) |
 | `i13NoDuplicateClones` | I13: no directive issued while one is pending, every clone targets the one (name, generation), clones bounded by the retry budget | `formal-verify`; `tests/attempt/lifecycle.rs::should_keep_name_and_generation_when_a_stage_is_retried` |
 | `i14OneJob` | I14: at most one job is ever bound | `formal-verify`; `tests/attempt/lifecycle.rs::should_bind_one_job_when_a_second_is_offered` |
-| `i21DeregisterBeforeStop` | I21 (attempt half, KER-04G): while a runner of the registration may be registered and idle in the VM (a launch sent and not refused, the runner not seen exiting), the attempt retires with its VM running, which commits to its stop, only on `ConfirmRetirement` (P11 had the deregistration's answer; `registration.qnt`'s `deregisterBeforeStop` says when it may confirm); quarantine stops and an operator's resolution are outside it (KER-04F) | `formal-verify`; `tests/attempt/properties.rs::should_keep_the_lifecycle_invariants_when_any_two_stimuli_are_accepted` (matrix states `backoff/registered`, `backoff/retirement_waiting`); `tests/attempt/lifecycle.rs::should_wait_for_the_deregistration_when_a_retirement_is_requested_in_backoff_holding_a_registration`, `should_request_the_retirement_when_the_activation_budget_is_spent_holding_a_registration` |
+| `i21DeregisterBeforeStop` | I21 (attempt half, KER-04G): while a runner of the registration may be registered and idle in the VM (a launch sent and not refused, the runner not seen exiting), the attempt retires with its VM running, which commits to its stop, only on `ConfirmRetirement` (P11 had the deregistration's answer; `registration.qnt`'s `deregisterBeforeStop` says when it may confirm); the automatic stop of a quarantined VM likewise waits for that answer (ADR 0076); an operator's resolution is outside it | `formal-verify`; `tests/attempt/properties.rs::should_keep_the_lifecycle_invariants_when_any_two_stimuli_are_accepted` (matrix states `backoff/registered`, `backoff/retirement_waiting`, `quarantined/deregistering`, `quarantined/busy`); `tests/attempt/lifecycle.rs::should_wait_for_the_deregistration_when_a_retirement_is_requested_in_backoff_holding_a_registration`, `should_request_the_retirement_when_the_activation_budget_is_spent_holding_a_registration`, `should_stop_a_quarantined_vm_only_after_the_deregistration_when_a_runner_may_be_registered`, `should_keep_a_quarantined_vm_running_when_github_answers_busy_for_its_deregistration`, `should_keep_waiting_when_the_deregistration_of_a_quarantine_stop_is_not_answered`, `should_stop_a_quarantined_vm_at_once_when_no_runner_can_be_registered_in_it` |
 | `i22JitMintedOnceAfterGrantAndVerification` | I22 (attempt half): a JIT handle only with the grant and a verification of the current epoch, at most one launch, no job once the JIT is presumed leaked (a launch of unknown outcome, or a handle a restart orphaned, even with its launch in flight) | `formal-verify`; `tests/attempt/lifecycle.rs::should_refuse_a_jit_handle_when_activation_lacks_a_grant_or_a_fresh_verification`, `should_never_launch_again_when_a_launch_outcome_is_unknown`, `should_record_a_late_launch_and_never_bind_a_job_when_a_restart_orphaned_its_handle` |
 | `i30GuestNeverDecidesOwnership` | I30: the recorded instance id is one the provider reported, never a guest's claim | `formal-verify`; `tests/attempt/lifecycle.rs::should_carry_the_recorded_instance_id_when_a_delete_is_issued` |
 | `quarantineTerminal` | automation never takes an attempt out of quarantine (only an operator's resolution or an observed absence) | `formal-verify`; `tests/attempt/lifecycle.rs::should_never_delete_when_quarantined_until_an_operator_resolves` |
@@ -486,7 +508,35 @@ candidate carve policies of `doc/domain-model.md` §6.3.1 (ADR 0069): `carvePoli
 candidate against safety, monotonicity pool by pool and in total, and release monotonicity, over
 a small host), `carveScenariosTest` (the usefulness table) and `sustainedLoadTest` (which
 candidates starve a waiting macOS job under sustained Linux load). The candidates are pure
-functions beside `planOf`; only `EXACT` (`carveTwo`) is what `capacity::plan` implements.
+functions beside `planOf`; `capacity::plan` implements `EXACT` (`carveTwo`) and, from DEC-06
+(owner, 2026-11-10: "implement both now"), `DEMAND` per pool. The policy is a parameter of the
+state machine: `host.policy` and `host.waiting` give each pool its policy and the jobs it is told
+wait for it, chosen by `init` (both policies, 0 to `MAX_RUNNING` jobs) and fixed for the run, and
+`shapeOf` cuts a `DEMAND` pool's headroom to them (`demandShape`), so every invariant of
+`allInvariants`, Apalache's bounded runs included, is checked under both policies for a fixed
+demand; `initWith` keeps every pool `EXACT` for the scenarios. DEC-06's tests:
+`carveMonotoneDemandTest` (`carveMonotone`'s properties for `DEMAND` with every fixed number of
+waiting jobs, and the later pool carved at least what `EXACT` carves it),
+`demandFixesThe13GiBCaseTest` (S1 and S2), `demandStarvesWhenDemandIsInvisibleTest` (sustained
+load seen only through `maxCapacity`: the risk GH-00 item 6 decides) and
+`demandLetsTheLaterPoolInTest` (the state machine: an idle `DEMAND` Linux pool keeps nothing and
+the macOS pool is carved and admitted, where `EXACT` carves it nothing).
+
+**Two modules (DEC-06).** `formal/scheduling.qnt` holds the state machine in
+`scheduling_machine` (state, actions, relations, invariants) and everything else in `scheduling`,
+its main module, which imports it: the candidate policies, `carveMonotone`, its variants and every
+scenario. `quint test` and `quint run` read `scheduling`; `formal-verify` gives Apalache
+`--main scheduling_machine` (`VERIFY_MAIN` in `tools/xtask/src/formal_verify.rs`). Apalache's
+inliner expands every definition of the module it is given and copies an operator's argument at
+every use: since KER-05D the candidate policies (a carve that depends on another carve, folded over
+every free capacity) and the plan's `Shape` read field by field through `less` and `fitIn` ran it
+out of its 3 GB heap in `InlinePass` before it checked anything, even with a single invariant at
+depth 1 and with 11 GB (bisected at DEC-06: KER-05H's model checked `admitStep` to depth 2 in 74 s,
+KER-05D's ran out of memory). So the state machine's `planOf` carves from counts (`carveCounts`:
+the keep and the fit as sums of indicators over `1..MAX_RUNNING`, no floors, no nested minima),
+and `carveCountsTest` checks that it equals `carveTwo` over the pools' shapes (`shapeOfCounts`)
+on every free capacity of a small host, both orders, every count of runners and quarantined
+leases, every cap and either pool closed; `admitStep` then checks to depth 2 in 24 s.
 `dp.memUnknown` abstracts every fact the ledger lacks
 (`vmFactsChange` toggles it in both relations): `dpFits` is false and `dpReport` delivers no
 memory while it holds, and the invariant `noStartWhileCapacityUnknown` (pinned by
@@ -663,10 +713,18 @@ Tests (`quint test`, all deterministic): `happyPathTest`, `idleRunnerDeregistere
 `busyAnswerWithdrawsRetirementTest`, `busyRetirementStaysCancelledAfterTheJobTest`,
 `lostRemovalReplyIsRetriedTest`, `issueUnknownFoundByNameTest`, `issueUnknownAbsentTest`,
 `issueUnknownWaitsForGitHubTest`, `deliveryUnknownPresumedLeakedTest`,
-`notSeenOnlinePresumedLeakedTest`, `reaperSparesTheForeignRunnerTest`, `nameIssuedOnceTest`, and
+`notSeenOnlinePresumedLeakedTest`, `reaperSparesTheForeignRunnerTest`, `nameIssuedOnceTest`,
 `mutant21StopBeforeDeregisterViolatesTest`: mutant 21 (verification §9) as the action
 `confirmRetirementStopFirst`, kept out of every step relation, which stops the VM before the
-runner is deregistered and violates `deregisterBeforeStop`. Negative controls tried in simulation:
+runner is deregistered and violates `deregisterBeforeStop`; and from DEC-06 (ADR 0076)
+`quarantineStopDeregistersFirstTest`, `quarantineStopBusyKeepsRunningTest` and
+`quarantineStopWaitsForGitHubTest` for `requestQuarantineStop` (a quarantine stop asks P11 like a
+retirement, in any registration phase: a busy answer withdraws it and the VM keeps running, an
+unreachable GitHub leaves it waiting), with the negative control
+`quarantineStopAtOnceViolatesTest` (KER-04F's immediate stop, `quarantineStopAtOnce`, kept out of
+every relation, violates `deregisterBeforeStop`). `requestQuarantineStop` is in `step` and
+`raceStep`; the Apalache times of the table predate it (simulation of both, 3000 traces of 30
+steps, found no violation). Negative controls tried in simulation:
 confirming a retirement without P11's step (mutant 21) makes `raceStep` and `step` report
 `deregisterBeforeStop`; a reaper that sends an unknown issue back to `Requested` makes `step`
 report `noRemintAfterUnknown`; dropping the "not leaked" guard of delivery makes `step` report
@@ -859,7 +917,10 @@ a command, its append, a claim and an effect take five steps): `ES_I14_durableDe
 depth 8 is what Apalache proves them to: every trace of registration, commits, claims,
 effects, advances, releases, failures, expiries and worker crashes of that length.
 `storeOnlyStep` at depth 4 covers two units interleaving their commands (as one step or as
-a request and a decision), one-step appends and split transactions, kicks and crashes. Beyond
+a request and a decision), one-step appends and split transactions, kicks and crashes. Its
+depth is the owner's decision (2026-11-10, DEC-06: "depth 4"): `BOUNDED` keeps it at 4, run only
+in the weekly formal lane (`formal.yml`, about 78 min), and depth 5, which had not checked its
+fourth state after 40 min, is not pursued. Beyond
 those depths the invariants are checked by the scenarios (every one runs `allInvariants` at its
 end) and by simulation (`formal-verify-simulate`: 3 seeds of 5000 traces of 50 steps per
 relation), which samples and proves nothing.

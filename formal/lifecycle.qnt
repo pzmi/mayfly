@@ -99,6 +99,11 @@ module lifecycle {
     // reason of the quarantine the attempt is in, so leaving it (an operator's resolution)
     // clears it (VER-01F)
     vanished: bool,
+    // the quarantine stop's deregistration (ADR 0076): "none" (nothing to wait for), "requested"
+    // (a runner of the attempt's registration may be registered and idle in the running VM, so
+    // P11 deregisters it before the stop), "confirmed" (P11 had the answer: removed or not
+    // found) or "busy" (GitHub answered busy: a job runs there, and the VM is not stopped)
+    dereg: str,
   }
 
   /// The provider's truth, and whether the pending directive has taken effect yet.
@@ -177,6 +182,24 @@ module lifecycle {
 
   pure def jobLive(x: Attempt): bool = x.job != NONE and not(x.runnerExited)
 
+  /// Whether the automatic stop of a quarantined VM would leave a runner of the attempt's
+  /// registration registered and idle on GitHub (ADR 0076): a JIT was issued, the runner was
+  /// not seen exiting, and no retirement passed the deregistration before (a retiring attempt
+  /// had P11's answer, or had nothing to wait for); only for a VM the stop would be issued for.
+  pure def stopNeedsDeregistration(x: Attempt): bool = and {
+    x.jit != "none",
+    not(x.runnerExited),
+    not(Set(RETIRING, DELETING).contains(x.phase)),
+    x.vmRunning,
+    x.instance != NONE,
+    not(jobLive(x)),
+  }
+
+  /// The quarantine stop is not waiting on the deregistration: none was needed, P11 confirmed
+  /// it, or the runner has exited since (an exited runner takes no job, I21).
+  pure def stopCleared(x: Attempt): bool =
+    Set("none", "confirmed").contains(x.dereg) or x.runnerExited
+
   /// The directive IssueNext issues in this state, or NO_DIRECTIVE.
   pure def nextDirective(x: Attempt): str =
     if (x.phase == RESERVED or x.phase == CLONING) CLONE_VM
@@ -195,8 +218,10 @@ module lifecycle {
       else NO_DIRECTIVE
     else if (x.phase == DELETING) DELETE_VM
     else if (x.phase == QUARANTINED)
-      // stopped with proof, never deleted; a VM without a recorded instance id is not touched
-      if (x.vmRunning and not(jobLive(x)) and x.instance != NONE) STOP_VM else NO_DIRECTIVE
+      // stopped with proof, never deleted; a VM without a recorded instance id is not touched;
+      // a runner that may be registered in it is deregistered first (ADR 0076)
+      if (x.vmRunning and not(jobLive(x)) and x.instance != NONE and stopCleared(x)) STOP_VM
+      else NO_DIRECTIVE
     else NO_DIRECTIVE
 
   pure def isStageDirective(d: str): bool = Set(CLONE_VM, START_VM, VERIFY_GUEST).contains(d)
@@ -211,17 +236,24 @@ module lifecycle {
   /// quarantine has its own reason (VER-01F).
   pure def retire(x: Attempt): Attempt =
     { ...x, phase: if (x.instance == NONE) DELETED else RETIRING, retireRequested: false,
-      pending: NO_DIRECTIVE, unknown: false, tries: 0, vanished: false }
+      pending: NO_DIRECTIVE, unknown: false, tries: 0, vanished: false, dereg: "none" }
 
-  /// Quarantine; entering it restarts the count of stops, staying in it does not.
+  /// Quarantine; entering it restarts the count of stops, staying in it does not. Entering it
+  /// with a runner that may be registered in the running VM requests its deregistration, which
+  /// the stop waits for (ADR 0076); staying in it keeps the request where it is.
   pure def quarantine(x: Attempt): Attempt =
     { ...x, phase: QUARANTINED, pending: NO_DIRECTIVE, unknown: false, retireRequested: false,
-      tries: if (x.phase == QUARANTINED) x.tries else 0 }
+      tries: if (x.phase == QUARANTINED) x.tries else 0,
+      dereg:
+        if (x.phase == QUARANTINED) x.dereg
+        else if (stopNeedsDeregistration(x)) "requested"
+        else "none" }
 
   /// Quarantine because the recorded VM vanished (`vm_vanished_externally`, ADR 0066): it is
-  /// not running, so no stop is issued for it, and its absence is the reason, not a release.
+  /// not running, so no stop is issued for it (nor a deregistration asked for one), and its
+  /// absence is the reason, not a release.
   pure def quarantineVanished(x: Attempt): Attempt =
-    { ...quarantine(x), vmRunning: false, vanished: true }
+    { ...quarantine(x), vmRunning: false, vanished: true, dereg: "none" }
 
   /// A stage directive failed definitely (refused, or observed not applied). Once the budget is
   /// spent the attempt retires, but one holding a registration (a JIT was issued: the activate
@@ -271,6 +303,16 @@ module lifecycle {
       g0.runnerMayLive,
       not(before.runnerExited),
       not(g0.deregistered),
+    } or and {
+      // the automatic stop of a quarantined VM is issued while such a runner may be registered
+      // and idle in it, before the deregistration answered (ADR 0076)
+      before.pending == NO_DIRECTIVE,
+      after.phase == QUARANTINED,
+      after.pending == STOP_VM,
+      g0.runnerMayLive,
+      not(after.runnerExited),
+      not(g0.deregistered),
+      not(g0.operatorResolved),
     },
   }
 
@@ -334,7 +376,7 @@ module lifecycle {
         name: name, generation: generation, instance: NONE, vmRunning: false, epoch: 1,
         granted: false, freshEpoch: NONE, jit: "none", jitLeaked: false, job: NONE,
         retireRequested: false,
-        diagnostics: "none", runnerExited: false, vanished: false,
+        diagnostics: "none", runnerExited: false, vanished: false, dereg: "none",
       },
       w' = { exists: false, instance: NONE, running: false, applied: false },
       g' = {
@@ -631,11 +673,15 @@ module lifecycle {
     }
   }
 
-  /// `RunnerExited{code}`: the runner process ended.
+  /// `RunnerExited{code}`: the runner process ended. Inside quarantine it is only recorded:
+  /// an exited runner takes no job, so the stop no longer waits for its deregistration.
   action runnerExited = all {
-    Set(LISTENING, BUSY).contains(a.phase) or (a.phase == ACTIVATING and a.jit == "taken"),
+    Set(LISTENING, BUSY).contains(a.phase) or (a.phase == ACTIVATING and a.jit == "taken")
+      or (a.phase == QUARANTINED and a.jit != "none"),
     not(a.runnerExited),
-    commit("observation", { ...a, phase: FINISHED, runnerExited: true }, g),
+    commit("observation",
+      { ...a, phase: if (a.phase == QUARANTINED) QUARANTINED else FINISHED, runnerExited: true },
+      g),
   }
 
   // ---- the world changes on its own ---------------------------------------------------------
@@ -700,23 +746,34 @@ module lifecycle {
       g),
   }
 
+  /// Whether P11 has a deregistration of this attempt to answer: a retirement's, or a
+  /// quarantine stop's (ADR 0076).
+  pure def awaitsDeregistration(x: Attempt): bool =
+    x.retireRequested or (x.phase == QUARANTINED and x.dereg == "requested")
+
   /// `ConfirmRetirement` after the registration was deregistered. The request outlives the
   /// phase it was made in: a failed fresh verification backs off, a runner that exits finishes,
   /// and the deregistration still ends in a confirmation there (VER-01F). A lost VM ends the
-  /// attempt instead: it is terminal, and nothing is confirmed after it.
+  /// attempt instead: it is terminal, and nothing is confirmed after it. Inside quarantine the
+  /// confirmation lets the quarantine stop go ahead and retires nothing (ADR 0076).
   action confirmRetirement = all {
     idle(a),
-    a.retireRequested,
+    awaitsDeregistration(a),
     not(terminal(a)),
-    commit("command", retire(a), { ...g, deregistered: true }),
+    commit("command",
+      if (a.phase == QUARANTINED) { ...a, dereg: "confirmed" } else retire(a),
+      { ...g, deregistered: true }),
   }
 
-  /// `WithdrawRetirement` after GitHub answered 422 (busy).
+  /// `WithdrawRetirement` after GitHub answered 422 (busy). Inside quarantine a job runs on the
+  /// runner: the VM is not stopped (ADR 0076), until the runner is seen exiting.
   action withdrawRetirement = all {
     idle(a),
-    a.retireRequested,
+    awaitsDeregistration(a),
     not(terminal(a)),
-    commit("command", { ...a, retireRequested: false }, g),
+    commit("command",
+      if (a.phase == QUARANTINED) { ...a, dereg: "busy" } else { ...a, retireRequested: false },
+      g),
   }
 
   /// `Quarantine{reason}` by a policy (identity doubt after delivery, redaction, ...).
@@ -939,8 +996,10 @@ module lifecycle {
   /// the runner was not seen exiting), the attempt retires with its VM running, which commits
   /// to stopping it, only after P11 had the deregistration's answer (`ConfirmRetirement`);
   /// `registration.qnt`'s `deregisterBeforeStop` states when that answer may confirm.
-  /// Quarantine stops are outside it: they are the safety action of KER-04F, taken unless a
-  /// job is live, and an operator's resolution ends one.
+  /// The automatic stop of a quarantined VM (KER-04F) is inside it too since ADR 0076: issued
+  /// while such a runner may be registered and idle in the VM, it waits for the same answer.
+  /// An operator's resolution ends the protection: it retires the attempt on the operator's
+  /// word (ADR 0025).
   val i21DeregisterBeforeStop = not(g.stopBeforeDeregister)
 
   // Every invariant of the model, so a new one cannot be left out of a stage.
@@ -1287,6 +1346,53 @@ module lifecycle {
       .expect(a.phase == RETIRING and not(i21DeregisterBeforeStop))
   }
 
+  // ADR 0076: a quarantined VM whose runner may still be registered is stopped only after
+  // the deregistration answered; before ADR 0076 the stop was issued at once (a violation of
+  // `i21DeregisterBeforeStop` once the invariant covers quarantine stops).
+  run quarantineStopWaitsForDeregistrationTest = {
+    initWith(1, 1).then(toPrepared).then(toListening)
+      .then(quarantineCommand)
+      .expect(a.phase == QUARANTINED and a.vmRunning and a.dereg == "requested")
+      .expect(not(canIssueNext(a)))
+      .then(confirmRetirement)
+      .expect(a.phase == QUARANTINED and a.dereg == "confirmed" and allInvariants)
+      .then(issueNext).expect(a.pending == STOP_VM and allInvariants)
+  }
+
+  // ADR 0076: GitHub answered busy (a job runs on the runner): the quarantined VM keeps
+  // running and is never stopped under the job; once the runner is seen exiting, it is.
+  run quarantineStopBusyKeepsRunningTest = {
+    initWith(1, 1).then(toPrepared).then(toListening)
+      .then(quarantineCommand).then(withdrawRetirement)
+      .expect(a.phase == QUARANTINED and a.dereg == "busy" and a.vmRunning)
+      .expect(not(canIssueNext(a)))
+      .then(runnerExited).expect(a.phase == QUARANTINED and a.runnerExited)
+      .then(issueNext).expect(a.pending == STOP_VM and allInvariants)
+  }
+
+  // ADR 0076, negative controls: a quarantine with no runner that could be registered (no JIT
+  // issued, or the runner exited) stops at once, and so does one whose VM was already stopped
+  // or whose job is live (it waits for the job instead, as before).
+  run quarantineStopWithoutRegistrationNeedsNoDeregistrationTest = {
+    initWith(1, 1).then(toPrepared).then(quarantineCommand)
+      .expect(a.dereg == "none")
+      .then(issueNext).expect(a.pending == STOP_VM and i21DeregisterBeforeStop)
+  }
+
+  run quarantineStopAfterRunnerExitedNeedsNoDeregistrationTest = {
+    initWith(1, 1).then(toPrepared).then(toListening).then(runnerExited)
+      .then(quarantineCommand).expect(a.dereg == "none")
+      .then(issueNext).expect(a.pending == STOP_VM and i21DeregisterBeforeStop)
+  }
+
+  // ADR 0076, positive control: the KER-04F stop, issued at once for a quarantined VM whose
+  // runner may still be registered (forced here: no action issues it now), is flagged.
+  run quarantineStopBeforeDeregistrationIsFlaggedTest = {
+    initWith(1, 1).then(toPrepared).then(toListening).then(quarantineCommand)
+      .then(commitWorld("saga", { ...a, pending: STOP_VM, tries: a.tries + 1 }, w, g))
+      .expect(a.pending == STOP_VM and not(i21DeregisterBeforeStop))
+  }
+
   // VER-01F: a clone whose lost reply took effect, and whose VM someone then removed, is
   // cloned afresh by its re-delivery: the reply carries the new VM's instance id.
   run cloneAnsweredAfterRemovalTest = {
@@ -1451,6 +1557,14 @@ module lifecycle_traces {
     TO_BACKOFF_HOLDING_REGISTRATION
       .concat([ISSUE, s("replyRefused"), s("confirmRetirement"), ISSUE, OK, ISSUE])
 
+  // ADR 0076: the quarantine stop deregisters first, see `i21DeregisterBeforeStop`.
+  /// A listening runner quarantined: the stop waits for the deregistration's confirmation.
+  pure val QUARANTINE_STOP_WAITS_FOR_DEREGISTRATION = TO_PREPARED.concat(TO_LISTENING)
+    .concat([s("quarantineCommand"), s("confirmRetirement"), ISSUE])
+  /// A busy answer keeps the quarantined VM running until its runner is seen exiting.
+  pure val QUARANTINE_STOP_BUSY_KEEPS_RUNNING = TO_PREPARED.concat(TO_LISTENING)
+    .concat([s("quarantineCommand"), s("withdrawRetirement"), s("runnerExited"), ISSUE])
+
   action tinit = {
     nondet name = Set(1).oneOf()
     nondet generation = Set(1).oneOf()
@@ -1521,5 +1635,7 @@ module lifecycle_traces {
     script(RETIREMENT_IN_BACKOFF_WAITS_FOR_DEREGISTRATION)
   action stageFailureHoldingRegistrationWaitsForDeregistration =
     script(STAGE_FAILURE_HOLDING_REGISTRATION_WAITS_FOR_DEREGISTRATION)
+  action quarantineStopWaitsForDeregistration = script(QUARANTINE_STOP_WAITS_FOR_DEREGISTRATION)
+  action quarantineStopBusyKeepsRunning = script(QUARANTINE_STOP_BUSY_KEEPS_RUNNING)
 
 }

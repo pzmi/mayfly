@@ -650,7 +650,12 @@ As built (RT-01, ADR 0046): unknown keys are refused at every level, every probl
 with its field path and its fix, `[github]` takes `organisation` and, for testing, `repository`;
 `[host]` takes `reserve_memory_mib` and `reserve_disk_gib`; a pool's `breaker_failures` and
 `breaker_window` are its N and W and `runner_refresh_at` is `HH:MM`; exit codes are 78 (invalid
-config), 69 (lock refused) and 73 (state dir unusable).
+config), 69 (lock refused) and 73 (state dir unusable). A pool's optional `capacity_policy` is
+`"exact"` (default) or `"demand"` (DEC-06, ADR 0069): what it keeps of the host's free capacity
+ahead of the pools after it, its whole headroom or only what it waits for; `"demand"` relies on
+`doc/github-scaleset.md` §12 item 6, unverified until GH-00, and starves a pool carved nothing if
+GitHub counts only jobs assigned under the `maxCapacity` mayfly sent. An older build refuses the
+key (unknown keys are refused).
 
 ---
 

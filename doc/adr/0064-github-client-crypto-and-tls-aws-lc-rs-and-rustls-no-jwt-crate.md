@@ -4,9 +4,9 @@ Date: 2026-11-10
 
 ## Status
 
-Proposed. Amends the `mayfly-adapter-github` and `mayfly-fake-github` rows of foundation.md
-§2.4 (marked there) and adds `[graph] targets` to `deny.toml`. A first draft the same day chose
-`ring` and `reqwest` 0.12; it was replaced before anything landed.
+Accepted (owner, 2026-11-10). Amends the `mayfly-adapter-github` and `mayfly-fake-github` rows
+of foundation.md §2.4 (marked there) and adds `[graph] targets` to `deny.toml`. A first draft the
+same day chose `ring` and `reqwest` 0.12; it was replaced before anything landed.
 
 ## Context
 

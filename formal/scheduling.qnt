@@ -18,7 +18,7 @@
  *
  * Ghost state (`g`) records history for the invariants and never feeds a guard.
  */
-module scheduling {
+module scheduling_machine {
   // ---- constants ----------------------------------------------------------------------------
 
   /// Attempt ids the reconciler may mint: each reserves at most once.
@@ -77,7 +77,12 @@ module scheduling {
 
   type Lease = { phase: str, slot: int, gen: int, pool: str, running: bool }
 
-  type Host = { report: Report, gateClosed: bool, drain: str }
+  /// `policy` and `waiting` are the capacity policy's inputs per pool (ADR 0069, DEC-06): the
+  /// pool's configured `capacity_policy` (`EXACT` or `DEMAND`) and the jobs it is told are
+  /// waiting for new VMs. Both are fixed at `init`: the properties are stated for a fixed demand.
+  type Host = {
+    report: Report, gateClosed: bool, drain: str, policy: str -> str, waiting: str -> int,
+  }
 
   type Terms = { rev: int, open: bool }
 
@@ -140,6 +145,7 @@ module scheduling {
   pure def max0(x: int): int = if (x < 0) 0 else x
   pure def min2(x: int, y: int): int = if (x < y) x else y
 
+  pure def stoppedQuarantined(l: Lease): bool = l.phase == QUARANTINED and not(l.running)
   pure def live(l: Lease): bool = Set(RESERVED, ACTIVATED, QUARANTINED).contains(l.phase)
   /// A lease that can still produce a runner: live and not quarantined.
   pure def runner(l: Lease): bool = Set(RESERVED, ACTIVATED).contains(l.phase)
@@ -243,6 +249,50 @@ module scheduling {
     (c1, c2)
   }
 
+  /// Whether `n` VMs of `v` (`n` at least 1) fit `f` less `kept`, as `fitIn(less(f, kept), v)
+  /// >= n` reads it: a slot each, and `n·v + kept ≤ f` on every other dimension the VM uses.
+  pure def fitsAfter(f: Free, kept: Free, v: Free, n: int): bool = and {
+    n + kept.vms <= f.vms,
+    v.mem == 0 or n * v.mem + kept.mem <= f.mem,
+    v.disk == 0 or n * v.disk + kept.disk <= f.disk,
+    v.mac == 0 or n * v.mac + kept.mac <= f.mac,
+  }
+
+  /// `min2(head, fitIn(less(f, kept), v))` for a headroom of at most `MAX_RUNNING`: the number
+  /// of `n` in `1..MAX_RUNNING` within the headroom whose `n` VMs fit, since fitting is monotone
+  /// in `n`; a sum of indicators, so no argument is copied.
+  pure def carveCount(f: Free, kept: Free, v: Free, headroom: int): int =
+    1.to(MAX_RUNNING).fold(0, (c, n) => c + (if (n <= headroom and fitsAfter(f, kept, v, n)) 1 else 0))
+
+  /// One pool as the state machine's plan reads it: counts, not a `Shape`. `cap` is how many
+  /// VMs its policy lets it be carved and keep for: `MAX_RUNNING` under `EXACT`, the jobs it is
+  /// told wait for under `DEMAND`.
+  type Counts = { pool: str, open: bool, live: int, runners: int, stopped: int, cap: int }
+
+  /// `carveTwo(f, shapeOfCounts(a), shapeOfCounts(b))` for the state machine's pools (headroom
+  /// at most `MAX_RUNNING`), written from the counts so that Apalache's inliner, which copies
+  /// an operator's argument at every use, keeps the plan small: a `Shape` read field by field,
+  /// the floors of `less` and the nested minima of `fitIn` copied the plan's terms until KER-05D's
+  /// carve ran it out of memory before it checked anything (DEC-06). Equal to `carveTwo` on
+  /// every such input (`carveCountsTest` in `scheduling`).
+  pure def carveCounts(f: Free, a: Counts, b: Counts): (int, int) = {
+    val headA = min2(max0(MAX_RUNNING - a.live), a.cap)
+    val headB = min2(max0(MAX_RUNNING - b.live), b.cap)
+    // `keeps(shapeOfCounts(a))`: its headroom of VMs, and for its quarantined places what its
+    // stopped quarantined leases owe (their memory), at most a VM per place
+    val places = max0(MAX_RUNNING - a.runners) - max0(MAX_RUNNING - a.live)
+    val vmA = vmOf(a.pool)
+    val kept = if (a.open) {
+      mem: vmA.mem * headA + min2(vmA.mem * max0(places), vmA.mem * a.stopped),
+      disk: vmA.disk * headA,
+      vms: headA,
+      mac: vmA.mac * headA,
+    } else NOTHING
+    val c1 = if (a.open) carveCount(f, NOTHING, vmA, headA) else 0
+    val c2 = if (b.open) carveCount(f, kept, vmOf(b.pool), headB) else 0
+    (c1, c2)
+  }
+
   type Plan = {
     freeMem: int, freeDisk: int, freeVms: int, freeMacos: int,
     carveLinux: int, carveMacos: int,
@@ -256,22 +306,36 @@ module scheduling {
   pure def holdsOf(l: Lease): Free =
     { mem: holdsMem(l), disk: VM_DISK, vms: 1, mac: if (l.pool == MACOS) 1 else 0 }
 
-  /// One pool's shape under the leases `ls`, open when the host's gate and its terms are.
-  pure def shapeOf(h: Host, ls: int -> Lease, ts: str -> Terms, pool: str): Shape = {
-    vm: vmOf(pool),
-    head: max0(MAX_RUNNING - countOf(ls, pool, live)),
-    room: max0(MAX_RUNNING - countOf(ls, pool, runner)),
-    owed: ATTEMPTS.fold(NOTHING, (s, a) =>
-      if (ls.get(a).phase == QUARANTINED and ls.get(a).pool == pool)
-        plus(s, less(vmOf(pool), holdsOf(ls.get(a))))
-      else s),
+  /// One pool's counts under the leases `ls`, open when the host's gate and its terms are, its
+  /// `cap` its waiting jobs when its policy is `DEMAND`.
+  pure def countsOf(h: Host, ls: int -> Lease, ts: str -> Terms, pool: str): Counts = {
+    pool: pool,
     open: gateOpen(h) and ts.get(pool).open,
+    live: countOf(ls, pool, live),
+    runners: countOf(ls, pool, runner),
+    stopped: countOf(ls, pool, stoppedQuarantined),
+    cap: if (h.policy.get(pool) == DEMAND) h.waiting.get(pool) else MAX_RUNNING,
+  }
+
+  /// The capacity policies `capacity::plan` implements (ADR 0069): a pool's `capacity_policy`.
+  pure val EXACT = "exact"         // KER-05D: keep the headroom, and what quarantines owe
+  pure val DEMAND = "demand"       // DEC-06: EXACT, keeping only for the waiting jobs it is given
+
+  /// `DEMAND` (ADR 0069, DEC-06): the pool's headroom cut to the `waiting` jobs it is told of, so
+  /// it is carved, and keeps ahead of the pools after it, only for them; what it keeps for its
+  /// quarantined places is unchanged. With `waiting` fixed this is `EXACT` over a smaller
+  /// headroom, so every property of `EXACT` holds (`carveMonotoneDemand`); what `waiting` can be
+  /// is the open question (`sustainedLoad`, GH-00).
+  pure def demandShape(s: Shape, waiting: int): Shape = {
+    val told = min2(s.head, waiting)
+    { ...s, head: told, room: s.room - (s.head - told) }
   }
 
   /// The pure policy: the free capacity after every live lease (quarantined included), carved
   /// in pool-name order among pools whose admission is open, each up to its `max_running`
-  /// headroom (live and quarantined leases count against it) within what the pools before it
-  /// keep ahead of it (`keeps`).
+  /// headroom (live and quarantined leases count against it, cut to its waiting jobs under
+  /// `DEMAND`) within what the pools before it keep ahead of it (`keeps`, computed from counts
+  /// by `carveCounts`).
   pure def planOf(h: Host, ls: int -> Lease, ts: str -> Terms): Plan = {
     val r = h.report
     val f = {
@@ -280,7 +344,7 @@ module scheduling {
       vms: max0(limVms(r) - allocVmsOf(ls)),
       mac: max0(limMacos(r) - allocMacosOf(ls)),
     }
-    val c = carveTwo(f, shapeOf(h, ls, ts, LINUX), shapeOf(h, ls, ts, MACOS))
+    val c = carveCounts(f, countsOf(h, ls, ts, LINUX), countsOf(h, ls, ts, MACOS))
     { freeMem: f.mem, freeDisk: f.disk, freeVms: f.vms, freeMacos: f.mac, carveLinux: c._1, carveMacos: c._2 }
   }
 
@@ -348,8 +412,20 @@ module scheduling {
     id: 0, mem: 0, disk: 0, slots: 0, macos: 0, foreignMem: 0, foreignVms: 0, foreignMacos: 0,
   }
 
-  action initWith(foreignMem: int, foreignMacos: int): bool = all {
-    host' = { report: NO_REPORT, gateClosed: false, drain: NO_DRAIN },
+  /// Every pool `EXACT`, the default (ADR 0069).
+  pure val ALL_EXACT: str -> str = POOLS.mapBy(_ => EXACT)
+  pure val NO_WAITING: str -> int = POOLS.mapBy(_ => 0)
+
+  action initWith(foreignMem: int, foreignMacos: int): bool =
+    initFull(foreignMem, foreignMacos, ALL_EXACT, NO_WAITING)
+
+  /// `init` with each pool's capacity policy and the jobs it is told are waiting (DEC-06).
+  action initFull(
+    foreignMem: int, foreignMacos: int, policy: str -> str, waiting: str -> int,
+  ): bool = all {
+    host' = {
+      report: NO_REPORT, gateClosed: false, drain: NO_DRAIN, policy: policy, waiting: waiting,
+    },
     leases' = ATTEMPTS.mapBy(_ => { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false }),
     slotGen' = SLOTS.mapBy(_ => 0),
     terms' = POOLS.mapBy(_ => { rev: 0, open: false }),
@@ -371,7 +447,13 @@ module scheduling {
   action init = {
     nondet fm = Set(0, 1).oneOf()
     nondet fmac = Set(0, 1).oneOf()
-    initWith(fm, fmac)
+    nondet linuxPolicy = Set(EXACT, DEMAND).oneOf()
+    nondet macosPolicy = Set(EXACT, DEMAND).oneOf()
+    nondet linuxWaiting = 0.to(MAX_RUNNING).oneOf()
+    nondet macosWaiting = 0.to(MAX_RUNNING).oneOf()
+    initFull(fm, fmac,
+      Map(LINUX -> linuxPolicy, MACOS -> macosPolicy),
+      Map(LINUX -> linuxWaiting, MACOS -> macosWaiting))
   }
 
   // ---- the data plane ----------------------------------------------------------------------
@@ -787,6 +869,62 @@ module scheduling {
     }
   }
 
+  /// quarantineHoldsCapacity: a quarantined lease keeps its slot (no free slot is one of
+  /// theirs) and its disk, and its memory while its VM runs.
+  val quarantineHoldsCapacity = ATTEMPTS.forall(a => leases.get(a).phase == QUARANTINED implies and {
+    not(freeSlotsOf(host.report, leases).contains(leases.get(a).slot)),
+    vms.get(a) != RUNNING or holdsMem(leases.get(a)) == vmMem(leases.get(a).pool),
+  })
+
+  /// allocationWithinReport: every reservation fit the newest report applied, and an older
+  /// report never replaced a newer one.
+  val allocationWithinReport = not(g.overAllocated) and not(g.staleApplied)
+
+  /// carveOutAdmissible: whatever the policy carves out for a pool, the host admits.
+  val carveOutAdmissible = {
+    val p = plan
+    val unused = ATTEMPTS.filter(a => leases.get(a).phase == FREE)
+    val a = lowest(unused)
+    POOLS.forall(pool =>
+      (carveOf(p, pool) > 0 and unused.size() > 0) implies canReserve(host, leases, terms, a, pool))
+  }
+
+  // Every invariant of the model, so a new one cannot be left out of a stage.
+  val allInvariants = and {
+    i01OneSlotPerAttempt,
+    i02NoSharedSlotGeneration,
+    i03StartsWithinCapacity,
+    i07NeverAdvertiseMore,
+    i08NothingAfterDrain,
+    i13NoDuplicateClones,
+    i24CarveOutsFitTheHost,
+    i26NoAdmissionWhileClosed,
+    noGrantWhileClosed,
+    i27BreakerBounded,
+    i28QuarantineNeverAutoDeleted,
+    i33DataPlaneNeverOvercommits,
+    noStartWhileCapacityUnknown,
+    generationsMonotonic,
+    macosGuestsAtMostTwo,
+    externalConsumptionShrinksAdmissible,
+    quarantineHoldsCapacity,
+    allocationWithinReport,
+    carveOutAdmissible,
+  }
+}
+
+/**
+ * The capacity policy's properties and candidates, and every scenario of the model, over the
+ * state machine `scheduling_machine` above: the main module that `quint test` and `quint run`
+ * use. `formal-verify` checks `scheduling_machine` alone (`VERIFY_MAIN` in
+ * `tools/xtask/src/formal_verify.rs`): Apalache's inliner expands every definition of the
+ * module it is given, and the candidate policies below (a carve that depends on another carve,
+ * folded over every free capacity) expand past any heap, which ran it out of memory before it
+ * checked anything once KER-05D added them (DEC-06).
+ */
+module scheduling {
+  import scheduling_machine.*
+
   /// carveMonotone (KER-05H, KER-05D): neither pool's carve grows when the free capacity shrinks
   /// on any dimension, and neither shrinks when a quarantined lease of the first pool is
   /// released (a running one frees a whole VM, a stopped one its disk and slots), whichever of
@@ -841,6 +979,64 @@ module scheduling {
       }
     })))
 
+  /// carveMonotoneDemand (DEC-06): `carveMonotone`'s properties for `DEMAND` with every fixed
+  /// number of waiting jobs of the first pool: the carve-outs fit together, neither pool's carve
+  /// grows when the free capacity shrinks or shrinks when a quarantined lease of the first pool
+  /// is released, and the later pool is carved at least what `EXACT` carves it (the first keeps
+  /// no more than under `EXACT`).
+  pure val carveMonotoneDemand = FREES.forall(f => ORDERS.forall(o =>
+    tuples(0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING),
+      0.to(MAX_RUNNING)).forall(t => {
+      val runners = t._1
+      val held = t._2
+      val stopped = t._3
+      val waiting = t._5
+      val first = firstShape(o._1, runners, held, stopped)
+      val second = secondShape(o._2, t._4)
+      val c = carveDemand(f, first, second, waiting)
+      val runningReleased =
+        carveDemand(plus(f, vmOf(o._1)), firstShape(o._1, runners, held - 1, stopped), second, waiting)
+      val stoppedReleased = carveDemand(plus(f, { ...vmOf(o._1), mem: 0 }),
+        firstShape(o._1, runners, held - 1, stopped - 1), second, waiting)
+      stopped > held or and {
+        fitsTogether(f, demandShape(first, waiting), second, c),
+        shrunk(f).forall(g2 => atMost(carveDemand(g2, first, second, waiting), c)),
+        held == stopped or atMost(c, runningReleased),
+        stopped == 0 or atMost(c, stoppedReleased),
+        carveTwo(f, first, second)._2 <= c._2,
+      }
+    })))
+
+  /// One pool's `Shape` from its counts, as `capacity::plan` builds it: its headroom, room and
+  /// what its quarantined leases owe (only a stopped one owes, its memory: `holdsOf`), cut by
+  /// `demandShape` when its cap is below its headroom.
+  pure def shapeOfCounts(c: Counts): Shape = {
+    val exact = {
+      vm: vmOf(c.pool),
+      head: max0(MAX_RUNNING - c.live),
+      room: max0(MAX_RUNNING - c.runners),
+      owed: times({ ...NOTHING, mem: vmMem(c.pool) }, c.stopped),
+      open: c.open,
+    }
+    demandShape(exact, c.cap)
+  }
+
+  /// carveCounts (DEC-06): the state machine's `carveCounts` is `carveTwo` over the shapes the
+  /// counts give, on every free capacity of a small host, both pool orders, every count of
+  /// runners and of running and stopped quarantined leases of the first pool, every live count
+  /// of the second, every cap (`MAX_RUNNING` is `EXACT`), open or closed.
+  pure val carveCountsAgree = FREES.forall(f => ORDERS.forall(o =>
+    tuples(0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING), 0.to(MAX_RUNNING),
+      0.to(MAX_RUNNING), Set(true, false)).forall(t => {
+      val a = { pool: o._1, open: true, live: t._1 + t._2, runners: t._1, stopped: t._3, cap: t._5 }
+      val b = { pool: o._2, open: t._6, live: t._4, runners: t._4, stopped: 0, cap: MAX_RUNNING }
+      (t._3 > t._2 or t._1 + t._2 > MAX_RUNNING) or and {
+        carveCounts(f, a, b) == carveTwo(f, shapeOfCounts(a), shapeOfCounts(b)),
+        carveCounts(f, { ...a, open: false }, b)
+          == carveTwo(f, shapeOfCounts({ ...a, open: false }), shapeOfCounts(b)),
+      }
+    })))
+
   // ---- KER-05D: candidate carve policies (ADR 0069, doc/domain-model.md §6.3.1) --------------
   //
   // Each candidate carves two pools in priority order (the first is the earlier pool name).
@@ -848,10 +1044,8 @@ module scheduling {
   // here, with the checks and scenarios that measured them, so the choice can be re-examined.
 
   pure val ROOM = "room"           // KER-05H: keep a whole VM per place in `room`
-  pure val EXACT = "exact"         // KER-05D: keep the headroom, and what quarantines owe
   pure val LEFTOVER = "leftover"   // greedy: hand the next pool what the earlier one left
   pure val ENVELOPE = "envelope"   // the leftover, clipped to stay monotone in total
-  pure val DEMAND = "demand"       // EXACT, keeping only for the waiting jobs it is given
   pure val SMALL_FIRST = "small"   // LEFTOVER with the smaller VM first when one is smaller
   pure val POLICIES = Set(ROOM, EXACT, LEFTOVER, ENVELOPE, DEMAND, SMALL_FIRST)
 
@@ -887,13 +1081,11 @@ module scheduling {
   pure def raised(f: Free, g: Free): Free =
     { mem: max2(f.mem, g.mem), disk: max2(f.disk, g.disk), vms: max2(f.vms, g.vms), mac: max2(f.mac, g.mac) }
 
-  /// EXACT with the first pool's headroom cut to the `waiting` jobs it is told of: it is carved
-  /// and keeps only for them. Monotone for a fixed `waiting`; what `waiting` can be is the
-  /// question (`sustainedLoad`).
-  pure def carveDemand(f: Free, first: Shape, second: Shape, waiting: int): (int, int) = {
-    val told = min2(first.head, waiting)
-    carveTwo(f, { ...first, head: told, room: first.room - (first.head - told) }, second)
-  }
+  /// EXACT with the first pool's headroom cut to the `waiting` jobs it is told of
+  /// (`demandShape`): it is carved and keeps only for them. Monotone for a fixed `waiting`; what
+  /// `waiting` can be is the question (`sustainedLoad`).
+  pure def carveDemand(f: Free, first: Shape, second: Shape, waiting: int): (int, int) =
+    carveTwo(f, demandShape(first, waiting), second)
 
   /// LEFTOVER with the smaller VM first when one is within the other on every dimension, the
   /// given order otherwise (VMs that differ in kind have no size order).
@@ -1025,49 +1217,6 @@ module scheduling {
   pure def sustainedLoad(p: str, visible: bool): int =
     1.to(ROUNDS).fold(LOADED, (s, _) => roundOf(p, visible, s)).started
 
-  /// quarantineHoldsCapacity: a quarantined lease keeps its slot (no free slot is one of
-  /// theirs) and its disk, and its memory while its VM runs.
-  val quarantineHoldsCapacity = ATTEMPTS.forall(a => leases.get(a).phase == QUARANTINED implies and {
-    not(freeSlotsOf(host.report, leases).contains(leases.get(a).slot)),
-    vms.get(a) != RUNNING or holdsMem(leases.get(a)) == vmMem(leases.get(a).pool),
-  })
-
-  /// allocationWithinReport: every reservation fit the newest report applied, and an older
-  /// report never replaced a newer one.
-  val allocationWithinReport = not(g.overAllocated) and not(g.staleApplied)
-
-  /// carveOutAdmissible: whatever the policy carves out for a pool, the host admits.
-  val carveOutAdmissible = {
-    val p = plan
-    val unused = ATTEMPTS.filter(a => leases.get(a).phase == FREE)
-    val a = lowest(unused)
-    POOLS.forall(pool =>
-      (carveOf(p, pool) > 0 and unused.size() > 0) implies canReserve(host, leases, terms, a, pool))
-  }
-
-  // Every invariant of the model, so a new one cannot be left out of a stage.
-  val allInvariants = and {
-    i01OneSlotPerAttempt,
-    i02NoSharedSlotGeneration,
-    i03StartsWithinCapacity,
-    i07NeverAdvertiseMore,
-    i08NothingAfterDrain,
-    i13NoDuplicateClones,
-    i24CarveOutsFitTheHost,
-    i26NoAdmissionWhileClosed,
-    noGrantWhileClosed,
-    i27BreakerBounded,
-    i28QuarantineNeverAutoDeleted,
-    i33DataPlaneNeverOvercommits,
-    noStartWhileCapacityUnknown,
-    generationsMonotonic,
-    macosGuestsAtMostTwo,
-    externalConsumptionShrinksAdmissible,
-    quarantineHoldsCapacity,
-    allocationWithinReport,
-    carveOutAdmissible,
-  }
-
   // ---- scenarios ----------------------------------------------------------------------------
 
   // KER-05H, KER-05D: no pool's carve grows when the free capacity shrinks or shrinks when a
@@ -1109,6 +1258,33 @@ module scheduling {
     sustainedLoad(DEMAND, false) == -1,
   })
 
+  // DEC-06: the state machine's carve, from counts, is `carveTwo` over the pools' shapes.
+  run carveCountsTest = initWith(0, 0).expect(carveCountsAgree)
+
+  // DEC-06: `DEMAND` keeps `carveMonotone`'s properties for every fixed number of waiting jobs,
+  // and never carves the later pool less than `EXACT`.
+  run carveMonotoneDemandTest = initWith(0, 0).expect(carveMonotoneDemand)
+
+  // DEC-06: the 13 GiB case (S1): 13 GiB free beside an idle macOS pool whose 15 GiB VM does not
+  // fit. `EXACT` keeps the macOS pool's headroom and carves the Linux pool nothing; `DEMAND`,
+  // told no macOS job waits, keeps nothing and carves three Linux VMs. Told one macOS job waits
+  // (S2), it keeps the room for it as `EXACT` does.
+  run demandFixesThe13GiBCaseTest = initWith(0, 0).expect(and {
+    carveBy(EXACT, S1.free, S1.first, S1.second, S1.waiting) == (0, 0),
+    carveBy(DEMAND, S1.free, S1.first, S1.second, S1.waiting) == (0, 3),
+    carveBy(DEMAND, S2.free, S2.first, S2.second, S2.waiting) == (0, 0),
+  })
+
+  // DEC-06: the risk `DEMAND` carries until GH-00 answers `doc/github-scaleset.md` §12 item 6.
+  // If GitHub assigns jobs only under the `maxCapacity` mayfly sends, a pool carved nothing is
+  // never told of its job: under sustained Linux load the macOS job starves (-1), where
+  // `EXACT` starts it in round 4; told of the job it starts in round 4 too.
+  run demandStarvesWhenDemandIsInvisibleTest = initWith(0, 0).expect(and {
+    sustainedLoad(EXACT, false) == 4,
+    sustainedLoad(DEMAND, true) == 4,
+    sustainedLoad(DEMAND, false) == -1,
+  })
+
 
   /// The report the data plane sends as its `id`-th, with this foreign consumption.
   pure def reportOf(id: int, fm: int, fmac: int): Report = {
@@ -1122,6 +1298,17 @@ module scheduling {
     dpReport.then(applyReport(reportOf(1, fm, fmac))).then(applyTerms(LINUX)).then(applyTerms(MACOS))
 
   action ready = readyWith(0, 0)
+
+  // DEC-06, in the state machine: with one unit of foreign memory the idle Linux pool (first in
+  // name order) keeps its two VMs' memory ahead of the macOS pool under `EXACT`, so the macOS
+  // pool is carved nothing; under `DEMAND`, told no Linux job waits, the Linux pool keeps and is
+  // carved nothing and the macOS pool is carved one VM, which the host admits.
+  run demandLetsTheLaterPoolInTest = {
+    initFull(1, 0, Map(LINUX -> DEMAND, MACOS -> EXACT), NO_WAITING).then(readyWith(1, 0))
+      .expect(plan.carveLinux == 0 and plan.carveMacos == 1 and allInvariants)
+      .expect(planOf({ ...host, policy: ALL_EXACT }, leases, terms).carveMacos == 0)
+      .then(reserve(1, MACOS)).expect(leases.get(1).phase == RESERVED and allInvariants)
+  }
 
   // Admission fills the host on the tightest dimension, then refuses; the plan carves nothing.
   run fillsThenRefusesTest = {

@@ -21,7 +21,9 @@
 # (`unknownStopResolvedByListing`, `confirmRetirementInBackoff`, `confirmRetirementAfterExit`,
 # `cloneAnsweredAfterRemoval`, `requarantineAfterVanished`) pin the divergences VER-01 found,
 # resolved; KER-04G's (`retirementInBackoffWaitsForDeregistration`,
-# `stageFailureHoldingRegistrationWaitsForDeregistration`) pin deregister-before-stop in Backoff.
+# `stageFailureHoldingRegistrationWaitsForDeregistration`) pin deregister-before-stop in Backoff;
+# DEC-06's (`quarantineStopWaitsForDeregistration`, `quarantineStopBusyKeepsRunning`) pin it for
+# the quarantine stop (ADR 0076).
 # Every
 # `*.itf.json` here has exactly one entry.
 
@@ -573,5 +575,25 @@ main = "lifecycle_traces"
 init = "tinit"
 step = "stageFailureHoldingRegistrationWaitsForDeregistration"
 max_steps = 13
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-quarantineStopWaitsForDeregistration.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "quarantineStopWaitsForDeregistration"
+max_steps = 15
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-quarantineStopBusyKeepsRunning.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "quarantineStopBusyKeepsRunning"
+max_steps = 16
 seed = "0x5ce1"
 invariant = "allInvariants"

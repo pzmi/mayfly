@@ -17,13 +17,13 @@ use super::events::{
     DirectiveRefused, DirectiveSent, GuestRejected, GuestVerified, JitHandleIssued,
     JitHandleOrphaned, JitHandleTaken, JobBound, LostEvidence, RetirementRequested,
     RetirementWithdrawn, RunnerExited, RunnerLaunchUnknown, RunnerLaunched,
-    StaleObservationIgnored, Staleness, VmBooted, VmCloned, VmDeleted, VmObservedStopped,
-    VmStopped,
+    StaleObservationIgnored, Staleness, StopDeregistrationConfirmed, StopDeregistrationRefusedBusy,
+    StopDeregistrationRequested, VmBooted, VmCloned, VmDeleted, VmObservedStopped, VmStopped,
 };
 use super::rejection::AttemptRejection;
 use super::state::{
     AttemptState, Diagnostics, DirectiveKind, DirectiveTag, Jit, Outcome, OwnershipProof, Pending,
-    Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, VmCondition,
+    Phase, QuarantineReason, RetireReason, RunnerRequestId, Stage, StopDeregistration, VmCondition,
 };
 use crate::command::{Actor, Command};
 
@@ -261,10 +261,12 @@ pub fn issuable(state: &AttemptState) -> Result<Option<DirectiveKind>, AttemptRe
         }
         Phase::Quarantined { .. } => {
             // stopped with proof unless a job is live, never deleted; a VM without a recorded
-            // instance id (ownership doubt) cannot be proven ours and is not touched
+            // instance id (ownership doubt) cannot be proven ours and is not touched; a runner
+            // that may be registered in it is deregistered first (ADR 0076)
             let stoppable = state.vm_running
                 && !job_live(state)
                 && state.instance_id.is_some()
+                && stop_cleared(state)
                 && within_budget(state);
             if stoppable {
                 Some(DirectiveKind::StopVm {
@@ -409,6 +411,53 @@ fn proof(state: &AttemptState) -> Result<OwnershipProof, AttemptRejection> {
 /// A job is bound and its runner has not exited: the VM is not stopped under it.
 const fn job_live(state: &AttemptState) -> bool {
     state.job_binding.is_some() && !state.runner_exited
+}
+
+/// Whether the automatic stop of a quarantined VM would leave a runner of the attempt's
+/// registration registered and idle on GitHub (ADR 0076, the model's `stopNeedsDeregistration`):
+/// a JIT was issued, the runner was not seen exiting, no retirement passed the deregistration
+/// before (a retiring attempt had P11's answer or had nothing to wait for), and the stop would
+/// be issued at all (the VM runs, its instance id is recorded, no job is live). Read on entering
+/// quarantine only.
+const fn stop_needs_deregistration(state: &AttemptState) -> bool {
+    let registered = match state.jit {
+        Jit::None => false,
+        Jit::Issued(..) | Jit::Taken(..) | Jit::Orphaned(..) => true,
+    };
+    let retired = match state.phase {
+        Phase::Retiring | Phase::Deleting => true,
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Deleted
+        | Phase::Lost
+        | Phase::Backoff { .. }
+        | Phase::Quarantined { .. }
+        | Phase::Closed => false,
+    };
+    registered
+        && !state.runner_exited
+        && !retired
+        && state.vm_running
+        && state.instance_id.is_some()
+        && !job_live(state)
+}
+
+/// Whether the quarantine stop waits for nothing more: no deregistration was needed, P11
+/// confirmed it, or the runner has exited since (an exited runner takes no job, I21). Pinned
+/// by `tests/attempt/lifecycle.rs::should_stop_a_quarantined_vm_only_after_the_deregistration_when_a_runner_may_be_registered`.
+const fn stop_cleared(state: &AttemptState) -> bool {
+    match state.stop_deregistration {
+        StopDeregistration::NotNeeded | StopDeregistration::Confirmed => true,
+        StopDeregistration::Requested | StopDeregistration::RefusedBusy => state.runner_exited,
+    }
 }
 
 const fn condition(state: &AttemptState) -> VmCondition {
@@ -575,7 +624,10 @@ fn decide_request_retirement(state: &AttemptState, reason: RetireReason) -> Deci
 /// too (VER-01F; pinned by
 /// `tests/attempt/lifecycle.rs::should_retire_when_a_retirement_is_confirmed_after_the_attempt_backed_off`
 /// and `should_retire_when_a_retirement_is_confirmed_after_the_runner_exited`). A lost VM ends
-/// the attempt: nothing is confirmed after it.
+/// the attempt: nothing is confirmed after it. Inside quarantine it answers the quarantine
+/// stop's deregistration instead (ADR 0076): `StopDeregistrationConfirmed`, and the attempt
+/// stays quarantined (pinned by
+/// `should_stop_a_quarantined_vm_only_after_the_deregistration_when_a_runner_may_be_registered`).
 fn decide_confirm_retirement(state: &AttemptState) -> Decision {
     match state.phase {
         Phase::Activating | Phase::Listening | Phase::Backoff { .. } | Phase::Finished => {
@@ -595,8 +647,16 @@ fn decide_confirm_retirement(state: &AttemptState) -> Decision {
         | Phase::Retiring
         | Phase::Deleting
         | Phase::Deleted
-        | Phase::Lost
-        | Phase::Quarantined { .. } => Err(AttemptRejection::NoRetirementRequested),
+        | Phase::Lost => Err(AttemptRejection::NoRetirementRequested),
+        // P11's answer to the quarantine stop's deregistration: the stop may go (ADR 0076)
+        Phase::Quarantined { .. } => match state.stop_deregistration {
+            StopDeregistration::Requested => Ok(vec![AttemptEvent::StopDeregistrationConfirmed(
+                StopDeregistrationConfirmed {},
+            )]),
+            StopDeregistration::NotNeeded
+            | StopDeregistration::Confirmed
+            | StopDeregistration::RefusedBusy => Err(AttemptRejection::NoRetirementRequested),
+        },
         Phase::NotStarted => Err(AttemptRejection::NotStarted),
         Phase::Closed => Err(AttemptRejection::Closed),
     }
@@ -605,6 +665,9 @@ fn decide_confirm_retirement(state: &AttemptState) -> Decision {
 /// `WithdrawRetirement` after a busy answer: wherever a request can be confirmed, it can be
 /// withdrawn (VER-01F; pinned by
 /// `tests/attempt/lifecycle.rs::should_withdraw_when_a_busy_answer_arrives_after_the_attempt_backed_off`).
+/// Inside quarantine a busy answer to the stop's deregistration keeps the VM running until its
+/// runner is seen exiting (ADR 0076; pinned by
+/// `should_keep_a_quarantined_vm_running_when_github_answers_busy_for_its_deregistration`).
 fn decide_withdraw_retirement(state: &AttemptState) -> Decision {
     match state.phase {
         Phase::Activating | Phase::Listening | Phase::Backoff { .. } | Phase::Finished => {
@@ -624,8 +687,16 @@ fn decide_withdraw_retirement(state: &AttemptState) -> Decision {
         | Phase::Retiring
         | Phase::Deleting
         | Phase::Deleted
-        | Phase::Lost
-        | Phase::Quarantined { .. } => Err(AttemptRejection::NoRetirementRequested),
+        | Phase::Lost => Err(AttemptRejection::NoRetirementRequested),
+        // a job runs on the runner: the quarantined VM is not stopped under it (ADR 0076)
+        Phase::Quarantined { .. } => match state.stop_deregistration {
+            StopDeregistration::Requested => Ok(vec![AttemptEvent::StopDeregistrationRefusedBusy(
+                StopDeregistrationRefusedBusy {},
+            )]),
+            StopDeregistration::NotNeeded
+            | StopDeregistration::Confirmed
+            | StopDeregistration::RefusedBusy => Err(AttemptRejection::NoRetirementRequested),
+        },
         Phase::NotStarted => Err(AttemptRejection::NotStarted),
         Phase::Closed => Err(AttemptRejection::Closed),
     }
@@ -644,7 +715,7 @@ fn decide_quarantine(state: &AttemptState, reason: QuarantineReason) -> Decision
         | Phase::Finished
         | Phase::Retiring
         | Phase::Deleting
-        | Phase::Backoff { .. } => Ok(vec![quarantined(state, reason)]),
+        | Phase::Backoff { .. } => Ok(quarantined(state, reason)),
         Phase::Quarantined { .. } => Err(AttemptRejection::AlreadyQuarantined),
         Phase::Deleted | Phase::Lost => Err(AttemptRejection::Terminal),
         Phase::NotStarted => Err(AttemptRejection::NotStarted),
@@ -652,11 +723,43 @@ fn decide_quarantine(state: &AttemptState, reason: QuarantineReason) -> Decision
     }
 }
 
-fn quarantined(state: &AttemptState, reason: QuarantineReason) -> AttemptEvent {
-    AttemptEvent::AttemptQuarantined(AttemptQuarantined {
+/// Quarantine for `reason`. Entering it with a runner that may be registered and idle in the
+/// running VM also requests that runner's deregistration, which the automatic stop waits for
+/// (ADR 0076; pinned by
+/// `tests/attempt/lifecycle.rs::should_stop_a_quarantined_vm_only_after_the_deregistration_when_a_runner_may_be_registered`);
+/// staying in it requests nothing again.
+fn quarantined(state: &AttemptState, reason: QuarantineReason) -> Vec<AttemptEvent> {
+    let entered = AttemptEvent::AttemptQuarantined(AttemptQuarantined {
         reason,
         vm: condition(state),
-    })
+    });
+    let entering = match state.phase {
+        Phase::Quarantined { .. } => false,
+        Phase::NotStarted
+        | Phase::Reserved
+        | Phase::Cloning
+        | Phase::Booting
+        | Phase::Verifying
+        | Phase::Prepared
+        | Phase::Activating
+        | Phase::Listening
+        | Phase::Busy
+        | Phase::Finished
+        | Phase::Retiring
+        | Phase::Deleting
+        | Phase::Deleted
+        | Phase::Lost
+        | Phase::Backoff { .. }
+        | Phase::Closed => true,
+    };
+    if entering && stop_needs_deregistration(state) {
+        vec![
+            entered,
+            AttemptEvent::StopDeregistrationRequested(StopDeregistrationRequested {}),
+        ]
+    } else {
+        vec![entered]
+    }
 }
 
 /// Adoption under a newer run epoch launches nothing; a handle issued and not taken is
@@ -831,13 +934,12 @@ fn decide_answer(
         }
         Fact::GuestRejected { reason, .. } => {
             expect_tag(pending, DirectiveTag::VerifyGuest)?;
-            Ok(vec![
-                AttemptEvent::GuestRejected(GuestRejected {
-                    directive_id,
-                    reason: *reason,
-                }),
-                quarantined(state, QuarantineReason::GuestIdentityRefused),
-            ])
+            let mut events = vec![AttemptEvent::GuestRejected(GuestRejected {
+                directive_id,
+                reason: *reason,
+            })];
+            events.extend(quarantined(state, QuarantineReason::GuestIdentityRefused));
+            Ok(events)
         }
         Fact::DirectiveRefused { reason, .. } => Ok(refused(state, pending, *reason)),
         Fact::OutcomeUnknown { .. } => match pending.outcome {
@@ -1004,10 +1106,12 @@ fn refused(state: &AttemptState, pending: Pending, reason: RefusalReason) -> Vec
         ];
     }
     if proof_refused {
-        return vec![
-            refusal,
-            quarantined(state, QuarantineReason::ProviderIdentityMismatch),
-        ];
+        let mut events = vec![refusal];
+        events.extend(quarantined(
+            state,
+            QuarantineReason::ProviderIdentityMismatch,
+        ));
+        return events;
     }
     let mut events = vec![refusal];
     events.extend(not_applied(state, pending));
@@ -1073,10 +1177,7 @@ fn cleanup_refused(state: &AttemptState) -> Vec<AttemptEvent> {
             if within_budget(state) {
                 Vec::new()
             } else {
-                vec![quarantined(
-                    state,
-                    QuarantineReason::DeleteRefusedRepeatedly,
-                )]
+                quarantined(state, QuarantineReason::DeleteRefusedRepeatedly)
             }
         }
     }
@@ -1263,10 +1364,7 @@ fn decide_vm_present(
         return Ok(if already_mismatched {
             Vec::new()
         } else {
-            vec![quarantined(
-                state,
-                QuarantineReason::ProviderIdentityMismatch,
-            )]
+            quarantined(state, QuarantineReason::ProviderIdentityMismatch)
         });
     }
     match state.pending {

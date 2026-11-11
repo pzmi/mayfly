@@ -1,11 +1,13 @@
 //! Policy P11's decision, pure: what an attempt's requested retirement does next, given its
 //! registration (`retirementStep` of `formal/registration.qnt`).
 //!
-//! The policy (CP-05) reads the attempt's `RetirementRequested` and the registration stream, and
-//! turns the step into one command: `RequestDeregistration{Retirement}` on the registration,
-//! `ConfirmRetirement` or `WithdrawRetirement` on the attempt, or nothing yet. Only a
-//! `ConfirmRetirement` lets the attempt's cleanup stop the VM, so this function is where
-//! "deregister before stop" (I21) is decided; mutant 21 (verification §9) lives here.
+//! The policy (CP-05) reads the attempt's `RetirementRequested` (or, for a quarantined VM, its
+//! `StopDeregistrationRequested`: ADR 0076) and the registration stream, and turns the step into
+//! one command: `RequestDeregistration{Retirement}` on the registration, `ConfirmRetirement` or
+//! `WithdrawRetirement` on the attempt, or nothing yet. Only a `ConfirmRetirement` lets the
+//! attempt's cleanup, or its quarantine stop, stop the VM, so this function is where "deregister
+//! before stop" (I21) is decided; mutant 21 (verification §9) lives here. The model is
+//! `formal/registration.qnt`'s `retirementStep`, with `requestQuarantineStop` for the quarantine.
 
 use mayfly_domain::EventId;
 
@@ -25,8 +27,9 @@ pub enum RetirementStep {
     Wait,
 }
 
-/// The step of `retirement` (the attempt's `RetirementRequested` event) given the attempt's
-/// registration; an attempt that never asked for one has the initial state.
+/// The step of `retirement` (the attempt's `RetirementRequested` or
+/// `StopDeregistrationRequested` event) given the attempt's registration; an attempt that never
+/// asked for one has the initial state.
 ///
 /// - GitHub answered busy for this very retirement: withdraw it, whatever happened since; a busy
 ///   answer to another (stale) retirement's request does not cancel this one (a job

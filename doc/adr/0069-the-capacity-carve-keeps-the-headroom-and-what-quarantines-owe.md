@@ -4,8 +4,10 @@ Date: 2026-11-10
 
 ## Status
 
-Proposed (KER-05D). Refines the capacity policy of ADR 0024 (the control plane's allocation
-within the data plane's report); the data plane's accounting is unchanged.
+Accepted (owner, 2026-11-10), with both policies: `EXACT` (KER-05D) and `DEMAND` (DEC-06), per
+pool, the default `exact` until GH-00 answers `doc/github-scaleset.md` §12 item 6. Refines the
+capacity policy of ADR 0024 (the control plane's allocation within the data plane's report);
+the data plane's accounting is unchanged.
 
 ## Context
 
@@ -42,11 +44,24 @@ resolves it (ADR 0025), so the double count lasted as long.
 2. **The properties are pool by pool.** M1 and M2 are checked for each pool's carve-out, not
    only the total: a later pool that gains when an earlier one loses takes its room VM by VM
    and starves its large VMs.
-3. **Demand-aware keeping waits for GH-00.** Keeping room only for an earlier pool's waiting
-   jobs (`DEMAND`) would let a later pool run beside an idle one, but our demand is
-   `min(deliverable, totalAssignedJobs)`; if `X-ScaleSetMaxCapacity` caps `totalAssignedJobs`
-   (`doc/github-scaleset.md` §12 item 6, unverified), a pool carved nothing never sees its job
-   and starves. Owner's decision once item 6 is answered.
+3. **Demand-aware keeping is a per-pool option, off by default (owner, 2026-11-10, DEC-06:
+   "implement both now").** A pool's `capacity_policy` is `"exact"` (the default: points 1 and
+   2) or `"demand"`: its headroom is cut to the VMs it waits for, so it is carved, and keeps
+   ahead of the pools after it, only for them; what it keeps for its quarantined places is
+   unchanged (`capacity::CapacityPolicy::Demand { waiting }`, `formal/scheduling.qnt`'s
+   `demandShape`). `waiting` is the pool's scale set's latest `totalAssignedJobs` beyond its live
+   runners plus its `min_prepared` deficit, never capped by its own carve-out (a capped count
+   feeds back: carved nothing, told nothing). For a fixed `waiting` it is `EXACT` over a smaller
+   headroom, so S, M1 and M2 hold pool by pool, and no `EXACT` pool is carved less than if every
+   pool were `EXACT`. **It depends on an unverified fact**: if `X-ScaleSetMaxCapacity` caps
+   `totalAssignedJobs` (`doc/github-scaleset.md` §12 item 6), a pool carved nothing never sees
+   its job and starves (U1 fails). So the default stays `"exact"` until GH-00 answers item 6.
+   The key is per pool, not per host: what matters is what each earlier pool holds back, so the
+   operator relaxes exactly the pool whose idle headroom starves the others (in the 13 GiB case,
+   the macOS pool), and each pool's keep still depends only on its own inputs. The key is
+   optional and new in schema 1; a build that predates it refuses a file that sets it (unknown
+   keys are refused, ADR 0046), so a rollback fails loudly instead of carving by another
+   policy.
 
 Options (carve-outs as (macOS, Linux), §6.3.1):
 
@@ -60,6 +75,23 @@ Options (carve-outs as (macOS, Linux), §6.3.1):
 | Smaller VM first, leftover | no | (0, 3) | (0, 9) | never |
 
 ## Consequences
+
+- DEC-06 (DEMAND): pinned by `formal/scheduling.qnt`'s `carveMonotoneDemandTest`,
+  `demandFixesThe13GiBCaseTest` (S1: `EXACT` (0, 0), `DEMAND` (0, 3); S2 with a job waiting
+  (0, 0)), `demandStarvesWhenDemandIsInvisibleTest` (sustained load: the macOS job never starts
+  when only jobs assigned under `maxCapacity` are seen) and `demandLetsTheLaterPoolInTest` (the
+  state machine, whose `init` now chooses each pool's policy and a fixed number of waiting jobs,
+  so every invariant of `allInvariants` is checked under both policies); and by
+  `tests/capacity.rs::should_fit_and_stay_monotone_when_pools_mix_policies_and_inputs_are_random`,
+  `should_carve_no_pool_less_when_a_quarantine_is_released_and_pools_mix_policies`,
+  `should_carve_later_pools_at_least_exact_when_earlier_pools_keep_only_for_demand`,
+  `should_carve_as_exact_when_every_demand_covers_its_headroom`,
+  `should_carve_a_later_pool_beside_an_idle_one_when_the_earlier_keeps_only_for_demand` and
+  `should_keep_room_for_a_waiting_job_when_the_earlier_pool_keeps_only_for_demand`; the config
+  key by `crates/mayfly-composition/tests/config.rs` (`full.toml`, the default, and
+  `capacity_policy_invalid.toml`). A `demand` pool that waits for nothing is held
+  `HoldReason::NoDemand`. The reconciler (CP-03) fills `waiting` from the scale set's
+  statistics; until then the policy is built and tested, not wired.
 
 - Operator-visible: with a quarantined lease in an earlier pool, later pools are carved more and
   their scale sets get a larger `maxCapacity` than under KER-05H; nothing else changes. Pinned

@@ -4,7 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09)
+Accepted (owner, 2026-11-09). Amended by ADR 0076 (owner, 2026-11-10): the stop of decision 1
+waits for the deregistration of a runner that may be registered in the VM.
 
 ## Context
 
@@ -23,7 +24,8 @@ always safe; only the answer can be missing.
 ## Decision
 
 1. **Quarantine whenever ownership or an outcome cannot be proven** (closed reason set,
-   `doc/domain-model.md` §6.10). The VM is kept (stopped unless a job is live), its lease keeps
+   `doc/domain-model.md` §6.10). The VM is kept (stopped unless a job is live; since ADR 0076,
+   only after its runner's deregistration when one may be registered in it), its lease keeps
    its resources and it is never reused.
 2. **A quarantined VM is never deleted automatically**: no retention timer, no cap-driven
    deletion, no deletion to make room. It is deleted only by an operator's resolution, with

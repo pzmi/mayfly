@@ -408,6 +408,25 @@ pub fn doubted() -> Vec<Step> {
     )
 }
 
+/// A listening runner quarantined by a policy: its stop waits for the deregistration of the
+/// runner that may be registered and idle in the VM (ADR 0076).
+pub fn quarantined_registered() -> Vec<Step> {
+    then(
+        listening(),
+        [AttemptCommand::Quarantine {
+            reason: QuarantineReason::ForensicRetention,
+        }],
+    )
+}
+
+/// ...and GitHub answered busy for that deregistration: a job runs there.
+pub fn quarantined_busy() -> Vec<Step> {
+    then(
+        quarantined_registered(),
+        [AttemptCommand::WithdrawRetirement],
+    )
+}
+
 fn unknown(path: Vec<Step>, n: u128) -> Vec<Step> {
     then(
         path,
@@ -500,6 +519,8 @@ pub fn matrix_states() -> Vec<(&'static str, AttemptState)> {
         ),
         ("quarantined/doubted", doubted()),
         ("quarantined/vanished", vanished()),
+        ("quarantined/deregistering", quarantined_registered()),
+        ("quarantined/busy", quarantined_busy()),
         ("closed", closed()),
     ];
     paths

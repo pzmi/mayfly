@@ -78,6 +78,15 @@ case operator_only refused operator_only
 case operator_resolves_quarantine accepted
   attempt_retired/v1 {"reason":"quarantine_resolved"}
 case outcome_unknown refused outcome_unknown
+case quarantine_requests_the_deregistration_before_its_stop accepted
+  attempt_quarantined/v1 {"reason":"forensic_retention","vm":"running"}
+  stop_deregistration_requested/v1 {}
+case quarantine_stop_deregistration_confirmed accepted
+  stop_deregistration_confirmed/v1 {}
+case quarantine_stop_deregistration_refused_busy accepted
+  stop_deregistration_refused_busy/v1 {}
+case quarantine_stop_needs_no_confirmation_without_a_registration refused no_retirement_requested
+case quarantine_stop_waits_for_the_deregistration refused nothing_to_issue
 case quarantined refused quarantined
 case record_clone accepted
   vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}

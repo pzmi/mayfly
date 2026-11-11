@@ -70,6 +70,9 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0052](adr/0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | The data plane assumes no fact it does not have: an unknown VM size or guest, or a listing not read yet, makes the dimension unknown; what needs it is refused `capacity_unknown`; `CapacityReported` lists the unknown dimensions with their causes and nothing free; protocol 1.1, compatible. Amends 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026; amended by 0066. | Accepted (owner, 2026-11-10) |
 | [ADR 0066](adr/0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A `StopVm` or `StartVm` whose recorded VM a complete listing shows absent is refused `target_absent` and the attempt quarantined `vm_vanished_externally` for review (a desync, never read as stopped or lost, not released by the inventory); status and the diagnostics bundle name it; a start refused `proof_mismatch` quarantines too; protocol 1.2, written `proof_mismatch` below. Amends 0053. | Accepted (owner, 2026-11-10) |
+| [ADR 0064](adr/0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | The GitHub client's crypto and TLS: `aws-lc-rs` as the `rustls` provider and for RS256, `rustls-platform-verifier`, `reqwest` 0.13, the App JWT built by hand (no JWT crate). Amends foundation.md §2.4. | Accepted (owner, 2026-11-10) |
+| [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. | Accepted (owner, 2026-11-10) |
+| [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
@@ -77,7 +80,10 @@ list (ADR 0045). Decided on 2026-11-10: inspect `actions/scaleset`, never port i
 DEC-03); at the KER-08 checkpoint, no defaults for unknown facts (ADR 0052), idempotent
 destructive directives (ADR 0053) and ADR 0048's amendment of ADR 0028 accepted (DEC-04); a
 vanished VM quarantined as a desync (ADR 0066), deadlines by the handshake's clock offset (ADR
-0020's amendment) and the Apalache lane weekly only (DEC-05). Still planner defaults: the remaining sub-items of **OD20** (socket
+0020's amendment) and the Apalache lane weekly only (DEC-05); ADR 0064 accepted, the event
+store's `storeOnlyStep` kept at depth 4 (weekly), ADR 0069 accepted with a per-pool `DEMAND`
+option (default `EXACT`) and quarantine stops deregistering first (ADR 0076) (DEC-06). Still
+planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04) and the live
 GitHub capture (GH-00).
 
@@ -157,6 +163,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-08 | Data-plane domain: executor, supervisor, resource ledger, fencing | KER-02, DEC-01 | opus | ⛳ |
 | DEC-04 | Record and implement the KER-08 owner decisions (ADRs 0052, 0053; 0028 amended) | KER-08 | opus | |
 | DEC-05 | Record and implement the owner decisions of 2026-11-10: ADR 0066, ADR 0020's amendment, a weekly formal lane | DEC-04, DP-01 | opus | |
+| DEC-06 | Record and implement the owner decisions of 2026-11-10 (round 7): ADRs 0064, 0069 with `DEMAND`, 0076; store-only depth 4 | DEC-05, KER-05, KER-04, KER-09 | opus | |
 | ES-01 | Storage-neutral journal port, memory journal, journal contract (landed) | KER-03 | opus | |
 | ES-01F | Align the landed journal port with the owner's decisions and its review | ES-01, DEC-01 | opus | |
 | ES-02 | SQLite journal adapter: schema, triggers, classification, five modes | ES-01F | opus | |
@@ -426,6 +433,26 @@ push and pull-request triggers and runs one job per model (`cargo xtask formal-v
 Accept: the named tests of ADR 0066 and of ADR 0020's amendment; the regenerated
 `matrix/directive.txt`, `link.txt`, `matrix/attempt.txt` and `decisions/attempt.txt`; the
 lifecycle relations at their bounded depths; `actionlint` and `action-pins` green.
+
+#### DEC-06 Record and implement the owner decisions of 2026-11-10 (round 7)
+Cites: plan §6, §9, §11; ver §6; dm §6.3.1, §6.4; ADRs 0024, 0025, 0046, 0064, 0069;
+`doc/github-scaleset.md` §12 item 6. The owner decided on 2026-11-10: (a) ADR 0064: "accept";
+(b) the event store's `storeOnlyStep` depth: "depth 4" (`BOUNDED` unchanged, weekly runs only;
+recorded in `doc/formal-models.md`); (c) ADR 0069 and its `DEMAND` option: "implement both now":
+a per-pool `capacity_policy = "exact" | "demand"` (optional, default `"exact"` until GH-00
+answers item 6; an older build refuses the key), `capacity::CapacityPolicy` in `capacity::plan`;
+(d) the quarantine stop: "deregister" (ADR 0076). Model first: `formal/scheduling.qnt` (the
+policy and the waiting jobs as `init` parameters, `carveMonotoneDemand`,
+`demandFixesThe13GiBCaseTest`, `demandStarvesWhenDemandIsInvisibleTest`,
+`demandLetsTheLaterPoolInTest`), `formal/lifecycle.qnt` (`i21DeregisterBeforeStop` covers the
+quarantine stop; the attempt's `dereg`) and `formal/registration.qnt` (`requestQuarantineStop`).
+The `Attempt` aggregate gains `StopDeregistrationRequested`, `StopDeregistrationConfirmed` and
+`StopDeregistrationRefusedBusy`; the conformance driver compares `dereg`.
+Accept: the named tests of ADRs 0069 (DEC-06's) and 0076; KER-05H's and KER-05D's capacity tests
+unchanged in what they assert; the regenerated `matrix/attempt.txt`, `decisions/attempt.txt`,
+`intents/attempt.txt`, the lifecycle regression traces and two new ones; the conformance replay
+and a 1000-trace sweep of lifecycle green; the lifecycle and scheduling relations at their
+bounded depths.
 
 #### KER-02 CP↔DP protocol
 Cites: plan §3.2, D9, D13. Model first: `formal/link.qnt` (at-least-once, duplicates,

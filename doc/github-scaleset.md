@@ -441,7 +441,9 @@ capture refutes one, the model changes first.
    field presence, nulls, zero times, `result` and `eventName` values, `requestLabels`,
    `acquireJobUrl`; offer fields usable for trust classification (ADR 0027).
 6. **Capacity header**: whether `X-ScaleSetMaxCapacity` caps assignment and `totalAssignedJobs`;
-   what lowering it mid-session does; when a plain-text 400 "capacity" error appears.
+   what lowering it mid-session does; when a plain-text 400 "capacity" error appears. The
+   `demand` capacity policy (ADR 0069, DEC-06) is safe only if it does not cap
+   `totalAssignedJobs`; until this is answered the default stays `exact`.
 7. **Rate limits**: whether the Actions service and the queue host send `Retry-After` or
    `X-RateLimit-*`, and what a throttled poll looks like.
 8. **Unconnected JIT runner**: how long its registration lives, and whether a job assigned to it

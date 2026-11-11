@@ -74,7 +74,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0022](0022-strategic-ddd-with-a-data-oriented-implementation.md) | Strategic DDD with a data-oriented implementation | Accepted |
 | [0023](0023-fake-tool-binaries-may-wait-in-real-time.md) | Fake tool binaries may wait in real time | Accepted |
 | [0024](0024-the-data-plane-owns-host-resource-accounting.md) | The data plane owns host resource accounting | Accepted. Amended by 0052 |
-| [0025](0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine keeps evidence and Unknown resolves only by observation | Accepted |
+| [0025](0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine keeps evidence and Unknown resolves only by observation | Accepted. Amended by 0076 |
 | [0026](0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Provider instance identity in the ownership proof and an external epoch floor | Accepted. Amended by 0053 |
 | [0027](0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only trust tier in v0.x | Accepted |
 | [0028](0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only with prepared unregistered VMs | Accepted. Amended by 0048 |
@@ -100,6 +100,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted |
 | [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted. Amended by 0066 |
 | [0058](0058-the-secrets-adapter-runs-its-own-commands-the-keychain-through-the-security-cli.md) | The secrets adapter runs its own commands; the Keychain through the security CLI | Proposed |
-| [0064](0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | GitHub client crypto and TLS: aws-lc-rs and rustls, no JWT crate | Proposed |
+| [0064](0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | GitHub client crypto and TLS: aws-lc-rs and rustls, no JWT crate | Accepted |
 | [0066](0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A vanished VM is quarantined as a desync | Accepted |
-| [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Proposed |
+| [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted |
+| [0076](0076-quarantine-stops-deregister-first.md) | Quarantine stops deregister first | Accepted |
