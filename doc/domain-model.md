@@ -361,6 +361,7 @@ Context in brackets.
 | **Shortfall** [Fleet] | `max(0, desired − (Activating + Listening + Busy))`: runners still to produce. Prepared VMs serve it first; they do not count in it. | — |
 | **Session** [Demand] | The GitHub message-queue session of one scale set. | "epoch", "operator session", "run" |
 | **Scale set** [Demand] | The GitHub-side resource whose *name* workflows put in `runs-on:`. One pool = one scale set (OD14). | "runner group" (a GitHub access group the scale set lives in) |
+| **Refusal sink** [Demand] | A disposable Linux VM running GitHub's official runner whose job-started hook fails every job, started for a job the run lookup refused so that GitHub fails it at once (ADR 0090). | "decoy", "fake runner" (mayfly never speaks the runner protocol itself) |
 | **Trust tier** [Demand, Fleet] | A classification of a **job offer** (never of a person): `trusted`, `untrusted`, `refused`. A pool serves exactly one tier. | `allow_untrusted_prs` (a degenerate toggle, replaced) |
 | **Runner registration** [Registration] | The GitHub-side runner record (`runner_id`, runner name), existing from `RegistrationIssued` until deregistration or GitHub's own removal. | bare "runner" |
 | **Runner process** [Execution] | The `actions/runner` OS process inside a guest. | bare "runner" |
@@ -517,10 +518,10 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `doc/github-scaleset.md` §12 and `mayfly_control_domain::demand`.
   *Planned (GH-00R's model, KER-06G):* on github.com, where jobs are assigned with no offer,
   `RecordMessage` classifies each `JobAssigned` (`trusted` or `AssignedJobRefused{reason}`) and a
-  runner starts only for a job whose workflow run was looked up and classified trusted, and
-  never while one is unclassified or refused and still assigned (ADR 0090), the refusal lapsing
-  after `refusal_release_window`, released by the operator, or, with `cancel_refused_runs`, its
-  run cancelled; a session's first message below its floor records
+  runner starts only for a job whose workflow run was looked up and classified trusted; the
+  in-guest hook of every runner fails an untrusted job it receives (ADR 0090, the hard boundary);
+  a refused job holds nothing and goes to a refusal sink (`StartSink`, the wire max pinned
+  meanwhile) or, with `cancel_refused_runs`, its run is cancelled; a session's first message below its floor records
   `MessageIdsRestarted` and restarts the cursor; a receipt counts as a duplicate only for the
   cursor's id, any other id at or below it degrades; a 404 for the journaled scale set leads to
   `RecordScaleSetRecreated{id}`.

@@ -479,65 +479,81 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
    `GET {api}/orgs/{org}/actions/runner-groups/{group_id}` ("Self-hosted runners", which it holds)
    and reports, at start-up and in `doctor`, each allowed repository that is public while
    `allows_public_repositories` is false; it reports and does not refuse (GH-08).
-2. **Per job, before any runner starts: the boundary.** Every `JobAssigned` is classified, and
-   while one is unclassified no runner of the scale set starts:
+2. **Per job, before a runner starts: the gate.** Every `JobAssigned` is classified, and a
+   runner starts only for a job classified trusted:
    - its repository (`ownerName/repositoryName`) must be one of the pool's `allowed_repositories`
      (config);
    - its workflow run is looked up, `GET /repos/{owner}/{repo}/actions/runs/{run_id}` with the
      installation token ("Actions: Read", section 2): `head_repository` against `repository` (a
      fork's pull request when they differ), `event`, `actor`;
-   - **allowed events** (proposed list, ADR 0090): `push`, `pull_request` whose head repository
-     is the base, `workflow_dispatch`, `schedule`, `merge_group`, `release`: each runs code in the
-     repository or on one of its branches, put there or started by someone with write access;
+   - **allowed events**: the pool's `allowed_events`, by default (owner, 2026-11-12) `push`,
+     `pull_request` whose head repository is the base, `workflow_dispatch`, `schedule`,
+     `merge_group`, `release`: each runs code in the repository or on one of its branches, put
+     there or started by someone with write access. Configurable per pool, not per repository:
+     any runner of the pool can receive any of the pool's jobs (ADR 0090);
    - **refused**: every other event (a fork's `pull_request`, `pull_request_target`,
      `workflow_run`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`,
      `repository_dispatch`, ...), anything unclassifiable (a field missing, empty or unknown, A5),
      and any job whose run could not be looked up (an error, a timeout, an absent run: a failed
-     lookup refuses, so nothing runs unclassified). A per-repository allowance for forks may come
-     later, by a new decision;
+     lookup refuses). A per-repository allowance for forks may come later, by a new decision;
    - a new assignment of a job (after a release) is classified afresh: its earlier refusal or
      classification does not carry over (`reassignedJobIsClassifiedAfreshTest`);
-   - a refusal is journaled, `AssignedJobRefused{reason}`, and shown to the operator: an event,
-     never only a log line.
+   - a refusal is journaled, `AssignedJobRefused{reason}`, and logged at WARN as the fixed event
+     `job_refused` with `repository`, `event`, `reason` and `run_id` and nothing more.
    That `workflowRunId` in a `JobAssigned` names the run the REST API knows, and that the lookup
    works with "Actions: Read" alone, are [open: HW-02, item 8].
-3. **Refused jobs** ("3a but as a configuration option"). The refused job holds its slot of
-   `maxCapacity` while GitHub keeps it assigned, and no runner of the scale set starts meanwhile,
-   since any new runner could take it.
-   - **Default:** mayfly cancels nothing. GitHub's own release and requeue (section 4.3) fails the
-     job at its third release. The hold ends when the job is observed gone: a `JobStarted` or
-     `JobCompleted` naming it, or the scale set re-created after a dormant deletion (section 3.1) (whether a github.com `JobCompleted` names it is [open: HW-02, item 1]), when
-     the refusal lapses after the pool's `refusal_release_window` (at least three release
-     times; 30 minutes by default until HW-02 item 2 measures the release; A7), or when the
-     operator runs `mayfly pool release-refusal <pool> <job>`, refused while GitHub still holds
-     the job assigned, so it lifts a hold and asserts no outcome (GH-09).
+3. **In the guest: the hard boundary** (owner, 2026-11-12). Runners of a set are
+   interchangeable and GitHub, not mayfly, picks the job a runner gets, so only a check on the
+   job a runner actually received binds a refusal to it. Every image's job-started hook
+   (`ACTIONS_RUNNER_HOOK_JOB_STARTED`, set by the launcher) classifies that job by the same rules
+   (`GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY`, the head repository in the payload at
+   `GITHUB_EVENT_PATH`, the pool's lists handed in as data): a trusted job runs; any other fails
+   before any step with `::error title=Refused by mayfly::<reason>` and a non-zero exit, and "the
+   job will not run and will be marked as failed" [docs: Running scripts before or after a job].
+   It fails closed: anything missing or unreadable refuses. The launcher reports the hook's
+   verdict, so a hook refusal is journaled and logged like a lookup refusal (IMG-02). **Before
+   the hook runs, the runner downloads and unpacks every action the job references** [runner
+   `8cfa104`: src/Runner.Worker/JobExtension.cs, `PrepareActionsAsync` before the job-started
+   hook; container setup after it]: attacker-chosen archives are parsed though no job code runs,
+   so a runner always runs in a disposable VM, never as a host process.
+4. **Refused jobs hold nothing** (owner, 2026-11-12, option A). A refused or pending job holds
+   no runner: a runner starts for any trusted job beside it, and if GitHub hands it the refused
+   one, its hook fails it in seconds. The refused job holds its slot of `maxCapacity` until it
+   is gone. To be rid of it:
+   - **refusal sink** (default): mayfly starts GitHub's official runner in a small disposable
+     **Linux** VM (no macOS slot) whose hook fails every job; the VM is deleted after its job or
+     at its deadline. It starts only while mayfly knows of no trusted or pending assignment, one
+     at a time per pool, and while it is up the scale set's `maxCapacity` is pinned at the
+     assigned count, so GitHub assigns nothing new that the sink could take (section 5). A trusted
+     job assigned before the pinned poll may still reach it and fail, with a message to re-run
+     (`sinkMayFailATrustedJobItCouldNotKnowOfTest`). That a Linux runner in a scale set whose
+     jobs ask for macOS labels receives them, the sink's latency and whether the pin holds with a
+     backlog are [open: HW-02, item 12] (IMG-03);
    - **`cancel_refused_runs`** (per pool, default false, "Actions: Write"): mayfly asks GitHub to
-     cancel the refused run at once (section 2) and holds only until the cancellation is observed
-     (the job leaves the assignment). A cancel that fails (409, an error) or whose answer is lost
-     changes nothing at GitHub, and the hold falls back to the release window (GH-10).
-4. **`check_fork_pr_setting`** (per organisation, default off, "Administration: Read"): at
+     cancel the refused run instead (section 2). A cancel that fails (409, an error) or whose
+     answer is lost changes nothing at GitHub (GH-10);
+   - **fallback**: when neither acts (no capacity for a sink, a failed cancel), GitHub's own
+     release and requeue (section 4.3) fails the job at its third release. Nothing waits on it.
+   The hold, `refusal_release_window` and `mayfly pool release-refusal` of the first decision are
+   withdrawn (ADR 0090, amended 2026-11-12).
+5. **`check_fork_pr_setting`** (per organisation, default off, "Administration: Read"): at
    start-up mayfly reads the organisation's fork-PR setting for private repositories (section 2)
-   and refuses to start when `run_workflows_from_fork_pull_requests` is true. The run lookup
-   already refuses a fork's run; this is defence in depth.
+   and refuses to start when `run_workflows_from_fork_pull_requests` is true. Defence in depth.
 
-Pinned by `formal/scaleset.qnt`'s `vmOnlyForAJobClassifiedTrusted`, `refusedJobNeverGetsAVm`,
-`assignedJobsClassified`, `cancelOnlyRefused`, `assignedUntrustedJobIsRefusedTest`,
-`failedLookupRefusesTest`, `cancelledRefusedRunReleasesTheHoldTest`,
-`failedCancelFallsBackToTheWindowTest`, `refusedJobFailsThenTrustedJobRunsTest`,
-`refusalExpiresWhenTheReleaseNamesNoJobTest` and `operatorReleasesARefusalTest`; the Rust side
-is KER-06G (aggregate and gate), GH-08 (config and start-up), GH-09 (operator release, window),
-GH-10 (lookup and cancel).
+Pinned by `formal/scaleset.qnt`'s `vmOnlyForAJobClassifiedTrusted`,
+`noStepOfAnUntrustedJobRuns`, `sinkRunsNoStep`, `sinkOnlyForARefusedJob`,
+`assignedJobsClassified`, `cancelOnlyRefused`, `refusedJobHoldsNothingAndTheHookFailsItTest`,
+`untrustedJobAssignedBeforeTheRunnerStartedFailsInTheHookTest`,
+`untrustedJobAssignedAfterTheRunnerStartedFailsInTheHookTest`,
+`refusalSinkFailsTheRefusedJobTest`, `noSinkBesideATrustedJobTest`, `failedLookupRefusesTest`,
+`cancelledRefusedRunTest`, `failedCancelFallsBackToGitHubsReleaseTest`, and the mutants
+`HOOK_PASS` and `SINK_RUNS`; the Rust side is KER-06G (aggregate and gate), GH-08 (config and
+start-up), GH-10 (lookup and cancel), IMG-02 (the hook) and IMG-03 (the sink).
 
-**What the per-job check cannot do.** A runner started for a trusted job may take an untrusted
-job GitHub assigned after the last message mayfly recorded, whether before or after the runner
-started (`runnerMayTakeAJobAssignedBeforeItStartedTest`,
-`runnerMayTakeAJobAssignedAfterItStartedTest`; not invariants): mayfly cannot know of an
-assignment it has not received, and nothing in the scale-set protocol ties a job to a runner.
-The per-job check stops every runner it can, `cancel_refused_runs` shortens what remains, and
-with public repositories allowed this race is the residual risk SEC-01 records. ADR 0090's
-proposed amendment adds a job-started hook in the guest that fails such a job before its first
-step (`ACTIONS_RUNNER_HOOK_JOB_STARTED`: "If there is any other exit code, the job will not run
-and will be marked as failed" [docs: Running scripts before or after a job]); IMG-02.
+**What remains.** An untrusted job may reach a runner started for a trusted one: GitHub assigned
+it after the last message mayfly recorded, or picked it for that runner. Its hook fails it before
+any step, after the runner has unpacked its actions inside the VM. With public repositories
+allowed, that unpacking in a disposable VM is the residual exposure SEC-01 records.
 
 ### 6.3 JIT config
 
@@ -638,7 +654,7 @@ wait that would outlast it is not taken; a connection whose attempt timed out is
 | Any error ends the listener, and its process exits [scaleset: listener/listener.go, Run] | Errors are classified: token expiry is handled in the client; transient errors back off and keep the session; a lost or expired session re-opens; a deleted scale set is re-created; protocol drift degrades the session, never safe mode | The daemon survives service hiccups |
 | Session created in the client's constructor, deleted on close [scaleset: client.go, MessageSessionClient] | Opening and closing a session are commands with journaled outcomes; on start the journaled stale session is deleted before a new one is created (section 3.2) | Crash recovery without a 409 loop |
 | Capacity is a configured number [scaleset: listener/listener.go] | Capacity is the scale set's reported max, changing with the host's capacity and the pool's mode (section 5) | ADR 0024, ADR 0029 |
-| Every assigned job is scaled for | A runner starts only for a job whose run was looked up and classified trusted, never while one is unclassified or refused (section 6.2) | ADR 0090 |
+| Every assigned job is scaled for | A runner starts only for a job whose run was looked up and classified trusted, and its in-guest hook fails any untrusted job it receives; a refused job goes to a refusal sink (section 6.2) | ADR 0090 |
 | A completed job removes its runner's container | `JobCompleted` is an observation; a VM is deleted only with the ownership proof (plan §8.4) | Ownership rule |
 | Initial statistics passed as a message with id −1 | Recorded as the session-open fact | Message ids mean service ids only |
 
@@ -721,20 +737,17 @@ older statistics replace the opening's until the backlog is consumed. That stays
 because every acquisition remains a counted reservation until a message at least as new releases
 it (A2), and it converges, because every change of the count emits a job event; keeping the
 opening's statistics instead would never converge. If the capture shows that statistics are read
-at delivery, A6 goes away. **A7** (items 1, 2; ADR 0090, owner 2026-11-12) a refusal or a
-classification that no job fact releases lapses after the pool's `refusal_release_window`, which
-is assumed to outlast GitHub's three releases, so the job is no longer assigned when it lapses;
-the default errs long (30 minutes) until item 2 is measured.
+at delivery, A6 goes away. (A7, the release window's assumption, went with the window: ADR 0090,
+amended 2026-11-12.)
 
 1. **Payload corpus.** Full envelopes for all four job types on github.com: a success, a
    failure, a cancellation, a `workflow_dispatch` and a `pull_request`: field presence, nulls,
    zero times, `result` and `eventName` values, `requestLabels`, and which fields identify the
-   job in a `JobStarted` and a `JobCompleted` when `runnerRequestId` is 0 (A5, A6, A7, section
-   4.3).
+   job in a `JobStarted` and a `JobCompleted` when `runnerRequestId` is 0 (A5, A6, section 4.3).
 2. **Which flow, and the release.** Whether github.com ever sends `JobAvailable` (if an offer
    appears: acquire a valid id, the same id twice, and a bogus id: A2, A4); and the time from a
    `JobAssigned` no runner takes to its `JobCompleted canceled` and requeue, three times, and to
-   the job's failure (section 4.3): it sets `refusal_release_window` (ADR 0090, A7).
+   the job's failure (section 4.3): the fallback's delay when no sink or cancel acts.
 3. **Capacity beyond 0.** With `maxCapacity` 0, queue one matching job and read
    `totalAvailableJobs` and `totalAssignedJobs` for 2 minutes, then advertise 1 and see it
    assigned; with 2 assigned, lower the header to 1 and see whether one is un-assigned; the
@@ -761,9 +774,14 @@ the default errs long (30 minutes) until item 2 is measured.
    `statistics` in a create's answer (sections 3.1, 7).
 10. **Unconnected JIT runner.** Mint a JIT config, never start it, and read its registration
     hourly until it goes (up to a day) (section 6.3).
-11. **Job-started hook (if the owner accepts ADR 0090's amendment).** When the hook runs
-    relative to a job container's setup, and that a hook exiting non-zero fails the job with no
-    step run (section 6.2).
+11. **Job-started hook (ADR 0090, required).** When the hook runs relative to a job container's
+    setup; that a hook exiting non-zero fails the job with no step run; what a fork PR's author
+    sees (the `::error` annotation, the job page, the Checks tab), from a second account
+    (section 6.2).
+12. **Refusal sink.** That a Linux arm64 runner JIT-registered in a scale set whose jobs ask for
+    macOS labels receives an assigned job; the time from `JobAssigned` to the sink's failure;
+    that with `maxCapacity` pinned at the assigned count no new job is assigned while the sink is
+    up, with a backlog behind it; that the failed run can be re-run (section 6.2).
 
 ## 13. GitHub App permissions (ADR 0045, draft)
 

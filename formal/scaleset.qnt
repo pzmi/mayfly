@@ -19,13 +19,15 @@
  * set directly (`JobAssigned`, no offer, no acquire) while fewer than the `maxCapacity` of the
  * last poll are assigned (`ghAssigns`; at 0 nothing is assigned, the starvation of ADR 0069's
  * `demand` policy). Either way a runner mayfly starts takes any job assigned to the set (runners
- * of a set are interchangeable), so on github.com each assignment waits for its workflow run's
- * lookup (`pending`, `lookupRun`; a failed lookup refuses), a runner starts only for a job
- * classified trusted, and none while an assignment is pending or refused (ADR 0090, owner
- * 2026-11-11 and 2026-11-12): `startVm`, `refusedJobNeverGetsAVm`. A refused job holds its slot of
- * `maxCapacity` until GitHub releases it (`jobRequeued`, failed at the third release), its run is
- * cancelled (`cancelRun`, with `cancel_refused_runs`: `initDirectWith(true)`), the release window
- * lapses (`assignmentExpires`, A7) or the operator releases it (`operatorReleasesRefusal`).
+ * of a set are interchangeable). On github.com each assignment waits for its workflow run's
+ * lookup (`pending`, `lookupRun`; a failed lookup refuses), and a runner starts only for a job
+ * classified trusted. The hard boundary is each runner's in-guest job-started hook (ADR 0090,
+ * owner 2026-11-12): it classifies the job the runner actually received and fails an untrusted
+ * one before any step (`runnerStarts`, `noStepOfAnUntrustedJobRuns`), so nothing holds the
+ * pool. A refused job is failed by a refusal sink (`startSink`, `sinkTakes`, with the wire max
+ * pinned while it is up), cancelled (`cancelRun`, with `cancel_refused_runs`:
+ * `initDirectWith(true)`), or, as the fallback, released and failed by GitHub (`jobRequeued`,
+ * failed at the third release); it holds its slot of `maxCapacity` until then.
  *
  * Assumptions on facts `doc/github-scaleset.md` leaves client-assumed or [open: HW-02] (§12), each
  * the safe side:
@@ -148,10 +150,10 @@ module scaleset {
   pure val OPEN_WINS = "openWins"
   /// ADR 0090 mutant: every assigned job is accepted without classification.
   pure val RUN_ASSIGNED = "runAssigned"
-  /// ADR 0090 mutant: a runner starts while an assigned job is refused.
-  pure val IGNORE_REFUSALS = "ignoreRefusals"
-  /// ADR 0090 mutant: a runner starts while an assignment waits for its run's lookup.
-  pure val IGNORE_PENDING = "ignorePending"
+  /// ADR 0090 mutant: the in-guest job-started hook lets every job through.
+  pure val HOOK_PASS = "hookPass"
+  /// ADR 0090 mutant: a refusal sink runs the job it takes.
+  pure val SINK_RUNS = "sinkRuns"
   /// ADR 0090 mutant: any assigned job's run is cancelled, refused or not, option or not.
   pure val CANCEL_ANY = "cancelAny"
 
@@ -200,6 +202,10 @@ module scaleset {
     cancelRefused: bool,
     // refused jobs whose cancel request was answered (accepted or refused): no second request
     cancelTried: Set[int],
+    // a refusal sink is up (started, not yet deleted): the wire max is pinned meanwhile
+    sinkLive: bool,
+    // refused jobs a sink was started for: one sink per refusal
+    sinkTried: Set[int],
     // a `MessageIdsRestarted` was recorded for the operator (A1)
     renumbered: bool,
     // the journaled scale set's id (a generation here)
@@ -239,12 +245,19 @@ module scaleset {
     assignedSeen: Set[int],
     // a runner started with no job classified trusted waiting (ADR 0090)
     vmUnbacked: bool,
-    // a runner started while an untrusted job mayfly had seen assigned was still assigned
-    vmWhileUntrustedKnown: bool,
     // an untrusted or unclassifiable assignment was accepted
     untrustedAccepted: bool,
-    // a runner took an untrusted job: the residual race ADR 0090 names (not an invariant)
-    untrustedRan: bool,
+    // a runner took an untrusted job (ADR 0090's race; its hook then fails it): not an invariant
+    untrustedReachedRunner: bool,
+    // a step of an untrusted job ran
+    untrustedStepRan: bool,
+    // a refusal sink ran a job's steps
+    sinkRanSteps: bool,
+    // a sink was started for a job that is truly trusted and was looked up, or with
+    // `cancel_refused_runs`, or while mayfly knew of a trusted or pending job
+    sinkUnwarranted: bool,
+    // a sink failed a trusted job (its limit: an assignment it could not know of): not an invariant
+    trustedFailedBySink: bool,
     // a reused id was applied as new with no `MessageIdsRestarted` and no degradation
     silentlyRenumbered: bool,
     // a reused id was recorded and applied nothing (degraded, or read as a redelivery)
@@ -266,6 +279,8 @@ module scaleset {
   var idle: int
   /// how often GitHub has released each job (it fails the job at the third)
   var released: int -> int
+  /// a refusal sink (ADR 0090) is up and has taken no job yet
+  var sinkIdle: bool
   var buffer: List[Item]
   var msgs: int -> Msg
   var nextMsg: int
@@ -299,8 +314,12 @@ module scaleset {
 
   /// `demand::wire_max`: the `maxCapacity` sent on every poll (ADR 0029): the capacity policy's
   /// reported max while open or paused (paused, it reports only live runners), 0 while draining
-  /// or in safe mode.
-  pure def wireMax(s: SS): int = if (s.mode == OPEN or s.mode == PAUSED) s.reportedMax else 0
+  /// or in safe mode; while a refusal sink is up, pinned at the assigned count the statistics show
+  /// so that GitHub assigns nothing new the sink could take (ADR 0090).
+  pure def wireMax(s: SS): int =
+    if (s.mode == OPEN or s.mode == PAUSED)
+      (if (s.sinkLive) minOf(s.reportedMax, s.stats.assigned) else s.reportedMax)
+    else 0
 
   /// `demand::desired`: min(deliverable, totalAssignedJobs); no standby (ADR 0028), never a count
   /// of job messages, never `totalRunningJobs` (plan §7.2).
@@ -397,7 +416,7 @@ module scaleset {
 
   /// GitHub's variables that most actions leave alone.
   action keepGh = all {
-    directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle, released' = released,
+    directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle, released' = released, sinkIdle' = sinkIdle,
   }
 
   action keepWorld = all {
@@ -430,7 +449,7 @@ module scaleset {
     conflicts: 0, conflictAlert: false, stats: STATS0, deliverable: 2, reportedMax: 2,
     mode: OPEN, desired: 0, acquiring: Set(), acquired: Set(), drift: 0,
     trusted: Set(), refused: Set(), renumbered: false, setGen: 1,
-    pending: Set(), cancelRefused: false, cancelTried: Set(),
+    pending: Set(), cancelRefused: false, cancelTried: Set(), sinkLive: false, sinkTried: Set(),
   }
 
   pure val G0: Ghost = {
@@ -440,7 +459,8 @@ module scaleset {
     recordedIds: Set(), reusedUnrecorded: Set(), silentlyDropped: false,
     reappliedEarlier: false, consecutive409: 0, applied: Set(), sentMax: 0,
     sentDeliverable: 0, sentMode: OPEN, assignedSeen: Set(), vmUnbacked: false,
-    vmWhileUntrustedKnown: false, untrustedAccepted: false, untrustedRan: false,
+    untrustedAccepted: false, untrustedReachedRunner: false, untrustedStepRan: false,
+    sinkRanSteps: false, sinkUnwarranted: false, trustedFailedBySink: false,
     silentlyRenumbered: false, reusedIgnored: false, cancelledUnrefused: false, lookupFailed: Set(),
   }
 
@@ -450,6 +470,7 @@ module scaleset {
     jobs' = REQS.mapBy(_ => J_AVAILABLE),
     directFlow' = false,
     released' = REQS.mapBy(_ => 0),
+    sinkIdle' = false,
     ghMax' = 0,
     ghSetGen' = 1,
     idle' = 0,
@@ -479,6 +500,7 @@ module scaleset {
     jobs' = REQS.mapBy(_ => J_AVAILABLE),
     directFlow' = true,
     released' = REQS.mapBy(_ => 0),
+    sinkIdle' = false,
     ghMax' = 0,
     ghSetGen' = 1,
     idle' = 0,
@@ -531,19 +553,54 @@ module scaleset {
   }
 
   /// A runner mayfly started takes a job assigned to the set: any of them, since runners of a set
-  /// are interchangeable (ADR 0027).
-  action runnerStarts(r: int): bool = all {
-    jobs.get(r) == J_ACQUIRED,
-    idle > 0,
-    jobs' = jobs.set(r, J_RUNNING), buffer' = buffer.append({ kind: STARTED, req: r }),
-    msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
-    ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
-    idsRestarted' = idsRestarted,
-    directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle - 1, released' = released,
-    keepListener, keepJournal,
-    g' = { ...ghostAfter(g, "world", ss, ss),
-      untrustedRan: g.untrustedRan or TRUST.get(r) != TRUSTED },
+  /// are interchangeable (ADR 0027). Its in-guest job-started hook (ADR 0090, owner 2026-11-12:
+  /// the hard boundary) classifies the job the runner actually received, by the same rules
+  /// (`TRUST`), before any step: a trusted job runs; any other fails at once, no step run
+  /// (`JobCompleted`). The mutant `HOOK_PASS` lets every job run.
+  action runnerStartsWith(how: str, r: int): bool = {
+    val runs = how == HOOK_PASS or TRUST.get(r) == TRUSTED
+    all {
+      jobs.get(r) == J_ACQUIRED,
+      idle > 0,
+      jobs' = jobs.set(r, if (runs) J_RUNNING else J_DONE),
+      buffer' = buffer.append({ kind: if (runs) STARTED else COMPLETED, req: r }),
+      msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
+      ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
+      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle - 1,
+      released' = released, sinkIdle' = sinkIdle,
+      keepListener, keepJournal,
+      g' = { ...ghostAfter(g, "world", ss, ss),
+        untrustedReachedRunner: g.untrustedReachedRunner or TRUST.get(r) != TRUSTED,
+        untrustedStepRan: g.untrustedStepRan or (runs and TRUST.get(r) != TRUSTED) },
+    }
   }
+
+  action runnerStarts(r: int): bool = runnerStartsWith(CORRECT, r)
+
+  /// The refusal sink's runner takes a job assigned to the set (GitHub picks which): its hook
+  /// fails every job, no step run. The mutant `SINK_RUNS` runs it instead.
+  action sinkTakesWith(how: str, r: int): bool = {
+    val runs = how == SINK_RUNS
+    all {
+      sinkIdle,
+      jobs.get(r) == J_ACQUIRED,
+      jobs' = jobs.set(r, if (runs) J_RUNNING else J_DONE),
+      buffer' = buffer.append({ kind: if (runs) STARTED else COMPLETED, req: r }),
+      msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
+      ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
+      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle,
+      released' = released, sinkIdle' = false,
+      keepListener, keepJournal,
+      g' = { ...ghostAfter(g, "world", ss, ss),
+        sinkRanSteps: g.sinkRanSteps or runs,
+        untrustedStepRan: g.untrustedStepRan or (runs and TRUST.get(r) != TRUSTED),
+        trustedFailedBySink: g.trustedFailedBySink or (not(runs) and TRUST.get(r) == TRUSTED) },
+    }
+  }
+
+  action sinkTakes(r: int): bool = sinkTakesWith(CORRECT, r)
 
   /// The job finishes.
   action jobFinishes(r: int): bool = all {
@@ -556,8 +613,8 @@ module scaleset {
   /// (here under the same request id, the harder case); at the `MAX_RELEASES`th release GitHub
   /// fails it instead. The acquire flow offers it again; github.com assigns it again
   /// (`ghAssigns`). On github.com whether the `JobCompleted` names the job is [open: HW-02]
-  /// (`runnerRequestId` is 0 there): `named` false sends one that names none, so only the
-  /// release window clears mayfly's classification (`assignmentExpires`).
+  /// (`runnerRequestId` is 0 there): `named` false sends one that names none, so mayfly's
+  /// classification of it stays until a new assignment of the job replaces it (it holds nothing).
   action jobRequeued(r: int, named: bool): bool = {
     val n = released.get(r) + 1
     val fails = n >= MAX_RELEASES
@@ -572,7 +629,7 @@ module scaleset {
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
       idsRestarted' = idsRestarted,
       directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle,
-      released' = released.set(r, n),
+      released' = released.set(r, n), sinkIdle' = sinkIdle,
       keepListener, keepJournal,
       g' = ghostAfter(g, "world", ss, ss),
     }
@@ -632,7 +689,7 @@ module scaleset {
       msgs' = msgs, nextMsg' = nextMsg, queue' = Set(),
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
       idsRestarted' = idsRestarted,
-      directFlow' = directFlow, ghMax' = 0, ghSetGen' = ghSetGen + 1, idle' = 0, released' = released,
+      directFlow' = directFlow, ghMax' = 0, ghSetGen' = ghSetGen + 1, idle' = 0, released' = released, sinkIdle' = sinkIdle,
       keepListener, keepJournal,
       g' = ghostAfter(g, "world", ss, ss),
     }
@@ -758,7 +815,7 @@ module scaleset {
   action recreateScaleSet = {
     val fresh = { ...ss, phase: ENSURED, setGen: ghSetGen, cursor: NONE, floor: NONE,
       sessionRecorded: false, stats: STATS0, desired: 0, acquiring: Set(), acquired: Set(),
-      trusted: Set(), refused: Set(), pending: Set(), cancelTried: Set() }
+      trusted: Set(), refused: Set(), pending: Set(), cancelTried: Set(), sinkTried: Set() }
     all {
       journalWritable,
       ss.phase == ENSURED or ss.phase == BACKOFF,
@@ -798,7 +855,7 @@ module scaleset {
     jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
     ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
     idsRestarted' = idsRestarted,
-    directFlow' = directFlow, ghMax' = wireMax(ss), ghSetGen' = ghSetGen, idle' = idle, released' = released,
+    directFlow' = directFlow, ghMax' = wireMax(ss), ghSetGen' = ghSetGen, idle' = idle, released' = released, sinkIdle' = sinkIdle,
     inHand' = if (queue == Set()) NONE else lowest(queue),
     inHandRecorded' = false,
     keepJournal,
@@ -844,6 +901,7 @@ module scaleset {
       trusted: acc.trusted,
       refused: acc.refused,
       pending: acc.pending,
+      sinkTried: ss.sinkTried.filter(j => acc.refused.contains(j)),
       drift: drift,
       phase: if (degrades) DEGRADED else ss.phase,
       desired: if (earlier) ss.desired else desiredOf(how, ss.deliverable, stats, acc.assignedItems),
@@ -941,44 +999,36 @@ module scaleset {
 
   // ---- runners (ADR 0090) -------------------------------------------------------------------
 
-  /// mayfly starts (activates) a runner for the scale set: only for a job it classified trusted
-  /// that waits for a runner (acquired, or assigned and classified), never while an assigned job
-  /// is refused (any runner of the set may take it), and only while planning (open, session
-  /// active). The reconciler's shortfall and the host's admission (scheduling model) bound it
-  /// further; here only the trust gate is modelled.
+  /// mayfly starts (activates) a runner for the scale set: only for a job whose run lookup
+  /// classified it trusted and that waits for a runner (acquired, or assigned and classified),
+  /// and only while planning (open, session active). Nothing else holds it (ADR 0090, owner
+  /// 2026-11-12): the runner's hook fails any untrusted job that reaches it. The reconciler's
+  /// shortfall and the host's admission (scheduling model) bound it further; here only the trust
+  /// gate on the lookup is modelled.
   val vmWaiting = ss.acquired.union(ss.trusted)
 
   /// Whether `startVm` may start a runner now (the trust gate, ADR 0090).
   val vmMayStart = and {
     journalWritable,
     planning(ss),
-    ss.refused == Set(),
-    ss.pending == Set(),
     idle < vmWaiting.size(),
   }
 
-  action startVmWith(how: str): bool = {
+  action startVm: bool = {
     val waiting = vmWaiting
     all {
-      if (how == IGNORE_REFUSALS) and {
-        journalWritable, planning(ss), ss.pending == Set(), idle < waiting.size()
-      } else if (how == IGNORE_PENDING) and {
-        journalWritable, planning(ss), ss.refused == Set(), idle < waiting.size()
-      } else vmMayStart,
+      vmMayStart,
       jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
       idsRestarted' = idsRestarted,
-      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle + 1, released' = released,
+      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle + 1, released' = released, sinkIdle' = sinkIdle,
       keepListener, keepJournal,
       g' = { ...ghostAfter(g, "command", ss, ss),
         vmUnbacked: g.vmUnbacked or
-          idle + 1 > waiting.filter(r => TRUST.get(r) == TRUSTED).size(),
-        vmWhileUntrustedKnown: g.vmWhileUntrustedKnown or
-          g.assignedSeen.exists(r => TRUST.get(r) != TRUSTED and jobs.get(r) == J_ACQUIRED) },
+          idle + 1 > waiting.filter(r => TRUST.get(r) == TRUSTED).size() },
     }
   }
 
-  action startVm = startVmWith(CORRECT)
 
   /// The workflow-run lookup of a pending assignment (ADR 0090, owner 2026-11-12): `GET
   /// /repos/{owner}/{repo}/actions/runs/{run_id}` ("Actions: Read") gives the head repository
@@ -1007,8 +1057,8 @@ module scaleset {
   /// .../actions/runs/{run_id}/cancel` for a refused job, once. `effect`: GitHub cancels it (the
   /// job leaves the assignment and a `JobCompleted` follows, which releases the refusal like any
   /// release); otherwise the request failed or never reached it. `answered`: mayfly records the
-  /// answer; a lost answer leaves the request to be retried. Either way the hold lasts until the
-  /// job is observed gone, and the release window still bounds it.
+  /// answer; a lost answer leaves the request to be retried. A cancel that fails leaves the job to
+  /// GitHub's release, which blocks nothing (no sink is started with this option).
   action cancelRunWith(how: str, r: int, effect: bool, answered: bool): bool = {
     val cancels = effect and jobs.get(r) == J_ACQUIRED
     val after = if (answered) { ...ss, cancelTried: ss.cancelTried.union(Set(r)) } else ss
@@ -1023,7 +1073,7 @@ module scaleset {
       ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
       idsRestarted' = idsRestarted,
       directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle,
-      released' = released,
+      released' = released, sinkIdle' = sinkIdle,
       keepListener,
       ss' = after, inbox' = inbox,
       // the ghost reads the job's true class, not the guard: a cancel is legitimate only with
@@ -1037,40 +1087,55 @@ module scaleset {
   action cancelRun(r: int, effect: bool, answered: bool): bool =
     cancelRunWith(CORRECT, r, effect, answered)
 
-  /// A classification lapses after the release window (ADR 0090): `refusal_release_window`, a
-  /// config value at least `MAX_RELEASES` times GitHub's release time, conservative by default
-  /// and measured by HW-02 (spec §12 item 2). A7 ([open: HW-02]): the window outlasts GitHub's
-  /// releases, so when it lapses the job is no longer assigned at GitHub (the guard reads that
-  /// assumption from the world; a window too short would let a runner start beside a job still
-  /// assigned). It clears a refusal or a trusted classification whose `JobCompleted` named no job
-  /// or never came, so a refusal never holds the scale set for ever.
-  action assignmentExpires(r: int): bool = {
-    val after = { ...ss, refused: ss.refused.exclude(Set(r)), trusted: ss.trusted.exclude(Set(r)) }
+  /// A refusal sink (ADR 0090, owner 2026-11-12): for a job the run lookup refused, mayfly starts
+  /// GitHub's official runner in a small disposable Linux VM whose hook fails whatever job it
+  /// gets. GitHub, not mayfly, picks the job a runner gets, so the sink starts only while mayfly
+  /// knows of no trusted or pending assignment, and the wire max is pinned at the assigned count
+  /// while it is up, so GitHub assigns nothing new it could take. Not with
+  /// `cancel_refused_runs` (cancel instead); once per refusal.
+  action startSink(r: int): bool = {
+    val after = { ...ss, sinkLive: true, sinkTried: ss.sinkTried.union(Set(r)) }
     all {
       journalWritable,
-      ss.refused.union(ss.trusted).contains(r),
-      jobs.get(r) != J_ACQUIRED,
-      keepWorld, keepListener,
+      planning(ss),
+      not(ss.cancelRefused),
+      ss.refused.contains(r),
+      not(ss.sinkTried.contains(r)),
+      not(ss.sinkLive),
+      ss.pending == Set(),
+      vmWaiting == Set(),
+      jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
+      ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
+      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle,
+      released' = released, sinkIdle' = true,
+      keepListener,
       ss' = after, inbox' = inbox,
+      // the ghost reads the job's true class: a sink is warranted only for a job that is
+      // untrusted or whose lookup failed, without the cancel option, beside no trusted or
+      // pending assignment
       g' = { ...ghostAfter(g, "command", ss, after),
-        assignedSeen: g.assignedSeen.exclude(Set(r)) },
+        sinkUnwarranted: g.sinkUnwarranted or ss.cancelRefused
+          or (TRUST.get(r) == TRUSTED and not(g.lookupFailed.contains(r)))
+          or ss.pending != Set() or vmWaiting != Set() },
     }
   }
 
-  /// The operator releases a refusal (`mayfly pool release-refusal`, ADR 0090) after seeing the
-  /// job failed or cancelled at GitHub: the command shows the job's state read from GitHub and
-  /// is refused while GitHub still holds it assigned (the guard), so it lifts a hold and asserts
-  /// no outcome.
-  action operatorReleasesRefusal(r: int): bool = {
-    val after = { ...ss, refused: ss.refused.exclude(Set(r)) }
+  /// The sink VM is deleted: after it failed its job, or at its deadline (its job released by
+  /// GitHub before it got it). The pin lifts with it.
+  action sinkEnds: bool = {
+    val after = { ...ss, sinkLive: false }
     all {
       journalWritable,
-      ss.refused.contains(r),
-      jobs.get(r) != J_ACQUIRED,
-      keepWorld, keepListener,
+      ss.sinkLive,
+      jobs' = jobs, buffer' = buffer, msgs' = msgs, nextMsg' = nextMsg, queue' = queue,
+      ghSession' = ghSession, nextSession' = nextSession, journalWritable' = journalWritable,
+      idsRestarted' = idsRestarted,
+      directFlow' = directFlow, ghMax' = ghMax, ghSetGen' = ghSetGen, idle' = idle,
+      released' = released, sinkIdle' = false,
+      keepListener,
       ss' = after, inbox' = inbox,
-      g' = { ...ghostAfter(g, "command", ss, after),
-        assignedSeen: g.assignedSeen.exclude(Set(r)) },
+      g' = ghostAfter(g, "command", ss, after),
     }
   }
 
@@ -1126,8 +1191,9 @@ module scaleset {
       startVm,
       lookupRun(r, flag),
       cancelRun(r, flag, flag2),
-      assignmentExpires(r),
-      operatorReleasesRefusal(r),
+      startSink(r),
+      sinkTakes(r),
+      sinkEnds,
       applyCapacity(d, rm, mode),
     }
   }
@@ -1154,7 +1220,9 @@ module scaleset {
       startVm,
       lookupRun(r, flag),
       cancelRun(r, flag, flag2),
-      assignmentExpires(r),
+      startSink(r),
+      sinkTakes(r),
+      sinkEnds,
     }
   }
 
@@ -1220,9 +1288,16 @@ module scaleset {
   /// never more idle runners than such jobs.
   val vmOnlyForAJobClassifiedTrusted = not(g.vmUnbacked)
 
-  /// ADR 0090: no runner starts while a job mayfly saw assigned to the set and did not classify
-  /// trusted is still assigned (any runner of the set may take it): a refused job never gets one.
-  val refusedJobNeverGetsAVm = not(g.vmWhileUntrustedKnown)
+  /// ADR 0090 (owner, 2026-11-12): no step of an untrusted job runs, wherever it lands: a runner's
+  /// hook fails it, a sink fails it.
+  val noStepOfAnUntrustedJobRuns = not(g.untrustedStepRan)
+
+  /// ADR 0090: a refusal sink runs no job's steps.
+  val sinkRunsNoStep = not(g.sinkRanSteps)
+
+  /// ADR 0090: a sink starts only for a job truly untrusted or whose lookup failed, without the
+  /// cancel option, while mayfly knows of no trusted or pending assignment it could take.
+  val sinkOnlyForARefusedJob = not(g.sinkUnwarranted)
 
   /// ADR 0090 (owner, 2026-11-12): a run is cancelled only with `cancel_refused_runs`, and only
   /// for a job that is truly untrusted or whose run lookup failed (the ghost reads `TRUST`, not
@@ -1284,7 +1359,9 @@ module scaleset {
     a1RefutationIsFlagged,
     persistentConflictsAreFlagged,
     vmOnlyForAJobClassifiedTrusted,
-    refusedJobNeverGetsAVm,
+    noStepOfAnUntrustedJobRuns,
+    sinkRunsNoStep,
+    sinkOnlyForARefusedJob,
     assignedJobsClassified,
     cancelOnlyRefused,
   }
@@ -1525,8 +1602,8 @@ module scaleset {
   }
 
   // github.com (ADR 0090): advertising 0 gets nothing assigned and the counts never move (ARC
-  // #3446, scaleset #133); once a poll advertises room, a trusted job is assigned, classified
-  // and gets a runner, which takes it.
+  // #3446, scaleset #133); once a poll advertises room, a trusted job is assigned, looked up,
+  // classified and gets a runner, whose hook lets it run.
   run directAssignmentNeedsAdvertisedRoomTest = {
     initDirect.then(applyCapacity(0, 0, OPEN)).then(poll).expect(ghMax == 0 and inHand == NONE)
       .expect(not(assignRoom))
@@ -1536,35 +1613,96 @@ module scaleset {
       .then(lookupRun(1, true))
       .expect(ss.trusted == Set(1) and ss.refused == Set() and ss.pending == Set())
       .then(startVm).expect(idle == 1 and not(vmMayStart))
-      .then(runnerStarts(1)).then(emit).then(handle)
-      .expect(ss.trusted == Set() and idle == 0 and not(g.untrustedRan) and allInvariants)
+      .then(runnerStarts(1)).expect(jobs.get(1) == J_RUNNING)
+      .then(emit).then(handle)
+      .expect(ss.trusted == Set() and idle == 0 and allInvariants)
   }
 
-  // ADR 0090: an assigned `pull_request_target` job is refused, after its run's lookup, before any
-  // runner starts; it holds
-  // its slot of `maxCapacity` (GitHub counts it and assigns no more), and while it is assigned no
-  // runner starts, not even for a trusted job; GitHub releases it (canceled, requeued), the
-  // refusal is released, and the trusted job gets its runner.
-  run assignedUntrustedJobIsRefusedTest = {
-    initDirect.then(poll).expect(ghMax == 2)
-      .then(ghAssigns(3)).then(emit).then(handle).then(lookupRun(3, true))
-      .expect(ss.refused == Set(3) and ss.trusted == Set() and ss.desired == 1)
-      .expect(not(vmMayStart))
-      .then(ghAssigns(1)).then(emit).then(handle).then(lookupRun(1, true))
-      .expect(ss.refused == Set(3) and ss.trusted == Set(1) and ss.desired == 2)
-      .expect(assignedSet(jobs).size() == 2 and not(assignRoom) and not(vmMayStart))
-      .then(jobRequeued(3, true)).then(emit).then(handle)
-      .expect(ss.refused == Set() and ss.trusted == Set(1))
-      .then(startVm).expect(idle == 1 and allInvariants)
+  // ADR 0090 (owner, 2026-11-12): a refused `pull_request_target` job holds nothing: a runner
+  // starts for the trusted job beside it, and whichever job that runner gets, its hook decides:
+  // here it gets the refused one, which fails at once with no step run.
+  run refusedJobHoldsNothingAndTheHookFailsItTest = {
+    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
+      .then(lookupRun(3, true)).then(lookupRun(1, true))
+      .expect(ss.refused == Set(3) and ss.trusted == Set(1) and vmMayStart)
+      .then(startVm).then(runnerStarts(3))
+      .expect(jobs.get(3) == J_DONE and g.untrustedReachedRunner and allInvariants)
   }
 
-  // The limit ADR 0090 names, not an invariant: a runner started for a trusted job may take an
-  // untrusted job GitHub assigned after it started (runners of a set are interchangeable). The
-  // per-job check stops every runner it can; `cancel_refused_runs` shortens what remains.
-  run runnerMayTakeAJobAssignedAfterItStartedTest = {
+  // ADR 0090's race, now harmless: an untrusted job GitHub assigned after the last message mayfly
+  // recorded, before or after the runner started, reaches a runner, and its hook fails it.
+  run untrustedJobAssignedAfterTheRunnerStartedFailsInTheHookTest = {
     initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle).then(lookupRun(1, true))
       .then(startVm).then(ghAssigns(3)).then(runnerStarts(3))
-      .expect(g.untrustedRan and allInvariants)
+      .expect(jobs.get(3) == J_DONE and not(g.untrustedStepRan) and allInvariants)
+  }
+
+  run untrustedJobAssignedBeforeTheRunnerStartedFailsInTheHookTest = {
+    initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle).then(lookupRun(1, true))
+      .then(ghAssigns(3)).then(startVm).then(runnerStarts(3))
+      .expect(jobs.get(3) == J_DONE and not(g.untrustedStepRan) and allInvariants)
+  }
+
+  // ADR 0090: for a job the lookup refused and no trusted job beside it, a refusal sink starts;
+  // the wire max is pinned at the assigned count while it is up (GitHub assigns nothing new), the
+  // sink's hook fails the job, and the sink is deleted.
+  run refusalSinkFailsTheRefusedJobTest = {
+    initDirect.then(poll).then(ghAssigns(3)).then(emit).then(handle).then(lookupRun(3, true))
+      .expect(ss.refused == Set(3))
+      .then(startSink(3)).expect(ss.sinkLive and sinkIdle)
+      .then(poll).expect(ghMax == 1 and not(assignRoom))
+      .then(sinkTakes(3)).expect(jobs.get(3) == J_DONE and not(sinkIdle))
+      .then(emit).then(handle).expect(ss.refused == Set())
+      .then(sinkEnds).then(poll).expect(not(ss.sinkLive) and ghMax == 2 and allInvariants)
+  }
+
+  // A sink does not start while mayfly knows of a trusted or pending assignment GitHub could
+  // hand it instead.
+  run noSinkBesideATrustedJobTest = {
+    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
+      .then(lookupRun(3, true))
+      .expect(ss.pending == Set(1))
+      .then(lookupRun(1, true)).expect(vmWaiting == Set(1))
+      .then(startSink(3).fail())
+  }
+
+  // The sink's limit, not an invariant: a trusted job GitHub assigned while the sink was coming
+  // up, before the pinned poll, may reach the sink and fail ("re-run" in its message).
+  run sinkMayFailATrustedJobItCouldNotKnowOfTest = {
+    initDirect.then(poll).then(ghAssigns(3)).then(emit).then(handle).then(lookupRun(3, true))
+      .then(startSink(3)).then(ghAssigns(1)).then(sinkTakes(1))
+      .expect(g.trustedFailedBySink and not(g.untrustedStepRan) and allInvariants)
+  }
+
+  // ADR 0090 (owner, 2026-11-12): a failed run lookup refuses even a trusted job: no runner
+  // starts for it, and a sink may take it.
+  run failedLookupRefusesTest = {
+    initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle)
+      .expect(ss.pending == Set(1) and not(vmMayStart))
+      .then(lookupRun(1, false))
+      .expect(ss.refused == Set(1) and ss.trusted == Set() and not(vmMayStart) and allInvariants)
+      .then(startSink(1)).expect(ss.sinkLive and allInvariants)
+  }
+
+  // `cancel_refused_runs` (owner, 2026-11-12): the refused run is cancelled at once, no sink.
+  run cancelledRefusedRunTest = {
+    initDirectWith(true).then(poll).then(ghAssigns(3)).then(emit).then(handle)
+      .then(lookupRun(3, true))
+      .then(cancelRun(3, true, true)).expect(jobs.get(3) == J_DONE and ss.cancelTried == Set(3))
+      .then(emit).then(handle).expect(ss.refused == Set() and allInvariants)
+  }
+
+  // A cancel that fails (or whose answer is lost) changes nothing at GitHub; GitHub's release
+  // fails the job at its third release, and nothing waits on it.
+  run failedCancelFallsBackToGitHubsReleaseTest = {
+    initDirectWith(true).then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit)
+      .then(handle).then(lookupRun(3, true)).then(lookupRun(1, true))
+      .then(cancelRun(3, false, false)).expect(ss.cancelTried == Set() and jobs.get(3) == J_ACQUIRED)
+      .then(cancelRun(3, false, true)).expect(ss.cancelTried == Set(3) and vmMayStart)
+      .then(startVm).then(runnerStarts(1))
+      .then(jobRequeued(3, true)).then(ghAssigns(3)).then(jobRequeued(3, true))
+      .then(ghAssigns(3)).then(jobRequeued(3, true)).expect(jobs.get(3) == J_DONE)
+      .expect(jobs.get(1) == J_RUNNING and allInvariants)
   }
 
   // GitHub deletes the scale set as dormant while no session lives; the create answers 404, and
@@ -1582,79 +1720,6 @@ module scaleset {
       .then(openSession).expect(ss.phase == ACTIVE and ss.floor == NONE)
       .then(emit).then(handle)
       .expect(ss.acquiring == Set(1, 2) and allInvariants)
-  }
-
-  // ADR 0090 progress: a refused job is released and assigned again until GitHub fails it at the
-  // third release; then the trusted job gets its runner.
-  run refusedJobFailsThenTrustedJobRunsTest = {
-    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
-      .then(lookupRun(3, true)).then(lookupRun(1, true))
-      .expect(ss.refused == Set(3) and ss.trusted == Set(1) and not(vmMayStart))
-      .then(jobRequeued(3, true)).then(ghAssigns(3)).then(emit).then(handle)
-      .then(lookupRun(3, true))
-      .expect(ss.refused == Set(3) and released.get(3) == 1)
-      .then(jobRequeued(3, true)).then(ghAssigns(3)).then(emit).then(handle)
-      .then(lookupRun(3, true))
-      .expect(ss.refused == Set(3) and released.get(3) == 2)
-      .then(jobRequeued(3, true)).expect(jobs.get(3) == J_DONE)
-      .then(emit).then(handle)
-      .expect(ss.refused == Set() and vmMayStart)
-      .then(startVm).then(runnerStarts(1))
-      .expect(jobs.get(1) == J_RUNNING and not(g.untrustedRan) and allInvariants)
-  }
-
-  // ADR 0090 progress when the release names no job (`runnerRequestId` 0 on github.com): the
-  // refusal lapses after the release window, or the operator releases it; then the trusted job
-  // gets its runner.
-  run refusalExpiresWhenTheReleaseNamesNoJobTest = {
-    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
-      .then(lookupRun(3, true)).then(lookupRun(1, true))
-      .then(jobRequeued(3, false)).then(emit).then(handle)
-      .expect(ss.refused == Set(3) and jobs.get(3) == J_AVAILABLE and not(vmMayStart))
-      .then(assignmentExpires(3))
-      .expect(ss.refused == Set() and vmMayStart and allInvariants)
-      .then(startVm).then(runnerStarts(1)).expect(jobs.get(1) == J_RUNNING and allInvariants)
-  }
-
-  run operatorReleasesARefusalTest = {
-    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
-      .then(lookupRun(3, true)).then(lookupRun(1, true))
-      .then(jobRequeued(3, false)).then(emit).then(handle)
-      .then(operatorReleasesRefusal(3))
-      .expect(ss.refused == Set() and ss.trusted == Set(1) and vmMayStart and allInvariants)
-  }
-
-  // ADR 0090 (owner, 2026-11-12): a failed run lookup refuses even a trusted job: nothing runs
-  // unclassified, and no runner starts while its lookup is pending.
-  run failedLookupRefusesTest = {
-    initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle)
-      .expect(ss.pending == Set(1) and not(vmMayStart))
-      .then(lookupRun(1, false))
-      .expect(ss.refused == Set(1) and ss.trusted == Set() and not(vmMayStart) and allInvariants)
-  }
-
-  // `cancel_refused_runs` (owner, 2026-11-12): the refused run is cancelled at once; the hold
-  // lasts until the cancellation is observed, and then the trusted job gets its runner.
-  run cancelledRefusedRunReleasesTheHoldTest = {
-    initDirectWith(true).then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit)
-      .then(handle).then(lookupRun(3, true)).then(lookupRun(1, true))
-      .expect(ss.refused == Set(3) and not(vmMayStart))
-      .then(cancelRun(3, true, true)).expect(jobs.get(3) == J_DONE and ss.refused == Set(3))
-      .expect(not(vmMayStart))
-      .then(emit).then(handle)
-      .expect(ss.refused == Set() and vmMayStart and allInvariants)
-      .then(startVm).then(runnerStarts(1)).expect(not(g.untrustedRan) and allInvariants)
-  }
-
-  // A cancel that fails (or whose answer is lost) changes nothing at GitHub: the hold stays and
-  // the release window still bounds it.
-  run failedCancelFallsBackToTheWindowTest = {
-    initDirectWith(true).then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit)
-      .then(handle).then(lookupRun(3, true)).then(lookupRun(1, true))
-      .then(cancelRun(3, false, false)).expect(ss.cancelTried == Set() and jobs.get(3) == J_ACQUIRED)
-      .then(cancelRun(3, false, true)).expect(ss.cancelTried == Set(3) and not(vmMayStart))
-      .then(jobRequeued(3, false)).then(emit).then(handle).expect(not(vmMayStart))
-      .then(assignmentExpires(3)).expect(vmMayStart and allInvariants)
   }
 
   // A numbering restarted within a session reuses an id the session recorded: its receipt is
@@ -1679,14 +1744,6 @@ module scaleset {
       .expect(ss.pending == Set(1) and ss.refused == Set())
       .then(lookupRun(1, true))
       .expect(ss.trusted == Set(1) and ss.refused == Set() and allInvariants)
-  }
-
-  // The limit ADR 0090 names, second form: the untrusted job was assigned before the runner
-  // started but after the last message mayfly recorded; mayfly could not know of it.
-  run runnerMayTakeAJobAssignedBeforeItStartedTest = {
-    initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle).then(lookupRun(1, true))
-      .then(ghAssigns(3)).then(startVm).then(runnerStarts(3))
-      .expect(g.untrustedRan and allInvariants)
   }
 
   // ---- curated mutants (verification §9), kept out of every step relation -------------------
@@ -1759,33 +1816,28 @@ module scaleset {
       .expect(ss.drift == 1 and not(redeliveryAppliesNothing) and not(allInvariants))
   }
 
-  // ADR 0090 mutant RUN_ASSIGNED (assigned jobs accepted without classification): the
-  // `pull_request_target` job is accepted and a runner starts for it.
+  // ADR 0090 mutant RUN_ASSIGNED (assigned jobs accepted without the lookup): the
+  // `pull_request_target` job is accepted and a runner starts for it; its hook still fails it.
   run mutantRunAssignedViolatesTest = {
     initDirect.then(poll).then(ghAssigns(3)).then(emit)
       .then(poll).then(recordWith(RUN_ASSIGNED)).then(ack(false))
       .expect(not(assignedJobsClassified) and not(allInvariants))
       .then(startVm)
-      .expect(not(vmOnlyForAJobClassifiedTrusted) and not(refusedJobNeverGetsAVm))
+      .expect(not(vmOnlyForAJobClassifiedTrusted))
   }
 
-  // ADR 0090 mutant IGNORE_REFUSALS: a runner starts for the trusted job while the refused one is
-  // assigned, so the refused job may take it.
-  run mutantIgnoreRefusalsViolatesTest = {
-    initDirect.then(poll).then(ghAssigns(3)).then(ghAssigns(1)).then(emit).then(handle)
-      .then(lookupRun(3, true)).then(lookupRun(1, true))
-      .expect(ss.refused == Set(3) and ss.trusted == Set(1))
-      .then(startVmWith(IGNORE_REFUSALS))
-      .expect(not(refusedJobNeverGetsAVm) and not(allInvariants))
-  }
-
-  // ADR 0090 mutant IGNORE_PENDING: a runner starts while the `pull_request_target` assignment
-  // still waits for its run's lookup.
-  run mutantIgnorePendingViolatesTest = {
+  // ADR 0090 mutant HOOK_PASS: a hook that lets every job through runs the untrusted job's steps.
+  run mutantHookPassViolatesTest = {
     initDirect.then(poll).then(ghAssigns(1)).then(emit).then(handle).then(lookupRun(1, true))
-      .then(ghAssigns(3)).then(emit).then(handle).expect(ss.pending == Set(3))
-      .then(startVmWith(IGNORE_PENDING))
-      .expect(not(refusedJobNeverGetsAVm) and not(allInvariants))
+      .then(startVm).then(ghAssigns(3)).then(runnerStartsWith(HOOK_PASS, 3))
+      .expect(not(noStepOfAnUntrustedJobRuns) and not(allInvariants))
+  }
+
+  // ADR 0090 mutant SINK_RUNS: a sink that runs the job it takes.
+  run mutantSinkRunsViolatesTest = {
+    initDirect.then(poll).then(ghAssigns(3)).then(emit).then(handle).then(lookupRun(3, true))
+      .then(startSink(3)).then(sinkTakesWith(SINK_RUNS, 3))
+      .expect(not(sinkRunsNoStep) and not(noStepOfAnUntrustedJobRuns) and not(allInvariants))
   }
 
   // ADR 0090 mutant CANCEL_ANY: a trusted job's run is cancelled, with the option off.

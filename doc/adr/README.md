@@ -94,7 +94,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0042](0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered Unknown, never refused | Accepted |
 | [0043](0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Upgrades jump forward any distance; rollback is one release, deeper rollback restores a backup | Accepted |
 | [0044](0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates mayfly; `mayfly uninstall --purge` removes what it created | Accepted |
-| [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted |
+| [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted. Amended 2026-11-12 |
 | [0046](0046-config-schema-v1-reads-raw-toml-secret-references-live-in-the-kernel-exit-codes.md) | Config schema v1 reads raw TOML, secret references live in the kernel, exit codes | Accepted |
 | [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted. Amended 2026-11-11 |
 | [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted. Amended 2026-11-12 |

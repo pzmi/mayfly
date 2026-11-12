@@ -438,16 +438,19 @@ Closed`. One listener per scale set (local lease). The fake is built from
 **Two flows** (`github-scaleset.md` §6.1): github.com assigns jobs to the scale set directly
 (`JobAssigned`, no offer, no acquire) up to the advertised `maxCapacity`; GHES 3.18 and 3.19
 offer them (`JobAvailable`) and mayfly acquires. **Trust on github.com** (ADR 0090, owner
-2026-11-11 and 2026-11-12): any plan, public repositories allowed, no runner group required; the
-boundary is the per-job check. Each `JobAssigned` must name a repository of the pool's
-`allowed_repositories`, and its workflow run is looked up (`GET .../actions/runs/{run_id}`,
-"Actions: Read") before any runner starts: a fork's run, `pull_request_target`, `workflow_run`,
-`issue_comment`, anything unclassifiable and any failed lookup is refused
-(`AssignedJobRefused`, journaled). While a job is unclassified or refused and still assigned, no
-new runner of the set starts; the hold ends when a job fact shows it gone, the pool's
-`refusal_release_window` lapses or the operator runs `mayfly pool release-refusal`. GitHub's own
-release and requeue fails a refused job at its third release; with `cancel_refused_runs`
-("Actions: Write") mayfly cancels the run at once. `check_fork_pr_setting` ("Administration:
+2026-11-11 and 2026-11-12): any plan, public repositories allowed, no runner group required.
+Each `JobAssigned` must name a repository of the pool's `allowed_repositories`, and its workflow
+run is looked up (`GET .../actions/runs/{run_id}`, "Actions: Read"); a runner starts only for a
+job classified trusted (the pool's `allowed_events`, by default `push`, a same-repository
+`pull_request`, `workflow_dispatch`, `schedule`, `merge_group`, `release`). Anything else,
+anything unclassifiable and any failed lookup is refused (`AssignedJobRefused`, journaled, and
+`job_refused` at WARN). The hard boundary is in the guest: every image's job-started hook
+classifies the job its runner actually received and fails an untrusted one before any step
+(IMG-02), so runners always run in disposable VMs and nothing holds the pool. A refused job goes
+to a refusal sink, GitHub's runner in a small disposable Linux VM whose hook fails it, started
+while `maxCapacity` is pinned at the assigned count (IMG-03); with `cancel_refused_runs`
+("Actions: Write") mayfly cancels the run instead; failing both, GitHub's own release fails it at
+the third release. `check_fork_pr_setting` ("Administration:
 Read") optionally refuses to start when fork pull-request workflows run in private
 repositories. A public allowed repository behind a runner group that does not admit public
 repositories gets no jobs; mayfly reports it at start-up and in `doctor`.
@@ -473,8 +476,7 @@ Processing loop (the poller never waits on VM work):
 no registered standby (ADR 0028). Never count `JobAssigned` messages (≤ 50 per batch); never add
 `TotalRunningJobs`. `shortfall = max(0, desired − (Activating + Listening + Busy))`; Prepared
 VMs serve it first and do not count in it. A runner is activated only for a job classified
-trusted that waits for one, and none while a job is unclassified or refused and still assigned
-(ADR 0090). The service
+trusted that waits for one (ADR 0090); a refused job holds nothing. The service
 assigns nothing beyond the advertised `maxCapacity`, so a scale set advertising 0 sees no demand
 at all (`github-scaleset.md` §5).
 
@@ -710,7 +712,7 @@ experimental**, an explicit opt-in (ADR 0069, amended 2026-11-11): GitHub assign
 scale set advertising `maxCapacity` 0 (`doc/github-scaleset.md` §5), so a `demand` pool carved
 nothing never sees its job and can starve. An older build refuses the key (unknown keys are
 refused). On github.com each pool also lists its `allowed_repositories` and may set
-`cancel_refused_runs` and `refusal_release_window`; an organisation may set
+`allowed_events` and `cancel_refused_runs`; an organisation may set
 `check_fork_pr_setting` (ADR 0090, GH-08).
 As built (RT-02, ADR 0091; owner, 2026-11-12: "reasonable defaults out of the box"): `state_dir`
 and `[provider] tart_home` are optional. Without them `mayflyd` uses the platform's standard

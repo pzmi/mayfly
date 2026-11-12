@@ -104,7 +104,7 @@ then, a model's task records the one it tried.
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed; at DEC-06F, with `requestQuarantineStop` (re-keying a pending retirement), 244 s for `step` and 145 s for `raceStep`, simulation 80 s and 17 s per seed (`formal-verify --model registration`, beside a `quint test` run) | KER-09, DEC-06F |
-| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted, recovered), both assignment flows (github.com's direct assignment capped by the advertised `maxCapacity`, GHES's offers and acquire), runners and the trust gate of ADR 0090, a dormant scale set deleted and re-created (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, 0090, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged`, `vmOnlyForAJobClassifiedTrusted`, `refusedJobNeverGetsAVm`, `assignedJobsClassified`, `cancelOnlyRefused` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation; at GH-00R, with both flows, runners, the trust gate and dormant re-creation, 512 s for `step` and 274 s for `messageStep` (two at a time, beside another lane's build), and after the review's fixes (bounded releases, the release window, the operator release, the duplicate rule) 565 s and 284 s; with the owner's decisions of 2026-11-12 (the run lookup, `pending`, the cancel option, `cancelOnlyRefused`) 272 s and 159 s (the pending gate prunes runner starts); after the final review (`cancelOnlyRefused` reading the truth, a new assignment classified afresh, the `IGNORE_PENDING` and `CANCEL_ANY` mutants) 322 s and 203 s; simulation about 85 s per seed and relation | KER-06, GH-00R |
+| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted, recovered), both assignment flows (github.com's direct assignment capped by the advertised `maxCapacity`, GHES's offers and acquire), runners with the in-guest hook, the refusal sink and the trust gate of ADR 0090, a dormant scale set deleted and re-created (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, 0090, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged`, `vmOnlyForAJobClassifiedTrusted`, `noStepOfAnUntrustedJobRuns`, `sinkRunsNoStep`, `sinkOnlyForARefusedJob`, `assignedJobsClassified`, `cancelOnlyRefused` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation; at GH-00R, with both flows, runners, the trust gate and dormant re-creation, 512 s for `step` and 274 s for `messageStep` (two at a time, beside another lane's build), and after the review's fixes (bounded releases, the release window, the operator release, the duplicate rule) 565 s and 284 s; with the owner's decisions of 2026-11-12 (the run lookup, `pending`, the cancel option, `cancelOnlyRefused`) 272 s and 159 s (the pending gate prunes runner starts); after the final review (`cancelOnlyRefused` reading the truth, a new assignment classified afresh, the `IGNORE_PENDING` and `CANCEL_ANY` mutants) 322 s and 203 s; at GH-00S (the hook, the refusal sink and the pin in place of the hold) 259 s and 155 s; simulation about 85 s per seed and relation | KER-06, GH-00R, GH-00S |
 | event_store | `formal/event_store.qnt` | the journal (stream heads, histories, the identity registry, receipts with intent digests and refusals bound to every stream read, the inbox, stream epochs), units of work judged in the port's reporting order and committed in one step or as split transactions with head locks in `StreamId` order and recorded waits, the `AggregateStore` write path (its epoch check and receipt read as one step or with another writer between them), the after-commit kick and a crash before it, the directive relay as a durable consumer (marks, checkpoints, fenced leases, workers), and the online rebuild's shadow generation, dual writes and cutover fence (event-store §7.3, ADRs 0034, 0041) | `ES_I1_atomicUnit`, `ES_I2_streamOrder`, `ES_I3_independentStreams`, `ES_I4_globalEventIdentity`, `ES_I5_commandIdentity`, `refusalReplayedAtSameRevision`, `ES_I6_messageIdentity`, `ES_I7_historyPreservation`, `ES_I11_rebuildEquivalence`, `ES_I12_epochSafety`, `replayWithinEpoch`, `ES_I14_durableDelivery`, `ES_I15_noSkip`, `ES_I16_lockOrder`, `directivesFromJournal`, `reactorsNeverReplayed` | `step`, `implStepSerial`, `relayStep`, `storeOnlyStep`, `deliveryOnlyStep` | 3 steps for `step` and `implStepSerial`, 4 for `relayStep` and `storeOnlyStep`, 8 for `deliveryOnlyStep` | about 12 min for `step`, 12 min for `implStepSerial`, 3.7 min for `relayStep` (re-run at ES-05F with `retire`, which ES-05 added to these three relations: no violation; `step` and `relayStep` two at a time, then `implStepSerial`, beside another lane's builds, 4-CPU sandbox), 78 min for `storeOnlyStep`, 42 min for `deliveryOnlyStep` (Apalache, two runs at a time beside another lane's builds; 4-CPU sandbox, measured at ES-06F, after the model gained `request`, `decide`, `rawRefusal` and intent 3: `step` and `implStepSerial` took 4 min at ES-06); `storeOnlyStep` at depth 5 had not finished checking its fourth state after 40 min, and depth 4 of `step` took 23 min at ES-06: checking the 31 invariant conditions at the last state is most of it; simulation about 3 min per seed and relation (300 traces of 50 steps of `step` ran at 30 traces per second) | ES-06, ES-06F, ES-05F |
 | image_store | `formal/image_store.qnt` | one image base on one host as the data plane's image store keeps it (ADR 0087): its registry entry and state machine (Reserved, Cloning, Customizing, Verifying, Ready, Retiring, Quarantined), the VM Tart lists under its name, job clones and the clone intents recorded before them, a crash between any two steps with recovery by observation, and the writers mayfly does not control (a foreign VM under the name, a look-alike in the base's place, a modified disk) | `cloneAllowedOnlyWhenOwnedReadyIntact` (CloneAllowed ⇒ Owned ∧ Ready ∧ IntegrityValid), `deleteAllowedOnlyWhenOwnedStoppedFree` (DeleteAllowed ⇒ Owned ∧ Stopped ∧ NoUnresolvedDependents, never Quarantined), `clonesRecorded` | `step` | 10 steps | 9 s, then 12 s for the stage once `recoverStop` and the Quarantined guard joined, 9 s once eviction became two steps (Apalache, beside another lane's build; 4-CPU sandbox, measured at DP-07); simulation about 32 s per seed of 5000 traces of 50 steps | DP-07 |
 
@@ -893,16 +893,18 @@ refused, `AssignedJobRefused`), and `JobStarted`/`JobCompleted` release a reserv
 classification and a refusal; `ack` deletes after the record (a lost ack leaves it queued); `acquireCall` acquires
 the pending ids still available while open (a lost answer leaves them pending); `startVm`
 starts a runner only for a job classified trusted that waits for one (acquired, or assigned and
-classified), never more idle runners than such jobs, never while a job is pending its run
-lookup or refused (ADR 0090, owner 2026-11-12), and only while open and active; `lookupRun`
-classifies a pending assignment from its workflow run (a failed lookup refuses);
-`cancelRun` (with `cancel_refused_runs`, chosen per trace by `initDirectWith`) asks GitHub to
-cancel a refused run once, its effect and its answer each possibly lost; `assignmentExpires` lapses a refusal or
-a classification after the release window (A7: the window outlasts GitHub's releases, so the
-job is no longer assigned) and `operatorReleasesRefusal` lifts a refusal GitHub no longer
-holds. GitHub's side
+classified), never more idle runners than such jobs, and only while open and active; nothing
+else holds it (ADR 0090, amended 2026-11-12); `lookupRun` classifies a pending assignment from
+its workflow run (a failed lookup refuses); `cancelRun` (with `cancel_refused_runs`, chosen per
+trace by `initDirectWith`) asks GitHub to cancel a refused run once, its effect and its answer
+each possibly lost; `startSink` starts a refusal sink for a refused job (without the option,
+once per refusal, one at a time, only while no trusted or pending assignment is known), and the
+wire max is pinned at the assigned count while it is up (`wireMax`); `sinkEnds` deletes it.
+GitHub's side
 adds `JobAssigned` for each acquisition, lets a runner take any job assigned to the set
-(`runnerStarts`: runners are interchangeable), finishes jobs, releases an assigned job no runner
+(`runnerStarts`: runners are interchangeable; its in-guest hook runs a trusted job and fails any
+other before a step), lets the sink take any assigned job (`sinkTakes`: its hook fails every
+job), finishes jobs, releases an assigned job no runner
 took as canceled and requeues it under the same request id (offered again in the acquire flow,
 assigned again in the direct one), failing it at the third release (`released`,
 `MAX_RELEASES`), and on github.com may send a `JobCompleted` that names no job (`named` false,
@@ -985,7 +987,10 @@ covered by the deterministic tests above and by simulation (50 steps), not by Ap
 | `a1RefutationIsFlagged` | a message emitted anew under an id at or below the session's floor is never dropped or applied silently: a session's first message below the floor starts a numbering recorded as `MessageIdsRestarted`, any other degrades the session (except a restarted id equal to the floor as the session's first message, which reads as the redelivery) | `tests/scaleset/rules.rs::should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor` (the degrade branch; the aggregate still degrades on a session's first message too until KER-06G), the model (`a1RestartIsRecoveredTest`, `a1RefutedMidSessionDegradesTest`) |
 | `persistentConflictsAreFlagged` | A3: `CONFLICT_LIMIT` creates in a row answered 409 are escalated to the operator | `tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict` |
 | `vmOnlyForAJobClassifiedTrusted` | ADR 0090: a runner starts only for a job mayfly classified trusted that waits for one, never more idle runners than such jobs | the model (`assignedUntrustedJobIsRefusedTest`, mutant `RUN_ASSIGNED`); the aggregate and the reconciler in KER-06G |
-| `refusedJobNeverGetsAVm` | ADR 0090 (owner, 2026-11-12): no runner starts while a job mayfly saw assigned and did not classify trusted is still assigned | the model (`assignedUntrustedJobIsRefusedTest`, mutants `RUN_ASSIGNED` and `IGNORE_REFUSALS`); KER-06G |
+| `noStepOfAnUntrustedJobRuns` | ADR 0090 (amended 2026-11-12): no step of an untrusted job runs, wherever it lands; the in-guest hook is the guard | the model (mutant `HOOK_PASS`, `refusedJobHoldsNothingAndTheHookFailsItTest`); the hook's tests (IMG-02) |
+| `sinkRunsNoStep` | ADR 0090: a refusal sink runs no job's steps | the model (mutant `SINK_RUNS`); IMG-03 |
+| `sinkOnlyForARefusedJob` | ADR 0090: a sink starts only for a job truly untrusted or whose lookup failed, without the cancel option, while no trusted or pending assignment is known | the model (`refusalSinkFailsTheRefusedJobTest`, `noSinkBesideATrustedJobTest`); KER-06G |
+| `refusedJobNeverGetsAVm` (removed by GH-00S) | the hold of the first decision: no runner starts while a job mayfly saw assigned and did not classify trusted is still assigned | the model (`assignedUntrustedJobIsRefusedTest`, mutants `RUN_ASSIGNED` and `IGNORE_REFUSALS`); KER-06G |
 | `assignedJobsClassified` | ADR 0090 and I32 for assignments: no untrusted assignment accepted, and each one seen and not released is pending its lookup or refused, a journaled fact | the model (mutant `RUN_ASSIGNED`, `failedLookupRefusesTest`); KER-06G, GH-10 |
 | `cancelOnlyRefused` | ADR 0090: a run is cancelled only with `cancel_refused_runs`, and only for a job that is truly untrusted or whose lookup failed | the model (`cancelledRefusedRunReleasesTheHoldTest`, `failedCancelFallsBackToTheWindowTest`, mutant `CANCEL_ANY`); GH-10 |
 | `i07WireWithinDeliverable`, `heldAcquiresNothing` | I07 and ADR 0029: the wire max never exceeds deliverable and is 0 while draining or in safe mode; nothing is planned or acquired while paused, draining or in safe mode, nor planned while the session is degraded (P21); no poll while the journal is unwritable | `tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`, `should_acquire_nothing_when_paused_draining_or_in_safe_mode`, `should_acquire_nothing_when_the_session_is_frozen`; `tests/scaleset/rules.rs::should_acquire_nothing_and_send_the_mode_wire_max_when_held`, `should_plan_no_offer_when_the_session_is_degraded_or_closing` |
@@ -1006,15 +1011,14 @@ Tests (`quint test`, all deterministic): `acquireWithinDeliverableTest`,
 `unknownTypesDegradeTheSessionTest`, `drainSendsZeroAndAcquiresNothingTest`,
 `pauseSendsRunnersAndAcquiresNothingTest`, `safeModeRecordsButNeverAcquiresTest`,
 `requeuedJobIsReservedOnceAgainTest`, `lostAcquireAnswerStaysPendingTest`, GH-00R's
-`directAssignmentNeedsAdvertisedRoomTest`, `assignedUntrustedJobIsRefusedTest`,
-`runnerMayTakeAJobAssignedAfterItStartedTest` (the limit ADR 0090 names: a runner started for a
-trusted job takes an untrusted job assigned after it; `g.untrustedRan` is a ghost, not an
-invariant), `dormantScaleSetIsRecreatedTest`, the progress scenarios
-`refusedJobFailsThenTrustedJobRunsTest`, `refusalExpiresWhenTheReleaseNamesNoJobTest` and
-`operatorReleasesARefusalTest`, the owner's decisions of 2026-11-12 `failedLookupRefusesTest`,
-`cancelledRefusedRunReleasesTheHoldTest`, `failedCancelFallsBackToTheWindowTest` and
-`reassignedJobIsClassifiedAfreshTest`, the second limit `runnerMayTakeAJobAssignedBeforeItStartedTest`
-(an untrusted job assigned before the runner started but after the last recorded message), and
+`directAssignmentNeedsAdvertisedRoomTest`, `dormantScaleSetIsRecreatedTest`,
+`reassignedJobIsClassifiedAfreshTest`, and GH-00S's `refusedJobHoldsNothingAndTheHookFailsItTest`,
+`untrustedJobAssignedAfterTheRunnerStartedFailsInTheHookTest`,
+`untrustedJobAssignedBeforeTheRunnerStartedFailsInTheHookTest`,
+`refusalSinkFailsTheRefusedJobTest`, `noSinkBesideATrustedJobTest`,
+`sinkMayFailATrustedJobItCouldNotKnowOfTest` (the sink's limit; `g.trustedFailedBySink` is a
+ghost, not an invariant), `failedLookupRefusesTest`, `cancelledRefusedRunTest` and
+`failedCancelFallsBackToGitHubsReleaseTest`, and
 `restartWithinASessionDegradesTest` (a reused id with a
 receipt in the same session degrades instead of reading as a duplicate), and the curated
 mutants of verification §9, each an action or a `recordWith` variant kept out of every step
@@ -1025,19 +1029,20 @@ relation: `mutant4AckBeforeRecordViolatesTest` (`i12RecordBeforeAck`),
 two model-local mutants of the KER-06 review: `mutantOpenWinsNeverConvergesTest`
 (`desiredFromLatestStatistics`) and `mutantReapplyCountsDriftTwiceTest`
 (`redeliveryAppliesNothing`); and two of ADR 0090: `mutantRunAssignedViolatesTest` (an assigned
-job accepted unclassified: `assignedJobsClassified`, then `vmOnlyForAJobClassifiedTrusted` and
-`refusedJobNeverGetsAVm`), `mutantIgnoreRefusalsViolatesTest` (a runner started beside a
-refused job: `refusedJobNeverGetsAVm`), `mutantIgnorePendingViolatesTest` (a runner started
-while an assignment waits for its lookup: `refusedJobNeverGetsAVm`) and
-`mutantCancelAnyViolatesTest` (a trusted job's run cancelled with the option off:
+job accepted unclassified: `assignedJobsClassified`, then `vmOnlyForAJobClassifiedTrusted`),
+`mutantHookPassViolatesTest` (a hook that lets every job through:
+`noStepOfAnUntrustedJobRuns`), `mutantSinkRunsViolatesTest` (a sink that runs its job:
+`sinkRunsNoStep`) and `mutantCancelAnyViolatesTest` (a trusted job's run cancelled with the option off:
 `cancelOnlyRefused`, whose ghost reads the job's true class and the option, not the guard).
 
-GH-00R's negative controls in simulation (3000 samples of 40 steps of `messageStep`): `record` as
-`RUN_ASSIGNED`, `startVm` as `IGNORE_REFUSALS` or `IGNORE_PENDING`, and `cancelRun` as
-`CANCEL_ANY` each report a violation within seconds; the correct model reports none under `step`
+GH-00S's negative controls in simulation: `record` as `RUN_ASSIGNED` and `cancelRun` as
+`CANCEL_ANY` each report a violation within 5000 samples of 40 steps of `step`, and
+`runnerStarts` as `HOOK_PASS` and `sinkTakes` as `SINK_RUNS` within 5000 of 50 steps of
+`messageStep` (`step` did not reach them in 5000 of 40: the paths are long) (GH-00R's `IGNORE_REFUSALS` and `IGNORE_PENDING` went with
+the hold); the correct model reports none under `step`
 or `messageStep` (three seeds of 5000 traces of 50 steps each). The Rust aggregate does not yet have the
-direct flow, the trust gate, the renumbering branch or the re-create: KER-06G, then VER-02's
-driver.
+direct flow, the trust gate, the sink, the renumbering branch or the re-create: KER-06G, then
+VER-02's driver; the hook and the sink are IMG-02 and IMG-03.
 
 ### event_store
 

@@ -4,8 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09). Decides philosophy P4. Amendment proposed 2026-11-12 (planner,
-GH-00R): the drafted list, after the owner's decisions of 2026-11-12 (ADR 0090).
+Accepted (owner, 2026-11-09). Decides philosophy P4. Amended 2026-11-12 (owner, GH-00S): the
+permission list, drafted in GH-00R and accepted by the owner on 2026-11-12 (ADR 0090).
 
 ## Context
 
@@ -33,9 +33,10 @@ App's permissions, the less a compromised key or a mayfly bug can do (philosophy
 
 - Documenting permissions loosely: lets them widen by drift, which this record forbids.
 
-## Amendment proposed 2026-11-12 (planner, GH-00R): the drafted list
+## Amended 2026-11-12 (owner, GH-00S): the permission list
 
-Drafted on 2026-11-11 and revised for the owner's decisions of 2026-11-12 (ADR 0090).
+Drafted by the planner on 2026-11-11 (GH-00R), revised for ADR 0090, and accepted by the owner on
+2026-11-12.
 
 The list is drafted from GitHub's documentation in `doc/github-scaleset.md` §13 and follows ADR
 0090 (owner, 2026-11-12):
@@ -48,8 +49,8 @@ The list is drafted from GitHub's documentation in `doc/github-scaleset.md` §13
   `check_fork_pr_setting`.
 
 The runner-group read of ADR 0090's public-repository report is covered by "Self-hosted
-runners". "Metadata: Read-only" comes with any repository
-permission and is not used. Repository scope (tests only) needs "Administration: Read and write"
+runners". "Metadata: Read-only" comes with any repository permission and is not used. The
+refusal sink of ADR 0090 needs nothing more: it is a JIT runner like any other. Repository scope (tests only) needs "Administration: Read and write"
 and "Metadata: Read-only". `doctor` compares the App's grant with what the configured options
 need. The list stays unverified (`PUBLISHED_PERMISSIONS` is `Unverified`) until HW-02 runs the
 whole chain with exactly these permissions (spec §12 item 7); decision 4 stands.
