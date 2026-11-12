@@ -363,6 +363,16 @@ queue (queue, cancel, reassign) and dumps its state as JSON for the fault lab's 
 shapes come from the spec, which cites where each was verified; nothing is taken from the
 reference client's tests or test server (ADR 0048).
 
+Its wire contract (`mayfly_fake_github::contract`, cases WC-01..WC-15) is the `ScaleSetApi` and
+`RunnerRegistry` wire behaviour of the spec as HTTP exchanges, run on a fresh world per case:
+against the fake in process and on a socket, in both flows, and, owner-gated, against a live
+disposable organisation (HW-02), whose world has no job script, so the scripted cases are
+reported as not run there, never as passed. Its own tests prove that deliberately broken fakes
+(a session stolen instead of 409, no redelivery, capacity ignored, `typeName` dropped, a backlog
+truncated) fail the cases named for each. The fake also runs as a process
+(`mayfly-fake-github --config <file>`, one `listening <url>` line when ready, stopped by closing
+its stdin); its real-time waits (the hold, a delay fault) live in one file under ADR 0023.
+
 ### 7.4 Independence (D11)
 
 The fake binaries and the fault lab import no production crate (`ARCH-independent-oracle`), and no

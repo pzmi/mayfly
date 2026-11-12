@@ -18,10 +18,10 @@ const ACCESS: &str = "/app/installations/7/access_tokens";
 const EXCHANGE: &str = "/actions/runner-registration";
 
 fn fake(scope: Scope) -> FakeGithub {
-    fake_with(scope, "no key")
+    fake_with(scope, "no key", "no key")
 }
 
-fn fake_with(scope: Scope, public_pem: &str) -> FakeGithub {
+fn fake_with(scope: Scope, public_pem: &str, private_pem: &str) -> FakeGithub {
     FakeGithub::new(
         FakeConfig {
             app_client_id: "app".to_owned(),
@@ -31,6 +31,7 @@ fn fake_with(scope: Scope, public_pem: &str) -> FakeGithub {
             web_base: "https://github.com".to_owned(),
             service_url: "https://pipelines.example/x".to_owned(),
             admin_token_lifetime_secs: 60,
+            admin_token_key_pem: private_pem.to_owned(),
             permissions: BTreeMap::new(),
         },
         Arc::new(|| NOW_MS),
@@ -104,7 +105,11 @@ async fn should_refuse_credentials_when_they_were_not_issued_by_the_previous_ste
 async fn should_answer_the_exchange_only_when_its_body_names_the_scope() {
     // given: an App JWT signed here, and the chain's first two tokens
     let keys = generate_app_key();
-    let fake = fake_with(Scope::Organization("acme".to_owned()), &keys.public_pem);
+    let fake = fake_with(
+        Scope::Organization("acme".to_owned()),
+        &keys.public_pem,
+        &keys.private_pem,
+    );
     let now = NOW_MS / 1000;
     let jwt = app_jwt(&keys.private_pem, now - 60, now + 540);
     let installation = token(

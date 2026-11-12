@@ -215,7 +215,9 @@ mayfly-fake-tart = { rustix = ["default", "fs", "process"], serde = ["default", 
 # aws-lc-rs's UnparsedPublicKey through the fake's own JWT and PEM code; synthetic PKCS#1 test
 # keys generated at run time by the rsa crate (another implementation than the provider);
 # base64url and serde for JWTs and bodies.
-mayfly-fake-github = { aws-lc-rs = ["default"], axum = ["http1", "tokio"], base64 = ["default"], rsa = ["default", "pkcs1v15"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["default", "rt", "net", "sync"] }
+# mayfly-fake-github: tokio `time` for the poll hold and delay faults (one file, ADR 0023),
+# `macros` for the hold's select, `io-util` for the contract's socket client.
+mayfly-fake-github = { aws-lc-rs = ["default"], axum = ["http1", "tokio"], base64 = ["default"], rsa = ["default", "pkcs1v15"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["default", "rt", "net", "sync", "time", "macros", "io-util"] }
 # `cargo xtask hw01` (HW-01X): its JSON report and Tart's JSON through serde_json; the run lock's
 # holder (`F_GETLK`), the process-group kill of a child past its deadline and the throwaway home's
 # owner check through rustix; Ctrl-C and SIGTERM set a flag (signal-hook) so the run cleans up.
@@ -249,7 +251,9 @@ mayfly-adapter-tart = { tempfile = ["default"], serde_json = ["default"] }
 mayfly-adapter-host = { tokio = ["rt", "macros"] }
 # The client's tests run on a paused current-thread runtime (ver §3.2).
 mayfly-adapter-github = { tokio = ["default", "rt", "macros", "test-util", "time", "sync"] }
-mayfly-fake-github = { tokio = ["default", "macros", "rt", "net", "sync"] }
+# mayfly-fake-github tests: `tempfile` for the process test's config, tokio `test-util` for the
+# paused clock.
+mayfly-fake-github = { tempfile = ["default"], tokio = ["default", "macros", "rt", "net", "sync", "test-util"] }
 
 [external.build]
 
@@ -265,6 +269,12 @@ mayfly-fake-github = { tokio = ["default", "macros", "rt", "net", "sync"] }
 # The fake `tart` waits in real time (delays, guest jobs, `ip --wait`) in this one file (ADR 0023).
 [[exceptions.lints]]
 path = "crates/mayfly-fake-tart/src/wait.rs"
+lint = "test_sleep"
+adr = "0023"
+
+# The fake GitHub holds a long poll and delays an answer in real time in this one file (ADR 0023).
+[[exceptions.lints]]
+path = "crates/mayfly-fake-github/src/wait.rs"
 lint = "test_sleep"
 adr = "0023"
 

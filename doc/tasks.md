@@ -1589,6 +1589,13 @@ restarted message numbering; and the REST workflow-run lookup and cancel routes 
 run with `head_repository` differing from `repository`, a lookup that fails, a cancel answering
 202, 409 or lost), the fork-PR setting route and the runner-group read of the public-repository
 report (spec §2, §6.2). Each client-assumed or open behaviour is a named knob.
+Note (GH-01, done): `Knobs` names every client-assumed or open behaviour with its HW-02 item;
+`Fault` covers the status overrides, `Retry-After`, the rate-limited 403, the 200 with an empty
+body, a stall, a response dropped after its effect and a delay; the control API (`/_fake/`, and
+the same as methods) queues, starts, completes, releases and cancels jobs, expires a session or
+its token, deletes a dormant scale set, restarts a numbering and dumps the state without tokens.
+The wire contract is `mayfly_fake_github::contract` (WC-01..WC-15, ver §7.3); its live run needs
+a `WireWorld` over a TLS client and the App's credentials, which HW-02 adds (owner, pending).
 
 #### GH-02 GitHub App auth and HTTP client
 Cites: `doc/github-scaleset.md` §1, §2, §8, plan §7.1, ADRs 0014, 0033, 0045, 0048. The App JWT

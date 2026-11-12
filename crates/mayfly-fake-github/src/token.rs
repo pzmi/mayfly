@@ -3,6 +3,7 @@
 use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use rsa::pkcs1::DecodeRsaPrivateKey;
 use serde::Deserialize;
 
 /// The claims of an App JWT the fake accepted.
@@ -105,18 +106,23 @@ fn decode_json<T: for<'de> Deserialize<'de>>(part: &str) -> Result<T, JwtRefusal
     serde_json::from_slice(&bytes).map_err(|_| JwtRefusal::Shape)
 }
 
-/// An admin token in the service's shape, a JWT the client reads `exp` from without verifying
-/// it (spec §1 step 4); `exp` is left out when `expires_at` is `None`. Its signature is filler:
-/// nothing verifies it.
-pub fn admin_token(serial: u64, expires_at: Option<u64>) -> String {
+/// An admin token in the service's shape: an RS256 JWT signed with `key_pem` (PKCS#1, generated
+/// at run time), which the client reads `exp` from without verifying it (spec §1 step 4); `exp`
+/// is left out when `expires_at` is `None`. `None` when the key does not sign. Pinned by
+/// `tests::should_sign_the_admin_token_when_given_a_key`.
+pub fn admin_token(serial: u64, expires_at: Option<u64>, key_pem: &str) -> Option<String> {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
     let claims = match expires_at {
         Some(exp) => format!(r#"{{"sub":"fake-admin-{serial}","exp":{exp}}}"#),
         None => format!(r#"{{"sub":"fake-admin-{serial}"}}"#),
     };
     let claims = URL_SAFE_NO_PAD.encode(claims.as_bytes());
-    let signature = URL_SAFE_NO_PAD.encode(format!("fake-signature-{serial}").as_bytes());
-    format!("{header}.{claims}.{signature}")
+    let signed = format!("{header}.{claims}");
+    let key = rsa::PrivateKey::from_pkcs1_pem(key_pem).ok()?;
+    let signature = key
+        .pkcs1v15_sign::<rsa::sha2::Sha256>(signed.as_bytes())
+        .ok()?;
+    Some(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature)))
 }
 
 #[cfg(test)]
@@ -204,5 +210,24 @@ mod tests {
             verify_app_jwt(&good, "not a key", "app", now),
             Err(JwtRefusal::Signature)
         );
+    }
+
+    #[test]
+    fn should_sign_the_admin_token_when_given_a_key() {
+        // given
+        let keys = crate::keys::generate_app_key();
+
+        // when
+        let token = admin_token(7, Some(1_000), &keys.private_pem).expect("signed");
+        let unusable = admin_token(7, Some(1_000), "not a key");
+
+        // then
+        let (signed, signature) = token.rsplit_once('.').expect("three parts");
+        let signature = URL_SAFE_NO_PAD.decode(signature).expect("base64");
+        let public = public_der(&keys.public_pem).expect("public key");
+        UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, public)
+            .verify(signed.as_bytes(), &signature)
+            .expect("the admin token verifies with the pair's public key");
+        assert_eq!(unusable, None);
     }
 }

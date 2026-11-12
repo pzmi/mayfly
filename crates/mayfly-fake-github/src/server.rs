@@ -22,6 +22,7 @@ const MAX_BODY: usize = 1024 * 1024;
 #[derive(Debug)]
 pub struct FakeServer {
     addr: SocketAddr,
+    fake: FakeGithub,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<io::Result<()>>>,
 }
@@ -32,9 +33,17 @@ impl FakeServer {
     /// # Errors
     /// When the port cannot be bound.
     pub async fn start(fake: FakeGithub) -> io::Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        Self::start_on(fake, 0).await
+    }
+
+    /// Serves `fake` on `127.0.0.1:port` (0: a port the system picks), on the current runtime.
+    ///
+    /// # Errors
+    /// When the port cannot be bound.
+    pub async fn start_on(fake: FakeGithub, port: u16) -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         let addr = listener.local_addr()?;
-        let app = Router::new().fallback(serve).with_state(fake);
+        let app = Router::new().fallback(serve).with_state(fake.clone());
         let (tx, rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -45,6 +54,7 @@ impl FakeServer {
         });
         Ok(Self {
             addr,
+            fake,
             shutdown: Some(tx),
             task: Some(task),
         })
@@ -56,7 +66,8 @@ impl FakeServer {
         format!("http://{}", self.addr)
     }
 
-    /// Stops accepting, finishes the requests in flight and waits for the task.
+    /// Stops accepting, ends stalled and held requests with 503 ([`FakeGithub::close`]),
+    /// finishes the requests in flight and waits for the task.
     ///
     /// # Errors
     /// What the server ended with.
@@ -64,6 +75,7 @@ impl FakeServer {
     /// # Panics
     /// When the server task panicked.
     pub async fn stop(mut self) -> io::Result<()> {
+        self.fake.close();
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
@@ -95,7 +107,10 @@ async fn serve(State(fake): State<FakeGithub>, request: Request) -> Response {
     let answer = fake
         .handle(FakeRequest {
             method: parts.method.as_str().to_owned(),
-            path: parts.uri.path().to_owned(),
+            path: parts
+                .uri
+                .path_and_query()
+                .map_or_else(|| parts.uri.path().to_owned(), |pq| pq.as_str().to_owned()),
             headers,
             body: body.to_vec(),
         })
