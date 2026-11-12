@@ -258,10 +258,12 @@ pub enum CapacityPolicy {
     Exact,
     /// Keep, and carve, only for the VMs the pool waits for, at most its headroom: a later pool
     /// may run beside an idle one (the 13 GiB case). Correct only if a pool carved nothing still
-    /// learns of its jobs, which depends on whether GitHub's `totalAssignedJobs` is capped by
-    /// the `maxCapacity` mayfly sends (`doc/github-scaleset.md` §12 item 6, unverified until
-    /// GH-00): if it is, a pool carved nothing never sees its job and starves
-    /// (`formal/scheduling.qnt`'s `demandStarvesWhenDemandIsInvisibleTest`).
+    /// learns of its jobs, and public evidence says it does not: GitHub assigns nothing to a
+    /// scale set advertising `maxCapacity` 0, so `totalAssignedJobs` stays 0
+    /// (`doc/github-scaleset.md` §5, maintainer-stated and server-observed). A pool carved
+    /// nothing never sees its job and starves (`formal/scheduling.qnt`'s
+    /// `demandStarvesWhenDemandIsInvisibleTest`); experimental, opt-in only (ADR 0069, amended
+    /// 2026-11-11).
     Demand {
         /// The new VMs the pool waits for, not capped by its carve-out (a capped count would
         /// feed back: carved nothing, told nothing): its scale set's latest

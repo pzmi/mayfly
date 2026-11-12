@@ -5,7 +5,8 @@ Date: 2026-11-10
 ## Status
 
 Accepted (owner, 2026-11-10). Amends ADR 0028 (the registration token as an auth-chain step
-only), marked there.
+only), marked there. Amended 2026-11-11 (owner, PLAN-01 and GH-00R): evidence strengths, and
+"until GH-00's capture settles it" becomes "until it is server-observed".
 
 ## Context
 
@@ -31,7 +32,8 @@ required in this case let's add it".
 2. **The protocol is ours to specify.** `doc/github-scaleset.md` states the wire protocol and the
    observed behaviour in mayfly's words. Each fact cites the upstream file and function at a
    pinned commit where it was verified, or is marked unverified until GH-00's live capture
-   settles it. mayfly re-derives those facts and pins them with its own recorded, redacted
+   settles it (*since 2026-11-11: each fact carries its evidence strength; see the
+   amendment*). mayfly re-derives those facts and pins them with its own recorded, redacted
    fixtures (GH-00, GH-03).
 3. **The fake is built from the spec.** `mayfly-fake-github` (GH-01) implements
    `doc/github-scaleset.md` and the GH-00 captures, never upstream's tests, test server or
@@ -70,3 +72,23 @@ required in this case let's add it".
   credential-bearing component.
 - Ignore the reference and work only from captures: slower, and loses the reference's evidence on
   retries, refresh and error classes.
+
+## Amended 2026-11-11 (owner, PLAN-01 and GH-00R): public evidence first, with its strength
+
+**Context.** The owner decided on 2026-11-11 to settle the spec from public evidence before any
+live session, and to shrink GH-00 to the live remainder recorded in HW-02's session. Public
+issues hold real responses of the service; a reference client's code holds only what it sends
+and tolerates.
+
+**Decision.** Each fact in `doc/github-scaleset.md` carries its evidence strength and a citation:
+**server-observed** (a public source shows the service's own response), **client-assumed** (what
+a reference client sends, expects or tolerates) or **doc-stated** (GitHub's documentation, or a
+GitHub maintainer's written statement); **[open: HW-02]** marks what no public source settles.
+Where this record says "until GH-00's capture settles it", read "**until it is
+server-observed**": a client-assumed or open fact stays a named assumption, a fake knob and a
+test name. The reading rule is unchanged: inspect, never port; a payload quoted in an issue is
+evidence, never a fixture (HW-02 records its own). Sources are pinned (repositories by commit,
+issues by number and the date of the comment, documentation by page and the date read).
+
+**Consequences.** GH-00R applied it (spec §1–§13, `formal/scaleset.qnt`'s A1–A6); GH-00's
+capture raises an item to server-observed by committing its fixture.

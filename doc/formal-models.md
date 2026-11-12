@@ -104,7 +104,7 @@ then, a model's task records the one it tried.
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal (plan §10, dm §11.3, ADRs 0025, 0026, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation | KER-07 |
 
 | registration | `formal/registration.qnt` | two attempts' `RunnerRegistration` streams, policies P9–P14 around them (mint, delivery and its online confirmation, issue unknown and the reaper, deregister before stop, the busy race, presumed leaks) and GitHub's runner list with a foreign runner of our name shape (dm §6.5, ADRs 0029, 0038, `doc/github-scaleset.md` §6–§7) | `i19OnlyJournaledIdsDeregistered`, `i19NameIssuedOnce`, `noRemintAfterUnknown`, `i20SettledOrOnReaperList`, `deregisterBeforeStop`, `i21BusyCancelsRetirement`, `i22IssuedAndDeliveredOnce`, `issueUnknownLeavesOnlyOnObservation` | `step`, `raceStep` | 8 steps for `step`, 12 for `raceStep` | about 5 min for `step`, 1.5 min for `raceStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-09); simulation about 80 s and 20 s per seed; at DEC-06F, with `requestQuarantineStop` (re-keying a pending retirement), 244 s for `step` and 145 s for `raceStep`, simulation 80 s and 17 s per seed (`formal-verify --model registration`, beside a `quint test` run) | KER-09, DEC-06F |
-| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted) (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation | KER-06 |
+| scaleset | `formal/scaleset.qnt` | one pool's `ScaleSet` stream, the listener that polls, records, acquires and acks for it, and GitHub's side: jobs, the message queue with its batch cap and redelivery until delete, sessions with expiry, a lost create and 409s escalated, message ids that restart (A1 refuted, recovered), both assignment flows (github.com's direct assignment capped by the advertised `maxCapacity`, GHES's offers and acquire), runners and the trust gate of ADR 0090, a dormant scale set deleted and re-created (plan §7.2, dm §6.1, ADRs 0024, 0027, 0028, 0029, 0090, `doc/github-scaleset.md` §3–§6) | `i12RecordBeforeAck`, `noDoubleReservationPerRequest`, `i23AcquireBelowDeliverable`, `i32TrustedOnly`, `desiredFromLatestStatistics`, `i07WireWithinDeliverable`, `heldAcquiresNothing`, `messageAppliesOnce`, `acquireUnknownLeavesOnlyOnObservation`, `neverStealsASession`, `redeliveryAppliesNothing`, `a1RefutationIsFlagged`, `persistentConflictsAreFlagged`, `vmOnlyForAJobClassifiedTrusted`, `refusedJobNeverGetsAVm`, `assignedJobsClassified`, `cancelOnlyRefused` | `step`, `messageStep` | 6 steps each | about 2.7 min for `step`, 1.6 min for `messageStep` (Apalache, run two at a time beside another lane's run; 4-CPU sandbox, measured at KER-06F); depth 8 found nothing through state 7 of either relation but took over an hour, one state-8 invariant alone more than 15 min; simulation about 1 min per seed and relation; at GH-00R, with both flows, runners, the trust gate and dormant re-creation, 512 s for `step` and 274 s for `messageStep` (two at a time, beside another lane's build), and after the review's fixes (bounded releases, the release window, the operator release, the duplicate rule) 565 s and 284 s; with the owner's decisions of 2026-11-12 (the run lookup, `pending`, the cancel option, `cancelOnlyRefused`) 272 s and 159 s (the pending gate prunes runner starts); after the final review (`cancelOnlyRefused` reading the truth, a new assignment classified afresh, the `IGNORE_PENDING` and `CANCEL_ANY` mutants) 322 s and 203 s; simulation about 85 s per seed and relation | KER-06, GH-00R |
 | event_store | `formal/event_store.qnt` | the journal (stream heads, histories, the identity registry, receipts with intent digests and refusals bound to every stream read, the inbox, stream epochs), units of work judged in the port's reporting order and committed in one step or as split transactions with head locks in `StreamId` order and recorded waits, the `AggregateStore` write path (its epoch check and receipt read as one step or with another writer between them), the after-commit kick and a crash before it, the directive relay as a durable consumer (marks, checkpoints, fenced leases, workers), and the online rebuild's shadow generation, dual writes and cutover fence (event-store §7.3, ADRs 0034, 0041) | `ES_I1_atomicUnit`, `ES_I2_streamOrder`, `ES_I3_independentStreams`, `ES_I4_globalEventIdentity`, `ES_I5_commandIdentity`, `refusalReplayedAtSameRevision`, `ES_I6_messageIdentity`, `ES_I7_historyPreservation`, `ES_I11_rebuildEquivalence`, `ES_I12_epochSafety`, `replayWithinEpoch`, `ES_I14_durableDelivery`, `ES_I15_noSkip`, `ES_I16_lockOrder`, `directivesFromJournal`, `reactorsNeverReplayed` | `step`, `implStepSerial`, `relayStep`, `storeOnlyStep`, `deliveryOnlyStep` | 3 steps for `step` and `implStepSerial`, 4 for `relayStep` and `storeOnlyStep`, 8 for `deliveryOnlyStep` | about 12 min for `step`, 12 min for `implStepSerial`, 3.7 min for `relayStep` (re-run at ES-05F with `retire`, which ES-05 added to these three relations: no violation; `step` and `relayStep` two at a time, then `implStepSerial`, beside another lane's builds, 4-CPU sandbox), 78 min for `storeOnlyStep`, 42 min for `deliveryOnlyStep` (Apalache, two runs at a time beside another lane's builds; 4-CPU sandbox, measured at ES-06F, after the model gained `request`, `decide`, `rawRefusal` and intent 3: `step` and `implStepSerial` took 4 min at ES-06); `storeOnlyStep` at depth 5 had not finished checking its fourth state after 40 min, and depth 4 of `step` took 23 min at ES-06: checking the 31 invariant conditions at the last state is most of it; simulation about 3 min per seed and relation (300 traces of 50 steps of `step` ran at 30 traces per second) | ES-06, ES-06F, ES-05F |
 | image_store | `formal/image_store.qnt` | one image base on one host as the data plane's image store keeps it (ADR 0087): its registry entry and state machine (Reserved, Cloning, Customizing, Verifying, Ready, Retiring, Quarantined), the VM Tart lists under its name, job clones and the clone intents recorded before them, a crash between any two steps with recovery by observation, and the writers mayfly does not control (a foreign VM under the name, a look-alike in the base's place, a modified disk) | `cloneAllowedOnlyWhenOwnedReadyIntact` (CloneAllowed ⇒ Owned ∧ Ready ∧ IntegrityValid), `deleteAllowedOnlyWhenOwnedStoppedFree` (DeleteAllowed ⇒ Owned ∧ Stopped ∧ NoUnresolvedDependents, never Quarantined), `clonesRecorded` | `step` | 10 steps | 9 s, then 12 s for the stage once `recoverStop` and the Quarantined guard joined, 9 s once eviction became two steps (Apalache, beside another lane's build; 4-CPU sandbox, measured at DP-07); simulation about 32 s per seed of 5000 traces of 50 steps | DP-07 |
 
@@ -585,7 +585,8 @@ demand; `initWith` keeps every pool `EXACT` for the scenarios. DEC-06's tests:
 `carveMonotoneDemandTest` (`carveMonotone`'s properties for `DEMAND` with every fixed number of
 waiting jobs, and the later pool carved at least what `EXACT` carves it),
 `demandFixesThe13GiBCaseTest` (S1 and S2), `demandStarvesWhenDemandIsInvisibleTest` (sustained
-load seen only through `maxCapacity`: the risk GH-00 item 6 decides) and
+load seen only through `maxCapacity`: the real behaviour, since GitHub assigns nothing to a
+scale set advertising 0, `doc/github-scaleset.md` §5) and
 `demandLetsTheLaterPoolInTest` (the state machine: an idle `DEMAND` Linux pool keeps nothing and
 the macOS pool is carved and admitted, where `EXACT` carves it nothing).
 
@@ -861,45 +862,74 @@ report `noRemintAfterUnknown`; dropping the "not leaked" guard of delivery makes
 
 ### scaleset
 
-One pool's scale set. The world is GitHub: each job's status (`jobs`: available, acquired,
-running, done), the job events not yet in a message (`buffer`), the messages it emitted (`msgs`,
+One pool's scale set. The world is GitHub: which flow it runs (`directFlow`, fixed per trace:
+`init` is `initAcquire` or `initDirect`), the `maxCapacity` it received on the last poll
+(`ghMax`), the scale set's id (`ghSetGen`), mayfly's runners that have no job yet (`idle`), each
+job's status (`jobs`: available, assigned to the set by an acquire or directly, running, done), the job events not yet in a message (`buffer`), the messages it emitted (`msgs`,
 ids increasing, each with the statistics of its moment), the unacknowledged ones (`queue`,
 redelivered until deleted) and the live session (`ghSession`). The journal is the stream's state
 (`ss`: phase, live and stale session, cursor, latest statistics, capacity input, desired, the
 pending and acquired reservations, drift) and the inbox receipts (`inbox`, keyed `(session,
 message)`); the listener holds at most one message. Three jobs start available, two trusted and
-one `pull_request_target`; the first batch holds two offers (`CAP = 2` stands for the service's
-50), the third waits, so the backlog is truncated.
+one `pull_request_target`. In the acquire flow (GHES) the first batch holds two offers (`CAP = 2`
+stands for the service's 50), the third waits, so the backlog is truncated; in the direct flow
+(github.com) nothing is offered and GitHub assigns jobs to the set (`ghAssigns`) while fewer than
+`ghMax` are assigned, so a poll advertising 0 gets nothing assigned (the cap ADR 0069's `demand`
+starves on, `doc/github-scaleset.md` §5).
 
 `poll` answers the oldest unacknowledged message (a recorded one whose ack was lost included);
-`record` is `RecordMessage`: the receipt; a message at or below the session's floor (the cursor
-at its open) applies nothing, and unless it is the stream's last record redelivered as the
-session's first message it degrades the session (A1 refuted); any other message applies its
+`record` is `RecordMessage`: the receipt (a duplicate only when the receipt exists and the id is
+the cursor's, since only the cursor can be redelivered within a session; a reused id with a
+receipt is not one); a session's first message strictly below its floor
+starts a new numbering (`MessageIdsRestarted`: applied as new, cursor and floor restart from it);
+any other message at or below the floor (the cursor at its open) applies nothing, and unless it
+is the stream's last record redelivered as the session's first message it degrades the session
+(A1 refuted); any other message applies its
 statistics if its id is above the cursor, then the batch folded in arrival order through
 `itemStep`, where an offer goes through `offerStep` (`demand::decide_offer`: tier, no second
 reservation, held modes and a degraded session, then the budget `assigned + open reservations <
-deliverable`) and `JobStarted`/`JobCompleted` release a reservation; `ack` deletes after the record (a lost ack leaves it queued); `acquireCall` acquires
-the pending ids still available while open (a lost answer leaves them pending). GitHub's side
-adds `JobAssigned` for each acquisition, starts runners, finishes jobs, requeues an acquired job
-as canceled-then-offered under the same request id (reassignment, the harder case), and sends
-unknown types, and once (`idsRestart`, A1 refuted) numbers a later session's batch from 1 again.
+deliverable`), a `JobAssigned` not acquired by mayfly is classified (`assignedStep`: trusted, or
+refused, `AssignedJobRefused`), and `JobStarted`/`JobCompleted` release a reservation, a
+classification and a refusal; `ack` deletes after the record (a lost ack leaves it queued); `acquireCall` acquires
+the pending ids still available while open (a lost answer leaves them pending); `startVm`
+starts a runner only for a job classified trusted that waits for one (acquired, or assigned and
+classified), never more idle runners than such jobs, never while a job is pending its run
+lookup or refused (ADR 0090, owner 2026-11-12), and only while open and active; `lookupRun`
+classifies a pending assignment from its workflow run (a failed lookup refuses);
+`cancelRun` (with `cancel_refused_runs`, chosen per trace by `initDirectWith`) asks GitHub to
+cancel a refused run once, its effect and its answer each possibly lost; `assignmentExpires` lapses a refusal or
+a classification after the release window (A7: the window outlasts GitHub's releases, so the
+job is no longer assigned) and `operatorReleasesRefusal` lifts a refusal GitHub no longer
+holds. GitHub's side
+adds `JobAssigned` for each acquisition, lets a runner take any job assigned to the set
+(`runnerStarts`: runners are interchangeable), finishes jobs, releases an assigned job no runner
+took as canceled and requeues it under the same request id (offered again in the acquire flow,
+assigned again in the direct one), failing it at the third release (`released`,
+`MAX_RELEASES`), and on github.com may send a `JobCompleted` that names no job (`named` false,
+[open: HW-02]), sends unknown types, once (`idsRestart`, A1 refuted, with no
+message of the old numbering queued) numbers a batch from 1 again, and once deletes a scale set
+no session holds (`dormantDeleted`: its queue and idle runners go, its assigned jobs return to
+GitHub's queue).
 Sessions end on their own (`sessionEnds`: an expired token, or an abandoned session timing
 out), are lost by the listener (`sessionLoss`) or a restart, deleted only when journaled
-(`deleteStale`), and re-opened (`openSession`: a 409 while another lives, counted and escalated
+(`deleteStale`), re-created after a dormant deletion (`recreateScaleSet`: the create answered
+404, so `ensure` journals the new id, the numbering starts afresh and the old set's reservations,
+classifications and refusals are dropped on that observation), and re-opened (`openSession`: a 409 while another lives, counted and escalated
 at `CONFLICT_LIMIT` in a row, else the new session's initial statistics recompute desired and
 the cursor becomes its floor); `openLost` leaves a session mayfly has no record of. `applyCapacity` is `ApplyCapacity` with a mode: open, paused, draining or safe;
 `journalToggles` makes the journal unwritable, which stops polling. `step` offers every stimulus;
 `messageStep` is the biased relation without session churn, capacity changes or outages, so a
 walk goes deep into redelivery, lost acks and acquire answers, truncation and reassignment.
 
-The model states the safe side of six facts `doc/github-scaleset.md` §12 leaves to GH-00, named
-A1–A6 in its header: ids increase per scale set across sessions and a message may be redelivered
-in a later session, oldest first; a message at or below a session's floor applies nothing, and
-one A1 does not explain degrades the session (A1); a message's statistics may not count mayfly's
+The model states the safe side of six facts `doc/github-scaleset.md` leaves client-assumed or
+[open: HW-02] (GH-00R), named A1–A6 in its header: within a numbering ids increase and a message
+may be redelivered in a later session, oldest first; a message at or below a session's floor
+applies nothing, a session's first message strictly below it starts a new numbering, and any
+other A1 does not explain degrades the session (A1); a message's statistics may not count mayfly's
 latest acquisitions, so the budget counts every open reservation on top (A2); a 409 on create
 backs off, persistent 409s are escalated, and only a journaled session is deleted (A3); acquire
 answers a subset and a lost answer leaves its ids pending (A4); an unclassifiable offer is
-declined (A5); a message emitted before an open and recorded after it cannot be told from a newer
+declined, an unclassifiable assignment refused (A5); a message emitted before an open and recorded after it cannot be told from a newer
 one, so statistics are ordered by message id only and such a message's older statistics apply
 until the backlog is consumed (A6).
 
@@ -928,8 +958,17 @@ statistics' floor
 (`should_apply_statistics_when_only_a_newer_message_without_statistics_was_recorded`); the model's
 messages all carry statistics, so the aggregate keeps the floor apart from the cursor.
 
-Coverage of the bounded run: both relations start from `init`, an Active session whose first
-message is queued, not from `Ensured`. At 6 steps `step` reaches the crash before a record and
+Coverage of the bounded run: both relations start from `init`, an Active session in either flow
+(the acquire flow's first message queued, or the direct flow with nothing yet), not from
+`Ensured`. The simulation of GH-00R's first draft found that a dormant deletion changes GitHub's
+count with no message, so `quiescent` now also requires the journaled scale set to be GitHub's.
+The review of GH-00R found two more: a reused id whose `(session, id)` receipt existed was
+dropped as a duplicate (now a duplicate needs the cursor's id), and `quiescent` never held again
+after a restart (it now requires every reused id recorded and applied as new, `reusedIgnored`
+false: a restart read as a redelivery or degraded is the operator's, not a convergence). Its
+final review added a ghost for `cancelOnlyRefused` that reads the truth, and the simulation then
+found a stale refusal surviving a job's reassignment (a release naming no job, then a new
+assignment): a new assignment now replaces the earlier classification. At 6 steps `step` reaches the crash before a record and
 the reopen that records it (poll, restart, delete, open, poll, record) and the 409 escalation
 (restart, delete, lost create, two 409s), but not a redelivery after a lost ack in a new session
 (8 steps) nor the A1 refutation (9); `messageStep` has no session churn at all. Those paths are
@@ -943,8 +982,12 @@ covered by the deterministic tests above and by simulation (50 steps), not by Ap
 | `i32TrustedOnly` | I32: only offers the pool's tier admits are reserved | `tests/demand.rs::should_decline_untrusted_and_unclassifiable_offers_when_the_pool_is_trusted`, `tests/scaleset/rules.rs::should_decline_untrusted_offers_when_a_message_is_recorded` |
 | `desiredFromLatestStatistics` | desired = min(deliverable, `totalAssignedJobs`) of the applied statistics (never a count of messages, never plus running jobs), and the applied statistics are GitHub's own once the stream has seen everything GitHub emitted (A6) | `tests/demand.rs::should_take_demand_from_statistics_when_a_batch_shows_fewer_jobs_than_assigned` (mutant 5), `should_not_add_running_jobs_when_desired_is_computed` (mutant 6); `tests/scaleset/rules.rs::should_keep_newer_statistics_when_an_older_message_is_recorded`, `should_recompute_desired_from_initial_statistics_when_a_session_opens`, `should_stay_within_deliverable_when_a_message_emitted_before_the_open_is_recorded_after_it`; the model (`OPEN_WINS`) |
 | `redeliveryAppliesNothing` | A1: a message recorded in an earlier session and redelivered applies nothing again (no statistics, plan, release or drift) | `tests/scaleset/rules.rs::should_apply_nothing_when_a_message_from_an_earlier_session_is_redelivered`, `should_count_no_drift_again_when_a_redelivered_message_carries_unknown_types`; the model (`REAPPLY`) |
-| `a1RefutationIsFlagged` | a message emitted anew under an id at or below the session's floor is never dropped silently: the session is degraded (except a restarted id equal to the floor as the session's first message, which reads as the redelivery) | `tests/scaleset/rules.rs::should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor` |
+| `a1RefutationIsFlagged` | a message emitted anew under an id at or below the session's floor is never dropped or applied silently: a session's first message below the floor starts a numbering recorded as `MessageIdsRestarted`, any other degrades the session (except a restarted id equal to the floor as the session's first message, which reads as the redelivery) | `tests/scaleset/rules.rs::should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor` (the degrade branch; the aggregate still degrades on a session's first message too until KER-06G), the model (`a1RestartIsRecoveredTest`, `a1RefutedMidSessionDegradesTest`) |
 | `persistentConflictsAreFlagged` | A3: `CONFLICT_LIMIT` creates in a row answered 409 are escalated to the operator | `tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict` |
+| `vmOnlyForAJobClassifiedTrusted` | ADR 0090: a runner starts only for a job mayfly classified trusted that waits for one, never more idle runners than such jobs | the model (`assignedUntrustedJobIsRefusedTest`, mutant `RUN_ASSIGNED`); the aggregate and the reconciler in KER-06G |
+| `refusedJobNeverGetsAVm` | ADR 0090 (owner, 2026-11-12): no runner starts while a job mayfly saw assigned and did not classify trusted is still assigned | the model (`assignedUntrustedJobIsRefusedTest`, mutants `RUN_ASSIGNED` and `IGNORE_REFUSALS`); KER-06G |
+| `assignedJobsClassified` | ADR 0090 and I32 for assignments: no untrusted assignment accepted, and each one seen and not released is pending its lookup or refused, a journaled fact | the model (mutant `RUN_ASSIGNED`, `failedLookupRefusesTest`); KER-06G, GH-10 |
+| `cancelOnlyRefused` | ADR 0090: a run is cancelled only with `cancel_refused_runs`, and only for a job that is truly untrusted or whose lookup failed | the model (`cancelledRefusedRunReleasesTheHoldTest`, `failedCancelFallsBackToTheWindowTest`, mutant `CANCEL_ANY`); GH-10 |
 | `i07WireWithinDeliverable`, `heldAcquiresNothing` | I07 and ADR 0029: the wire max never exceeds deliverable and is 0 while draining or in safe mode; nothing is planned or acquired while paused, draining or in safe mode, nor planned while the session is degraded (P21); no poll while the journal is unwritable | `tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`, `should_acquire_nothing_when_paused_draining_or_in_safe_mode`, `should_acquire_nothing_when_the_session_is_frozen`; `tests/scaleset/rules.rs::should_acquire_nothing_and_send_the_mode_wire_max_when_held`, `should_plan_no_offer_when_the_session_is_degraded_or_closing` |
 | `messageAppliesOnce` | I13 for demand: a message applies once per receipt | the model (mutant 7); the receipt store's inbox dedupe (ES-01) |
 | `acquireUnknownLeavesOnlyOnObservation` | a pending acquisition leaves only on an acquire answer or a job fact | `tests/scaleset/rules.rs::should_keep_acquisitions_pending_when_no_observation_names_them` |
@@ -957,12 +1000,23 @@ Tests (`quint test`, all deterministic): `acquireWithinDeliverableTest`,
 `declinedPastDeliverableAndTierTest`, `truncatedBacklogDemandFromStatisticsTest`,
 `redeliveryAfterLostAckIsDuplicateTest`, `redeliveryInNewSessionReservesOnceTest`,
 `crashBeforeRecordThenReopenConvergesTest`, `changeAfterOpenReachesDesiredTest`,
-`redeliveryCountsNoDriftTwiceTest`, `a1RefutedDegradesTheSessionTest`,
-`a1RefutedAtTheFloorReadsAsARedeliveryTest`, `persistentConflictsEscalateTest`,
+`redeliveryCountsNoDriftTwiceTest`, `a1RestartIsRecoveredTest`,
+`a1RefutedMidSessionDegradesTest`, `a1RefutedAtTheFloorReadsAsARedeliveryTest`, `persistentConflictsEscalateTest`,
 `degradedSessionPlansNothingTest`, `sessionConflictBacksOffTest`, `sessionExpiryReopensWithInitialStatisticsTest`,
 `unknownTypesDegradeTheSessionTest`, `drainSendsZeroAndAcquiresNothingTest`,
 `pauseSendsRunnersAndAcquiresNothingTest`, `safeModeRecordsButNeverAcquiresTest`,
-`requeuedJobIsReservedOnceAgainTest`, `lostAcquireAnswerStaysPendingTest`, and the curated
+`requeuedJobIsReservedOnceAgainTest`, `lostAcquireAnswerStaysPendingTest`, GH-00R's
+`directAssignmentNeedsAdvertisedRoomTest`, `assignedUntrustedJobIsRefusedTest`,
+`runnerMayTakeAJobAssignedAfterItStartedTest` (the limit ADR 0090 names: a runner started for a
+trusted job takes an untrusted job assigned after it; `g.untrustedRan` is a ghost, not an
+invariant), `dormantScaleSetIsRecreatedTest`, the progress scenarios
+`refusedJobFailsThenTrustedJobRunsTest`, `refusalExpiresWhenTheReleaseNamesNoJobTest` and
+`operatorReleasesARefusalTest`, the owner's decisions of 2026-11-12 `failedLookupRefusesTest`,
+`cancelledRefusedRunReleasesTheHoldTest`, `failedCancelFallsBackToTheWindowTest` and
+`reassignedJobIsClassifiedAfreshTest`, the second limit `runnerMayTakeAJobAssignedBeforeItStartedTest`
+(an untrusted job assigned before the runner started but after the last recorded message), and
+`restartWithinASessionDegradesTest` (a reused id with a
+receipt in the same session degrades instead of reading as a duplicate), and the curated
 mutants of verification §9, each an action or a `recordWith` variant kept out of every step
 relation: `mutant4AckBeforeRecordViolatesTest` (`i12RecordBeforeAck`),
 `mutant5CountMessagesViolatesTest` and `mutant6AddRunningViolatesTest`
@@ -970,7 +1024,20 @@ relation: `mutant4AckBeforeRecordViolatesTest` (`i12RecordBeforeAck`),
 `mutant19AcquireEveryViolatesTest` (`i23AcquireBelowDeliverable`, then `i32TrustedOnly`); and
 two model-local mutants of the KER-06 review: `mutantOpenWinsNeverConvergesTest`
 (`desiredFromLatestStatistics`) and `mutantReapplyCountsDriftTwiceTest`
-(`redeliveryAppliesNothing`).
+(`redeliveryAppliesNothing`); and two of ADR 0090: `mutantRunAssignedViolatesTest` (an assigned
+job accepted unclassified: `assignedJobsClassified`, then `vmOnlyForAJobClassifiedTrusted` and
+`refusedJobNeverGetsAVm`), `mutantIgnoreRefusalsViolatesTest` (a runner started beside a
+refused job: `refusedJobNeverGetsAVm`), `mutantIgnorePendingViolatesTest` (a runner started
+while an assignment waits for its lookup: `refusedJobNeverGetsAVm`) and
+`mutantCancelAnyViolatesTest` (a trusted job's run cancelled with the option off:
+`cancelOnlyRefused`, whose ghost reads the job's true class and the option, not the guard).
+
+GH-00R's negative controls in simulation (3000 samples of 40 steps of `messageStep`): `record` as
+`RUN_ASSIGNED`, `startVm` as `IGNORE_REFUSALS` or `IGNORE_PENDING`, and `cancelRun` as
+`CANCEL_ANY` each report a violation within seconds; the correct model reports none under `step`
+or `messageStep` (three seeds of 5000 traces of 50 steps each). The Rust aggregate does not yet have the
+direct flow, the trust gate, the renumbering branch or the re-create: KER-06G, then VER-02's
+driver.
 
 ### event_store
 

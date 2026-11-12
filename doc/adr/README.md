@@ -76,7 +76,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0024](0024-the-data-plane-owns-host-resource-accounting.md) | The data plane owns host resource accounting | Accepted. Amended by 0052 |
 | [0025](0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine keeps evidence and Unknown resolves only by observation | Accepted. Amended by 0076 |
 | [0026](0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Provider instance identity in the ownership proof and an external epoch floor | Accepted. Amended by 0053 |
-| [0027](0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only trust tier in v0.x | Accepted |
+| [0027](0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only trust tier in v0.x | Accepted. Amended by 0090 |
 | [0028](0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only with prepared unregistered VMs | Accepted. Amended by 0048 |
 | [0029](0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration reaper and the wire behaviour of pause, drain and safe mode | Accepted |
 | [0030](0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked into the image with refresh tooling | Accepted |
@@ -89,21 +89,22 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0037](0037-a-per-vm-shim-owns-each-tart-run-process.md) | A per-VM shim owns each tart run process | Accepted |
 | [0038](0038-jit-delivery-through-tart-exec-with-a-checked-guest-identity.md) | JIT delivery through tart exec with a checked guest identity | Accepted |
 | [0039](0039-clones-only-from-local-service-owned-image-bases.md) | Clones only from local service-owned image bases | Accepted |
-| [0040](0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool at organisation scope | Accepted |
+| [0040](0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool at organisation scope | Accepted. Amended 2026-11-11 |
 | [0041](0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | AggregateStore: one write path, intent digests and refusals bound to every read | Accepted |
 | [0042](0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered Unknown, never refused | Accepted |
 | [0043](0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Upgrades jump forward any distance; rollback is one release, deeper rollback restores a backup | Accepted |
 | [0044](0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates mayfly; `mayfly uninstall --purge` removes what it created | Accepted |
 | [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted |
 | [0046](0046-config-schema-v1-reads-raw-toml-secret-references-live-in-the-kernel-exit-codes.md) | Config schema v1 reads raw TOML, secret references live in the kernel, exit codes | Accepted |
-| [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted |
+| [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted. Amended 2026-11-11 |
 | [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted |
 | [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted. Amended by 0066 |
 | [0058](0058-the-secrets-adapter-runs-its-own-commands-the-keychain-through-the-security-cli.md) | The secrets adapter runs its own commands; the Keychain through the security CLI | Accepted |
 | [0064](0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | GitHub client crypto and TLS: aws-lc-rs and rustls, no JWT crate | Accepted |
 | [0066](0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A vanished VM is quarantined as a desync | Accepted. Amended 2026-11-11 |
-| [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted |
+| [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted. Amended 2026-11-11 |
 | [0076](0076-quarantine-stops-deregister-first.md) | Quarantine stops deregister first | Accepted |
 | [0082](0082-jit-configs-on-the-data-plane-and-the-guest-launcher-contract.md) | JIT configs on the data plane and the guest launcher contract | Accepted |
 | [0087](0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: a durable record, a booted base and pull verification | Accepted |
+| [0090](0090-trust-on-github-com-every-assigned-job-s-run-looked-up-before-a-runner.md) | Trust on github.com: every assigned job's run looked up before a runner | Accepted. Amended 2026-11-12 |
 | [0091](0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition: one run per session, its configuration and identity | Proposed |

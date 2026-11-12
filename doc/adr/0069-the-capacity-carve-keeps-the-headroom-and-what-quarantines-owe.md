@@ -7,7 +7,8 @@ Date: 2026-11-10
 Accepted (owner, 2026-11-10), with both policies: `EXACT` (KER-05D) and `DEMAND` (DEC-06), per
 pool, the default `exact` until GH-00 answers `doc/github-scaleset.md` §12 item 6. Refines the
 capacity policy of ADR 0024 (the control plane's allocation within the data plane's report);
-the data plane's accounting is unchanged.
+the data plane's accounting is unchanged. Amended 2026-11-11 (owner, GH-00R): the evidence
+says the header caps assignment; `demand` stays, an explicit opt-in marked experimental.
 
 ## Context
 
@@ -56,6 +57,7 @@ resolves it (ADR 0025), so the double count lasted as long.
    pool were `EXACT`. **It depends on an unverified fact**: if `X-ScaleSetMaxCapacity` caps
    `totalAssignedJobs` (`doc/github-scaleset.md` §12 item 6), a pool carved nothing never sees
    its job and starves (U1 fails). So the default stays `"exact"` until GH-00 answers item 6.
+   (*Public evidence says it caps it at 0: see the amendment of 2026-11-11.*)
    The key is per pool, not per host: what matters is what each earlier pool holds back, so the
    operator relaxes exactly the pool whose idle headroom starves the others (in the 13 GiB case,
    the macOS pool), and each pool's keep still depends only on its own inputs. The key is
@@ -112,3 +114,24 @@ Options (carve-outs as (macOS, Linux), §6.3.1):
 The other rows of the table: their failures are checked in `formal/scheduling.qnt`
 (`carvePoliciesTest`, `sustainedLoadTest`). An explicit pool priority in place of name order
 was not explored: it reorders who waits and changes nothing above.
+
+## Amended 2026-11-11 (owner, GH-00R): `demand` stays, experimental
+
+**Context.** Decision 3 rested on whether `X-ScaleSetMaxCapacity` caps `totalAssignedJobs`
+(`doc/github-scaleset.md` §12 item 6, now §5). Public evidence says it does, at least at 0: a
+GitHub maintainer closed ARC #3446 on 2025-07-01 with "the back-end would not assign jobs to the
+scale set anymore if the capacity is 0" (doc-stated); and on github.com scale sets advertising
+0 kept `totalAssignedJobs` at 0 and received no message for matching queued jobs over 100 s,
+while advertising 1 got the job assigned and counted (scaleset #133, 2026-09-30,
+server-observed). That is the world of `formal/scheduling.qnt`'s
+`demandStarvesWhenDemandIsInvisibleTest`: a `demand` pool carved 0 never sees its job.
+
+**Decision.** `exact` stays the default. `demand` stays, as an **explicit, experimental
+opt-in**: a pool gets it only by `capacity_policy = "demand"` in config, documented as
+experimental and as able to starve the pool when its carve-out reaches 0; nothing turns it on by
+default. The model's starvation test is the real behaviour and is kept. HW-02 measures what lies
+beyond 0 (spec §12 item 3: whether `totalAvailableJobs` counts a job held back by 0, and what
+lowering the header does), which decides whether any `demand` variant can see waiting jobs.
+
+**Consequences.** The config documentation (`mayfly_composition::config::CapacityPolicy`, plan
+§9) marks `demand` experimental; no code path changes.

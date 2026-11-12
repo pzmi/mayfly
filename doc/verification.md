@@ -349,11 +349,16 @@ chooses. Its output formats follow the Tart release pinned in the Tart JSON fixt
 An HTTP server implementing [`doc/github-scaleset.md`](github-scaleset.md): the auth chain
 (installation token, registration token as an auth step only, runner-registration; ADRs 0028
 and 0048), the scale-set endpoints (scale set CRUD, session create, refresh and
-delete, long-poll messages with redelivery until delete, the 50-message cap, statistics, acquire,
-JIT config) and the runner endpoints (list, get and delete runners), built from that spec and the
-GH-00 capture. Fault
-knobs per endpoint: status override (401, 403, 429 with `Retry-After`, 5xx), dropped response
-after the effect, session expiry, latency. A control API under a reserved prefix scripts the job
+delete, long-poll messages with redelivery until delete, the 50-message cap, statistics, both
+assignment flows: github.com's direct `JobAssigned` capped by the advertised `maxCapacity` and
+GHES's offers with acquire and `acquirablejobs`, release and requeue of an assigned job, JIT
+config, dormant deletion of a scale set), the runner endpoints (list, get and delete runners, 204
+also for an absent one) and the REST workflow-run lookup and cancel of ADR 0090's per-job check,
+built from that spec as GH-00R settled it. Each behaviour the spec marks client-assumed or
+[open: HW-02] is a named knob until it is server-observed (ADR 0048, amended 2026-11-11). Fault
+knobs per endpoint: status override (401, 403, 429 with `Retry-After`, 5xx), the session conflict
+and expired exceptions, a 200 with an empty body, 429 `ConfigureTooManyRunnersException`, a
+restarted message numbering, dropped response after the effect, session expiry, latency. A control API under a reserved prefix scripts the job
 queue (queue, cancel, reassign) and dumps its state as JSON for the fault lab's observer. Wire
 shapes come from the spec, which cites where each was verified; nothing is taken from the
 reference client's tests or test server (ADR 0048).

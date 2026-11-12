@@ -47,7 +47,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0024](adr/0024-the-data-plane-owns-host-resource-accounting.md) | The data plane accounts for and enforces host resources (memory, disk, macOS-guest slots incl. foreign VMs), refuses directives that do not fit and reports capacity; the control plane allocates only within reported capacity (OD4). Amended by 0052. | Accepted |
 | [ADR 0025](adr/0025-quarantine-keeps-evidence-and-unknown-resolves-only-by-observation.md) | Quarantine whenever ownership or an outcome cannot be proven; never auto-delete a quarantined VM; capacity loss accepted; `Unknown` resolves only by re-observation, no operator assertion (OD9, OD10). | Accepted |
 | [ADR 0026](adr/0026-provider-instance-identity-in-the-ownership-proof-and-an-external-epoch-floor.md) | Ownership proof includes the provider instance id (random MAC per clone, re-observed before delete); external epoch floor in `TART_HOME` (OD6, OD7). Amended by 0053. | Accepted |
-| [ADR 0027](adr/0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only tier in v0.x; untrusted offers declined before acquire; `allow_untrusted_prs` refused (OD3). | Accepted |
+| [ADR 0027](adr/0027-trusted-only-trust-tier-in-v0-x.md) | Trusted-only tier in v0.x; untrusted offers declined before acquire; `allow_untrusted_prs` refused (OD3). Partly superseded by 0090: classify-before-acquire on GHES only. | Accepted |
 | [ADR 0028](adr/0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only, no classic mode; only prepared, unregistered VMs ahead of demand, no registered standby (OD18, OD8). Amended by 0048 (registration token as an auth-chain step only; accepted by the owner, 2026-11-10). | Accepted |
 | [ADR 0029](adr/0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration aggregate and reaper; `maxCapacity` and acquisition under pause, drain and safe mode (OD11, OD15). | Accepted |
 | [ADR 0030](adr/0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked in, self-update off, breaker on expiry, `mayfly image refresh` (OD12). | Accepted |
@@ -60,20 +60,21 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0037](adr/0037-a-per-vm-shim-owns-each-tart-run-process.md) | A per-VM shim (`mayfly vm-shim`) owns each `tart run`; re-adoption on start; stop only via `tart stop` (OD1). | Accepted |
 | [ADR 0038](adr/0038-jit-delivery-through-tart-exec-with-a-checked-guest-identity.md) | JIT over `tart exec -i` stdin to the exact VM after the lock-PID and instance-id checks; GitHub confirms the runner online; no SSH (OD5). | Accepted |
 | [ADR 0039](adr/0039-clones-only-from-local-service-owned-image-bases.md) | Never pull at job time; clones only from local service-owned bases; `mayfly image refresh <pool>` (OD13). | Accepted |
-| [ADR 0040](adr/0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool, organisation scope, never deleted automatically (OD14). | Accepted |
+| [ADR 0040](adr/0040-one-scale-set-per-pool-at-organisation-scope.md) | One scale set per pool, organisation scope, never deleted automatically (OD14). Amended 2026-11-11 (owner, GH-00R): enterprise scope unsupported (no App auth there); several organisations next (GH-07). | Accepted |
 | [ADR 0041](adr/0041-aggregatestore-one-write-path-intent-digests-and-refusals-bound-to-every-read.md) | `AggregateStore`'s write path; refusal receipts bound to every stream the decision read; `CommandBody` with a canonical intent digest; derived event ids; `ARCH-single-append`. Amends 0034 (E3). | Accepted (owner, 2026-11-09) |
 | [ADR 0042](adr/0042-a-frame-of-an-older-session-is-answered-unknown-never-refused.md) | A frame of an older session is answered `Unknown`, never refused (amends plan §3.2's `stale_epoch`). | Accepted (owner, 2026-11-09) |
 | [ADR 0043](adr/0043-upgrades-jump-forward-any-distance-rollback-is-one-release-deeper-rollback-restores-a-backup.md) | Forward upgrades of any distance (upgrade matrix from every release); rollback one release; deeper rollback restores the pre-migration backup (`mayfly restore`); older build refuses writes on newer streams; deep-rollback recovery quarantines what it cannot prove (OD2). | Accepted (owner, 2026-11-09) |
 | [ADR 0044](adr/0044-homebrew-distributes-and-updates-mayfly-mayfly-uninstall-purge-removes-what-it-created.md) | Homebrew distributes and updates; no self-update; `brew uninstall` removes the program; `mayfly uninstall --purge` removes what mayfly created, with ownership proof (P1, P3). | Accepted (owner, 2026-11-09) |
-| [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). | Accepted (owner, 2026-11-09) |
-| [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Amends 0028 (registration token as an auth-chain step only; accepted 2026-11-10). | Accepted (owner, 2026-11-10) |
+| [ADR 0045](adr/0045-the-github-app-permission-list-is-a-published-commitment.md) | The minimal GitHub App permission list and the reason for each is published; widening needs docs and an ADR first; `doctor` warns on excess (P4; list to be verified by GH-00/HW-02). Amendment proposed 2026-11-11 (GH-00R): the drafted list, organisation "Self-hosted runners: Read and write" only (`doc/github-scaleset.md` §13). | Accepted (owner, 2026-11-09) |
+| [ADR 0048](adr/0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | mayfly writes its own idiomatic Rust Scale Set client, informed by reading `actions/scaleset` (MIT) and copying no code or tests; the protocol is specified in `doc/github-scaleset.md` and pinned by our own fixtures; the fake is built from that spec and GH-00; any copied upstream fragment ships in `THIRD-PARTY-NOTICES`. Amends 0028 (registration token as an auth-chain step only; accepted 2026-11-10). Amended 2026-11-11 (owner, PLAN-01, GH-00R): every fact carries its evidence strength; "until GH-00's capture" reads "until it is server-observed". | Accepted (owner, 2026-11-10) |
 | [ADR 0052](adr/0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | The data plane assumes no fact it does not have: an unknown VM size or guest, or a listing not read yet, makes the dimension unknown; what needs it is refused `capacity_unknown`; `CapacityReported` lists the unknown dimensions with their causes and nothing free; protocol 1.1, compatible. Amends 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0053](adr/0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | `DeleteVm` is "ensure absent" (a complete re-observation without the target is `Done`), `StopVm` of a proven stopped VM is `Done`; a mismatching present target is still refused; an incomplete re-observation is `Unknown{listing_incomplete}`, never `Done`. Amends 0026; amended by 0066. | Accepted (owner, 2026-11-10) |
 | [ADR 0066](adr/0066-a-vanished-vm-is-quarantined-as-a-desync.md) | A `StopVm` or `StartVm` whose recorded VM a complete listing shows absent is refused `target_absent` and the attempt quarantined `vm_vanished_externally` for review (a desync, never read as stopped or lost, not released by the inventory); status and the diagnostics bundle name it; a start refused `proof_mismatch` quarantines too; protocol 1.2, written `proof_mismatch` below. Amends 0053. Amended 2026-11-11 (DEC-07): a recorded VM absent from a complete listing, found by a stop, a start or the inventory, records `VmVanished` and closes the attempt (no quarantine); the `attempts` view's `desync`, the breaker counts it; quarantine only for a present, mismatched VM. | Accepted (owner, 2026-11-10); amended 2026-11-11 (owner) |
 | [ADR 0064](adr/0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | The GitHub client's crypto and TLS: `aws-lc-rs` as the `rustls` provider and for RS256, `rustls-platform-verifier`, `reqwest` 0.13, the App JWT built by hand (no JWT crate). Amends foundation.md §2.4. | Accepted (owner, 2026-11-10) |
-| [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. | Accepted (owner, 2026-11-10) |
+| [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. Amended 2026-11-11 (owner, GH-00R): public evidence says it caps it at 0; `demand` stays an explicit, experimental opt-in. | Accepted (owner, 2026-11-10) |
 | [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
 | [ADR 0087](adr/0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: mayfly's own private `TART_HOME`; a durable, fail-closed registry of the bases it made, kept on the data plane as host evidence; the Reserved → … → Ready → Retiring state machine with recovery by observation; clone only from a revalidated Ready base, never delete a quarantined one; full verification from a raw manifest fetched by digest; signature policy recorded. Amends 0039. | Accepted (owner, 2026-11-11) |
+| [ADR 0090](adr/0090-trust-on-github-com-every-assigned-job-s-run-looked-up-before-a-runner.md) | Trust on github.com, where jobs are assigned with no offer: any plan, public repositories allowed, no runner group required; every assigned job's repository must be configured and its workflow run is looked up ("Actions: Read") before any runner starts; forks, `pull_request_target`, `workflow_run`, `issue_comment`, unclassifiable jobs and failed lookups are refused and journaled; no new runner while one is unclassified or refused and assigned, until it is gone, `refusal_release_window` lapses or the operator releases it; `cancel_refused_runs` ("Actions: Write") and `check_fork_pr_setting` ("Administration: Read") are per-pool and per-organisation options, default off; GHES keeps 0027. Partly supersedes 0027. | Accepted (owner, 2026-11-11 and 2026-11-12) |
 | [ADR 0091](adr/0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition (RT-02): the host id generated once and never replaced, `[images]` required by `mayflyd`, a link that ends is a run that ends (a new run mints the new epoch), the start-up `ReportInventory` sent outside the journal (an exception to ADR 0034), the platform's standard places when the configuration names none (owner, 2026-11-12). | Proposed |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
@@ -91,6 +92,14 @@ controller's, its desync recorded and its attempt closed (ADR 0066's amendment).
 never port, ADR 0048), GH-00 shrinks to the live remainder recorded in HW-02's session, and the
 real-Tart lane becomes one command the owner runs from a terminal (HW-01X, `cargo xtask hw01`;
 `hardware.yml` optional); GH-00R and HW-01X record the dated amendments of ADRs 0048 and 0015.
+Decided on 2026-11-11 (GH-00R): `capacity_policy = "demand"` stays, experimental, since public
+evidence says `maxCapacity` 0 gets nothing assigned (ADR 0069 amended); organisation scope only,
+enterprise unsupported, several organisations next (ADR 0040 amended, GH-07). Decided on
+2026-11-11 and 2026-11-12 (GH-00R, ADR 0090): on github.com the trust boundary is the per-job
+check, with the job's workflow run looked up before any runner starts; any plan and public
+repositories work; refused jobs hold new runners until gone, the release window lapses or the
+operator releases them; cancelling refused runs and the fork-PR setting check are options,
+default off.
 Still planner defaults: the remaining sub-items of **OD20** (socket
 authorisation, audit). Owner items still pending: the branch ruleset (FND-04), the live remainder
 of the scale-set spec (GH-00, in HW-02's session) and the real-Tart report (HW-01).
@@ -218,11 +227,17 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
 | GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02, DEC-03 | sonnet | |
 | GH-03 | Scale Set client and recorded-fixture contract | GH-01, GH-02 | opus | |
-| GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06, CP-04 | opus | |
-| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, CP-05, E2E-01 | sonnet | ⛳ |
+| GH-02H | GitHub transport hardening: service and queue host rule, HTTP/2 health, JIT throttling | GH-02 | sonnet | |
+| KER-06G | `ScaleSet` aggregate follows GH-00R's model: assigned-job classification, numbering restart, scale set re-created | KER-06, GH-00R | opus | |
+| GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06G, CP-04 | opus | |
+| GH-10 | Workflow-run lookup of assigned jobs and the cancel of refused runs | GH-02, KER-06G | sonnet | |
+| GH-08 | Trust on github.com: the trust config, the start-up checks, refusals wired | GH-03, GH-10, KER-06G, RT-01 | opus | |
+| GH-09 | Operator release of a refusal and the refusal release window | GH-08, RT-03 | sonnet | |
+| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, GH-08, CP-05, E2E-01 | sonnet | ⛳ |
+| GH-07 | Several organisations: one scale set per pool per organisation, one App | E2E-02, GH-08 | opus | |
 | LNK-01 | UDS transport and split control/data roles | DP-02, RT-02 | sonnet | |
 | VER-01 | Conformance crate: ITF replay, lifecycle driver | KER-04, FND-06 | opus | |
-| VER-02 | Conformance drivers: scheduling, recovery, scaleset, link, registration | VER-01, CP-04, GH-04, LNK-01, KER-09 | opus | |
+| VER-02 | Conformance drivers: scheduling, recovery, scaleset, link, registration | VER-01, CP-04, GH-04, KER-06G, LNK-01, KER-09 | opus | |
 | VER-03 | Fault lab: controller, history, verdicts, guardrails | E2E-01 | opus | |
 | VER-04 | Fault lab: nemesis, checker, core scenarios (ver §8.4) | VER-03, E2E-02, LNK-01 | opus | ⛳ |
 | VER-05 | Curated mutants (negative controls) and mutation lane | VER-02, VER-04 | sonnet | |
@@ -232,6 +247,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | SEC-01 | Threat model and secret-handling audit | RT-04, DP-05 | opus | |
 | OPS-01 | launchd service and foreground mode, install/uninstall, real `doctor` checks | RT-03 | sonnet | |
 | OPS-02 | Image manifest, `mayfly image verify`, digest pinning | RT-01 | sonnet | |
+| IMG-02 | (Proposed, ADR 0090 amendment) In-guest job-started hook that fails an untrusted job | DP-05, GH-08 | opus | |
 | OPS-03 | Release workflow: macOS binaries, checksums, provenance, SBOM | FND-04, OPS-01 | sonnet | ⛳ |
 | OPS-04 | Runbooks and operator docs | OPS-01, VER-04 | haiku | |
 | OPS-05 | Watchdog, heartbeat metric, distinct exit codes | RT-02, RT-04 | sonnet | |
@@ -460,7 +476,7 @@ replaced; a vanish closes the attempt (ADR 0066's amendment).
 
 #### DEC-06 Record and implement the owner decisions of 2026-11-10 (round 7)
 Cites: plan §6, §9, §11; ver §6; dm §6.3.1, §6.4; ADRs 0024, 0025, 0046, 0064, 0069;
-`doc/github-scaleset.md` §12 item 6. The owner decided on 2026-11-10: (a) ADR 0064: "accept";
+`doc/github-scaleset.md` §12 item 6 (§5 and §12 item 3 since GH-00R). The owner decided on 2026-11-10: (a) ADR 0064: "accept";
 (b) the event store's `storeOnlyStep` depth: "depth 4" (`BOUNDED` unchanged, weekly runs only;
 recorded in `doc/formal-models.md`); (c) ADR 0069 and its `DEMAND` option: "implement both now":
 a per-pool `capacity_policy = "exact" | "demand"` (optional, default `"exact"` until GH-00
@@ -1103,6 +1119,12 @@ the stop (`quarantineDuringPendingRetirementBusyTest`). Accept adds: a component
 quarantined VM's idle runner is deregistered and the VM then stopped, and one in which a busy
 answer keeps it running.
 
+Note (GH-00R): a removal answering 204 means the runner is gone, not that mayfly removed it
+(GitHub's 2022 design record: 204 also for an absent runner), so the outcome is recorded as
+gone; busy is told by `typeName` (400 or 409). Ghost runners (spec §6.3): a runner whose own job
+acquire failed is deregistered by GitHub while its process keeps listening, so a registered VM
+whose runner id reads 404 is retired by mayfly's observation and the attempt's deadline, never
+by waiting for the guest to exit.
 #### CP-06 Breaker, quarantine and Unknown-escalation policies
 Cites: dm P15, P16, P19; ADR 0025. Breaker counting and trips per (pool, digest); quarantine opening
 (ERROR, metric, status), escalation levels T_q1/T_q2 that never act on the VM, no timer and no cap
@@ -1484,6 +1506,13 @@ citation with its strength or an explicit entry in the HW-02 remainder list; no 
 test or payload in the repository (or each listed in `THIRD-PARTY-NOTICES`, ADR 0048); `cargo
 xtask check --only docs` green, and the formal stages and conformance replay when the model
 changed.
+Note (GH-00R, done; review fixes 2026-11-11): the spec carries each fact's strength and citation (§1–§11), §12 is the
+HW-02 remainder (eleven items), §13 the drafted App permission list. Design-changing findings went
+model first into `formal/scaleset.qnt` (both flows, direct assignment capped by `maxCapacity`, the
+trust gate of ADR 0090, a restarted numbering recovered, a dormant scale set re-created) and into
+the cards GH-02H, KER-06G, GH-08, GH-09, GH-10 and GH-07 and the notes on GH-01, GH-03, GH-04, CP-05, SEC-01,
+E2E-02 and VER-02. Ids were already `u64`; in code only doc comments changed (`demand` marked
+experimental, the HW-02 item numbers).
 
 #### GH-01 `mayfly-fake-github`
 Cites: `doc/github-scaleset.md`, ver §7.3, ADRs 0012, 0028, 0040, 0048. An Axum fake built from
@@ -1501,6 +1530,18 @@ HW-02's session). A contract suite for the `ScaleSetApi` and
 disposable organisation (HW-02).
 Accept: its own tests; the contract suite green against the fake, and its own tests prove a
 deliberately broken fake fails it (ver §5); the live run listed as pending (owner).
+Note (GH-00R): the fake serves both flows of spec §6.1, selected per fake: github.com's direct
+assignment (a `JobAssigned` with `runnerRequestId` 0, no offer, nothing assigned beyond the last
+poll's `maxCapacity`, so 0 assigns nothing) and GHES's offers with acquire and `acquirablejobs`
+(200 or 204); release and requeue of an assigned job no runner takes, three times, then failed;
+409 `RunnerScaleSetSessionConflictException` on a second session; a refresh answering 400
+`RunnerScaleSetSessionExpiredException`; a 200 with an empty body; runner removal answering 204
+for an absent runner and 400 or 409 `JobStillRunningException` for a busy one (knob); 429
+`ConfigureTooManyRunnersException` on JIT; dormant deletion of a scale set (404 after); a
+restarted message numbering; and the REST workflow-run lookup and cancel routes of ADR 0090 (a
+run with `head_repository` differing from `repository`, a lookup that fails, a cancel answering
+202, 409 or lost), the fork-PR setting route and the runner-group read of the public-repository
+report (spec §2, §6.2). Each client-assumed or open behaviour is a named knob.
 
 #### GH-02 GitHub App auth and HTTP client
 Cites: `doc/github-scaleset.md` §1, §2, §8, plan §7.1, ADRs 0014, 0033, 0045, 0048. The App JWT
@@ -1533,6 +1574,17 @@ DEC-01: organisation scope (repository scope for tests); scale sets never delete
 Note (GH-02 review): `messageQueueUrl` receives the queue token, so it passes the same rule as the
 Actions service URL and the configured bases (`credential_base_problem`: https, or http only to
 loopback; no query, fragment or user info) before any call, refused as protocol drift otherwise.
+Note (GH-00R): classify errors by `typeName` only, never by status (spec §2); a refresh answering
+`RunnerScaleSetSessionExpiredException` is a lost session, created anew, never refreshed again;
+a 200 whose body is empty or undecodable is a transient poll failure (no record, no ack); a
+remove answering 204 is "gone", not proof that mayfly removed it; a create or read answering 404
+for the journaled scale set reports it gone (KER-06G re-creates it); `JobAssigned` decodes with
+`runnerRequestId` 0 and its classifying fields (repository, owner, event, labels) as optional,
+missing meaning unclassifiable; on GHES, after a session opens with available or assigned jobs in
+its statistics, list `acquirablejobs` and hand them to the domain as offers (spec §6.1). Fixture
+cases add: session expired on refresh, 200 with empty body, 204 for an absent runner, a busy
+runner at 400, direct assignment with request id 0. The listener's duplicate check follows
+KER-06G: a receipt counts as a duplicate only for the cursor's id.
 
 #### GH-04 Listener use case
 Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §6, §9 (ADR 0048). Poll → record
@@ -1549,6 +1601,109 @@ false after a refusal. The listener acks a refused message once `save` answered
 `Outcome::Refused` (the refusal receipt committed), never by `inbox_contains`; a redelivery after
 a lost ack is answered by that receipt while its bound streams are unchanged and decided afresh
 once they moved. A component test pins the ack of a refused message and its redelivery.
+Note (GH-00R): on github.com there is no acquire: the record step classifies each `JobAssigned`
+(KER-06G) and the reconciler starts a runner only through KER-06G's gate. A gap between
+`totalAssignedJobs` and running jobs that stays wide (spec §3.4, a stale count GitHub keeps across
+session re-creates) is a metric and an operator alarm, never a reason to delete the scale set.
+Component tests add: an assigned untrusted job refused and acked, no runner started while it is
+assigned; a restarted numbering recorded and the session kept; a 404 on create re-ensures.
+
+#### GH-02H GitHub transport hardening
+Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:
+(1) when the API base is `https://api.github.com`, the Actions service URL and every queue URL
+must have a host ending in `.actions.githubusercontent.com` (on top of `credential_base_problem`;
+GHES keeps the https rule only); (2) HTTP/2 health: ping a silent connection (30 s, 10 s
+timeout) or drop a connection whose attempt timed out, so a retry never reuses a dead one;
+(3) 429 `ConfigureTooManyRunnersException` on JIT is a throttle of minutes: backed off within the
+directive's deadline, never re-minted under a new name (I19).
+Accept: tests over fake-github: a service URL on another host refused before any token is sent;
+a stalled connection replaced on retry under `tokio::time::pause`; a JIT 429 backs off and
+reports without a second name.
+
+#### KER-06G `ScaleSet` aggregate follows GH-00R's model
+Cites: `formal/scaleset.qnt` (GH-00R), `doc/github-scaleset.md` §3.1, §4.1, §4.3, §6, ADRs 0027,
+0040, 0090. Rule 7: the model is already changed; this is the Rust side.
+(1) **Assigned jobs** (ADR 0090, owner 2026-11-11 and 2026-11-12): `JobAssigned` facts carry
+the classifying fields (repository, owner, `workflowRunId`, event, labels), keyed by `(jobId,
+workflowRunId)`, never by `runnerRequestId` (0 on github.com); an assignment is `pending` until
+its run lookup's observation (`RecordRunLookup{job, run facts | failed}`, from GH-10) classifies
+it through a pure `demand::classify_assigned` (the pool's `allowed_repositories`, the scale set's
+name, head repository against base, event); the stream keeps `pending`, `trusted` and `refused`
+sets released by `JobStarted` or `JobCompleted`, the lapse of `refusal_release_window` and the
+operator's release (GH-09); `AssignedJobRefused{reason}` is a journaled event and, with
+`cancel_refused_runs`, a `CancelRun` directive (once; its answer recorded); a pure
+`demand::runner_may_start` (nothing pending or refused, a classified-trusted job waiting, open
+and active) gates the reconciler's shortfall (CP-03) and minting. (2) **Restarted
+numbering**: a session's first message strictly below the floor records `MessageIdsRestarted`,
+applies as new, and restarts cursor and floor; later regressions still degrade. A message is a
+`DuplicateMessage` only when its receipt exists and its id equals the cursor; any other id at or
+below the cursor degrades (the receipt check alone would drop a reused id silently). (3) **Re-ensure**: a 404 for the
+journaled scale set returns the stream to `Unconfigured`; `RecordScaleSetRecreated{id}` resets
+cursor and floor and drops reservations, classifications and refusals on that observation.
+New events are new types (schema 1), with golden fixtures and `DETERMINISM_CASES` accepted and
+refused.
+`demand::trust` follows ADR 0090's proposed allowed events: `push`, `pull_request` from the base
+repository, `workflow_dispatch`, `schedule`, `merge_group`, `release`; every other event is
+refused. A new assignment of a job replaces its earlier classification.
+Accept: rules and property tests naming the model's invariants `vmOnlyForAJobClassifiedTrusted`,
+`refusedJobNeverGetsAVm`, `assignedJobsClassified`, `cancelOnlyRefused` and the renumbered branch
+of `a1RefutationIsFlagged`; the mutants RUN_ASSIGNED, IGNORE_REFUSALS, IGNORE_PENDING and
+CANCEL_ANY fail them.
+
+#### GH-08 Trust on github.com
+Cites: ADR 0090 (owner, 2026-11-11 and 2026-11-12), `doc/github-scaleset.md` §2, §6.2, §13, ADR
+0045. Config: a pool's `allowed_repositories` (required on github.com; full names; public allowed;
+refused empty), `cancel_refused_runs` (default false) and `refusal_release_window` (default 30
+minutes, at least three release times); an organisation's `check_fork_pr_setting` (default
+false); an enterprise scope is refused with a message naming ADR 0040. Start-up and before every
+session open: the scale set exists (or is created) and its session is reachable; nothing about
+runner groups or the GitHub plan. With `check_fork_pr_setting`, the start-up read of the
+organisation's fork-PR setting for private repositories refuses the organisation's pools (an
+operator-visible state with the reason, `doctor` shows it) when
+`run_workflows_from_fork_pull_requests` is true. `doctor` checks the App's permissions against
+what the pools' options need (ADR 0045). Public repositories: it reads the scale set's runner
+group (`GET /orgs/{org}/actions/runner-groups/{group_id}`, "Self-hosted runners") and reports, at
+start-up and in `doctor`, each allowed repository that is public while the group's
+`allows_public_repositories` is false (GitHub routes it nothing then); a report, not a refusal.
+Wires KER-06G's classification and GH-10's lookup and cancel into the listener and the
+reconciler; GH-09 wires its own release.
+Accept: tests over fake-github: a public allowed repository's trusted job runs; a fork's run, an
+unlisted repository and a failed lookup are refused end to end with no VM; with
+`cancel_refused_runs` the refused run is cancelled and the hold ends on the cancellation; with
+`check_fork_pr_setting` an enabled fork setting refuses to start and a disabled one starts; a
+public allowed repository behind a group that does not admit public repositories is reported.
+
+#### GH-09 Operator release of a refusal
+Cites: ADR 0090 (owner, 2026-11-12), `doc/github-scaleset.md` §6.2, plan §11. `mayfly pool release-refusal <pool> <job>` and its socket API call: shows the
+refused job's current state read from GitHub (assigned, released, failed) and lifts the refusal
+only when GitHub no longer holds the job assigned (refused otherwise, with the reason); a
+journaled command (`ReleaseRefusal`) with its operator and reason, never an assertion of an
+outcome. Also the per-pool config `refusal_release_window` (default 30 minutes, at least three
+release times; HW-02 item 2 measures the release) and its lapse in the reconciler.
+Accept: tests over fake-github: a release refused while the job is assigned; accepted once the
+fake fails it; the lapse after the window under a fake clock; `mayfly pool list` shows each
+refusal, its reason and its age.
+
+#### GH-10 Workflow-run lookup and cancel
+Cites: ADR 0090 (owner, 2026-11-12), `doc/github-scaleset.md` §2, §6.2, §13. In
+`mayfly-adapter-github`, with the installation token: `GET
+/repos/{owner}/{repo}/actions/runs/{run_id}` ("Actions: Read") for each pending assignment,
+decoded into run facts (repository, head repository, event, actor), every request with a
+deadline, a failure (error, timeout, 404, a missing field) answered as `failed` so the domain
+refuses; `POST .../actions/runs/{run_id}/cancel` ("Actions: Write") for a `CancelRun` directive,
+its answer (202, 409, an error, or none) recorded as an observation, never retried past one
+answered attempt. Strings are untrusted input, length-bounded.
+Accept: tests over fake-github: a fork's run decoded as one; a lookup timeout answered `failed`;
+a cancel's 202, 409 and lost answer each recorded; no token in an error.
+
+#### GH-07 Several organisations
+Cites: ADR 0040 (amended 2026-11-11), `doc/github-scaleset.md` §1. One daemon serves pools in
+several organisations, one scale set per pool in its organisation, with the same GitHub App
+installed in each: per-organisation installation ids, tokens, start-up checks (GH-08) and
+rate budgets; nothing shared between organisations but the App key. Enterprise scope stays
+unsupported unless the owner asks (a new ADR on the classic token).
+Accept: an e2e test over two fake organisations, each with its own scale set and installation;
+a failure in one organisation leaves the other's pools running.
 
 #### E2E-02 ⛳ Scale-set end to end
 Cites: plan §7.2, §9. `mayflyd` + fake-tart + fake-github: queue 1 job → 1 VM → job done → deleted;
@@ -1556,6 +1711,9 @@ queue 100 jobs with 2 slots → never more than 2 VMs, all jobs complete, no dou
 cancel/reassign case.
 Accept: e2e tests green in CI.
 DEC-01: adds the decline of an untrusted offer and a cancel during deregistration (F33).
+Note (GH-00R): on fake-github's direct flow, adds the refusal of a fork's run and of an unlisted
+repository's job (no VM until the fake releases it, or, with `cancel_refused_runs`, until the
+cancellation is observed) and a public allowed repository's job that runs (ADR 0090).
 
 #### LNK-01 UDS transport and split roles
 Cites: plan §3.3. Length-prefixed JSON over a Unix socket; `mayflyd --role control|data`; link
@@ -1581,6 +1739,9 @@ UDS).
 Accept: each driver has a negative control; CI runs bounded seeds per model.
 DEC-01: adds the registration driver (KER-09) and the resource-ledger comparison in scheduling.
 
+Note (GH-00R): the scaleset driver replays both inits (`initDirect`, `initAcquire`) and the
+actions GH-00R added (`ghAssigns`, `startVm`, `dormantDeleted`, `recreateScaleSet`, the
+renumbering branch of `record`) against KER-06G's aggregate.
 #### VER-03 Fault lab skeleton
 Cites: ver §8, D11. `tools/faultlab`: scenario schema, independent controller with monotonic clock,
 fsync-before-dispatch history JSONL, subprocess workers driving `mayfly` CLI, artefact folder,
@@ -1632,6 +1793,13 @@ DEC-01: trust tier and fork-approval settings (ADR 0027), reachability with and 
 (ADR 0032, NET-01), the secret providers (ADR 0033), the diagnostics bundle (ADR 0036), the
 planned rule that only the GitHub adapter opens outbound connections, residual risks (a JIT config
 is visible to the workflow it serves; hypervisor escape).
+Note (GH-00R, ADR 0090): the threat model adds the github.com trust controls (the configured
+repositories, the per-job workflow-run lookup and its refusals, the hold while a job is
+unclassified or refused, the cancel option, the optional fork-PR setting check), public
+repositories being allowed, and the residual race (a runner started for a trusted job may take an
+untrusted job GitHub assigned after the last message mayfly recorded, before or after the runner
+started), which with public repositories is the main residual risk, and the proposed job-started
+hook against it (IMG-02).
 
 ### Phase 7 — operate
 
@@ -1649,6 +1817,18 @@ Accept: plist golden; doctor JSON golden on Linux with fakes; (owner) install on
 Note (RT-02): a P24 stop takes up to 25 s for the loops and 5 s for the runtime
 (`daemon::SHUTDOWN_DEADLINE`, `RUNTIME_SHUTDOWN`), so the plist's `ExitTimeOut` is at least 30 s;
 the plist passes `--config`, which `mayflyd` requires.
+
+#### IMG-02 (Proposed) In-guest job-started hook
+Cites: ADR 0090's amendment of 2026-11-12 (proposed: this card waits for the owner), ADRs 0030,
+0082, `doc/github-scaleset.md` §6.2. Bake a fixed job-started hook into every image beside the
+runner, and have the launcher set `ACTIONS_RUNNER_HOOK_JOB_STARTED` to it and hand it the pool's
+allowed repositories as data (never interpolated into a command). The hook reads
+`GITHUB_EVENT_NAME`, `GITHUB_REPOSITORY` and the payload at `GITHUB_EVENT_PATH`
+(`pull_request.head.repo.full_name` against `repository.full_name`) and exits non-zero, failing
+closed, unless the event is allowed, the repository listed and a pull request's head the base.
+Accept: tests of the hook over synthetic payloads (each refused event, a fork, a missing or
+unreadable payload: non-zero; an allowed event: zero); the launcher contract test that the
+variable is set; the timing and the failed job are HW-02 checks (spec §12 item 11, owner).
 
 #### OPS-02 Image manifest
 Cites: plan §8, OPS. Manifest schema (`schema`, provider, OS, arch, digest-pinned source, runner
@@ -1902,7 +2082,10 @@ test over fake-github plants each and finds none in the recorded fixture. (owner
 HW-02's session.
 Item 6, whether `X-ScaleSetMaxCapacity` caps `totalAssignedJobs`, keeps `capacity_policy`'s
 default `exact` (ADR 0069) until it is server-observed here; neither a client's assumption nor
-GitHub's documentation changes that default.
+GitHub's documentation changes that default. (GH-00R: public evidence shows the cap at 0, so
+`exact` stays and `demand` is experimental; the remainder is spec §12's items, the capacity
+beyond 0 among them as item 3, and item 8 asks whether a `JobAssigned` carries enough to classify
+a job, ADR 0090.)
 Accept: each remainder item the session answers is committed as a redacted fixture under
 `tests/fixtures/github-scaleset/`, and its spec entry is raised to server-observed, citing that
 fixture (a refuted assumption changes the model first, rule 7); the minimal GitHub App permission

@@ -1,9 +1,10 @@
 //! The App's granted permissions against the published minimal list (ADR 0045), for `mayfly
 //! doctor`'s warning.
 //!
-//! The list itself is unverified until GH-00 and HW-02 confirm it against a real App (spec §12
-//! item 13): [`PUBLISHED_PERMISSIONS`] stays [`PublishedPermissions::Unverified`], and no
-//! permission is guessed. The comparison is ready for the day it is filled in.
+//! The list is drafted from GitHub's documentation (spec §13) and stays unverified until HW-02
+//! confirms it against a real App (spec §12 item 7): [`PUBLISHED_PERMISSIONS`] stays
+//! [`PublishedPermissions::Unverified`], and no permission is guessed. The comparison is ready
+//! for the day it is filled in.
 
 use std::collections::BTreeMap;
 
@@ -45,7 +46,7 @@ pub struct RequiredPermission {
 /// The published list, or the fact that it is not yet verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishedPermissions {
-    /// GH-00 and HW-02 have not confirmed a list yet (ADR 0045 §4).
+    /// HW-02 has not confirmed the drafted list yet (ADR 0045 §4, spec §13).
     Unverified,
     /// The verified list.
     Verified(&'static [RequiredPermission]),

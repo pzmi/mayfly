@@ -513,8 +513,17 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   `RecordSessionDeleted{session_id}` (only a journaled session) and `RecordSessionRecovered`
   complete the session FSM; `ApplyCapacity` carries the reported max and the pool's wire mode
   (ADR 0029). Unknown types degrade the session at `PROTOCOL_DRIFT_THRESHOLD`. The assumptions on
-  facts GH-00 has not settled (A1–A6) are listed in `formal/scaleset.qnt`,
+  facts not yet server-observed (A1–A6) are listed in `formal/scaleset.qnt`,
   `doc/github-scaleset.md` §12 and `mayfly_control_domain::demand`.
+  *Planned (GH-00R's model, KER-06G):* on github.com, where jobs are assigned with no offer,
+  `RecordMessage` classifies each `JobAssigned` (`trusted` or `AssignedJobRefused{reason}`) and a
+  runner starts only for a job whose workflow run was looked up and classified trusted, and
+  never while one is unclassified or refused and still assigned (ADR 0090), the refusal lapsing
+  after `refusal_release_window`, released by the operator, or, with `cancel_refused_runs`, its
+  run cancelled; a session's first message below its floor records
+  `MessageIdsRestarted` and restarts the cursor; a receipt counts as a duplicate only for the
+  cursor's id, any other id at or below it degrades; a 404 for the journaled scale set leads to
+  `RecordScaleSetRecreated{id}`.
 - **Events** (as built, KER-06 and its review fix KER-06F): `ScaleSetEpochAdvanced`,
   `ScaleSetEnsured`, `SessionOpenRequested`, `SessionOpened{session_id, statistics, desired}`,
   `SessionLost{cause: expired|conflicted|failed|restarted, stale_session}`,
@@ -723,14 +732,16 @@ one VM's capacity, not two. Beyond it, two options were put to the owner in ADR 
 - **`DEMAND`** fixes S1 (Linux runs beside an idle macOS pool) and keeps every property, **if**
   the demand it reads does not depend on the `maxCapacity` it sends. Our demand is `desired =
   min(deliverable, totalAssignedJobs)` (plan §7.2), and whether `X-ScaleSetMaxCapacity` caps
-  `totalAssignedJobs` is unverified (`doc/github-scaleset.md` §12 item 6). If it caps it, a pool
+  `totalAssignedJobs` was unverified (`doc/github-scaleset.md` §12 item 6 then; §5 now: public
+  evidence says it caps it at 0, GH-00R). If it caps it, a pool
   carved nothing is never assigned its job, never keeps room for it and starves (the `never`
   of footnote 3). **Decided (owner, 2026-11-10, DEC-06): "implement both now".** Each pool's
   `capacity_policy` is `exact` (the default) or `demand`; a `demand` pool is carved, and keeps
   ahead of later pools, only for the VMs it waits for (`CapacityPolicy::Demand { waiting }`:
   its scale set's latest `totalAssignedJobs` beyond its live runners plus its `min_prepared`
   deficit, never capped by its own carve-out, which would feed back). The default stays `exact`
-  until GH-00 answers item 6. Per pool, not per host: the keep is what each earlier pool holds
+  until GH-00 answers item 6; since GH-00R (ADR 0069 amended 2026-11-11) `demand` is an
+  explicit, experimental opt-in, because the evidence says such a pool starves. Per pool, not per host: the keep is what each earlier pool holds
   back, so the operator relaxes exactly the pool whose idle headroom starves the others, and
   each pool's keep still depends only on its own inputs, so the properties hold pool by pool
   for a fixed demand (model `carveMonotoneDemand`, `demandFixesThe13GiBCaseTest`,
@@ -1137,24 +1148,28 @@ Metrics derive from the same projections (bounded labels): add `mayfly_mode{mode
 
 ### 9.1 GitHub (`mayfly-adapter-github`, CP)
 
-Three endpoints, four credentials, one budget per endpoint family. Items marked **[VERIFY]** are
-settled by the protocol capture (GH-00) before the fake is written.
+Three endpoints, four credentials, one budget per endpoint family. The protocol is specified, with
+each fact's evidence strength, in `doc/github-scaleset.md` (GH-00R, 2026-11-11); what no public
+source settles is marked **[open: HW-02]** there and recorded in HW-02's session (GH-00).
 
 | Credential | Obtained from | Used for | Lifetime | On failure |
 |:--|:--|:--|:--|:--|
 | 1. **App JWT** (RS256, from the private key in the secret store) | signed locally | exchanging for an installation token | ≤ 10 min, backdated `iat` | key unreadable/locked → `SessionDegraded{app_auth}` |
 | 2. **Installation access token** | `POST /app/installations/{id}/access_tokens` | REST: runner list/get/delete, permission probe | ≈ 1 h | 401/403 → refresh once, then degraded (permission drift is an audit fact) |
-| 3. **Actions-service token** (+ service URL) | the scale-set registration handshake | scale set CRUD, JIT generation, session create/delete | own expiry [VERIFY] | refresh by re-handshake; degraded on repeat |
-| 4. **Message-queue access token** | `SessionOpened` | poll, ack, acquire | own expiry; 401 → refresh session | `SessionExpired` → reopen, initial statistics |
+| 3. **Actions-service token** (+ service URL, on github.com a host under `.actions.githubusercontent.com`) | the scale-set registration handshake | scale set CRUD, JIT generation, session create/delete | its `exp` claim (lifetime [open: HW-02]) | refresh by re-handshake; degraded on repeat |
+| 4. **Message-queue access token** | `SessionOpened` | poll, ack, acquire (GHES) | about 1 h (server-observed); 401 → refresh session | `SessionExpired` (a refresh answering `RunnerScaleSetSessionExpiredException`) → new session, initial statistics |
 
 Secret *artefacts* that are not mayfly's credentials but flow through the ACL: the **JIT config**
 (per runner) and registry pull credentials
 (Image). All are `Secret<T>`; none is journaled; fixtures are scrubbed with a canary test.
 
 What crosses in: messages (`JobAvailable/Assigned/Started/Completed`, statistics), runner
-records, status codes, `Retry-After`/rate headers. Translation: wire messages → `Offer`,
-`Statistics`, `JobStarted/JobCompleted` facts with sanitised, length-bounded strings (repo, ref,
-labels are untrusted data, never interpolated); unknown message types → counted, acked after the
+records, workflow runs (the per-job lookup of ADR 0090), status codes,
+`Retry-After`/rate headers. Errors are told apart by `typeName`, never by status. Translation:
+wire messages → `Offer` (GHES), `AssignedJob` (github.com: repository, owner, event, labels,
+keyed by job and run, never by `runnerRequestId`, which is 0 there), `Statistics`,
+`JobStarted/JobCompleted` facts with sanitised, length-bounded strings (repo, ref, labels are
+untrusted data, never interpolated; a missing classifying field makes a job unclassifiable); unknown message types → counted, acked after the
 record, `SessionDegraded{protocol_drift}` past a threshold (never safe mode: R7). The ACL is the
 only code that knows wire shapes; the domain sees neither JSON nor HTTP.
 

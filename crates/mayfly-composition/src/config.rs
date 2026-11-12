@@ -220,10 +220,11 @@ pub enum CapacityPolicy {
     /// whatever GitHub does with the `maxCapacity` mayfly sends.
     #[default]
     Exact,
-    /// `"demand"`: keep room only for the VMs the pool waits for, so later pools run beside an
-    /// idle one. Depends on a fact not verified yet (`doc/github-scaleset.md` §12 item 6, GH-00):
-    /// if GitHub counts only the jobs it assigned under the `maxCapacity` mayfly sent, a pool
-    /// carved nothing never learns of its job and starves.
+    /// `"demand"`: **experimental**, an explicit opt-in (ADR 0069, amended 2026-11-11). Keep room
+    /// only for the VMs the pool waits for, so later pools run beside an idle one. GitHub
+    /// assigns nothing to a scale set advertising `maxCapacity` 0 (`doc/github-scaleset.md` §5),
+    /// so a pool carved nothing never learns of its job and can starve; HW-02 measures what lies
+    /// beyond 0 (§12 item 3).
     Demand,
 }
 

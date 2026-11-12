@@ -4,7 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09). Decides philosophy P4.
+Accepted (owner, 2026-11-09). Decides philosophy P4. Amendment proposed 2026-11-12 (planner,
+GH-00R): the drafted list, after the owner's decisions of 2026-11-12 (ADR 0090).
 
 ## Context
 
@@ -31,3 +32,24 @@ App's permissions, the less a compromised key or a mayfly bug can do (philosophy
 ## Alternatives considered
 
 - Documenting permissions loosely: lets them widen by drift, which this record forbids.
+
+## Amendment proposed 2026-11-12 (planner, GH-00R): the drafted list
+
+Drafted on 2026-11-11 and revised for the owner's decisions of 2026-11-12 (ADR 0090).
+
+The list is drafted from GitHub's documentation in `doc/github-scaleset.md` §13 and follows ADR
+0090 (owner, 2026-11-12):
+
+- **base**: the organisation's **"Self-hosted runners: Read and write"** (the runner-registration
+  exchange, scale sets, sessions, JIT configs, runner reads and removal) and the repositories'
+  **"Actions: Read"** (the workflow-run lookup of every assigned job);
+- **optional**: **"Actions: Write"** in place of Read, only for a pool with
+  `cancel_refused_runs`; the organisation's **"Administration: Read"**, only with
+  `check_fork_pr_setting`.
+
+The runner-group read of ADR 0090's public-repository report is covered by "Self-hosted
+runners". "Metadata: Read-only" comes with any repository
+permission and is not used. Repository scope (tests only) needs "Administration: Read and write"
+and "Metadata: Read-only". `doctor` compares the App's grant with what the configured options
+need. The list stays unverified (`PUBLISHED_PERMISSIONS` is `Unverified`) until HW-02 runs the
+whole chain with exactly these permissions (spec §12 item 7); decision 4 stands.

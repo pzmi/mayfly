@@ -42,9 +42,9 @@
 //!   (`tests/scaleset/rules.rs::should_plan_no_offer_when_the_session_is_degraded_or_closing`).
 //! - **I18**: an older run epoch is refused (`stale_run`).
 //!
-//! Assumptions A1–A6 on facts `doc/github-scaleset.md` marks [unverified: GH-00] are stated in
-//! the model's header and in its §12 (A2 and A5 also in [`crate::demand`]); each takes the safe
-//! side.
+//! Assumptions A1–A6 on facts `doc/github-scaleset.md` leaves client-assumed or [open: HW-02] are
+//! stated in the model's header and in its §12 (A2 and A5 also in [`crate::demand`]); each takes
+//! the safe side.
 
 mod cases;
 mod decide;

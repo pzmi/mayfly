@@ -47,7 +47,7 @@ pub struct InstallationToken {
 /// The admin connection to the Actions service (spec §1 step 4): every Actions call (GH-03)
 /// carries its token as `Bearer`.
 ///
-/// The token's lifetime is [unverified: GH-00] (spec §12 item 4), so nothing assumes one: the
+/// The token's lifetime is [open: HW-02] (spec §12 item 5), so nothing assumes one: the
 /// refresh reads only its `exp` claim, a token without `exp` is refused, and so is a token that
 /// arrives already inside the refresh margin, which would otherwise start a refresh on every
 /// call (pinned by `tests/client/auth.rs::should_refuse_the_admin_token_when_it_has_no_expiry`,

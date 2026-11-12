@@ -26,17 +26,17 @@
 //!
 //! The model is `formal/scaleset.qnt` (`desiredOf`, `wireMax`, `offerStep`).
 //!
-//! **Assumptions** where `doc/github-scaleset.md` marks a fact [unverified: GH-00] (§12), each on
-//! the safe side and named in the model:
+//! **Assumptions** where `doc/github-scaleset.md` marks a fact client-assumed or [open: HW-02]
+//! (§12), each on the safe side and named in the model:
 //!
-//! - **A2** (§12 items 3 and 6): whether a message's `totalAssignedJobs` already counts the jobs
+//! - **A2** (§12 items 2 and 3): whether a message's `totalAssignedJobs` already counts the jobs
 //!   mayfly acquired since is not known. The budget therefore counts every open reservation on
 //!   top of it ([`Budget::reserved`]): a job may be counted twice (mayfly acquires less until its
 //!   `JobStarted` releases the reservation), never once too few (mayfly never holds a job it
 //!   cannot serve, I23). When the capture shows that a message's statistics count the jobs its
 //!   `JobAssigned` items name, a reservation can be released on `JobAssigned` instead.
-//! - **A5** (§12 item 5): which `eventName` values offers carry, and whether they carry one at
-//!   all, comes from real payloads only. An offer whose event name is missing or not in
+//! - **A5** (§12 items 1 and 8): which `eventName` values offers carry, and whether they carry
+//!   one at all, comes from real payloads only. An offer whose event name is missing or not in
 //!   [`EventName`] is unclassifiable and declined (ADR 0027): until the capture lists the values,
 //!   mayfly fails closed and acquires nothing it cannot classify.
 
@@ -235,7 +235,7 @@ pub enum DeclineReason {
     /// The pool's tier does not admit its trigger (I32).
     Tier,
     /// Its trigger is missing or unknown, so it cannot be classified (A5, ADR 0027); declined
-    /// apart from `Tier` so the operator can tell a payload GH-00 has not captured from an
+    /// apart from `Tier` so the operator can tell a payload not yet server-observed from an
     /// untrusted trigger. Pinned by
     /// `tests/demand.rs::should_decline_untrusted_and_unclassifiable_offers_when_the_pool_is_trusted`.
     Unclassifiable,

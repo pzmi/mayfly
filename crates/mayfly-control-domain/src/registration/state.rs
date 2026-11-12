@@ -133,8 +133,8 @@ pub enum Removal {
     NotFound,
 }
 
-/// A job's result as `JobCompleted` reported it. The full set of GitHub's values is unverified
-/// until GH-00's capture (`doc/github-scaleset.md` §4.3); anything else is `other`.
+/// A job's result as `JobCompleted` reported it. The full set of GitHub's values is
+/// [open: HW-02] (`doc/github-scaleset.md` §4.3, §12 item 1); anything else is `other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobResult {

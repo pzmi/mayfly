@@ -418,28 +418,52 @@ GitHub App (RS256 JWT → installation token). Four credentials (dm §9.1): App 
 token, Actions-service token, message-queue token; all in memory only, refreshed before expiry,
 never logged (`Secret<T>` with redacting `Debug`/`Display`, a test proves it). The App key comes
 from a `SecretProvider` reference (`keychain:`, `file:`, `env:`, `exec:`; ADR 0033). Permissions
-are verified against a disposable installation (GH-00, owner), never guessed; the documented
-permission list, with the reason for each permission, is a published commitment (ADR 0045; the
-list itself is to be verified by GH-00 and HW-02), and `mayfly doctor` warns when the App holds
-more.
+are never guessed; the documented permission list, with the reason for each permission, is a
+published commitment (ADR 0045), and `mayfly doctor` warns when the App holds more. The list is
+drafted from GitHub's documentation (`doc/github-scaleset.md` §13: the organisation's
+"Self-hosted runners: Read and write" and the repositories' "Actions: Read"; "Actions: Write"
+only with `cancel_refused_runs`, the organisation's "Administration: Read" only with
+`check_fork_pr_setting`) and verified in HW-02 before it is published as verified.
 
 ### 7.2 Scale Set session
 
 One pool is one scale set at organisation scope (repository scope for testing), never deleted
-automatically (ADR 0040). Session states: `Unconfigured → Ensured → Opening → Active ⇄ Backoff |
-Degraded → Closing → Closed`. One listener per scale set (local lease). GH-00 records a live
-session before the fake is built.
+by mayfly (ADR 0040); enterprise scope is unsupported, since GitHub App authentication does not
+work there, and several organisations are the next step (ADR 0040 amended 2026-11-11, GH-07). A
+scale set GitHub deletes as dormant (7 days without a session) is re-created by `ensure`.
+Session states: `Unconfigured → Ensured → Opening → Active ⇄ Backoff | Degraded → Closing →
+Closed`. One listener per scale set (local lease). The fake is built from
+[`github-scaleset.md`](github-scaleset.md) as GH-00R settled it from public evidence.
+
+**Two flows** (`github-scaleset.md` §6.1): github.com assigns jobs to the scale set directly
+(`JobAssigned`, no offer, no acquire) up to the advertised `maxCapacity`; GHES 3.18 and 3.19
+offer them (`JobAvailable`) and mayfly acquires. **Trust on github.com** (ADR 0090, owner
+2026-11-11 and 2026-11-12): any plan, public repositories allowed, no runner group required; the
+boundary is the per-job check. Each `JobAssigned` must name a repository of the pool's
+`allowed_repositories`, and its workflow run is looked up (`GET .../actions/runs/{run_id}`,
+"Actions: Read") before any runner starts: a fork's run, `pull_request_target`, `workflow_run`,
+`issue_comment`, anything unclassifiable and any failed lookup is refused
+(`AssignedJobRefused`, journaled). While a job is unclassified or refused and still assigned, no
+new runner of the set starts; the hold ends when a job fact shows it gone, the pool's
+`refusal_release_window` lapses or the operator runs `mayfly pool release-refusal`. GitHub's own
+release and requeue fails a refused job at its third release; with `cancel_refused_runs`
+("Actions: Write") mayfly cancels the run at once. `check_fork_pr_setting` ("Administration:
+Read") optionally refuses to start when fork pull-request workflows run in private
+repositories. A public allowed repository behind a runner group that does not admit public
+repositories gets no jobs; mayfly reports it at start-up and in `doctor`.
 
 Processing loop (the poller never waits on VM work):
 
 1. Long-poll with `lastMessageId` and `maxCapacity` = the scale set's **reported max** (≤ its
    deliverable carve-out, I24; pause, drain and safe mode per ADR 0029).
-2. Classify each `JobAvailable` offer by trust tier and plan acquisition (pure
+2. GHES: classify each `JobAvailable` offer by trust tier and plan acquisition (pure
    `PlanAcquire`): acquire only while `assigned < deliverable` (I23) and only offers the pool's
-   tier admits (I32); the rest are declined with a reason.
+   tier admits (I32); the rest are declined with a reason. github.com: classify each
+   `JobAssigned` (ADR 0090); refused ones are recorded with their reason.
 3. In one unit: inbox `(session, message_id)`, latest `statistics` (an older message never
-   replaces newer), job facts, declined offers and the new **desired** count. A redelivered
-   message is `DuplicateMessage`.
+   replaces newer), job facts, declined offers, classified and refused assignments and the new
+   **desired** count. A redelivered message is `DuplicateMessage`; a session's first message
+   below the cursor starts a new numbering (`MessageIdsRestarted`).
 4. Only then `DeleteMessage` (ack). Ack failure is retried; it never re-acquires.
 5. Empty poll → still reconcile. A session open recomputes desired from its initial statistics.
 6. An unknown message type is recorded, acked and counted; past a threshold the session is
@@ -448,15 +472,20 @@ Processing loop (the poller never waits on VM work):
 **Demand:** `desired = min(deliverable, assigned)` where `assigned = TotalAssignedJobs`; there is
 no registered standby (ADR 0028). Never count `JobAssigned` messages (≤ 50 per batch); never add
 `TotalRunningJobs`. `shortfall = max(0, desired − (Activating + Listening + Busy))`; Prepared
-VMs serve it first and do not count in it.
+VMs serve it first and do not count in it. A runner is activated only for a job classified
+trusted that waits for one, and none while a job is unclassified or refused and still assigned
+(ADR 0090). The service
+assigns nothing beyond the advertised `maxCapacity`, so a scale set advertising 0 sees no demand
+at all (`github-scaleset.md` §5).
 
 ### 7.3 Runner registrations
 
 Scale sets only: there is no classic or `--ephemeral` mode (ADR 0028). A registration is its own
 aggregate (`RunnerRegistration`, dm §6.5): the runner name is the VM name, issued at most once
 (I19); a JIT config is minted once per registration; a registered-idle runner is deregistered
-before its VM is stopped, and a busy answer (409 `JobStillRunningException` on the Actions-service
-path mayfly uses; 422 on the REST path) cancels that retirement (I21); a lost mint or delivery is
+before its VM is stopped, and a busy answer (`JobStillRunningException`, 400 or 409, told by its
+`typeName`, on the Actions-service path mayfly uses; 422 on the REST path) cancels that
+retirement (I21); a 204 means the runner is gone, not that mayfly removed it; a lost mint or delivery is
 presumed leaked and deregistered by its journaled id. The reaper (ADR 0029) runs at run start,
 after long outages and daily, deletes only journaled ids and reports unrecognised ones.
 
@@ -464,11 +493,16 @@ after long outages and daily, deletes only journaled ids and reports unrecognise
 
 The Scale Set API is in public preview. mayfly specifies it in its own words in
 [`github-scaleset.md`](github-scaleset.md) and implements its own client, informed by reading
-GitHub's `actions/scaleset` but copying none of it (ADR 0048). The adapter is versioned; recorded
-request/response fixtures (redacted) are the contract; `mayfly-fake-github` implements the wire
-behaviour independently (redelivery, 50-message cap, session expiry, 401/403/409/429 +
-Retry-After), built from that specification and the GH-00 capture, and a gated live test runs
-against a disposable organisation (owner-provisioned).
+GitHub's `actions/scaleset` but copying none of it (ADR 0048). Each fact carries its evidence
+strength (server-observed, client-assumed, doc-stated) and a pinned citation; GH-00R settled
+what public sources settle, and the rest is the HW-02 remainder (`github-scaleset.md` §12),
+recorded by GH-00's redacting capture in HW-02's session. A client-assumed or open fact stays a
+named assumption, a fake knob and a test name until it is server-observed (ADR 0048, amended
+2026-11-11). The adapter is versioned; recorded request/response fixtures (redacted) are the
+contract; `mayfly-fake-github` implements the wire behaviour independently (redelivery,
+50-message cap, both assignment flows, session conflict and expiry, 401/403/409/429 +
+Retry-After), built from that specification, and a gated live test runs against a disposable
+organisation (owner-provisioned).
 
 ---
 
@@ -671,10 +705,13 @@ with its field path and its fix, `[github]` takes `organisation` and, for testin
 `breaker_window` are its N and W and `runner_refresh_at` is `HH:MM`; exit codes are 78 (invalid
 config), 69 (lock refused) and 73 (state dir unusable). A pool's optional `capacity_policy` is
 `"exact"` (default) or `"demand"` (DEC-06, ADR 0069): what it keeps of the host's free capacity
-ahead of the pools after it, its whole headroom or only what it waits for; `"demand"` relies on
-`doc/github-scaleset.md` §12 item 6, unverified until GH-00, and starves a pool carved nothing if
-GitHub counts only jobs assigned under the `maxCapacity` mayfly sent. An older build refuses the
-key (unknown keys are refused).
+ahead of the pools after it, its whole headroom or only what it waits for. **`"demand"` is
+experimental**, an explicit opt-in (ADR 0069, amended 2026-11-11): GitHub assigns nothing to a
+scale set advertising `maxCapacity` 0 (`doc/github-scaleset.md` §5), so a `demand` pool carved
+nothing never sees its job and can starve. An older build refuses the key (unknown keys are
+refused). On github.com each pool also lists its `allowed_repositories` and may set
+`cancel_refused_runs` and `refusal_release_window`; an organisation may set
+`check_fork_pr_setting` (ADR 0090, GH-08).
 As built (RT-02, ADR 0091; owner, 2026-11-12: "reasonable defaults out of the box"): `state_dir`
 and `[provider] tart_home` are optional. Without them `mayflyd` uses the platform's standard
 places, creating them `0700` and then running its usual checks: on macOS `~/Library/Application
@@ -732,7 +769,7 @@ mistakes.
 | 1 Kernel | Pure domain, protocol, lifecycle FSM, aggregates, models | exhaustive FSM matrix, golden events, Quint models check |
 | 2 Journal | Stream-scoped store: SQLite journal, AggregateStore, projections, inbox, durable delivery, snapshots, PostgreSQL in Docker | store contracts on memory, SQLite (five modes) and PostgreSQL |
 | 3 Planes | CP reconciler/saga, DP executor, inproc link | **walking skeleton**: `mayflyd` + fake-tart + fake GitHub runs a job end to end on Linux |
-| 4 GitHub | Live capture (GH-00), Scale Set client, listener, JIT, registrations and reaper | fake-GitHub contract built from the capture, redelivery/ack-loss tests |
+| 4 GitHub | Spec from public evidence (GH-00R), Scale Set client, listener, trust on github.com, JIT, registrations and reaper | fake-GitHub contract built from the spec, redelivery/ack-loss tests; the live remainder in HW-02 |
 | 5 Real world | Tart adapter, guest transport, host probes, launchd | (owner) real Tart smoke on the Mac |
 | 6 Evidence | Conformance replay, fault lab F01–F31, mutants, fuzz | core faults PASS, curated mutants killed |
 | 7 Operate | Packaging, signing, runbooks, canary next to Tartelet | (owner) canary on a real repository |

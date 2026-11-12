@@ -1296,7 +1296,8 @@ module scheduling {
   // reserve what they are carved (the macOS pool up to its one job). The result is the round in
   // which the macOS VM is reserved, or -1 within `ROUNDS`. `DEMAND` is run twice: told every
   // waiting job (`visible`), or only those GitHub assigned under the last `maxCapacity` it was
-  // sent (`seen`: whether `X-ScaleSetMaxCapacity` caps assignment is unverified, GH-00 item 6).
+  // sent (`seen`: `X-ScaleSetMaxCapacity` caps assignment; public evidence says it does at 0,
+  // `doc/github-scaleset.md` §5).
   pure val ROUNDS = 8
   type Load = { free: Free, linux: int, macos: int, seen: int, round: int, started: int }
   pure val LOADED: Load = {
@@ -1382,7 +1383,8 @@ module scheduling {
     carveBy(DEMAND, S2.free, S2.first, S2.second, S2.waiting) == (0, 0),
   })
 
-  // DEC-06: the risk `DEMAND` carries until GH-00 answers `doc/github-scaleset.md` §12 item 6.
+  // DEC-06: the risk `DEMAND` carries; public evidence says it is real (`doc/github-scaleset.md`
+  // §5, ADR 0069 amended 2026-11-11), so `DEMAND` is experimental.
   // If GitHub assigns jobs only under the `maxCapacity` mayfly sends, a pool carved nothing is
   // never told of its job: under sustained Linux load the macOS job starves (-1), where
   // `EXACT` starts it in round 4; told of the job it starts in round 4 too.

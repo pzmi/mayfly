@@ -21,13 +21,14 @@ pub const PROTOCOL_DRIFT_THRESHOLD: u32 = 3;
 /// escalates to the operator with `SessionConflictEscalated`: a session mayfly has no record of
 /// is blocking the pool longer than an abandoned one should live. The creates go on backing off
 /// (the session may still end on its own) and mayfly never deletes it. A tuning value the owner
-/// may change; GH-00's capture (item 2: how long an abandoned session blocks a new one) informs
-/// it. Pinned by
+/// may change; HW-02's capture (`doc/github-scaleset.md` §12 item 9: how long an abandoned
+/// session blocks a new one) informs it. Pinned by
 /// `tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict`.
 pub const SESSION_CONFLICT_ESCALATION: u32 = 5;
 
 /// A message's `messageId`. Assumed to increase per scale set, across sessions (A1,
-/// `doc/github-scaleset.md` §12 item 1): the statistics cursor is kept across sessions, so an
+/// client-assumed, `doc/github-scaleset.md` §4.1 and §12 item 4; a restarted numbering is
+/// KER-06G's): the statistics cursor is kept across sessions, so an
 /// older message's statistics never replace newer ones, and a session's floor (the cursor at its
 /// open) tells a message recorded in an earlier session from a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

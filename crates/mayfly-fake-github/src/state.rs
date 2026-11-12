@@ -40,7 +40,7 @@ pub struct FakeConfig {
     pub web_base: String,
     /// The Actions service URL the exchange answers (opaque to the client).
     pub service_url: String,
-    /// How long an admin token lives. Unverified (spec §12 item 4): short in tests so a client
+    /// How long an admin token lives. [open: HW-02] (spec §12 item 5): short in tests so a client
     /// must refresh.
     pub admin_token_lifetime_secs: u64,
     /// The installation's granted permissions, as the access-token answer lists them.

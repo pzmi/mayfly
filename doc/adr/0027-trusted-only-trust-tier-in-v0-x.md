@@ -4,7 +4,8 @@ Date: 2026-11-09
 
 ## Status
 
-Accepted (owner, 2026-11-09)
+Accepted (owner, 2026-11-09). Amended by 0090, which partly supersedes it: classify-before-acquire
+holds on GHES only; on github.com assigned jobs are classified before a runner starts.
 
 ## Context
 
@@ -16,7 +17,8 @@ and no co-residency, none of which exists yet (`doc/domain-model.md` OD3).
 ## Decision
 
 Every pool declares a `tier`; in v0.x the only accepted value is `trusted`. The listener
-classifies each offer before acquiring it (pure `demand::trust`); an offer classified untrusted,
+classifies each offer before acquiring it (*on GHES only since ADR 0090: github.com assigns
+jobs directly*) (pure `demand::trust`); an offer classified untrusted,
 an offer triggered by `pull_request_target`, `workflow_run` or `issue_comment`, and an offer the
 classifier cannot classify are declined (`declined{reason: tier}`) and never acquired. The
 documentation requires GitHub's fork-approval settings on every repository the scale set serves.
