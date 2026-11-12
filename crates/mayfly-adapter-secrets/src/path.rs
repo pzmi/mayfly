@@ -4,7 +4,10 @@
 //! - **Ancestors** (every directory above the file's or command's directory): owned by root or
 //!   the daemon's user; not writable by group or others unless sticky (`/tmp`). A symlink on
 //!   the way is followed only when root or the daemon's user owns it (`/var` and `/tmp` are
-//!   root's symlinks on macOS); the directory it leads to is then checked as an ancestor.
+//!   root's symlinks on macOS), its target holds no `.` or `..`, and at most [`MAX_LINKS`] are
+//!   followed; its target is then walked component by component by the same rules (from `/`
+//!   when absolute), so every directory it leads through is checked as an ancestor, not only
+//!   the last.
 //! - **A secret file's directory**: the daemon's, nothing for group or others (`0700`).
 //! - **A secret file**: a regular file, the daemon's, nothing for group or others and no special
 //!   bit (`0600`), at most the port's limit.
@@ -15,14 +18,16 @@
 //! checks it on the opened descriptor, so a directory swapped after its check is never entered.
 //! The rules are unit-tested branch by branch below; the walk by the contract's FS and EX cases.
 
-use std::ffi::OsStr;
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
 use mayfly_control::secrets::{MAX_SECRET_BYTES, Refusal};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, readlinkat, statat};
 use rustix::io::Errno;
 
 /// What a node is.
@@ -76,6 +81,9 @@ impl Stat {
         self.mode & 0o7777
     }
 }
+
+/// The most symlinks followed on the way to a secret's directory; one more is refused as a loop.
+pub const MAX_LINKS: usize = 40;
 
 const ROOT: u32 = 0;
 const GROUP_OTHER: u32 = 0o077;
@@ -234,8 +242,11 @@ fn stat_of(file: &File) -> Result<Stat, Refusal> {
 }
 
 /// Opens the directory `path` names its last component in, walking from `/`: every ancestor
-/// passes [`ancestor_refusal`] for `ancestors`, the directory itself is no symlink and passes
-/// `directory_rule`. Returns that directory and the last component.
+/// passes [`ancestor_refusal`] for `ancestors`, a symlink on the way is followed only as the
+/// module says (its target's components walked like the path's own), the directory itself is
+/// no symlink and passes `directory_rule`. Returns that directory and the last component.
+/// Pinned by the contract's FS cases and `tests/contract.rs::
+/// should_check_every_directory_a_trusted_link_leads_through_when_walking_to_a_secret`.
 ///
 /// # Errors
 /// The first refusal on the way; `RelativePath` for a path that is not absolute or holds `..`.
@@ -250,17 +261,14 @@ pub fn open_directory_of(
     let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
         return Err(Refusal::NotRegularFile);
     };
-    let mut components = Vec::new();
+    let mut pending: VecDeque<OsString> = VecDeque::new();
     for component in parent.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
-            Component::Normal(part) => components.push(part),
+            Component::Normal(part) => pending.push_back(part.to_os_string()),
             Component::ParentDir | Component::Prefix(_) => return Err(Refusal::RelativePath),
         }
     }
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-    let mut directory = File::from(open("/", flags, Mode::empty()).map_err(errno_refusal)?);
-    let root = stat_of(&directory)?;
     let owner = ancestors.owner;
     let check = |is_last: bool, stat: &Stat| {
         if is_last {
@@ -269,36 +277,60 @@ pub fn open_directory_of(
             ancestor_refusal(ancestors, stat)
         }
     };
-    if let Some(refusal) = check(components.is_empty(), &root) {
-        return Err(refusal);
-    }
-    let last = components.len().saturating_sub(1);
-    for (index, part) in components.into_iter().enumerate() {
-        let next = match openat(&directory, part, flags | OFlags::NOFOLLOW, Mode::empty()) {
+    let open_root = |is_last: bool| -> Result<File, Refusal> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let root = File::from(open("/", flags, Mode::empty()).map_err(errno_refusal)?);
+        match check(is_last, &stat_of(&root)?) {
+            Some(refusal) => Err(refusal),
+            None => Ok(root),
+        }
+    };
+    let mut directory = open_root(pending.is_empty())?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        let is_last = pending.is_empty();
+        let next = match openat(&directory, &part, flags | OFlags::NOFOLLOW, Mode::empty()) {
             Ok(fd) => File::from(fd),
             Err(Errno::LOOP | Errno::NOTDIR | Errno::MLINK) => {
                 let link =
-                    statat(&directory, part, AtFlags::SYMLINK_NOFOLLOW).map_err(errno_refusal)?;
+                    statat(&directory, &part, AtFlags::SYMLINK_NOFOLLOW).map_err(errno_refusal)?;
                 if FileType::from_raw_mode(link.st_mode) != FileType::Symlink {
                     return Err(Refusal::Io {
                         kind: ErrorKind::NotADirectory,
                     });
                 }
-                if index == last {
+                links += 1;
+                if is_last || links > MAX_LINKS {
                     return Err(Refusal::Symlink);
                 }
+                // `directory`, the link's own, passed the ancestor rule when it was opened
                 if !ancestors.trust(link.st_uid) {
                     return Err(Refusal::AncestorWrongOwner {
                         expected: owner,
                         found: link.st_uid,
                     });
                 }
-                File::from(openat(&directory, part, flags, Mode::empty()).map_err(errno_refusal)?)
+                let target = readlinkat(&directory, &part, Vec::new()).map_err(errno_refusal)?;
+                let target = Path::new(OsStr::from_bytes(target.as_bytes()));
+                for component in target.components().rev() {
+                    match component {
+                        Component::Normal(step) => pending.push_front(step.to_os_string()),
+                        Component::RootDir => {}
+                        Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                            return Err(Refusal::Symlink);
+                        }
+                    }
+                }
+                if target.is_absolute() {
+                    directory = open_root(false)?;
+                }
+                continue;
             }
             Err(errno) => return Err(errno_refusal(errno)),
         };
         let stat = stat_of(&next)?;
-        if let Some(refusal) = check(index == last, &stat) {
+        if let Some(refusal) = check(is_last, &stat) {
             return Err(refusal);
         }
         directory = next;

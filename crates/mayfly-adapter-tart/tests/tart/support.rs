@@ -129,15 +129,39 @@ pub fn provider_at(dir: &Path) -> TartProvider {
     )
 }
 
+/// A temporary directory reached through a symlink owned by whoever runs the tests
+/// (`<tempdir>/l -> r`), as macOS reaches every temporary directory through root's
+/// `/var -> private/var`: a start-up check that refused every link on the way would then fail
+/// on Linux too, not only on the macOS runners (DP-07F). Removed when dropped.
+pub struct LinkedDir {
+    _dir: TempDir,
+    path: PathBuf,
+}
+
+impl LinkedDir {
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("r")).expect("the link's target");
+        let path = dir.path().join("l");
+        std::os::unix::fs::symlink("r", &path).expect("symlink");
+        Self { _dir: dir, path }
+    }
+
+    /// The directory, through the link.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// A `TART_HOME` and shim directory, and the fake driven directly; cleaned up when dropped,
 /// failed test or not.
 pub struct Fake {
-    pub dir: TempDir,
+    pub dir: LinkedDir,
 }
 
 impl Fake {
     pub fn new() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = LinkedDir::new();
         let home = dir.path().join("tart-home");
         std::fs::create_dir(&home).expect("tart home");
         std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700))

@@ -1247,6 +1247,20 @@ recorded per source and `required` refused until SIG-01. `list` names only Ready
 the clone proof; every other `mfb-*` VM is counted by the inventory (DP-06F). Model:
 `formal/image_store.qnt` (driver: VER-08). A drift is answered `effect_failed`;
 `ImageDriftDetected` needs a protocol observation.
+Note (DP-07F): the start-up check refused every symlink on the path, and macOS reaches `/var`,
+`/tmp` and `/etc` through root's links into `/private`, so it refused every temporary directory
+and every deployment under them (the macOS CI job, red since DP-07). `verify::check_path` now
+walks the path from `/`: a link on the way is followed only when root or the daemon's user owns
+it, in a directory that passes the ancestor rule, with no `.` or `..` in its target and at most
+`verify::MAX_LINKS` followed, and its target is walked by the same rules; `TART_HOME` and the
+registry's directory are still never links. The daemon keeps the configured path (every link and
+directory on it is writable only by trusted users, so its resolution cannot change outside the
+trust model; a later canonical path would be a second, unchecked resolution). The secrets walk
+(`mayfly-adapter-secrets::path`) already followed only trusted links but let the kernel resolve
+their targets; it now walks a target's components too. The tart tests reach their tempdirs
+through a link (`support::LinkedDir`), so Linux CI catches a check that refuses one. Pinned by
+`tests/tart/images.rs::should_follow_only_trusted_links_when_checking_a_private_directory` and
+`tests/contract.rs::should_check_every_directory_a_trusted_link_leads_through_when_walking_to_a_secret`.
 
 #### SIG-01 Image signature verification for pools that require it
 Cites: ADR 0087 decision 8, dm §9.3, ADR 0033. DP-07 records each source's signature policy

@@ -12,7 +12,7 @@
 //!
 //! Pinned by the tests below and `tests/tart/images.rs` (the fault cases).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::MetadataExt;
@@ -408,7 +408,9 @@ pub fn identity(dir: &Path) -> Option<Identity> {
 pub enum UnsafeLayout {
     /// It is missing, not a directory, or not an absolute path without `.` or `..`.
     NotADirectory(PathBuf),
-    /// It, or a component of the path to it, is a symlink.
+    /// A symlink that is not trusted: the directory itself is one, or a link on the way to it is
+    /// owned by neither root nor the daemon's user, names `.` or `..` in its target, or is one
+    /// more than [`MAX_LINKS`] followed (a loop).
     Symlink(PathBuf),
     /// It is not owned by the daemon's user.
     OwnedByOther(PathBuf),
@@ -429,6 +431,9 @@ pub struct DirFacts {
     /// Whether it is a directory and not a symlink.
     pub directory: bool,
 }
+
+/// The most symlinks followed on the way to a private directory; one more is refused as a loop.
+pub const MAX_LINKS: usize = 40;
 
 const STICKY: u32 = 0o1000;
 const GROUP_OTHER_WRITE: u32 = 0o022;
@@ -452,6 +457,17 @@ pub const fn judge(facts: DirFacts, euid: u32, ancestor: bool) -> bool {
     }
 }
 
+/// Whether a symlink owned by `link_uid`, found in a directory with `parent`'s facts, may be
+/// followed on the way to a private directory: the link is owned by root or `euid` and its
+/// directory is a safe ancestor ([`judge`]). Only its owner, the directory's owner or root can
+/// replace a link in a sticky directory, so a sticky, world-writable directory (`/tmp`) is safe
+/// for a link only because the link's owner is checked too. Pinned by
+/// `tests::should_follow_only_a_trusted_link_in_a_safe_directory_when_given_their_facts`.
+#[must_use]
+pub const fn judge_link(link_uid: u32, parent: DirFacts, euid: u32) -> bool {
+    (link_uid == 0 || link_uid == euid) && judge(parent, euid, true)
+}
+
 fn facts(path: &Path) -> Option<DirFacts> {
     let meta = fs::symlink_metadata(path).ok()?;
     Some(DirFacts {
@@ -462,12 +478,12 @@ fn facts(path: &Path) -> Option<DirFacts> {
 }
 
 /// Checks that `dir` is private to the daemon's user and that no ancestor lets anyone else
-/// swap it: the start-up check of ADR 0087. Every component of the path as configured is read
-/// without following links, and a symlink anywhere in it is refused (the daemon uses the
-/// configured path, so a link's target could change under it); `.` and `..` are refused too.
-/// Its `vms` and `cache` subdirectories, when present, must not be writable by group or others
-/// either. Pinned by
-/// `tests/tart/images.rs::should_refuse_to_start_when_tart_home_or_an_ancestor_lets_others_swap_it`.
+/// swap it: the start-up check of ADR 0087. The path is walked from `/` as [`check_path`] walks
+/// it; `dir` itself must then be a directory, not a symlink, owned by the daemon's user with no
+/// access for group or others. Its `vms` and `cache` subdirectories, when present, must not be
+/// writable by group or others either. Pinned by
+/// `tests/tart/images.rs::should_refuse_to_start_when_tart_home_or_an_ancestor_lets_others_swap_it`
+/// and `tests/tart/images.rs::should_follow_only_trusted_links_when_checking_a_private_directory`.
 ///
 /// # Errors
 /// [`UnsafeLayout`].
@@ -499,36 +515,102 @@ pub fn check_private(dir: &Path) -> Result<(), UnsafeLayout> {
 }
 
 /// The part of [`check_private`] that holds before `dir` exists, run before the daemon creates
-/// it: an absolute path without `.` or `..`, no component that exists is a symlink, and every
-/// ancestor that exists is owned by root or the daemon's user and not writable by group or
-/// others unless sticky.
+/// it. `dir` is absolute without `.` or `..`. The walk starts at `/` and reads each component
+/// without following it, up to the first that does not exist:
+///
+/// - a directory above `dir` is owned by root or the daemon's user and not writable by group or
+///   others unless sticky ([`judge`]);
+/// - a symlink above `dir` is followed only when root or the daemon's user owns it (its
+///   directory was judged just before, [`judge_link`]), its target holds no `.` or `..`, and at
+///   most [`MAX_LINKS`] are followed; the target's components are then walked by the same
+///   rules, from `/` for an absolute target, so the directories a link leads through are
+///   checked too. macOS's `/var`, `/tmp` and `/etc` are root's links into `/private`, so a
+///   rule refusing every link would refuse every deployment and temporary directory there;
+/// - `dir` itself is never a symlink.
+///
+/// The daemon keeps using `dir` as configured rather than a canonical path. Every directory the
+/// walk passes and every link it follows is writable only by root or the daemon's user, so
+/// nobody outside the trust model can change what the configured path resolves to once it is
+/// checked; canonicalizing afterwards would be a second resolution, made later and checked by
+/// nothing, and would gain nothing over the first. An error names a component as configured
+/// while the walk is still on the configured path, and the resolved path inside a link's target.
 ///
 /// # Errors
 /// [`UnsafeLayout`].
 pub fn check_path(dir: &Path) -> Result<(), UnsafeLayout> {
     let euid = rustix::process::geteuid().as_raw();
-    if !dir.is_absolute()
-        || dir
-            .components()
-            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
-    {
+    if !dir.is_absolute() || has_dots(dir) {
         return Err(UnsafeLayout::NotADirectory(dir.to_path_buf()));
     }
-    for component in dir.ancestors() {
-        let link = fs::symlink_metadata(component).is_ok_and(|m| m.file_type().is_symlink());
-        if link {
-            return Err(UnsafeLayout::Symlink(component.to_path_buf()));
+    // each pending component with the name to report it by when it is configured
+    let mut pending: VecDeque<(PathBuf, Option<PathBuf>)> = VecDeque::new();
+    let mut spelled = PathBuf::from("/");
+    for component in dir.components() {
+        if let Component::Normal(name) = component {
+            spelled.push(name);
+            pending.push_back((PathBuf::from(name), Some(spelled.clone())));
         }
     }
-    for ancestor in dir.ancestors().skip(1) {
-        let Some(found) = facts(ancestor) else {
-            continue;
+    let root = PathBuf::from("/");
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let root_facts = facts(&root).ok_or_else(|| UnsafeLayout::NotADirectory(root.clone()))?;
+    if !judge(root_facts, euid, true) {
+        return Err(UnsafeLayout::UnsafeAncestor(root));
+    }
+    let mut resolved = root;
+    let mut parent = root_facts;
+    let mut links = 0;
+    while let Some((name, spelled)) = pending.pop_front() {
+        let next = resolved.join(&name);
+        let shown = spelled.unwrap_or_else(|| next.clone());
+        let last = pending.is_empty();
+        let meta = match fs::symlink_metadata(&next) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(UnsafeLayout::NotADirectory(shown)),
         };
-        if !judge(found, euid, true) {
-            return Err(UnsafeLayout::UnsafeAncestor(ancestor.to_path_buf()));
+        if meta.file_type().is_symlink() {
+            links += 1;
+            if last || links > MAX_LINKS || !judge_link(meta.uid(), parent, euid) {
+                return Err(UnsafeLayout::Symlink(shown));
+            }
+            let target = fs::read_link(&next).map_err(|_| UnsafeLayout::Symlink(shown.clone()))?;
+            if has_dots(&target) {
+                return Err(UnsafeLayout::Symlink(shown));
+            }
+            if target.is_absolute() {
+                resolved = PathBuf::from("/");
+                parent = root_facts;
+            }
+            for component in target.components().rev() {
+                if let Component::Normal(part) = component {
+                    pending.push_front((PathBuf::from(part), None));
+                }
+            }
+            continue;
         }
+        let found = DirFacts {
+            uid: meta.uid(),
+            mode: meta.mode(),
+            directory: meta.file_type().is_dir(),
+        };
+        if last {
+            return Ok(());
+        }
+        if !judge(found, euid, true) {
+            return Err(UnsafeLayout::UnsafeAncestor(shown));
+        }
+        resolved = next;
+        parent = found;
     }
     Ok(())
+}
+
+fn has_dots(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
 }
 
 #[cfg(test)]
@@ -709,6 +791,36 @@ mod tests {
 
             // then
             assert_eq!(judged, safe, "{facts:?} ancestor={ancestor}");
+        }
+    }
+
+    #[test]
+    fn should_follow_only_a_trusted_link_in_a_safe_directory_when_given_their_facts() {
+        // given: the daemon is 501; root's links into `/private` sit in root's `/` (macOS)
+        let euid = 501;
+        let dir = |uid, mode| DirFacts {
+            uid,
+            mode,
+            directory: true,
+        };
+        let cases = [
+            (0, dir(0, 0o755), true),
+            (501, dir(501, 0o700), true),
+            (501, dir(0, 0o1777), true),
+            (0, dir(0, 0o1777), true),
+            (502, dir(0, 0o755), false),
+            (502, dir(0, 0o1777), false),
+            (0, dir(0, 0o777), false),
+            (0, dir(502, 0o755), false),
+            (0, dir(0, 0o775), false),
+        ];
+
+        for (link_uid, parent, follow) in cases {
+            // when
+            let judged = judge_link(link_uid, parent, euid);
+
+            // then
+            assert_eq!(judged, follow, "link uid {link_uid} in {parent:?}");
         }
     }
 }

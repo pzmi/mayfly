@@ -175,8 +175,9 @@ fn should_give_tart_run_files_for_stdio_never_a_pipe_when_the_shim_starts_it() {
         })
         .collect();
 
-    // then
-    let dir = fake.shims().join(vm(1).to_string());
+    // then: the kernel names an open file by its resolved path, and the fake's directory is
+    // reached through a link
+    let dir = std::fs::canonicalize(fake.shims().join(vm(1).to_string())).expect("shim dir");
     assert_eq!(stdio[0], PathBuf::from("/dev/null"));
     assert_eq!(stdio[1], dir.join("run.stdout"));
     assert_eq!(stdio[2], dir.join("run.stderr"));

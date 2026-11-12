@@ -259,6 +259,55 @@ fn should_refuse_without_blocking_when_the_path_is_a_fifo() {
     assert_eq!(got.err().map(|e| e.refusal), Some(Refusal::NotRegularFile));
 }
 
+#[test]
+fn should_check_every_directory_a_trusted_link_leads_through_when_walking_to_a_secret() {
+    // given: links the daemon's user owns in its own directory, so each is followed; what they
+    // lead through decides
+    let root = tempfile::tempdir().expect("tempdir");
+    let base = root.path();
+    let uid = fs::metadata(base).expect("stat").uid();
+    set_mode(base, 0o700);
+    let secret_in = |dir: &Path| {
+        fs::create_dir_all(dir).expect("mkdir");
+        set_mode(dir, 0o700);
+        fs::write(dir.join("secret"), "synthetic-link-walk").expect("write");
+        set_mode(&dir.join("secret"), 0o600);
+    };
+    let open = base.join("open");
+    fs::create_dir(&open).expect("mkdir");
+    fs::create_dir(open.join("deep")).expect("mkdir");
+    set_mode(&open.join("deep"), 0o755);
+    secret_in(&open.join("deep/inner"));
+    set_mode(&open, 0o777);
+    symlink(open.join("deep"), base.join("through-open")).expect("symlink");
+    let safe = base.join("safe");
+    fs::create_dir(&safe).expect("mkdir");
+    set_mode(&safe, 0o755);
+    secret_in(&safe.join("inner"));
+    symlink("safe", base.join("relative")).expect("symlink");
+    symlink("../safe", base.join("dotted")).expect("symlink");
+    symlink("loop-b", base.join("loop-a")).expect("symlink");
+    symlink("loop-a", base.join("loop-b")).expect("symlink");
+    let provider = FileProvider::owned_by(uid);
+    let refusal = |path: PathBuf| {
+        run(provider.resolve(&file_reference(path)))
+            .err()
+            .map(|e| e.refusal)
+    };
+
+    // when
+    let through_open = refusal(base.join("through-open/inner/secret"));
+    let relative = refusal(base.join("relative/inner/secret"));
+    let dotted = refusal(base.join("dotted/inner/secret"));
+    let looped = refusal(base.join("loop-a/inner/secret"));
+
+    // then
+    assert_eq!(through_open, Some(Refusal::AncestorTooOpen { mode: 0o777 }));
+    assert_eq!(relative, None);
+    assert_eq!(dotted, Some(Refusal::Symlink));
+    assert_eq!(looped, Some(Refusal::Symlink));
+}
+
 // ----------------------------------------------------------------------------------- env:
 
 #[derive(Default)]

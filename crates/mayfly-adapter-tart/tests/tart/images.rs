@@ -31,7 +31,7 @@ use mayfly_testkit_data::images::{REPOSITORY, RUNNER, RUNNER_SHA256};
 use mayfly_testkit_data::provider_contract::vm;
 use serde_json::{Value, json};
 
-use crate::support::Fake;
+use crate::support::{Fake, LinkedDir};
 
 fn image_config() -> ImageConfig {
     ImageConfig {
@@ -1119,8 +1119,9 @@ fn private_dir(path: &Path, mode: u32) {
 fn should_refuse_to_start_when_tart_home_or_an_ancestor_lets_others_swap_it() {
     // given: the boundary of ADR 0087. Tart names VMs, so a writer to TART_HOME could swap a
     // directory between a check and the effect; the start-up check refuses any layout where
-    // anyone but root and the daemon's user could.
-    let root = tempfile::tempdir().expect("tempdir");
+    // anyone but root and the daemon's user could. A link the daemon's user owns in its own
+    // directory is followed (only they could change it); TART_HOME itself is never a link.
+    let root = LinkedDir::new();
     let state = root.path().join("state");
     private_dir(&state, 0o700);
     let open_home = root.path().join("open-home");
@@ -1165,9 +1166,7 @@ fn should_refuse_to_start_when_tart_home_or_an_ancestor_lets_others_swap_it() {
             ))),
             None,
             Some(ConfigError::UnsafeLayout(UnsafeLayout::Symlink(linked))),
-            Some(ConfigError::UnsafeLayout(UnsafeLayout::Symlink(
-                linked_parent
-            ))),
+            None,
             Some(ConfigError::UnsafeLayout(UnsafeLayout::NotADirectory(
                 root.path().join("target/../target")
             ))),
@@ -1175,6 +1174,82 @@ fn should_refuse_to_start_when_tart_home_or_an_ancestor_lets_others_swap_it() {
         ]
     );
     assert!(verify::check_private(&state).is_ok());
+}
+
+#[test]
+fn should_follow_only_trusted_links_when_checking_a_private_directory() {
+    // given: links on the way to TART_HOME as macOS has them (root's `/var -> private/var` in
+    // root's `0755` `/`) and as someone else could plant them
+    let root = LinkedDir::new();
+    let base = root.path();
+    let link = |target: &Path, at: &Path| std::os::unix::fs::symlink(target, at).expect("link");
+    let system = base.join("system");
+    private_dir(&system, 0o755);
+    private_dir(&base.join("private"), 0o755);
+    private_dir(&base.join("private/var"), 0o755);
+    private_dir(&base.join("private/var/home"), 0o700);
+    let private_var = base.join("private/var");
+    link(&private_var, &system.join("var"));
+    link(Path::new("../private/var"), &system.join("var-up"));
+    let shared = base.join("shared");
+    private_dir(&shared, 0o777);
+    link(&private_var, &shared.join("var"));
+    let sticky = base.join("sticky");
+    private_dir(&sticky, 0o1777);
+    link(&private_var, &sticky.join("var"));
+    let open = base.join("open");
+    private_dir(&open, 0o777);
+    private_dir(&open.join("deep"), 0o755);
+    private_dir(&open.join("deep/home"), 0o700);
+    link(&open.join("deep"), &system.join("through-open"));
+    link(Path::new("loop-b"), &system.join("loop-a"));
+    link(Path::new("loop-a"), &system.join("loop-b"));
+    link(&private_var.join("home"), &system.join("home-link"));
+    // as root, a link handed to another user; nobody else can give a link away, so as any other
+    // user the link stays the daemon's own and is followed
+    let foreign = system.join("foreign");
+    link(&private_var, &foreign);
+    let as_root = rustix::process::geteuid().is_root();
+    if as_root {
+        std::os::unix::fs::lchown(&foreign, Some(65534), Some(65534)).expect("lchown");
+    }
+
+    // when
+    let judged = [
+        verify::check_private(&system.join("var/home")),
+        verify::check_private(&system.join("var-up/home")),
+        verify::check_private(&shared.join("var/home")),
+        verify::check_private(&sticky.join("var/home")),
+        verify::check_private(&system.join("through-open/home")),
+        verify::check_private(&system.join("home-link")),
+        verify::check_private(&foreign.join("home")),
+    ];
+    let looped = verify::check_private(&system.join("loop-a/home"));
+    let registry = verify::check_path(&system.join("var/home/state"));
+
+    // then
+    let open_resolved = std::fs::canonicalize(&open).expect("canonical");
+    assert_eq!(
+        judged,
+        [
+            Ok(()),
+            Err(UnsafeLayout::Symlink(system.join("var-up"))),
+            Err(UnsafeLayout::UnsafeAncestor(shared)),
+            Ok(()),
+            Err(UnsafeLayout::UnsafeAncestor(open_resolved)),
+            Err(UnsafeLayout::Symlink(system.join("home-link"))),
+            if as_root {
+                Err(UnsafeLayout::Symlink(foreign))
+            } else {
+                Ok(())
+            },
+        ]
+    );
+    assert!(
+        matches!(looped, Err(UnsafeLayout::Symlink(_))),
+        "{looped:?}"
+    );
+    assert_eq!(registry, Ok(()));
 }
 
 #[test]
@@ -1379,7 +1454,7 @@ fn should_not_retire_a_base_when_a_recorded_clone_of_it_is_still_listed() {
 #[test]
 fn should_create_nothing_when_the_registry_directory_would_sit_under_an_unsafe_ancestor() {
     // given
-    let root = tempfile::tempdir().expect("tempdir");
+    let root = LinkedDir::new();
     let home = root.path().join("home");
     private_dir(&home, 0o700);
     let shared = root.path().join("shared");
