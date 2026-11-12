@@ -160,9 +160,9 @@ pub fn described(instance_id: &str, running: bool) -> FakeVm {
 
 pub fn sizing() -> Sizing {
     Sizing {
-        image_disk_bytes: 50 * GIB,
-        base_disk_bytes: 60 * GIB,
-        clone_disk_bytes: 80 * GIB,
+        image_disk_bytes: Some(50 * GIB),
+        base_disk_bytes: Some(60 * GIB),
+        clone_disk_bytes: Some(80 * GIB),
         vm_memory_bytes: 8 * GIB,
     }
 }
@@ -217,6 +217,7 @@ impl Fakes {
             images: FakeImageStore::new(ImageListing {
                 images: BTreeSet::from([digest()]),
                 bases: BTreeMap::from([(base(), GuestOs::Linux)]),
+                ..ImageListing::default()
             }),
             guest: FakeGuest::new(GuestScript {
                 verify: Ok(GuestAnswer::Verified(GuestFacts {
@@ -255,6 +256,18 @@ impl Fakes {
         Exec::start(config(concurrency), self.ports(), self.floor.floor())
             .await
             .expect("the host can be probed")
+    }
+
+    /// An executor started over these fakes with `config` and entered into the session at
+    /// [`EPOCH`].
+    pub async fn open_with(&self, config: Config) -> Exec {
+        let mut exec = Exec::start(config, self.ports(), self.floor.floor())
+            .await
+            .expect("the host can be probed");
+        let mut link = StaticWelcome::new(Ok(welcome(EPOCH)));
+        let entered = exec.enter(&mut link, &self.floor).await;
+        assert_eq!(entered, Ok(EPOCH));
+        exec
     }
 
     /// An executor started and entered into the session at [`EPOCH`].

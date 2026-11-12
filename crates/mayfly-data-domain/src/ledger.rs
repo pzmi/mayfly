@@ -14,7 +14,11 @@
 //! a directive that needs one of them is refused `capacity_unknown` ([`Ledger::admits`]), the
 //! capacity report says which and why with `free` zero there ([`Ledger::report`]), and the
 //! dimension comes back when a listing describes it. The configured [`Sizing`] is not such a
-//! default: the operator set it, and it bounds what this data plane creates.
+//! default: the operator set it, and it bounds what this data plane creates. Nor is a measured
+//! disk ceiling (ADR 0052's amendment of 2026-11-12): where no ceiling is configured, an image's
+//! and a base's ceiling is its verified manifest's disk size and a clone's its base's
+//! ([`MeasuredDisks`], [`Ledger::learn_image`]); one not measured yet is unknown, so a directive
+//! that would create it is refused `capacity_unknown{disk}`.
 //!
 //! What a VM takes is the data plane's own sizing, never only what the control plane sent
 //! (ADR 0024, mutant 24): a `StartVm` is counted at the larger of its run options and
@@ -39,19 +43,44 @@ use mayfly_protocol::{
 use crate::inventory::Inventory;
 
 /// The footprints of what a directive creates, from the data plane's own configuration (values
-/// the operator set, ADR 0052), never from the control plane.
+/// the operator set, ADR 0052), never from the control plane. A disk ceiling left `None` is
+/// measured per image ([`MeasuredDisks`]), never defaulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sizing {
-    /// The disk ceiling of one pulled image.
-    pub image_disk_bytes: u64,
-    /// The disk ceiling of one materialised base.
-    pub base_disk_bytes: u64,
-    /// The disk ceiling of one clone.
-    pub clone_disk_bytes: u64,
+    /// The disk ceiling of one pulled image; `None`: its manifest's disk size.
+    pub image_disk_bytes: Option<u64>,
+    /// The disk ceiling of one materialised base; `None`: its image's manifest's disk size.
+    pub base_disk_bytes: Option<u64>,
+    /// The disk ceiling of one clone; `None`: its base's measured disk size.
+    pub clone_disk_bytes: Option<u64>,
     /// The memory of one running VM by the data plane's own configuration: the floor of a
     /// `StartVm`'s memory demand whatever its run options ask (ADR 0024). Never what a VM of
     /// unknown memory is counted with: that memory is unknown (ADR 0052).
     pub vm_memory_bytes: u64,
+}
+
+impl Sizing {
+    /// Whether any disk ceiling is left to the manifests.
+    #[must_use]
+    pub const fn measures_disks(&self) -> bool {
+        self.image_disk_bytes.is_none()
+            || self.base_disk_bytes.is_none()
+            || self.clone_disk_bytes.is_none()
+    }
+}
+
+/// Disk ceilings measured from verified image manifests (the sum of the disk layers'
+/// uncompressed sizes, the disk Tart reconstructs): what the image store's listing says of each
+/// image and base it holds. A size never changes for a digest, so what was measured is kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeasuredDisks {
+    /// Each image's disk, by digest.
+    pub images: BTreeMap<ImageDigest, u64>,
+    /// Each base's disk: its image's.
+    pub bases: BTreeMap<BaseName, u64>,
+    /// Each listed base's image, so a base whose own size did not read takes its image's once
+    /// that is measured again ([`Ledger::unmeasured_listed`]).
+    pub base_images: BTreeMap<BaseName, ImageDigest>,
 }
 
 /// What the host probe reports (DP-01's `HostProbe`, fed by inventory and probes).
@@ -67,8 +96,9 @@ pub struct HostProbe {
     /// base's `mfb-*`, counted from the inventory and the image store's listing
     /// ([`Ledger::base_vms`], [`foreign_use`]).
     pub foreign: Capacity,
-    /// The dimensions in which the probe could not size a VM that is not ours: `foreign` is
-    /// then only what it could size, and the dimension is unknown (ADR 0052).
+    /// The dimensions in which the probe could not size a VM that is not ours (`foreign` is
+    /// then only what it could size), or could not measure the host itself (slots it could not
+    /// derive; every dimension when the probe failed): the dimension is unknown (ADR 0052).
     pub foreign_unsized: BTreeSet<ResourceDimension>,
     /// Free disk is under the low-water mark: nothing that needs disk starts (F17).
     pub disk_low_water: bool,
@@ -98,8 +128,8 @@ pub struct BaseUse {
     /// The guest its clones run; `None` until the image store's listing names it (a
     /// `MaterialiseImage`'s answer does not).
     pub guest: Option<GuestOs>,
-    /// Its disk ceiling.
-    pub disk_bytes: u64,
+    /// Its disk ceiling; `None` while not measured (ADR 0052).
+    pub disk_bytes: Option<u64>,
 }
 
 /// What the VMs that are not ours use, by one complete provider listing: the host probe's
@@ -160,11 +190,14 @@ pub struct Ledger {
     /// by the inventory in full, as a malformed `mf-*` VM is, so a base VM is never counted in
     /// neither ([`Ledger::base_vm`]).
     pub base_vms: BTreeMap<BaseName, VmUse>,
-    /// Pulled images and their disk.
-    pub images: BTreeMap<ImageDigest, u64>,
+    /// Pulled images and their disk; `None` while not measured (ADR 0052).
+    pub images: BTreeMap<ImageDigest, Option<u64>>,
     /// Materialised bases. No VM directive can name one (ADR 0026): it names an
     /// [`OwnedVmName`] (`mf-`), which a base name (`mfb-`) never parses as (I05).
     pub bases: BTreeMap<BaseName, BaseUse>,
+    /// Disk ceilings measured from verified manifests: listed, or measured before a pull
+    /// ([`Ledger::learn_image`]).
+    pub measured: MeasuredDisks,
     /// Capacity set aside per `(epoch, directive)` from admission until its outcome is applied.
     pub reservations: BTreeMap<(Epoch, DirectiveId), Reservation>,
     /// A complete inventory has been applied since the start: until then our VMs are not known
@@ -325,6 +358,11 @@ impl Ledger {
             base_vms: BTreeMap::new(),
             images: BTreeMap::new(),
             bases: BTreeMap::new(),
+            measured: MeasuredDisks {
+                images: BTreeMap::new(),
+                bases: BTreeMap::new(),
+                base_images: BTreeMap::new(),
+            },
             reservations: BTreeMap::new(),
             next_report_id: 1,
             inventory_read: false,
@@ -375,11 +413,10 @@ impl Ledger {
         let images = self
             .images
             .values()
-            .fold(ZERO, |sum, bytes| plus(sum, disk(*bytes)));
-        let bases = self
-            .bases
-            .values()
-            .fold(ZERO, |sum, base| plus(sum, disk(base.disk_bytes)));
+            .fold(ZERO, |sum, bytes| plus(sum, disk(bytes.unwrap_or(0))));
+        let bases = self.bases.values().fold(ZERO, |sum, base| {
+            plus(sum, disk(base.disk_bytes.unwrap_or(0)))
+        });
         let reserved = self
             .reservations
             .values()
@@ -414,7 +451,9 @@ impl Ledger {
                 add(dimension, UnknownCause::InventoryNotRead);
             }
         }
-        if !self.images_read {
+        let unmeasured = self.images.values().any(Option::is_none)
+            || self.bases.values().any(|base| base.disk_bytes.is_none());
+        if !self.images_read || unmeasured {
             add(ResourceDimension::Disk, UnknownCause::ImagesNotRead);
         }
         for dimension in &self.probe.foreign_unsized {
@@ -458,18 +497,26 @@ impl Ledger {
     pub fn demand(&self, kind: &DirectiveKind) -> Result<Capacity, ResourceDimension> {
         Ok(match kind {
             DirectiveKind::PullImage { digest } if self.images.contains_key(digest) => ZERO,
-            DirectiveKind::PullImage { .. } => disk(self.sizing.image_disk_bytes),
+            DirectiveKind::PullImage { digest } => {
+                disk(self.image_ceiling(digest).ok_or(ResourceDimension::Disk)?)
+            }
             DirectiveKind::MaterialiseImage { base_name, .. }
                 if self.bases.contains_key(base_name) =>
             {
                 ZERO
             }
-            DirectiveKind::MaterialiseImage { .. } => disk(self.sizing.base_disk_bytes),
+            DirectiveKind::MaterialiseImage { digest, .. } => {
+                disk(self.base_ceiling(digest).ok_or(ResourceDimension::Disk)?)
+            }
             DirectiveKind::CloneVm { vm_name, .. } if self.vms.contains_key(vm_name) => ZERO,
-            DirectiveKind::CloneVm { .. } => Capacity {
+            DirectiveKind::CloneVm { base_name, .. } => Capacity {
                 vm_slots: 1,
                 macos_guests: 0,
-                resources: Resources::new(0, self.sizing.clone_disk_bytes),
+                resources: Resources::new(
+                    0,
+                    self.clone_ceiling(base_name)
+                        .ok_or(ResourceDimension::Disk)?,
+                ),
             },
             DirectiveKind::StartVm {
                 vm_name,
@@ -503,6 +550,96 @@ impl Ledger {
             | DirectiveKind::ReportCapacity
             | DirectiveKind::ReportHostFacts => ZERO,
         })
+    }
+
+    /// The disk ceiling of the image `digest`: configured, else measured from its manifest;
+    /// `None` while neither (ADR 0052). Pinned by
+    /// `tests/data_plane/ledger.rs::should_refuse_capacity_unknown_when_a_pull_needs_a_disk_not_measured_yet`.
+    #[must_use]
+    pub fn image_ceiling(&self, digest: &ImageDigest) -> Option<u64> {
+        self.sizing
+            .image_disk_bytes
+            .or_else(|| self.measured.images.get(digest).copied())
+    }
+
+    /// The disk ceiling of a base made from `digest`: configured, else its image's measured.
+    #[must_use]
+    pub fn base_ceiling(&self, digest: &ImageDigest) -> Option<u64> {
+        self.sizing
+            .base_disk_bytes
+            .or_else(|| self.measured.images.get(digest).copied())
+    }
+
+    /// The disk ceiling of a clone of `base`: configured, else its base's measured. Pinned by
+    /// `tests/data_plane/ledger.rs::should_size_each_creation_by_its_manifest_when_no_ceiling_is_configured`.
+    #[must_use]
+    pub fn clone_ceiling(&self, base: &BaseName) -> Option<u64> {
+        self.sizing
+            .clone_disk_bytes
+            .or_else(|| self.measured_base(base))
+    }
+
+    /// A base's measured disk: its own, else its image's.
+    fn measured_base(&self, base: &BaseName) -> Option<u64> {
+        self.measured.bases.get(base).copied().or_else(|| {
+            self.measured
+                .base_images
+                .get(base)
+                .and_then(|digest| self.measured.images.get(digest))
+                .copied()
+        })
+    }
+
+    /// The images whose disk is still unknown although listed, by digest: a listed image of
+    /// no measured size, and the image of a listed base of none. The executor measures them
+    /// again on each observer pass, and `mayflyd` reports them; until then disk is unknown,
+    /// reported `images_not_read` (ADR 0052's amendment: no new protocol cause). Pinned by
+    /// `tests/data_plane/ledger.rs::should_size_a_base_by_its_image_when_its_own_size_did_not_read`.
+    #[must_use]
+    pub fn unmeasured_listed(&self) -> BTreeSet<ImageDigest> {
+        let images = self
+            .images
+            .iter()
+            .filter(|(_, bytes)| bytes.is_none())
+            .map(|(digest, _)| digest.clone());
+        let bases = self
+            .bases
+            .iter()
+            .filter(|(_, base)| base.disk_bytes.is_none())
+            .filter_map(|(name, _)| self.measured.base_images.get(name).cloned());
+        images.chain(bases).collect()
+    }
+
+    /// The image a `PullImage` would pull whose disk ceiling is neither configured nor measured
+    /// yet: the executor measures its manifest before admitting it ([`Ledger::learn_image`]).
+    #[must_use]
+    pub fn unmeasured<'k>(&self, kind: &'k DirectiveKind) -> Option<&'k ImageDigest> {
+        match kind {
+            DirectiveKind::PullImage { digest }
+                if !self.images.contains_key(digest) && self.image_ceiling(digest).is_none() =>
+            {
+                Some(digest)
+            }
+            DirectiveKind::PullImage { .. }
+            | DirectiveKind::MaterialiseImage { .. }
+            | DirectiveKind::EvictImage { .. }
+            | DirectiveKind::CloneVm { .. }
+            | DirectiveKind::StartVm { .. }
+            | DirectiveKind::VerifyGuest { .. }
+            | DirectiveKind::LaunchRunner { .. }
+            | DirectiveKind::ExportDiagnostics { .. }
+            | DirectiveKind::StopVm { .. }
+            | DirectiveKind::DeleteVm { .. }
+            | DirectiveKind::ReportInventory
+            | DirectiveKind::ReportCapacity
+            | DirectiveKind::ReportHostFacts => None,
+        }
+    }
+
+    /// Keeps the disk size measured from the verified manifest of `digest` (a size never
+    /// changes for a digest).
+    pub fn learn_image(&mut self, digest: &ImageDigest, disk_bytes: u64) {
+        self.measured.images.insert(digest.clone(), disk_bytes);
     }
 
     /// Whether `demand` fits what is free, checked per dimension in [`ResourceDimension`]
@@ -600,17 +737,24 @@ impl Ledger {
     /// what it removed.
     pub fn commit(&mut self, key: (Epoch, DirectiveId), kind: &DirectiveKind) {
         self.reservations.remove(&key);
-        let sizing = self.sizing;
         match kind {
             DirectiveKind::PullImage { digest } => {
-                self.images
-                    .entry(digest.clone())
-                    .or_insert(sizing.image_disk_bytes);
+                let ceiling = self.image_ceiling(digest);
+                self.images.entry(digest.clone()).or_insert(ceiling);
             }
-            DirectiveKind::MaterialiseImage { base_name, .. } => {
+            DirectiveKind::MaterialiseImage {
+                base_name, digest, ..
+            } => {
+                let ceiling = self.base_ceiling(digest);
+                if let Some(measured) = self.measured.images.get(digest).copied() {
+                    self.measured.bases.insert(base_name.clone(), measured);
+                }
+                self.measured
+                    .base_images
+                    .insert(base_name.clone(), digest.clone());
                 self.bases.entry(base_name.clone()).or_insert(BaseUse {
                     guest: None,
-                    disk_bytes: sizing.base_disk_bytes,
+                    disk_bytes: ceiling,
                 });
             }
             DirectiveKind::EvictImage { base_name } => {
@@ -618,11 +762,12 @@ impl Ledger {
             }
             DirectiveKind::CloneVm { base_name, vm_name } => {
                 let guest = self.bases.get(base_name).and_then(|base| base.guest);
+                let disk_bytes = self.clone_ceiling(base_name);
                 self.vms.entry(vm_name.clone()).or_insert(VmUse {
                     guest,
                     running: false,
                     memory_bytes: None,
-                    disk_bytes: Some(sizing.clone_disk_bytes),
+                    disk_bytes,
                 });
             }
             DirectiveKind::StartVm {
@@ -678,7 +823,8 @@ impl Ledger {
     }
 
     /// What a `StartVm` runs with by the ledger: its run options, raised to the configured
-    /// sizing (the memory of one VM, the disk of one clone). The control plane may ask for
+    /// sizing (the memory of one VM, the disk of one clone when configured; a measured clone's
+    /// disk is the VM's own, recorded at its clone). The control plane may ask for
     /// more and is counted at that; it never gets less counted than the data plane's own sizing
     /// (ADR 0024, mutant 24). Raising rather than refusing: the data plane has no per-pool
     /// ceiling to refuse against, and counting the larger way never over-commits.
@@ -687,7 +833,9 @@ impl Ledger {
         let wanted = run_options.resources;
         Resources::new(
             wanted.memory_bytes.max(self.sizing.vm_memory_bytes),
-            wanted.disk_bytes.max(self.sizing.clone_disk_bytes),
+            wanted
+                .disk_bytes
+                .max(self.sizing.clone_disk_bytes.unwrap_or(0)),
         )
     }
 
@@ -731,26 +879,43 @@ impl Ledger {
             .retain(|_, r| !(r.held && r.settles == Settles::Inventory));
     }
 
-    /// Applies the image store's listing: the pulled images and the bases with their guests.
-    /// Held image reservations are settled.
+    /// Applies the image store's listing: the pulled images and the bases with their guests,
+    /// each counted at its configured ceiling, else at what `disks` measured of it (kept for
+    /// later: a digest's size never changes), else unknown (ADR 0052). Held image reservations
+    /// are settled. Pinned by
+    /// `tests/data_plane/ledger.rs::should_count_listed_images_and_bases_at_their_measured_disks_when_no_ceiling_is_configured`.
     pub fn apply_images(
         &mut self,
         images: &BTreeSet<ImageDigest>,
         bases: &BTreeMap<BaseName, GuestOs>,
+        disks: &MeasuredDisks,
     ) {
+        self.measured
+            .images
+            .extend(disks.images.iter().map(|(d, bytes)| (d.clone(), *bytes)));
+        self.measured
+            .bases
+            .extend(disks.bases.iter().map(|(b, bytes)| (b.clone(), *bytes)));
+        self.measured.base_images.extend(
+            disks
+                .base_images
+                .iter()
+                .map(|(b, digest)| (b.clone(), digest.clone())),
+        );
         let sizing = self.sizing;
         self.images = images
             .iter()
-            .map(|digest| (digest.clone(), sizing.image_disk_bytes))
+            .map(|digest| (digest.clone(), self.image_ceiling(digest)))
             .collect();
         self.bases = bases
             .iter()
             .map(|(name, guest)| {
+                let disk_bytes = sizing.base_disk_bytes.or_else(|| self.measured_base(name));
                 (
                     name.clone(),
                     BaseUse {
                         guest: Some(*guest),
-                        disk_bytes: sizing.base_disk_bytes,
+                        disk_bytes,
                     },
                 )
             })

@@ -169,9 +169,9 @@ pub fn directive(id: u128, epoch: Epoch, kind: DirectiveKind) -> Directive {
 
 pub fn sizing() -> Sizing {
     Sizing {
-        image_disk_bytes: 50 * GIB,
-        base_disk_bytes: 60 * GIB,
-        clone_disk_bytes: 80 * GIB,
+        image_disk_bytes: Some(50 * GIB),
+        base_disk_bytes: Some(60 * GIB),
+        clone_disk_bytes: Some(80 * GIB),
         vm_memory_bytes: 8 * GIB,
     }
 }
@@ -205,6 +205,7 @@ pub fn ledger(probe: HostProbe) -> Ledger {
     ledger.apply_images(
         &std::collections::BTreeSet::new(),
         &std::collections::BTreeMap::new(),
+        &mayfly_data_domain::MeasuredDisks::default(),
     );
     ledger
 }

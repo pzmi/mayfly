@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 
 use mayfly_testkit_data::image_contract::{ImageCase, MemoryWorld, check_image_store_contract};
-use mayfly_testkit_data::{BaseEvictingStore, NameEvictingStore, TagPullStore};
+use mayfly_testkit_data::{
+    BaseEvictingStore, GuessingSizeStore, NameEvictingStore, TagPullStore, TrustingMeasureStore,
+};
 
 #[test]
 fn should_pass_every_case_when_the_store_is_the_in_memory_images() {
@@ -65,6 +67,38 @@ fn should_fail_the_foreign_and_identity_cases_when_a_store_evicts_by_name() {
             ImageCase::EvictRefusesForeign,
             ImageCase::EvictRefusesIdentityMismatch
         ]),
+        "{report}"
+    );
+}
+
+#[test]
+fn should_fail_the_measure_case_when_a_store_guesses_a_disk() {
+    // given
+    let make = || MemoryWorld::wrapped(GuessingSizeStore);
+
+    // when
+    let report = check_image_store_contract(&make);
+
+    // then
+    assert_eq!(
+        report.failed_cases(),
+        BTreeSet::from([ImageCase::MeasureFromManifest]),
+        "{report}"
+    );
+}
+
+#[test]
+fn should_fail_the_measure_case_when_a_store_measures_without_checking_the_digest() {
+    // given
+    let make = || MemoryWorld::wrapped(TrustingMeasureStore);
+
+    // when
+    let report = check_image_store_contract(&make);
+
+    // then
+    assert_eq!(
+        report.failed_cases(),
+        BTreeSet::from([ImageCase::MeasureFromManifest]),
         "{report}"
     );
 }

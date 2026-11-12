@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mayfly_adapter_host::{HostConfig as ProbeConfig, OsProbe, ProviderView, ReadFailed};
+use mayfly_adapter_host::{HostConfig as ProbeConfig, OsProbe, ProviderView, ReadFailed, VmShape};
 use mayfly_adapter_link::inproc;
 use mayfly_adapter_secrets::UriSecretProvider;
 use mayfly_adapter_sqlite::{OpenError, SqliteJournal, SqliteLedger, SqliteOptions};
@@ -105,8 +105,7 @@ use mayfly_domain::{
     Resources, Secret,
 };
 use mayfly_protocol::{
-    Capacity, Directive, DirectiveKind, DirectiveSink as _, Mode, ObservationKind, SUPPORTED,
-    SecretHandle,
+    Directive, DirectiveKind, DirectiveSink as _, Mode, ObservationKind, SUPPORTED, SecretHandle,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::sync::watch;
@@ -287,19 +286,6 @@ impl std::fmt::Display for DaemonError {
 
 impl std::error::Error for DaemonError {}
 
-/// What `[host]` must say for `mayflyd` (ADR 0052: no default for a fact of the host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostSizing {
-    /// The VMs this host runs at once.
-    pub vm_slots: u32,
-    /// The macOS guests the hypervisor runs at once (at most 2).
-    pub macos_guests: u32,
-    /// The disk ceiling of one image, and of one base made from it, in GiB.
-    pub image_disk_gib: u64,
-    /// The disk ceiling of one clone, in GiB.
-    pub clone_disk_gib: u64,
-}
-
 /// The daemon's configuration as `mayflyd` needs it.
 #[derive(Debug, Clone)]
 pub struct Loaded {
@@ -307,8 +293,6 @@ pub struct Loaded {
     pub config: Config,
     /// `[images]`.
     pub images: crate::config::ImagesConfig,
-    /// `[host]`'s sizing.
-    pub sizing: HostSizing,
     /// The state directory and `TART_HOME`: the configuration's, else the platform's standard
     /// places (ADR 0091 decision 5, [`crate::paths`]).
     pub places: Places,
@@ -323,9 +307,11 @@ fn missing(field: &str, problem: &str, fix: &str) -> ConfigError {
     }
 }
 
-/// The daemon's configuration: the file valid, `[images]` present and `[host]`'s sizing keys
-/// given, each missing one named (exit 78). Pinned by
-/// `tests/daemon.rs::should_refuse_to_start_when_the_role_the_images_or_the_sizing_are_missing`.
+/// The daemon's configuration: the file valid and `[images]` present, each missing one named
+/// (exit 78). `[host]`'s sizing keys are optional: absent, each is measured, read from the
+/// image's manifest or Apple's limit ([`crate::sizing`], ADR 0052's amendment of 2026-11-12).
+/// Pinned by
+/// `tests/daemon.rs::should_refuse_to_start_when_the_role_or_the_images_are_missing`.
 ///
 /// # Errors
 /// [`LoadError`] when the file does not load or lacks what the daemon needs.
@@ -351,59 +337,11 @@ pub fn load(path: &Path, env: &PlatformEnv) -> Result<Loaded, LoadError> {
             "add `[images]` with `repository = \"ghcr.io/acme/runner-macos\"`",
         ));
     }
-    let sized = "required to run mayflyd: the host's capacity is the operator's, never a default (ADR 0052)";
-    let host = config.host;
-    for (key, given, example) in [
-        ("vm_slots", host.vm_slots.is_some(), "vm_slots = 2"),
-        (
-            "macos_guests",
-            host.macos_guests.is_some(),
-            "macos_guests = 2",
-        ),
-        (
-            "image_disk_gib",
-            host.image_disk_gib.is_some(),
-            "image_disk_gib = 100",
-        ),
-        (
-            "clone_disk_gib",
-            host.clone_disk_gib.is_some(),
-            "clone_disk_gib = 100",
-        ),
-    ] {
-        if !given {
-            errors.push(missing(
-                &format!("host.{key}"),
-                sized,
-                &format!("add `{example}` under `[host]`, measured for this host"),
-            ));
-        }
-    }
-    match (
-        places,
-        config.images.clone(),
-        host.vm_slots,
-        host.macos_guests,
-        host.image_disk_gib,
-        host.clone_disk_gib,
-    ) {
-        (
-            Some(places),
-            Some(images),
-            Some(vm_slots),
-            Some(macos_guests),
-            Some(image_disk_gib),
-            Some(clone_disk_gib),
-        ) if errors.is_empty() => Ok(Loaded {
+    match (places, config.images.clone()) {
+        (Some(places), Some(images)) if errors.is_empty() => Ok(Loaded {
             config,
             places,
             images,
-            sizing: HostSizing {
-                vm_slots,
-                macos_guests,
-                image_disk_gib,
-                clone_disk_gib,
-            },
         }),
         _ => Err(LoadError::Invalid(ConfigErrors(errors))),
     }
@@ -486,14 +424,21 @@ fn derive(parts: &[&[u8]]) -> u128 {
     u128::from_be_bytes(head)
 }
 
-/// The data plane's sizing (ADR 0052: the operator's): disks from `[host]`, a base sized as its
-/// image, a VM's memory floor the smallest pool's.
-fn sizing(config: &Config, host: HostSizing) -> Sizing {
-    let image = host.image_disk_gib.saturating_mul(GIB);
+/// The data plane's sizing: disks from `[host]` when configured, else measured per image from
+/// its manifest (`None`, ADR 0052's amendment), a base sized as its image, a VM's memory floor
+/// the smallest pool's.
+fn sizing(config: &Config) -> Sizing {
+    let image = config
+        .host
+        .image_disk_gib
+        .map(|gib| gib.saturating_mul(GIB));
     Sizing {
         image_disk_bytes: image,
         base_disk_bytes: image,
-        clone_disk_bytes: host.clone_disk_gib.saturating_mul(GIB),
+        clone_disk_bytes: config
+            .host
+            .clone_disk_gib
+            .map(|gib| gib.saturating_mul(GIB)),
         vm_memory_bytes: config
             .pools
             .iter()
@@ -501,6 +446,21 @@ fn sizing(config: &Config, host: HostSizing) -> Sizing {
             .min()
             .unwrap_or(0)
             .saturating_mul(MIB),
+    }
+}
+
+/// What one measured slot must hold: the largest memory and the most CPUs of any pool, so a
+/// measured count never offers a slot the largest VM does not fit.
+fn vm_shape(config: &Config) -> VmShape {
+    VmShape {
+        memory_bytes: config
+            .pools
+            .iter()
+            .map(|p| p.memory_mib)
+            .max()
+            .unwrap_or(0)
+            .saturating_mul(MIB),
+        cpus: config.pools.iter().map(|p| p.cpu).max().unwrap_or(0),
     }
 }
 
@@ -602,15 +562,14 @@ async fn data_plane(
     let probe = OsProbe::new(
         ProbeConfig {
             provider_home: tart.tart_home.clone(),
-            vm_slots: loaded.sizing.vm_slots,
-            macos_guests: loaded.sizing.macos_guests,
-            reserve: Capacity {
-                vm_slots: 0,
-                macos_guests: 0,
-                resources: config.host.reserve(),
-            },
-            disk_low_water_bytes: config.host.reserve().disk_bytes,
-            memory_low_water_bytes: config.host.reserve().memory_bytes,
+            vm_slots: config.host.vm_slots,
+            vm_shape: vm_shape(config),
+            macos_guests: config.host.macos_guests(),
+            reserve_memory_bytes: config.host.reserve_memory_bytes(),
+            reserve_disk_bytes: config.host.reserve_disk_bytes(),
+            reserve_cpus: config.host.reserve_cpus(),
+            disk_low_water_bytes: config.host.reserve_disk_bytes(),
+            memory_low_water_bytes: None,
             wake_gap: Duration::from_secs(60),
         },
         view,
@@ -638,7 +597,7 @@ async fn data_plane(
     let exec = Executor::start(
         DataConfig {
             host_id: host.clone(),
-            sizing: sizing(config, loaded.sizing),
+            sizing: sizing(config),
             concurrency: 4,
             observe_every: OBSERVE_EVERY,
             listing_timeout: Millis::new(30_000),
@@ -701,7 +660,8 @@ where
 /// Everything a run borrows.
 struct Daemon<'a> {
     config: &'a Config,
-    sizing: HostSizing,
+    /// The operator reserve in effect at start: configured, or measured by the probe.
+    reserves: Resources,
     host: HostId,
     boot_id: String,
     version: String,
@@ -775,6 +735,12 @@ pub async fn run_with(
     let journal = SqliteJournal::open(&journal_path, SqliteOptions::new(SystemClock.now()))
         .map_err(DaemonError::Journal)?;
     let (mut exec, floor, boot_id) = data_plane(&loaded, &options, &host).await?;
+    let reading = exec.ledger().probe.clone();
+    report_sizing(&crate::sizing::report(
+        &config.host,
+        Some(&reading),
+        &exec.ledger().unmeasured_listed(),
+    ));
     let notifier = Notifier::new();
     let rng = OsRng::seeded().map_err(|_| DaemonError::Start("the random generator"))?;
     let projections =
@@ -790,7 +756,7 @@ pub async fn run_with(
     let key: [u8; 32] = random_bytes().map_err(|_| DaemonError::Start("the random generator"))?;
     let daemon = Daemon {
         config,
-        sizing: loaded.sizing,
+        reserves: reading.reserve.resources,
         boot_id,
         host,
         version: options.version.clone(),
@@ -799,7 +765,7 @@ pub async fn run_with(
         notifier,
         details: ConfigDetails::new(
             config,
-            loaded.sizing.clone_disk_gib,
+            config.host.clone_disk_gib,
             key,
             Placements::default(),
         ),
@@ -849,7 +815,7 @@ impl Daemon<'_> {
                 host: self.host.clone(),
                 boot_id: self.boot_id.clone(),
                 version: self.version.clone(),
-                reserves: self.config.host.reserve(),
+                reserves: self.reserves,
                 crash_loop: false,
             },
         );
@@ -937,7 +903,10 @@ impl Daemon<'_> {
                 },
                 vm_resources: Resources::new(
                     pool.memory_mib.saturating_mul(MIB),
-                    self.sizing.clone_disk_gib.saturating_mul(GIB),
+                    self.config
+                        .host
+                        .clone_disk_gib
+                        .map_or(0, |gib| gib.saturating_mul(GIB)),
                 ),
                 max_running: pool.max_running,
                 min_prepared: pool.min_prepared,
@@ -1303,6 +1272,15 @@ impl Daemon<'_> {
             }
         }
     }
+}
+
+/// Writes the start-up sizing report to stderr, flushed: each value and its source. stdout
+/// carries only the ready line, whose promise its readers rely on.
+fn report_sizing(report: &crate::sizing::SizingReport) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = write!(err, "{report}");
+    let _ = err.flush();
 }
 
 /// Runs `mayflyd --role all` on its own runtime until SIGTERM or SIGINT: the binary's whole

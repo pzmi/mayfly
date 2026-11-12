@@ -15,7 +15,8 @@
 //! suite only bounds a whole case ([`CASE_BOUND`]). [`check_image_store_contract`] returns a
 //! report of failed cases: the suite's own tests show the broken stores of ver §5 failing exactly
 //! the cases that exist to catch them (`TagPullStore`: IC-01, IC-02; `BaseEvictingStore`: IC-10;
-//! `NameEvictingStore`: IC-11, IC-12; `tests/image_contract.rs`). A world that cannot build what
+//! `NameEvictingStore`: IC-11, IC-12; `GuessingSizeStore` and
+//! `TrustingMeasureStore`: IC-15; `tests/image_contract.rs`). A world that cannot build what
 //! a case needs fails it.
 
 use std::collections::BTreeSet;
@@ -28,7 +29,7 @@ use mayfly_domain::{ImageDigest, OwnedVmName};
 use mayfly_protocol::{BaseName, GuestOs};
 use mayfly_testkit_shared::poll::within;
 
-use crate::images::{MemoryImages, REPOSITORY, RUNNER, base_for, digest_of};
+use crate::images::{MemoryImages, REPOSITORY, RUNNER, base_for, digest_of, disk_bytes};
 use crate::provider_contract::vm;
 
 /// The longest a whole case may take before it is reported as hung.
@@ -55,6 +56,10 @@ pub trait ImageWorld {
     /// Publishes an image of `guest` whose content is `content` at `<repository>@<its digest>`
     /// and at `<repository>:latest`; returns the digest.
     fn publish(&self, content: &[u8], guest: GuestOs) -> ImageDigest;
+
+    /// The disk an image published from `content` reconstructs to: what its manifest's disk
+    /// layers sum to.
+    fn disk_bytes(&self, content: &[u8]) -> u64;
 
     /// Publishes `content` at `<repository>@<digest>` and `:latest` where `digest` is the digest
     /// of `claimed`, not of `content`: drift (domain-model §9.3); returns that digest.
@@ -133,11 +138,16 @@ pub enum ImageCase {
     /// IC-14: a Linux image materialises a base listed as a Linux guest, beside a macOS one, so
     /// the ledger counts it outside the macOS-guest limit (plan §1 G3).
     LinuxBaseListedAsLinux,
+    /// IC-15: an image's disk is measured from its manifest fetched by digest, before any pull
+    /// and without one; a manifest that does not hash to its digest, or a digest the registry
+    /// does not hold, is refused `Definite`; once pulled and materialised, the listing names the
+    /// same disk for the image and its base (ADR 0052's amendment of 2026-11-12).
+    MeasureFromManifest,
 }
 
 impl ImageCase {
     /// Every case, in id order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::PullByDigest,
         Self::PullRefusesDrift,
         Self::PullUnknownRefused,
@@ -152,6 +162,7 @@ impl ImageCase {
         Self::EvictRefusesIdentityMismatch,
         Self::RestartKeepsOwnership,
         Self::LinuxBaseListedAsLinux,
+        Self::MeasureFromManifest,
     ];
 
     /// The case's id, `IC-01` …
@@ -172,6 +183,7 @@ impl ImageCase {
             Self::EvictRefusesIdentityMismatch => "IC-12",
             Self::RestartKeepsOwnership => "IC-13",
             Self::LinuxBaseListedAsLinux => "IC-14",
+            Self::MeasureFromManifest => "IC-15",
         }
     }
 }
@@ -286,6 +298,7 @@ async fn run_case<W: ImageWorld>(w: &mut W, case: ImageCase) -> Check {
         ImageCase::EvictRefusesIdentityMismatch => evict_refuses_identity_mismatch(w).await,
         ImageCase::RestartKeepsOwnership => restart_keeps_ownership(w).await,
         ImageCase::LinuxBaseListedAsLinux => linux_base_listed_as_linux(w).await,
+        ImageCase::MeasureFromManifest => measure_from_manifest(w).await,
     }
 }
 
@@ -573,6 +586,48 @@ async fn linux_base_listed_as_linux<W: ImageWorld>(w: &mut W) -> Check {
     )
 }
 
+async fn measure_from_manifest<W: ImageWorld>(w: &mut W) -> Check {
+    let content = b"{\"image\":\"measured\"}";
+    let digest = w.publish(content, GuestOs::Macos);
+    let want = w.disk_bytes(content);
+    let measured = step("measure", w.store().measure(&digest)).await?;
+    eq("the measured disk", &measured, &want)?;
+    eq("pulls while measuring", &w.fetched(), &Vec::new())?;
+    let listing = step("list", w.store().list()).await?;
+    ensure(
+        "a measured image is listed without a pull",
+        !listing.images.contains(&digest),
+    )?;
+    let drifted = w.publish_drifted(b"{\"image\":\"served\"}", b"{\"image\":\"claimed\"}");
+    eq(
+        "measuring a drifted manifest",
+        &w.store().measure(&drifted).await,
+        &Err(VmError::Definite),
+    )?;
+    let unknown = digest_of(b"never published");
+    eq(
+        "measuring a digest the registry does not hold",
+        &w.store().measure(&unknown).await,
+        &Err(VmError::Definite),
+    )?;
+    step("pull", w.store().pull(&digest)).await?;
+    let base = base_of(w, &digest)?;
+    step(
+        "materialise",
+        w.store().materialise(&digest, &base, &w.runner()),
+    )
+    .await?;
+    let listing = step("list", w.store().list()).await?;
+    eq(
+        "listed disks of the image and its base",
+        &(
+            listing.disks.images.get(&digest),
+            listing.disks.bases.get(&base),
+        ),
+        &(Some(&want), Some(&want)),
+    )
+}
+
 async fn restart_keeps_ownership<W: ImageWorld>(w: &mut W) -> Check {
     let base = materialised(w).await?;
     w.restart();
@@ -653,6 +708,10 @@ impl<S: ImageStore> ImageWorld for MemoryWorld<S> {
             self.images.serve(&reference, content, guest);
         }
         digest
+    }
+
+    fn disk_bytes(&self, content: &[u8]) -> u64 {
+        disk_bytes(content)
     }
 
     fn publish_drifted(&self, content: &[u8], claimed: &[u8]) -> ImageDigest {

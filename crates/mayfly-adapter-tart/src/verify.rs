@@ -85,6 +85,19 @@ pub struct Layout {
     pub chunks: Vec<Expected>,
 }
 
+impl Layout {
+    /// The disk Tart reconstructs: the chunks' uncompressed sizes summed (checked not to
+    /// overflow, and against the manifest's stated disk size when it has one, by [`layout`]).
+    /// An image's, its base's and a clone's measured disk ceiling (ADR 0052's amendment of
+    /// 2026-11-12). Pinned by `tests::should_sum_the_uncompressed_chunks_when_a_disk_is_measured`.
+    #[must_use]
+    pub fn disk_bytes(&self) -> u64 {
+        self.chunks
+            .iter()
+            .fold(0_u64, |sum, chunk| sum.saturating_add(chunk.size))
+    }
+}
+
 #[derive(Deserialize)]
 struct Manifest {
     #[serde(rename = "schemaVersion")]
@@ -637,6 +650,24 @@ mod tests {
             "schemaVersion": 2, "mediaType": MANIFEST_V1, "layers": layers
         }))
         .expect("json")
+    }
+
+    #[test]
+    fn should_sum_the_uncompressed_chunks_when_a_disk_is_measured() {
+        // given: two chunks of 40 and 2 GiB uncompressed, whose compressed layers are 3 bytes
+        let b = "b".repeat(64);
+        let raw = manifest(&[
+            (CONFIG_LAYER, None),
+            (DISK_V2_LAYER, Some((40 << 30, b.as_str()))),
+            (DISK_V2_LAYER, Some((2 << 30, b.as_str()))),
+            (NVRAM_LAYER, None),
+        ]);
+
+        // when
+        let disk = layout(&raw).map(|l| l.disk_bytes());
+
+        // then: the reconstructed disk, never the compressed layer sizes
+        assert_eq!(disk, Ok(42 << 30));
     }
 
     #[test]

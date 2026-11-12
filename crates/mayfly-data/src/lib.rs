@@ -23,7 +23,7 @@ pub use launch_store::{AlreadyHeld, LaunchBinding, LaunchStore};
 pub use mayfly_data_domain::HostProbe as HostReading;
 pub use redaction::redact_log;
 // The types the ports name, so an adapter implements them through this crate alone.
-pub use mayfly_data_domain::{ForeignUse, Inventory, Shim, foreign_use};
+pub use mayfly_data_domain::{ForeignUse, Inventory, MeasuredDisks, Shim, foreign_use};
 pub use mayfly_protocol::{
     BaseName, Capacity, DiagnosticsLoss, GuestFacts, GuestOs, GuestRejection, HostFacts,
     InventoryGap, Nonce, OwnershipProof, ResourceDimension, RunOptions, SecretHandle,

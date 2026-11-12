@@ -1,4 +1,4 @@
-//! The `ImageStore` contract (IC-01..IC-14) against real Tart (DP-07, HW-01): macOS only, with
+//! The `ImageStore` contract (IC-01..IC-15) against real Tart (DP-07, HW-01): macOS only, with
 //! the `real-tart` feature, run by `cargo xtask hw01` after it has built the contract image (the
 //! pinned Linux image with the test launcher, `tools/hw01/launcher`) and pushed it to the
 //! loopback registry it serves for the run. It names, through the environment:
@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use mayfly_adapter_tart::bases::SignaturePolicy;
-use mayfly_adapter_tart::verify::{CONFIG_LAYER, sha256_hex};
+use mayfly_adapter_tart::verify::{self, CONFIG_LAYER, sha256_hex};
 use mayfly_adapter_tart::{
     BaseRecords, Deadlines, FetchError, ImageConfig, ImageDeadlines, ManifestSource,
     RegistryManifests, RunnerPlatform, ShimProgram, TartConfig, TartImageStore, TartProvider,
@@ -368,6 +368,16 @@ impl ImageWorld for RealImageWorld {
         let (digest, bytes) = self.variant(content, guest);
         self.serve(&digest, &bytes);
         digest
+    }
+
+    /// Every variant shares the contract image's disk chunks, so the disk is the contract
+    /// image's: the macOS one when the run has it (IC-15 publishes a macOS guest), else the
+    /// Linux one.
+    fn disk_bytes(&self, _content: &[u8]) -> u64 {
+        let source = self.contract_macos.as_ref().unwrap_or(&self.contract);
+        verify::layout(source)
+            .expect("the contract image's layout")
+            .disk_bytes()
     }
 
     fn publish_drifted(&self, content: &[u8], claimed: &[u8]) -> ImageDigest {

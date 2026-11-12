@@ -97,7 +97,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0045](0045-the-github-app-permission-list-is-a-published-commitment.md) | The GitHub App permission list is a published commitment | Accepted |
 | [0046](0046-config-schema-v1-reads-raw-toml-secret-references-live-in-the-kernel-exit-codes.md) | Config schema v1 reads raw TOML, secret references live in the kernel, exit codes | Accepted |
 | [0048](0048-our-own-scale-set-client-informed-by-reading-actions-scaleset.md) | Our own Scale Set client, informed by reading actions/scaleset | Accepted. Amended 2026-11-11 |
-| [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted |
+| [0052](0052-no-defaults-for-unknown-facts-the-data-plane-fails-safe.md) | No defaults for unknown facts: the data plane fails safe | Accepted. Amended 2026-11-12 |
 | [0053](0053-destructive-data-plane-directives-are-idempotent-by-outcome.md) | Destructive data-plane directives are idempotent by outcome | Accepted. Amended by 0066 |
 | [0058](0058-the-secrets-adapter-runs-its-own-commands-the-keychain-through-the-security-cli.md) | The secrets adapter runs its own commands; the Keychain through the security CLI | Accepted |
 | [0064](0064-github-client-crypto-and-tls-aws-lc-rs-and-rustls-no-jwt-crate.md) | GitHub client crypto and TLS: aws-lc-rs and rustls, no JWT crate | Accepted |
@@ -105,6 +105,6 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0069](0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve keeps the headroom and what quarantines owe | Accepted. Amended 2026-11-11 |
 | [0076](0076-quarantine-stops-deregister-first.md) | Quarantine stops deregister first | Accepted |
 | [0082](0082-jit-configs-on-the-data-plane-and-the-guest-launcher-contract.md) | JIT configs on the data plane and the guest launcher contract | Accepted |
-| [0087](0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: a durable record, a booted base and pull verification | Accepted |
+| [0087](0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: a durable record, a booted base and pull verification | Accepted. Amended 2026-11-12 |
 | [0090](0090-trust-on-github-com-every-assigned-job-s-run-looked-up-before-a-runner.md) | Trust on github.com: every assigned job's run looked up before a runner | Accepted. Amended 2026-11-12 |
 | [0091](0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition: one run per session, its configuration and identity | Proposed |

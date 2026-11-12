@@ -1,5 +1,6 @@
 //! The fake image store, guest transport, host probe and floor: scripted answers, shared state.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -14,10 +15,14 @@ fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// An image store over a listing; materialised bases run Linux guests.
+/// An image store over a listing; materialised bases run Linux guests. A digest given a size
+/// ([`FakeImageStore::manifest`]) measures to it and is listed with it once pulled, its bases
+/// too; any other digest does not measure.
 #[derive(Debug, Clone, Default)]
 pub struct FakeImageStore {
     state: Arc<Mutex<(ImageListing, Option<VmError>)>>,
+    manifests: Arc<Mutex<BTreeMap<ImageDigest, u64>>>,
+    measured: Arc<Mutex<Vec<ImageDigest>>>,
 }
 
 impl FakeImageStore {
@@ -26,7 +31,37 @@ impl FakeImageStore {
     pub fn new(listing: ImageListing) -> Self {
         Self {
             state: Arc::new(Mutex::new((listing, None))),
+            ..Self::default()
         }
+    }
+
+    /// The registry's manifest of `digest` states a disk of `disk_bytes`.
+    pub fn manifest(&self, digest: &ImageDigest, disk_bytes: u64) {
+        lock(&self.manifests).insert(digest.clone(), disk_bytes);
+    }
+
+    /// The listing names `digest` with no disk size (its kept manifest no longer reads), and so
+    /// does each base made from it.
+    pub fn forget_size(&self, digest: &ImageDigest) {
+        let mut state = lock(&self.state);
+        let listing = &mut state.0;
+        listing.disks.images.remove(digest);
+        let bases: Vec<BaseName> = listing
+            .disks
+            .base_images
+            .iter()
+            .filter(|(_, image)| *image == digest)
+            .map(|(base, _)| base.clone())
+            .collect();
+        for base in bases {
+            listing.disks.bases.remove(&base);
+        }
+    }
+
+    /// Every digest measured, in order.
+    #[must_use]
+    pub fn measured(&self) -> Vec<ImageDigest> {
+        lock(&self.measured).clone()
     }
 
     /// Every later call fails with `error`, or none does (`None`).
@@ -58,26 +93,51 @@ impl ImageStore for FakeImageStore {
         state.1.map_or_else(|| Ok(state.0.clone()), Err)
     }
 
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        lock(&self.measured).push(digest.clone());
+        if let Some(error) = lock(&self.state).1 {
+            return Err(error);
+        }
+        lock(&self.manifests)
+            .get(digest)
+            .copied()
+            .ok_or(VmError::Definite)
+    }
+
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
+        let size = lock(&self.manifests).get(digest).copied();
         self.apply(|listing| {
             listing.images.insert(digest.clone());
+            if let Some(size) = size {
+                listing.disks.images.insert(digest.clone(), size);
+            }
         })
     }
 
     async fn materialise(
         &self,
-        _digest: &ImageDigest,
+        digest: &ImageDigest,
         base: &BaseName,
         _runner_version: &str,
     ) -> Result<(), VmError> {
+        let size = lock(&self.manifests).get(digest).copied();
         self.apply(|listing| {
             listing.bases.insert(base.clone(), GuestOs::Linux);
+            listing
+                .disks
+                .base_images
+                .insert(base.clone(), digest.clone());
+            if let Some(size) = size {
+                listing.disks.bases.insert(base.clone(), size);
+            }
         })
     }
 
     async fn evict(&self, base: &BaseName) -> Result<(), VmError> {
         self.apply(|listing| {
             listing.bases.remove(base);
+            listing.disks.bases.remove(base);
+            listing.disks.base_images.remove(base);
         })
     }
 }

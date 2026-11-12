@@ -29,8 +29,12 @@
 //!   deleted, whatever its identity; a name the registry does not hold is never deleted; a
 //!   recorded base a complete listing no longer shows is done. Absence is always read from a
 //!   complete `tart list`, never a per-name `tart get`.
+//! - **measure**: the raw manifest fetched by digest ([`ManifestSource`]), checked against the
+//!   digest and read as Tart's disk v2 layout, gives the disk the image reconstructs to (the
+//!   chunks' uncompressed sizes, [`Layout::disk_bytes`]); nothing is pulled or kept.
 //! - **list**: the verified, unchanged images, and only the `Ready` bases that pass the clone
-//!   proof ([`crate::proof::ready_for_clone`]), with their guest. Any other `mfb-*` VM is counted
+//!   proof ([`crate::proof::ready_for_clone`]), with their guest; each with its disk, read from
+//!   the manifest kept at its pull (a manifest that no longer reads leaves its size unknown). Any other `mfb-*` VM is counted
 //!   by the ledger from the inventory, in full (DP-06F), so every base is counted once.
 //! - **recover**: crash recovery by observation, per base, from what a crash at each state
 //!   leaves (ADR 0087's crash table; a base left booted is stopped with `tart stop` before it is
@@ -50,7 +54,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use mayfly_data::{Ambiguity, BaseName, GuestOs, ImageListing, ImageStore, VmError};
+use mayfly_data::{Ambiguity, BaseName, GuestOs, ImageListing, ImageStore, MeasuredDisks, VmError};
 use mayfly_domain::ImageDigest;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
@@ -373,6 +377,13 @@ impl<M: ManifestSource> TartImageStore<M> {
         Some([print.config, print.nvram, print.disk])
     }
 
+    /// The disk of `digest` by the manifest kept at its pull, when it still hashes to the digest
+    /// and reads.
+    fn kept_disk(&self, digest: &ImageDigest) -> Option<u64> {
+        let raw = self.bases.manifest(digest)?;
+        verify::layout(&raw).ok().map(|layout| layout.disk_bytes())
+    }
+
     /// Whether `digest` was verified and its cache entry is unchanged since.
     fn image_current(&self, record: &Record, digest: &ImageDigest) -> bool {
         record
@@ -642,7 +653,7 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        let images = record
+        let images: BTreeSet<ImageDigest> = record
             .images
             .iter()
             .filter(|(digest, entry)| {
@@ -650,6 +661,12 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
             })
             .map(|(digest, _)| digest.clone())
             .collect();
+        let mut disks = MeasuredDisks::default();
+        for digest in &images {
+            if let Some(bytes) = self.kept_disk(digest) {
+                disks.images.insert(digest.clone(), bytes);
+            }
+        }
         let mut bases = BTreeMap::new();
         for (name, entry) in &record.bases {
             let Ok(base) = BaseName::new(name) else {
@@ -667,10 +684,34 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
                 .filter(|info| ready_for_clone(entry, info, self.home(), name).is_ok())
                 .and_then(|info| info.guest());
             if let Some(guest) = guest {
-                bases.insert(base, guest);
+                bases.insert(base.clone(), guest);
+                disks
+                    .base_images
+                    .insert(base.clone(), entry.source_digest.clone());
+                if let Some(bytes) = self.kept_disk(&entry.source_digest) {
+                    disks.bases.insert(base, bytes);
+                }
             }
         }
-        Ok(ImageListing { images, bases })
+        Ok(ImageListing {
+            images,
+            bases,
+            disks,
+        })
+    }
+
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        let raw = self
+            .manifests
+            .fetch(&self.images.repository, digest)
+            .await
+            .map_err(|_| VmError::Definite)?;
+        if !matches(&raw, digest) {
+            return Err(VmError::Definite);
+        }
+        verify::layout(&raw)
+            .map(|layout| layout.disk_bytes())
+            .map_err(|_| VmError::Definite)
     }
 
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {

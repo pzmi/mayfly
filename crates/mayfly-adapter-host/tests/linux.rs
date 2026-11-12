@@ -75,3 +75,15 @@ fn should_read_no_sleep_when_two_clock_readings_are_taken_back_to_back() {
     assert!(now.with_sleep >= before.with_sleep);
     assert!(slept(before, now).as_secs() < 1);
 }
+
+#[test]
+fn should_read_at_least_one_cpu_when_the_kernel_reports_them() {
+    // given
+    let os = Os::new();
+
+    // when
+    let cpus = os.cpus().expect("the CPU count");
+
+    // then
+    assert!(cpus >= 1);
+}

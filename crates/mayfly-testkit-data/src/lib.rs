@@ -34,6 +34,9 @@ pub mod provider_contract;
 pub use clock::{FakeClock, SequentialIds};
 pub use guest::{MemoryGuests, MemorySecrets, UncheckedLockTransport};
 pub use host::{FakeGuest, FakeHostProbe, FakeImageStore, GuestScript, MemoryFloor};
-pub use images::{BaseEvictingStore, MemoryImages, NameEvictingStore, TagPullStore};
+pub use images::{
+    BaseEvictingStore, GuessingSizeStore, MemoryImages, NameEvictingStore, TagPullStore,
+    TrustingMeasureStore,
+};
 pub use link::{DirectiveFeed, FeedSource, StaticWelcome, Tap, TapSink, directives, observations};
 pub use provider::{FakeVm, FakeVmProvider, Fault, Held, Op};

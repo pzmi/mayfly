@@ -452,7 +452,9 @@ pub struct UnknownCapacity {
 pub enum UnknownCause {
     /// No complete inventory has been read since the data plane started: our VMs are not known.
     InventoryNotRead,
-    /// No image-store listing has been read since the data plane started.
+    /// No image-store listing has been read since the data plane started, or a listed image or
+    /// base's disk has not been measured from its manifest (its kept manifest did not read and
+    /// measuring it again failed; ADR 0052's amendment of 2026-11-12, which reuses this cause).
     ImagesNotRead,
     /// The host probe could not size a VM that is not ours.
     ForeignVmUnsized,

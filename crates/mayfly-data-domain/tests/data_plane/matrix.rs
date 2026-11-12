@@ -525,14 +525,14 @@ fn should_fit_or_name_the_short_dimension_when_each_creating_kind_meets_each_hos
             if host_name == "target_already_there" {
                 match &mut kind {
                     DirectiveKind::PullImage { digest } => {
-                        ledger.images.insert(digest.clone(), 1);
+                        ledger.images.insert(digest.clone(), Some(1));
                     }
                     DirectiveKind::MaterialiseImage { base_name, .. } => {
                         ledger.bases.insert(
                             base_name.clone(),
                             mayfly_data_domain::BaseUse {
                                 guest: Some(GuestOs::Linux),
-                                disk_bytes: 1,
+                                disk_bytes: Some(1),
                             },
                         );
                     }

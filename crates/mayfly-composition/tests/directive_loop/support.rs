@@ -263,9 +263,9 @@ pub struct Dp {
 
 fn sizing() -> Sizing {
     Sizing {
-        image_disk_bytes: 50 * GIB,
-        base_disk_bytes: 60 * GIB,
-        clone_disk_bytes: 80 * GIB,
+        image_disk_bytes: Some(50 * GIB),
+        base_disk_bytes: Some(60 * GIB),
+        clone_disk_bytes: Some(80 * GIB),
         vm_memory_bytes: 8 * GIB,
     }
 }
@@ -296,6 +296,7 @@ impl Dp {
                 BaseName::new("mfb-base").unwrap_or_else(|e| panic!("{e}")),
                 GuestOs::Linux,
             )]),
+            ..ImageListing::default()
         });
         let guest = FakeGuest::new(GuestScript {
             verify: Ok(GuestAnswer::Verified(GuestFacts {

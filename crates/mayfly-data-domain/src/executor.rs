@@ -23,8 +23,8 @@ use mayfly_domain::{
 };
 use mayfly_protocol::{
     Directive, DirectiveKind, DirectiveOutcome, DirectiveRef, DirectiveTag, EpochCheck, Mode,
-    ObservationKind, OwnershipProof, ProtocolVersion, RefusalReason, SUPPORTED, UnknownReason,
-    VersionRefusal, VmObservation, admit_frame, check_epoch,
+    ObservationKind, OwnershipProof, ProtocolVersion, RefusalReason, ResourceDimension, SUPPORTED,
+    UnknownReason, VersionRefusal, VmObservation, admit_frame, check_epoch,
 };
 
 use crate::inventory::Inventory;
@@ -405,6 +405,41 @@ impl DataPlane {
             Link::Open(session) => Some(session.epoch),
             Link::Idle | Link::Awaiting | Link::Entering(_) => None,
         }
+    }
+
+    /// Whether `directive`, written in `version`, would reach admission now and is held back
+    /// only by a disk ceiling not measured yet: the session is open and speaks `version`, the
+    /// epoch is current, the directive is not already in the table, and [`admission`] passes
+    /// or refuses only `capacity_unknown{disk}`. Pure. The executor measures an image's
+    /// manifest only then, so a stale, duplicate, expired or safe-mode-held `PullImage` makes no
+    /// registry fetch. Pinned by
+    /// `tests/data_plane/ledger.rs::should_measure_only_a_fresh_admissible_pull_when_its_disk_is_unknown`.
+    #[must_use]
+    pub fn worth_measuring(
+        &self,
+        version: ProtocolVersion,
+        directive: &Directive,
+        now: Millis,
+    ) -> bool {
+        let session = match &self.link {
+            Link::Open(session) => session,
+            Link::Idle | Link::Awaiting | Link::Entering(_) => return false,
+        };
+        let current = match check_epoch(Some(session.epoch), directive.epoch) {
+            EpochCheck::Current => true,
+            EpochCheck::NotEntered | EpochCheck::Stale => false,
+        };
+        let fresh = admit_frame(Some(session.version), version, SUPPORTED).is_ok()
+            && current
+            && !session.table.contains_key(&directive.directive_id);
+        let unknown_disk = Err(RefusalReason::CapacityUnknown {
+            dimension: ResourceDimension::Disk,
+        });
+        let admissible =
+            admission(session.mode, &self.host_id, &self.ledger, directive, now).map(|_| ());
+        fresh
+            && self.ledger.unmeasured(&directive.kind).is_some()
+            && (admissible.is_ok() || admissible == unknown_disk)
     }
 
     /// Takes one directive frame written in `version` at `now` (a reading of the clock its

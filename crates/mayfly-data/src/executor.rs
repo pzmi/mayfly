@@ -256,6 +256,12 @@ enum Work {
         gated: bool,
     },
     Observed(Pass),
+    /// A `PullImage` whose image's disk was measured (or not) before its admission.
+    Measured {
+        version: ProtocolVersion,
+        directive: Directive,
+        disk_bytes: Option<u64>,
+    },
 }
 
 /// An admitted directive waiting to run a stage.
@@ -420,8 +426,11 @@ where
                 reason: InventoryGap::Deadline,
             });
         ledger.apply_inventory(&inventory);
-        if let Some(Ok(listing)) = bounded(&ports.clock, due, ports.images.list()).await {
-            ledger.apply_images(&listing.images, &listing.bases);
+        if let Some(Ok(mut listing)) = bounded(&ports.clock, due, ports.images.list()).await {
+            if config.sizing.measures_disks() {
+                remeasure(&ports, due, &mut listing).await;
+            }
+            ledger.apply_images(&listing.images, &listing.bases, &listing.disks);
         }
         let plane = DataPlane::start(config.host_id.clone(), floor, ledger);
         Ok(Self {
@@ -652,6 +661,42 @@ where
     Ok(())
 }
 
+/// Measures again, from its manifest fetched by digest, each image `listing` names without a
+/// size, and the image of each listed base without one (a kept manifest that no longer reads),
+/// bounded by the pass's `due`. What still does not measure stays unknown (ADR 0052: counted
+/// neither at a guess nor as absent, which would undercount the disk it holds) and is measured
+/// again on the next pass. Pinned by
+/// `tests/executor/effects.rs::should_measure_a_listed_image_again_when_its_size_did_not_read`.
+async fn remeasure<V, I, G, H, C, D>(
+    ports: &Ports<V, I, G, H, C, D>,
+    due: Millis,
+    listing: &mut ImageListing,
+) where
+    I: ImageStore,
+    C: ProcessClock,
+{
+    let disks = &mut listing.disks;
+    let wanted: BTreeSet<ImageDigest> = listing
+        .images
+        .iter()
+        .filter(|digest| !disks.images.contains_key(*digest))
+        .cloned()
+        .chain(
+            listing
+                .bases
+                .keys()
+                .filter(|base| !disks.bases.contains_key(*base))
+                .filter_map(|base| disks.base_images.get(base).cloned())
+                .filter(|digest| !disks.images.contains_key(digest)),
+        )
+        .collect();
+    for digest in wanted {
+        if let Some(Ok(bytes)) = bounded(&ports.clock, due, ports.images.measure(&digest)).await {
+            disks.images.insert(digest, bytes);
+        }
+    }
+}
+
 /// Runs the effect of `kind`, answering what was observed.
 async fn effect<V, I, G, H, C, D>(ports: &Ports<V, I, G, H, C, D>, kind: DirectiveKind) -> Stimulus
 where
@@ -758,7 +803,48 @@ impl Core {
         run.unsolicited(ObservationKind::CapacityReported(report));
     }
 
-    fn receive<V, I, G, H, C, D>(
+    /// Receives `directive`: a `PullImage` whose image's disk ceiling is neither configured nor
+    /// measured, and that would otherwise be admitted (fenced first: session, version, epoch,
+    /// duplicate, deadline, safe mode; `DataPlane::worth_measuring`), has its manifest measured first, bounded by the directive's deadline, and is
+    /// admitted once that read returns, measured or not (unknown is then refused
+    /// `capacity_unknown{disk}`, ADR 0052); everything else is admitted now. Pinned by
+    /// `tests/executor/effects.rs::should_measure_the_manifest_before_admitting_a_pull_when_no_ceiling_is_configured`.
+    fn receive<'a, V, I, G, H, C, D>(
+        &mut self,
+        ports: &'a Ports<V, I, G, H, C, D>,
+        run: &mut Run<'a>,
+        version: ProtocolVersion,
+        directive: &Directive,
+    ) where
+        V: VmProvider,
+        I: ImageStore,
+        G: GuestTransport,
+        H: HostProbe,
+        C: ProcessClock,
+        D: ObservationIds,
+    {
+        let now = admission_now(&ports.clock, self.deadlines);
+        let digest = self.plane.ledger.unmeasured(&directive.kind).cloned();
+        let Some(digest) = digest.filter(|_| self.plane.worth_measuring(version, directive, now))
+        else {
+            self.admit(ports, run, version, directive);
+            return;
+        };
+        let due = local_due(&ports.clock, self.deadlines, directive.deadline);
+        let directive = directive.clone();
+        run.in_flight.push(Box::pin(async move {
+            let disk_bytes = bounded(&ports.clock, due, ports.images.measure(&digest))
+                .await
+                .and_then(Result::ok);
+            Work::Measured {
+                version,
+                directive,
+                disk_bytes,
+            }
+        }));
+    }
+
+    fn admit<V, I, G, H, C, D>(
         &mut self,
         ports: &Ports<V, I, G, H, C, D>,
         run: &mut Run<'_>,
@@ -844,6 +930,7 @@ impl Core {
             run.passing = true;
             let ticket = self.gate.begin_listing();
             let due = after(ports.clock.monotonic(), self.config.listing_timeout);
+            let measures = self.config.sizing.measures_disks();
             run.in_flight.push(Box::pin(async move {
                 let clock = &ports.clock;
                 let inventory = bounded(clock, due, ports.provider.inventory())
@@ -851,9 +938,12 @@ impl Core {
                     .unwrap_or(Inventory::Incomplete {
                         reason: InventoryGap::Deadline,
                     });
-                let images = bounded(clock, due, ports.images.list())
+                let mut images = bounded(clock, due, ports.images.list())
                     .await
                     .and_then(Result::ok);
+                if measures && let Some(listing) = images.as_mut() {
+                    remeasure(ports, due, listing).await;
+                }
                 let probe = bounded(clock, due, ports.host.resources()).await;
                 Work::Observed(Pass {
                     ticket,
@@ -978,6 +1068,21 @@ impl Core {
                 run.passing = false;
                 self.apply_pass(run, pass);
             }
+            Work::Measured {
+                version,
+                directive,
+                disk_bytes,
+            } => {
+                if let (Some(bytes), DirectiveKind::PullImage { digest }) =
+                    (disk_bytes, &directive.kind)
+                {
+                    self.plane.ledger.learn_image(digest, bytes);
+                }
+                // A session that is closing admits nothing more: the control plane resends.
+                if !run.closing {
+                    self.admit(ports, run, version, &directive);
+                }
+            }
         }
     }
 
@@ -1027,7 +1132,7 @@ impl Core {
         }
         ledger.apply_inventory(&pass.inventory);
         if let Some(listing) = pass.images {
-            ledger.apply_images(&listing.images, &listing.bases);
+            ledger.apply_images(&listing.images, &listing.bases, &listing.disks);
         }
         let observed = pass.inventory.observation();
         run.unsolicited(observed.clone());

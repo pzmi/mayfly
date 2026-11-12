@@ -2,8 +2,9 @@
 //! `DirectiveDetails`), from the configuration and the image placements.
 //!
 //! - **Run options** from each pool's `memory_mib` and the host's `clone_disk_gib`
-//!   (`[host]`, required by `mayflyd`, ADR 0052); a pool the configuration does not name gets none, and the sink holds
-//!   its directive.
+//!   when configured (else no disk: the data plane counts a clone at its base's manifest disk,
+//!   ADR 0052's amendment); a pool the configuration does not name gets none, and the sink
+//!   holds its directive.
 //! - **Stop grace**: [`STOP_GRACE`] for every pool until the configuration carries P6's
 //!   per-guest-OS deadlines.
 //! - **The guest challenge** of a `VerifyGuest`: the first 128 bits of SHA-256 over a key drawn
@@ -63,16 +64,17 @@ pub struct ConfigDetails {
 }
 
 impl ConfigDetails {
-    /// The details of `config`'s pools, each clone given `clone_disk_gib`, challenges keyed by
-    /// `key`, bases from `placements`.
+    /// The details of `config`'s pools, each clone given `clone_disk_gib` when configured (none
+    /// when measured: the data plane counts a clone at its base's manifest disk), challenges
+    /// keyed by `key`, bases from `placements`.
     #[must_use]
     pub fn new(
         config: &Config,
-        clone_disk_gib: u64,
+        clone_disk_gib: Option<u64>,
         key: [u8; 32],
         placements: Placements,
     ) -> Self {
-        let disk = clone_disk_gib.saturating_mul(GIB);
+        let disk = clone_disk_gib.map_or(0, |gib| gib.saturating_mul(GIB));
         let runs = config
             .pools
             .iter()
@@ -153,8 +155,8 @@ max_running = 2
     #[test]
     fn should_repeat_the_nonce_when_one_directive_is_resent() {
         // given
-        let details = ConfigDetails::new(&config(), 90, [7; 32], Placements::default());
-        let other = ConfigDetails::new(&config(), 90, [8; 32], Placements::default());
+        let details = ConfigDetails::new(&config(), Some(90), [7; 32], Placements::default());
+        let other = ConfigDetails::new(&config(), Some(90), [8; 32], Placements::default());
         let id = DirectiveId::from_u128(42);
 
         // when
@@ -169,7 +171,7 @@ max_running = 2
     #[test]
     fn should_size_the_run_from_the_pool_when_a_vm_starts() {
         // given
-        let details = ConfigDetails::new(&config(), 90, [7; 32], Placements::default());
+        let details = ConfigDetails::new(&config(), Some(90), [7; 32], Placements::default());
         let pool = PoolName::new("mac").unwrap_or_else(|e| panic!("{e}"));
 
         // when
@@ -192,7 +194,7 @@ max_running = 2
     fn should_know_no_base_when_no_placement_names_one_yet() {
         // given
         let placements = Placements::default();
-        let details = ConfigDetails::new(&config(), 90, [7; 32], placements.clone());
+        let details = ConfigDetails::new(&config(), Some(90), [7; 32], placements.clone());
         let pool = PoolName::new("mac").unwrap_or_else(|e| panic!("{e}"));
         let before = details.image_base(&pool, &ImageDigest::sample());
 

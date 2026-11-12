@@ -1,16 +1,21 @@
 //! Each directive kind against its port: what an applied, rejected or failed effect answers.
 
-use mayfly_data::{Ambiguity, Diagnostics, GuestAnswer, LaunchAnswer, RunnerStatus, VmError};
-use mayfly_domain::{Millis, ProviderInstanceId, SecretHandleId};
+use std::collections::{BTreeMap, BTreeSet};
+
+use mayfly_data::{
+    Ambiguity, Diagnostics, GuestAnswer, ImageListing, LaunchAnswer, MeasuredDisks, RunnerStatus,
+    VmError,
+};
+use mayfly_domain::{ImageDigest, Millis, ProviderInstanceId, SecretHandleId};
 use mayfly_protocol::{
     BaseName, DiagnosticsLoss, DirectiveKind, GuestFacts, GuestOs, GuestRejection, Nonce,
-    ObservationKind, RefusalReason, SecretHandle,
+    ObservationKind, RefusalReason, ResourceDimension, SecretHandle,
 };
-use mayfly_testkit_data::GuestScript;
+use mayfly_testkit_data::{FakeImageStore, GuestScript};
 
 use crate::support::{
-    Fakes, answers, answers_to, base, described, digest, directive, facts, probe, run, run_options,
-    session, vm,
+    Fakes, GIB, answers, answers_to, base, config, described, digest, directive, facts, probe, run,
+    run_options, session, vm,
 };
 
 fn instance() -> ProviderInstanceId {
@@ -219,5 +224,149 @@ fn should_refuse_proof_mismatch_when_the_launch_identity_check_fails_or_has_no_i
             1,
             "a launch without an id never reaches it"
         );
+    });
+}
+
+#[test]
+fn should_measure_the_manifest_before_admitting_a_pull_when_no_ceiling_is_configured() {
+    run(async {
+        // given: no disk ceiling configured; the registry's manifest of `fresh` states 30 GiB,
+        // and `unmeasurable` has none
+        let mut fakes = Fakes::new(probe(4));
+        fakes.images = FakeImageStore::new(ImageListing {
+            images: BTreeSet::from([digest()]),
+            bases: BTreeMap::from([(base(), GuestOs::Linux)]),
+            disks: MeasuredDisks {
+                images: BTreeMap::from([(digest(), 20 * GIB)]),
+                bases: BTreeMap::from([(base(), 20 * GIB)]),
+                base_images: BTreeMap::from([(base(), digest())]),
+            },
+        });
+        let fresh = ImageDigest::new(&format!("sha256:{}", "c".repeat(64))).expect("a digest");
+        let unmeasurable =
+            ImageDigest::new(&format!("sha256:{}", "d".repeat(64))).expect("a digest");
+        fakes.images.manifest(&fresh, 30 * GIB);
+        let mut config = config(2);
+        config.sizing.image_disk_bytes = None;
+        config.sizing.base_disk_bytes = None;
+        config.sizing.clone_disk_bytes = None;
+        let mut exec = fakes.open_with(config).await;
+        let pulled = fresh.clone();
+
+        // when
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            feed.send(directive(1, DirectiveKind::PullImage { digest: fresh }))
+                .await;
+            tap.wait_for(answers(1)).await;
+            feed.send(directive(
+                2,
+                DirectiveKind::PullImage {
+                    digest: unmeasurable,
+                },
+            ))
+            .await;
+            tap.wait_for(answers(2)).await;
+            tap
+        })
+        .await;
+
+        // then: the measured pull runs; the other is refused unknown and never pulled
+        assert_eq!(
+            answers_to(&seen, 1),
+            [ObservationKind::ImagePulled {
+                digest: pulled.clone()
+            }]
+        );
+        assert_eq!(
+            answers_to(&seen, 2),
+            [ObservationKind::DirectiveRefused {
+                reason: RefusalReason::CapacityUnknown {
+                    dimension: ResourceDimension::Disk
+                }
+            }]
+        );
+        assert_eq!(fakes.images.measured().len(), 2);
+        assert_eq!(
+            exec.ledger().images.get(&pulled),
+            Some(&Some(30 * GIB)),
+            "the pulled image is counted at its manifest's disk"
+        );
+    });
+}
+
+fn measured_config() -> mayfly_data::Config {
+    let mut config = config(2);
+    config.sizing.image_disk_bytes = None;
+    config.sizing.base_disk_bytes = None;
+    config.sizing.clone_disk_bytes = None;
+    config
+}
+
+#[test]
+fn should_measure_a_listed_image_again_when_its_size_did_not_read() {
+    run(async {
+        // given: the store lists the image and its base without sizes (a kept manifest that no
+        // longer reads), and the registry does not answer for it yet
+        let mut fakes = Fakes::new(probe(4));
+        fakes.images = FakeImageStore::new(ImageListing {
+            images: BTreeSet::from([digest()]),
+            bases: BTreeMap::from([(base(), GuestOs::Linux)]),
+            disks: MeasuredDisks {
+                base_images: BTreeMap::from([(base(), digest())]),
+                ..MeasuredDisks::default()
+            },
+        });
+        let mut exec = fakes.open_with(measured_config()).await;
+        let unknown_at_start = exec.ledger().unmeasured_listed();
+
+        // when: the registry answers again, and an observer pass runs
+        fakes.images.manifest(&digest(), 20 * GIB);
+        let _ = session(&mut exec, |feed, mut tap| async move {
+            feed.send(directive(1, DirectiveKind::ReportInventory))
+                .await;
+            tap.wait_for(answers(1)).await;
+            tap
+        })
+        .await;
+
+        // then: unknown, never zero, until measured; then the image and its base are sized
+        assert_eq!(unknown_at_start, BTreeSet::from([digest()]));
+        assert!(exec.ledger().unmeasured_listed().is_empty());
+        assert_eq!(exec.ledger().images.get(&digest()), Some(&Some(20 * GIB)));
+        assert_eq!(
+            exec.ledger().bases.get(&base()).and_then(|b| b.disk_bytes),
+            Some(20 * GIB)
+        );
+    });
+}
+
+#[test]
+fn should_fetch_no_manifest_when_a_pull_is_stale() {
+    run(async {
+        // given: no ceiling configured and a pull of an unmeasured image under an older epoch
+        let fakes = Fakes::new(probe(4));
+        let fresh = ImageDigest::new(&format!("sha256:{}", "e".repeat(64))).expect("a digest");
+        fakes.images.manifest(&fresh, 30 * GIB);
+        let mut exec = fakes.open_with(measured_config()).await;
+        let asked = fresh.clone();
+        let mut stale = directive(1, DirectiveKind::PullImage { digest: fresh });
+        stale.epoch = mayfly_domain::Epoch::new(1);
+
+        // when
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            feed.send(stale).await;
+            tap.wait_for(answers(1)).await;
+            tap
+        })
+        .await;
+
+        // then: fenced before any registry fetch
+        assert_eq!(
+            answers_to(&seen, 1),
+            [ObservationKind::OutcomeUnknown {
+                reason: mayfly_protocol::UnknownReason::StaleEpoch
+            }]
+        );
+        assert!(!fakes.images.measured().contains(&asked));
     });
 }

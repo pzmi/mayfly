@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mayfly_data::{ImageListing, ImageStore, VmError};
+use mayfly_data_domain::MeasuredDisks;
 use mayfly_domain::{ImageDigest, OwnedVmName};
 use mayfly_protocol::{BaseName, GuestOs};
 use sha2::{Digest, Sha256};
@@ -113,6 +114,13 @@ impl World {
 pub struct MemoryImages {
     world: Arc<Mutex<World>>,
     flights: Arc<Mutex<BTreeMap<ImageDigest, Arc<AsyncMutex<()>>>>>,
+}
+
+/// The disk an in-memory image reconstructs to: its content's length (the Tart adapter sums
+/// its manifest's disk layers).
+#[must_use]
+pub fn disk_bytes(content: &[u8]) -> u64 {
+    u64::try_from(content.len()).unwrap_or(u64::MAX)
 }
 
 fn reference(digest: &ImageDigest) -> String {
@@ -338,10 +346,43 @@ impl ImageStore for MemoryImages {
                 Some((BaseName::new(name).ok()?, vm.guest))
             })
             .collect();
+        let size = |digest: &ImageDigest| {
+            world
+                .registry
+                .get(&reference(digest))
+                .filter(|(content, _)| digest_of(content) == *digest)
+                .map(|(content, _)| disk_bytes(content))
+        };
+        let mut disks = MeasuredDisks::default();
+        for digest in world.cache.keys() {
+            if let Some(bytes) = size(digest) {
+                disks.images.insert(digest.clone(), bytes);
+            }
+        }
+        for (name, recorded) in &world.record {
+            let Ok(base) = BaseName::new(name) else {
+                continue;
+            };
+            disks
+                .base_images
+                .insert(base.clone(), recorded.digest.clone());
+            if let Some(bytes) = size(&recorded.digest) {
+                disks.bases.insert(base, bytes);
+            }
+        }
         Ok(ImageListing {
             images: world.cache.keys().cloned().collect(),
             bases,
+            disks,
         })
+    }
+
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        let world = self.world();
+        match world.registry.get(&reference(digest)) {
+            Some((content, _)) if digest_of(content) == *digest => Ok(disk_bytes(content)),
+            Some(_) | None => Err(VmError::Definite),
+        }
     }
 
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
@@ -415,6 +456,10 @@ impl ImageStore for TagPullStore {
         self.0.list().await
     }
 
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        self.0.measure(digest).await
+    }
+
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
         self.0
             .pull_through(digest, &format!("{REPOSITORY}:latest"), false)
@@ -442,6 +487,10 @@ pub struct BaseEvictingStore(pub MemoryImages);
 impl ImageStore for BaseEvictingStore {
     async fn list(&self) -> Result<ImageListing, VmError> {
         self.0.list().await
+    }
+
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        self.0.measure(digest).await
     }
 
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
@@ -472,6 +521,10 @@ impl ImageStore for NameEvictingStore {
         self.0.list().await
     }
 
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        self.0.measure(digest).await
+    }
+
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
         self.0.pull(digest).await
     }
@@ -487,5 +540,78 @@ impl ImageStore for NameEvictingStore {
 
     async fn evict(&self, base: &BaseName) -> Result<(), VmError> {
         self.0.evict_by_name(base)
+    }
+}
+
+/// Broken (ver §5): answers a fixed size for any digest without fetching or checking its
+/// manifest: a guessed disk, which IC-15 exists to catch.
+#[derive(Debug, Clone)]
+pub struct GuessingSizeStore(pub MemoryImages);
+
+/// What [`GuessingSizeStore`] answers for every digest.
+pub const GUESSED_DISK_BYTES: u64 = 100 << 30;
+
+impl ImageStore for GuessingSizeStore {
+    async fn list(&self) -> Result<ImageListing, VmError> {
+        self.0.list().await
+    }
+
+    async fn measure(&self, _digest: &ImageDigest) -> Result<u64, VmError> {
+        Ok(GUESSED_DISK_BYTES)
+    }
+
+    async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
+        self.0.pull(digest).await
+    }
+
+    async fn materialise(
+        &self,
+        digest: &ImageDigest,
+        base: &BaseName,
+        runner_version: &str,
+    ) -> Result<(), VmError> {
+        self.0.materialise(digest, base, runner_version).await
+    }
+
+    async fn evict(&self, base: &BaseName) -> Result<(), VmError> {
+        self.0.evict(base).await
+    }
+}
+
+/// Broken (ver §5): measures whatever manifest the registry serves for a digest without
+/// checking that it hashes to the digest, so drifted content is sized as if it were the image:
+/// IC-15's drift check exists to catch it.
+#[derive(Debug, Clone)]
+pub struct TrustingMeasureStore(pub MemoryImages);
+
+impl ImageStore for TrustingMeasureStore {
+    async fn list(&self) -> Result<ImageListing, VmError> {
+        self.0.list().await
+    }
+
+    async fn measure(&self, digest: &ImageDigest) -> Result<u64, VmError> {
+        self.0
+            .world()
+            .registry
+            .get(&reference(digest))
+            .map(|(content, _)| disk_bytes(content))
+            .ok_or(VmError::Definite)
+    }
+
+    async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
+        self.0.pull(digest).await
+    }
+
+    async fn materialise(
+        &self,
+        digest: &ImageDigest,
+        base: &BaseName,
+        runner_version: &str,
+    ) -> Result<(), VmError> {
+        self.0.materialise(digest, base, runner_version).await
+    }
+
+    async fn evict(&self, base: &BaseName) -> Result<(), VmError> {
+        self.0.evict(base).await
     }
 }

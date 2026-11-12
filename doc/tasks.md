@@ -222,6 +222,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-03 | Operator socket API and `mayfly` CLI | RT-02 | sonnet | |
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
 | RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05 | opus | |
+| RT-06 | Measured host sizing | RT-02, DP-06, DP-07 | opus | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05 | opus | ⛳ |
 | GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
@@ -1157,7 +1158,10 @@ admissible on a host only once its base is materialised; prepared attempts on an
 retired; unreferenced digests evicted; `WithdrawImage` refused while pinned; runner-version expiry
 trips the breaker.
 Accept: component tests on fakes; withdraw refused while pinned; never a clone from an OCI
-reference.
+reference; a pool's `vm_resources` disk becomes its placed base's measured disk (the image's
+manifest, ADR 0052's amendment of 2026-11-12) when `clone_disk_gib` is not configured. Until
+CP-07, such a pool is planned with 0 disk and the data plane's gate (I33) refuses what does not
+fit: the backstop, pinned by RT-06's ledger tests.
 Note (KER-11 review): the placement stream is keyed by the host and the digest's first twelve hex
 digits, so the manager passes the full digest it read (`PlacementState::digest`) as its proof:
 `RequestPlacement` with another digest of the same prefix is refused `placement_differs`
@@ -1390,7 +1394,8 @@ gives Ctrl-C its terminal-mode stop: loops end between units of work, `BeginShut
 VMs left under their shims, the loops bounded at 25 s and the runtime's shutdown at 5 s more.
 Config: `[images] repository, runners, realm_hosts` (required by `mayflyd`, ADR 0091 decision 2)
 and `[host] vm_slots, macos_guests (at most 2), image_disk_gib, clone_disk_gib`, optional in the
-schema with no default and required by `mayflyd` (ADR 0052: exit 78 naming each missing key).
+schema with no default and required by `mayflyd` (ADR 0052: exit 78 naming each missing key);
+*optional and measured since RT-06 (ADR 0052's amendment of 2026-11-12).*
 Pinned by `crates/mayfly-composition/tests/daemon.rs`: start over fake-tart, SIGKILL, restart,
 the unrecorded VM reported, nothing deleted, the floor at the last epoch, the pool configured
 once, a second daemon 69, SIGTERM exit 0, the journal `0600`; a link lost after recovery gives a
@@ -1459,6 +1464,44 @@ is the run mode's, decided by the owner (an amendment to ADR 0031).
 Accept: integration test over fake-tart and fake-github: Ctrl-C with an idle, a Prepared and a Busy
 attempt ends with no runner registered, no `mf-*` VM left and the bases untouched; a second Ctrl-C
 during the wait stops at once and leaves what remains recorded for the next start.
+
+#### RT-06 Measured host sizing
+Cites: ADR 0052 (amended 2026-11-12), ADR 0024, ADR 0087, plan §9, §11. The owner (2026-11-12):
+usable out of the box with reasonable defaults, host sizing measured, not guessed. `[host]`'s
+sizing keys become optional (no rename; a configured value overrides): `macos_guests` is 2,
+Apple's limit, and a configured value is capped at 2; the image and clone disk ceilings are each
+image's verified manifest's disk (the disk layers' `org.cirruslabs.tart.uncompressed-size`
+summed), unknown until measured (`capacity_unknown`); `vm_slots` is derived from the host probe's
+RAM and CPUs less a reserve (`reserve_memory_mib`, measured as max(25 % of RAM, 8 GiB) when
+absent; the new `reserve_cpus`, default 2), divided by the largest memory and the most CPUs of
+any pool (the safer divisors: the ledger does not track CPUs) and bounded by both; a probe that cannot read them leaves the value unknown. The start-up report
+shows each value and its source until RT-03's status takes it.
+Accept: unit tests of the measured slots on a scripted probe (64 GiB / 10 CPUs with 8 GiB,
+2-CPU VMs → 4), the reserve configured, unreadable CPUs → `vm_slots` unknown, manifest-derived
+disk ceilings and a pull measured before admission, configured values overriding,
+`macos_guests` capped at 2, and the start-up report's sources; the `ImageStore` contract's
+IC-15 on the in-memory store and the Tart adapter over fake-tart, with a guessing store failing it.
+As built (RT-06): the probe (`mayfly_adapter_host::{vm_slots, reserve_memory}`) measures on
+every reading, reading the CPUs only when slots are not configured; unreadable CPUs report
+`vm_slots` unsized through the existing `foreign_vm_unsized` cause (owner, 2026-11-12: no new
+protocol cause). `ImageStore::measure` fetches the manifest by digest and checks its hash before
+any layer is pulled ("verified", owner 2026-11-12); the executor measures a `PullImage` whose
+ceiling is neither configured nor known before admitting it, and the listing carries each
+image's and base's disk from the manifest kept at its pull (`MeasuredDisks`, with each base's
+image); a listed image whose kept manifest no longer reads is measured again on every observer
+pass, and stays unknown (`images_not_read`, never dropped, which would undercount) until it
+measures. A `PullImage` is fenced (session, version, epoch, duplicate, deadline, safe mode)
+before its manifest is fetched. On Linux the probe's memory is bounded by the cgroup v2
+`memory.max`, as its CPU count is by the quota. `mayflyd` writes
+`mayflyd sizing <key>=<value> source=<configured|configured_capped_at_apple_limit|measured|manifest|apple_limit|default>`
+lines to stderr at start-up, with ` reason=cpus_unreadable` (or `probe_unreadable`) on an
+unknown value and one `unmeasured_image=<digest> reason=manifest_unreadable` line per image
+that did not measure (`mayfly_composition::sizing`); stdout keeps only the ready line.
+Until CP-07 places a pool's image, a pool without `clone_disk_gib` is planned with no disk and
+the data plane's gate refuses what does not fit. Model: none, an input-side change: the
+scheduling model takes slots and disk as given, and unknown capacity refuses through the
+`capacity_unknown` path it already models. Also in this commit, the owner's accepted amendment of
+ADR 0087 decision 1 (DP-07F's trusted symlinks), recorded in the ADR.
 
 #### E2E-01 ⛳ Walking skeleton
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +

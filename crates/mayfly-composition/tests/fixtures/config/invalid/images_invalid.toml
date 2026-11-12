@@ -9,7 +9,7 @@ private_key = "file:/etc/mayfly/app-key.pem"
 
 [host]
 vm_slots = 0
-macos_guests = 3
+macos_guests = 2000
 
 [provider]
 tart_home = "/var/lib/mayfly/tart"

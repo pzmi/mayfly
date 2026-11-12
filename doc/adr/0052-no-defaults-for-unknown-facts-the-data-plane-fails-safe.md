@@ -5,6 +5,8 @@ Date: 2026-11-10
 ## Status
 
 Accepted (owner, 2026-11-10). Amends ADR 0024 (the ledger's unknown facts), marked there.
+Amended 2026-11-12 (owner, RT-06): a measured fact is not an assumption; the host's sizing
+keys are optional and measured when absent (see the amendment below).
 
 ## Context
 
@@ -39,7 +41,8 @@ specified we should fail safe fail early".
    `guest`, `memory_bytes` and `disk_bytes` (new optional fields), or the data plane's own
    record of what it created, makes the dimension known again. An incomplete one describes
    nothing (I25).
-6. **Configured values are not defaults.** `Sizing` is what the operator set: the disk
+6. **Configured values are not defaults.** *(Extended 2026-11-12 by the owner's amendment
+   below: where nothing is configured, a measured value applies.)* `Sizing` is what the operator set: the disk
    ceilings of an image, a base and a clone the data plane creates, and the memory floor of a
    `StartVm` (KER-08F). They count what this data plane creates, never a VM it did not.
 7. **Protocol: minor 1.1, compatible.** `capacity_unknown`, `listing_incomplete` (ADR 0053),
@@ -103,3 +106,66 @@ dimension, in a 1.1 session or a 1.0 one. What is true today:
   `CapacityReported` into the `Host`'s `ReportedCapacity` zeroes what each unknown dimension
   can deliver, the control plane can issue a directive there and read the refusal (CP-03
   re-reads it next pass). The note on CP-04's card in `doc/tasks.md` records that work.
+
+## Amended 2026-11-12 (owner): measured facts are not assumptions (RT-06)
+
+The owner (2026-11-12): "The system should be usable and have reasonable defaults out of the
+box, so users don't have to research everything for a quick start", with host sizing
+**measured, not guessed**, keeping decision 1. RT-02 had made `[host] vm_slots`,
+`macos_guests`, `image_disk_gib` and `clone_disk_gib` required (exit 78). They are optional
+now (the keys keep their names), and a configured value still overrides. Where none is
+configured, each value is a fact with a source, never a guess:
+
+| Value | When not configured | Source |
+|:--|:--|:--|
+| `macos_guests` | 2; a configured value is capped at 2. Linux guests are not bound by it. | Apple's limit: the macOS licence allows two virtual macOS instances per Mac, and Virtualization.framework refuses a third running macOS guest |
+| `image_disk_gib`, `clone_disk_gib` | Per image: the sum of the disk layers' `org.cirruslabs.tart.uncompressed-size` in the image's manifest (the disk Tart reconstructs); a base is its image's, a clone its base's | The manifest fetched by digest and checked to hash to it before any layer is pulled (`ImageStore::measure`, contract case IC-15), and the manifest kept at the pull for the listing |
+| `vm_slots` | min((RAM − memory reserve) ÷ the largest memory of any pool, (CPUs − CPU reserve) ÷ the most CPUs of any pool): each divisor the largest any pool asks, the safer choice since the ledger does not track CPUs | The host probe's physical memory and CPU count (on Linux bounded by the process's cgroup v2 `memory.max` and CPU quota), read on every probe |
+| `reserve_memory_mib` | max(25 % of RAM, 8 GiB), for the person using the machine; it is also the memory-pressure mark, as before | The host probe's physical memory |
+| `reserve_cpus` (new key) | 2 | The owner's default |
+
+What cannot be measured stays unknown (decision 1): a manifest not measured yet (or that does
+not read) makes a pull, a base or a clone of it `capacity_unknown{disk}`, and a listed image or
+base of unknown size makes disk unknown (`images_not_read`, whose meaning now includes "a
+listed image's or base's disk not measured": no new protocol cause; `mayflyd` names each such
+image on stderr, `unmeasured_image=<digest> reason=manifest_unreadable`). The data plane
+measures such an image again on every observer pass, so a lost kept manifest blocks disk work
+only until the registry answers. It is not dropped from the listing to plan a re-pull: its files
+are still on disk, and counting it as absent would undercount (decision 1). CPUs that do not
+read make
+`vm_slots` unknown (reported through the probe's existing `foreign_vm_unsized` cause, which the
+executor already uses for a failed probe; a dedicated cause would be protocol 1.2; stderr says
+`reason=cpus_unreadable`); memory that
+does not read fails the probe, as before. Until the control plane places a pool's image (CP-07),
+a pool without `clone_disk_gib` plans its VMs with no disk, and the data plane's gate (I33)
+refuses what does not fit. `mayflyd` writes each value and its source to stderr at start-up
+(`mayfly_composition::sizing`, the seam RT-03's status will return).
+
+Compatibility, both ways a rollback can differ: (a) with `reserve_memory_mib` absent, the
+default memory reserve, and with it the memory-pressure mark, moves from a fixed 4 GiB to
+max(25 % of RAM, 8 GiB), so the same file keeps more memory back on this build than on an older
+one (the older one stays correct, only less conservative); (b) an older build refuses a file
+that sets `reserve_cpus` (unknown keys are refused) or omits a sizing key (exit 78), which fails
+loudly rather than run another sizing. A file that sets every sizing key and not
+`reserve_cpus` means the same to both, apart from (a) when `reserve_memory_mib` is absent. No Quint model changes: the scheduling model takes slots and disk as
+inputs, and an unknown dimension refuses through the `capacity_unknown` path it already models.
+
+Pinned by `mayfly-adapter-host`'s `tests/probe.rs`
+(`should_measure_slots_from_memory_and_cpus_when_none_are_configured`,
+`should_keep_the_configured_reserve_when_slots_are_measured`,
+`should_take_the_configured_slots_without_reading_cpus_when_slots_are_configured`,
+`should_leave_slots_unknown_when_the_cpus_cannot_be_read`), `mayfly-data-domain`'s
+`tests/data_plane/ledger.rs`
+(`should_refuse_capacity_unknown_when_a_pull_needs_a_disk_not_measured_yet`,
+`should_size_each_creation_by_its_manifest_when_no_ceiling_is_configured`,
+`should_size_by_the_configured_ceiling_when_one_is_configured`), `mayfly-data`'s
+`tests/executor/effects.rs::should_measure_the_manifest_before_admitting_a_pull_when_no_ceiling_is_configured`,
+the `ImageStore` contract's IC-15, and `mayfly-composition`'s `tests/sizing.rs`,
+`tests/config.rs::should_cap_macos_guests_at_apples_limit_when_more_are_configured` and
+`tests/daemon.rs::should_start_and_report_each_sizing_source_when_no_sizing_key_is_configured`;
+the re-measure by `mayfly-data`'s
+`tests/executor/effects.rs::should_measure_a_listed_image_again_when_its_size_did_not_read` and
+`mayfly-data-domain`'s `should_size_a_base_by_its_image_when_its_own_size_did_not_read`; no
+registry fetch for a fenced pull by `should_fetch_no_manifest_when_a_pull_is_stale` and
+`should_measure_only_a_fresh_admissible_pull_when_its_disk_is_unknown`; and IC-15's broken
+stores (`GuessingSizeStore`, `TrustingMeasureStore`).

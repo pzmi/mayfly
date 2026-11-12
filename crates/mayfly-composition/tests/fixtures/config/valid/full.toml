@@ -12,6 +12,7 @@ private_key = "keychain:mayfly/app-key"
 [host]
 reserve_memory_mib = 8192
 reserve_disk_gib = 100
+reserve_cpus = 3
 vm_slots = 4
 macos_guests = 1
 image_disk_gib = 80

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mayfly_composition::config::{
-    CapacityPolicy, Config, ConfigErrorKind, GithubScope, GuestOs, LoadError, ProviderKind, Tier,
-    TimeOfDay, plan_policy,
+    CapacityPolicy, Config, ConfigErrorKind, GithubScope, GuestOs, HostConfig, LoadError,
+    ProviderKind, Tier, TimeOfDay, plan_policy,
 };
 use mayfly_control_domain::capacity;
 use mayfly_domain::SecretRef;
@@ -179,8 +179,9 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     );
     assert_eq!(config.github.installation_id, 12_345_678);
     assert_eq!(config.github.private_key.scheme(), "keychain");
-    assert_eq!(config.host.reserve_memory_mib, 8192);
-    assert_eq!(config.host.reserve().disk_bytes, 100 * 1024 * 1024 * 1024);
+    assert_eq!(config.host.reserve_memory_mib, Some(8192));
+    assert_eq!(config.host.reserve_disk_bytes(), 100 * 1024 * 1024 * 1024);
+    assert_eq!(config.host.reserve_cpus, Some(3));
     assert_eq!(
         (config.host.vm_slots, config.host.macos_guests),
         (Some(4), Some(1))
@@ -281,8 +282,13 @@ fn should_apply_the_defaults_when_the_optional_keys_are_absent() {
     );
     assert_eq!(pool.runner_refresh_at, None);
     assert_eq!(pool.capacity_policy, CapacityPolicy::Exact);
-    assert_eq!(config.host.reserve_memory_mib, 4096);
+    assert_eq!(config.host.reserve_memory_mib, None, "measured when absent");
     assert_eq!(config.host.reserve_disk_gib, 50);
+    assert_eq!(
+        (config.host.reserve_cpus, config.host.reserve_cpus()),
+        (None, 2)
+    );
+    assert_eq!(config.host.macos_guests(), 2, "Apple's limit when absent");
     assert_eq!(
         (config.host.vm_slots, config.host.macos_guests),
         (None, None)
@@ -666,4 +672,19 @@ fn should_leave_the_places_to_the_platform_when_the_file_names_none() {
     assert_eq!(config.state_dir, None);
     assert_eq!(config.provider.tart_home, None);
     assert_eq!(config.provider.kind, ProviderKind::Tart);
+}
+
+#[test]
+fn should_cap_macos_guests_at_apples_limit_when_more_are_configured() {
+    // given
+    let host = |n| HostConfig {
+        macos_guests: Some(n),
+        ..HostConfig::default()
+    };
+
+    // when
+    let effective = [0, 1, 2, 3, 64].map(|n| host(n).macos_guests());
+
+    // then
+    assert_eq!(effective, [0, 1, 2, 2, 2]);
 }

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mayfly_adapter_host::{
-    Clocks, HostConfig, HostSource, Memory, OsProbe, ProviderView, ReadFailed, Volume,
+    Clocks, HostConfig, HostSource, Memory, OsProbe, ProviderView, ReadFailed, VmShape, Volume,
 };
 use mayfly_data::{
     Capacity, GuestOs, HostProbe, HostReading, Inventory, InventoryGap, ProbeFailed,
@@ -27,12 +27,14 @@ enum Broken {
     Volume,
     Memory,
     Clocks,
+    Cpus,
 }
 
 #[derive(Debug)]
 struct Host {
     volume: Volume,
     memory: Memory,
+    cpus: u32,
     clocks: Clocks,
     broken: BTreeSet<Broken>,
     asked: Vec<PathBuf>,
@@ -53,6 +55,7 @@ impl ScriptedHost {
                 total_bytes: 64 * GIB,
                 available_bytes: 48 * GIB,
             },
+            cpus: 10,
             clocks: Clocks {
                 awake: Duration::from_secs(1),
                 with_sleep: Duration::from_secs(1),
@@ -106,6 +109,10 @@ impl HostSource for ScriptedHost {
         self.answer(Broken::Memory, |h| h.memory)
     }
 
+    fn cpus(&self) -> Result<u32, ReadFailed> {
+        self.answer(Broken::Cpus, |h| h.cpus)
+    }
+
     fn boot_id(&self) -> Result<String, ReadFailed> {
         Ok("boot-1".to_owned())
     }
@@ -145,12 +152,29 @@ impl ProviderView for ScriptedProvider {
 fn config() -> HostConfig {
     HostConfig {
         provider_home: PathBuf::from("/var/lib/mayfly/tart"),
-        vm_slots: VM_SLOTS,
+        vm_slots: Some(VM_SLOTS),
+        vm_shape: VmShape {
+            memory_bytes: 8 * GIB,
+            cpus: 2,
+        },
         macos_guests: MACOS_GUESTS,
-        reserve: RESERVE,
+        reserve_memory_bytes: Some(RESERVE.resources.memory_bytes),
+        reserve_disk_bytes: RESERVE.resources.disk_bytes,
+        reserve_cpus: 2,
         disk_low_water_bytes: DISK_LOW_WATER,
-        memory_low_water_bytes: MEMORY_LOW_WATER,
+        memory_low_water_bytes: Some(MEMORY_LOW_WATER),
         wake_gap: WAKE_GAP,
+    }
+}
+
+/// [`config`] with nothing sized: slots and the memory reserve measured, the memory mark the
+/// reserve.
+fn measured() -> HostConfig {
+    HostConfig {
+        vm_slots: None,
+        reserve_memory_bytes: None,
+        memory_low_water_bytes: None,
+        ..config()
     }
 }
 
@@ -272,7 +296,7 @@ fn should_read_totals_foreign_use_and_both_marks_when_the_host_is_readable() {
                 macos_guests: 2,
                 resources: Resources::new(64 * GIB, 1000 * GIB),
             },
-            reserve: config().reserve,
+            reserve: RESERVE,
             foreign: Capacity {
                 vm_slots: 1,
                 macos_guests: 1,
@@ -492,4 +516,146 @@ fn should_count_every_running_guest_not_ours_when_facts_are_reported() {
 
     // then: the hypervisor counts every running guest but ours
     assert_eq!(facts.external_guests, 3);
+}
+
+#[test]
+fn should_measure_slots_from_memory_and_cpus_when_none_are_configured() {
+    // given: 64 GiB and 10 CPUs, VMs of 8 GiB and 2 CPUs, the default reserve (a quarter of
+    // memory, at least 8 GiB, and 2 CPUs)
+    let host = ScriptedHost::new();
+    let provider = ScriptedProvider::listing(Vec::new());
+    let probe = OsProbe::with_source(measured(), provider, host.clone());
+
+    // when
+    let reading = block_on(probe.resources()).expect("a readable host");
+
+    // then: memory allows (64 - 16) / 8 = 6 and CPUs (10 - 2) / 2 = 4, so 4
+    assert_eq!(reading.totals.vm_slots, 4);
+    assert_eq!(
+        reading.reserve,
+        Capacity {
+            vm_slots: 0,
+            macos_guests: 0,
+            resources: Resources::new(16 * GIB, RESERVE.resources.disk_bytes),
+        }
+    );
+    assert!(reading.foreign_unsized.is_empty());
+    assert!(
+        !reading.memory_pressure,
+        "48 GiB available is above the 16 GiB reserve"
+    );
+}
+
+#[test]
+fn should_bound_measured_slots_by_memory_when_memory_is_scarcer() {
+    // given: 16 GiB and 10 CPUs: the 8 GiB floor of the reserve leaves room for one VM
+    let host = ScriptedHost::new();
+    host.with(|h| {
+        h.memory = Memory {
+            total_bytes: 16 * GIB,
+            available_bytes: 12 * GIB,
+        };
+    });
+    let probe = OsProbe::with_source(measured(), ScriptedProvider::listing(Vec::new()), host);
+
+    // when
+    let reading = block_on(probe.resources()).expect("a readable host");
+
+    // then
+    assert_eq!(reading.totals.vm_slots, 1);
+    assert_eq!(reading.reserve.resources.memory_bytes, 8 * GIB);
+}
+
+#[test]
+fn should_bound_measured_slots_by_cpus_when_cpus_are_scarcer() {
+    // given: VMs of 8 GiB and 4 CPUs on hosts bound by CPUs, by memory, by a reserve larger
+    // than memory, and by a reserve larger than the CPUs
+    let shape = VmShape {
+        memory_bytes: 8 * GIB,
+        cpus: 4,
+    };
+    let hosts = [
+        (128 * GIB, 10, 32 * GIB),
+        (128 * GIB, 64, 32 * GIB),
+        (8 * GIB, 64, 16 * GIB),
+        (64 * GIB, 1, 8 * GIB),
+    ];
+
+    // when
+    let slots = hosts.map(|(memory, cpus, reserve)| {
+        mayfly_adapter_host::vm_slots(memory, cpus, reserve, 2, shape)
+    });
+
+    // then
+    assert_eq!(slots, [2, 12, 0, 0]);
+}
+
+#[test]
+fn should_keep_the_configured_reserve_when_slots_are_measured() {
+    // given: a reserve of 24 GiB and 4 CPUs configured
+    let host = ScriptedHost::new();
+    let config = HostConfig {
+        reserve_memory_bytes: Some(24 * GIB),
+        reserve_cpus: 4,
+        ..measured()
+    };
+    let probe = OsProbe::with_source(config, ScriptedProvider::listing(Vec::new()), host);
+
+    // when
+    let reading = block_on(probe.resources()).expect("a readable host");
+
+    // then: memory allows (64 - 24) / 8 = 5 and CPUs (10 - 4) / 2 = 3
+    assert_eq!(reading.totals.vm_slots, 3);
+    assert_eq!(reading.reserve.resources.memory_bytes, 24 * GIB);
+}
+
+#[test]
+fn should_take_the_configured_slots_without_reading_cpus_when_slots_are_configured() {
+    // given: slots configured and the CPUs unreadable
+    let host = ScriptedHost::new();
+    host.breaks(Broken::Cpus, true);
+    let config = HostConfig {
+        vm_slots: Some(9),
+        ..measured()
+    };
+    let probe = OsProbe::with_source(config, ScriptedProvider::listing(Vec::new()), host);
+
+    // when
+    let reading = block_on(probe.resources()).expect("a readable host");
+
+    // then
+    assert_eq!(reading.totals.vm_slots, 9);
+    assert!(reading.foreign_unsized.is_empty());
+}
+
+#[test]
+fn should_leave_slots_unknown_when_the_cpus_cannot_be_read() {
+    // given
+    let host = ScriptedHost::new();
+    host.breaks(Broken::Cpus, true);
+    let probe = OsProbe::with_source(measured(), ScriptedProvider::listing(Vec::new()), host);
+
+    // when
+    let reading = block_on(probe.resources()).expect("memory and disk still read");
+
+    // then: no slot is counted and the dimension is unknown, never a guess (ADR 0052)
+    assert_eq!(reading.totals.vm_slots, 0);
+    assert_eq!(
+        reading.foreign_unsized,
+        BTreeSet::from([ResourceDimension::VmSlots])
+    );
+}
+
+#[test]
+fn should_fail_the_probe_when_memory_cannot_be_read_for_measured_slots() {
+    // given
+    let host = ScriptedHost::new();
+    host.breaks(Broken::Memory, true);
+    let probe = OsProbe::with_source(measured(), ScriptedProvider::listing(Vec::new()), host);
+
+    // when
+    let reading = block_on(probe.resources());
+
+    // then: the executor makes every dimension unknown on `ProbeFailed`
+    assert_eq!(reading, Err(ProbeFailed));
 }

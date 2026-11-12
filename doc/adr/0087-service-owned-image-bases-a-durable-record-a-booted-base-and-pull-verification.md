@@ -5,7 +5,8 @@ Date: 2026-11-11
 ## Status
 
 Accepted (owner, 2026-11-11), after the owner's review of the first draft and two
-independent reviews of its implementation
+independent reviews of its implementation. Amended 2026-11-12 (owner, DP-07F): a symlink on
+the way to `TART_HOME` is followed when trusted; see the amendment below.
 
 ## Context
 
@@ -47,7 +48,8 @@ from a terminal as their own user and stops it with Ctrl-C; nothing is auto-star
    `~/.tart`: a `0700` directory under its state directory (RT-02 places it). At start-up the image
    store checks that `TART_HOME` and the registry's directory are directories (not symlinks) owned
    by the daemon's user with no access for group or others, that `vms/` and `cache/` are writable
-   by no one else, that no component of the path as configured is a symlink (or `.`/`..`), and
+   by no one else, that no component of the path as configured is a symlink (or `.`/`..`)
+   *(replaced 2026-11-12 by the owner's amendment below: trusted symlinks are followed)*, and
    that every ancestor is owned by root or the daemon's user and is not writable by group or
    others unless sticky; it refuses to start otherwise (`verify::check_private`). The path and
    its ancestors are checked before the registry's directory is created, and every file the
@@ -187,7 +189,8 @@ from a terminal as their own user and stops it with Ctrl-C; nothing is auto-star
   and evict, an unresolved intent, an incomplete listing, unrecorded clone lineage (the stated
   limit), a lost or corrupt registry, a quarantined base never evicted, a crash while the base
   was booted, a digest Tart linked to another manifest's entry, and an unsafe directory layout
-  (open modes, a writable ancestor, a symlink anywhere in the path, another owner: the start-up
+  (open modes, a writable ancestor, a symlink anywhere in the path *(an untrusted symlink in
+  the path, since the amendment of 2026-11-12)*, another owner: the start-up
   check that is the boundary for a directory swapped between check and effect).
 - `mayfly-fake-tart` lays out pulls as Tart 2.28.0 does (an entry named by the served manifest's
   hash, a symlink for another requested name, a re-serialized manifest, no blob checks), keeps
@@ -206,6 +209,25 @@ from a terminal as their own user and stops it with Ctrl-C; nothing is auto-star
   VMs under a launchd daemon without a GUI session (service mode).
 - The Tart pin stays 2.28.0 here; TART-01 moves it to 2.41.1 and re-checks what this record
   assumes.
+
+## Amended 2026-11-12 (owner): DP-07F, trusted symlinks on the way
+
+Accepted by the owner on 2026-11-12. macOS reaches `/var`, `/tmp` and `/etc` through root's
+links into `/private`, so a state directory under `/var` (a service's usual place) failed
+decision 1's rule although nothing in its path is anyone else's. Decision 1's clause "no
+component of the path as configured is a symlink (or `.`/`..`)" is replaced by:
+
+> the path as configured holds no `.` or `..`, and a symlink on the way is followed only when
+> root or the daemon's user owns it, sits in a directory that passes the ancestor rule, holds no
+> `.` or `..` in its target and is one of at most 40 followed, its target walked by the same
+> rules (macOS reaches `/var`, `/tmp` and `/etc` through root's links into `/private`);
+> `TART_HOME` and the registry's directory themselves are never symlinks
+
+The Consequences' "a symlink anywhere in the path" reads "an untrusted symlink in the path".
+The rest of the layout rule (owners, modes, the ancestor rule, `O_NOFOLLOW` on every hashed
+file) is unchanged. Pinned by `mayfly-adapter-tart`'s
+`verify::tests::should_follow_only_a_trusted_link_in_a_safe_directory_when_given_their_facts`
+and `tests/tart/images.rs::should_follow_only_trusted_links_when_checking_a_private_directory`.
 
 ## Upstream Tart proposals (listed, not filed)
 

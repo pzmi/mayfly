@@ -4,17 +4,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mayfly_data_domain::{
-    BaseUse, ForeignUse, Inventory, Ledger, Receipt, Settles, Stimulus, VmUse, foreign_use,
+    BaseUse, ForeignUse, Inventory, Ledger, MeasuredDisks, Receipt, Settles, Stimulus, VmUse,
+    foreign_use,
 };
-use mayfly_domain::{DirectiveId, Epoch, Millis};
+use mayfly_domain::{DirectiveId, Epoch, ImageDigest, Millis};
 use mayfly_protocol::{
     CapacityConstraint, DirectiveKind, GuestOs, InventoryGap, Mode, ObservationKind, RefusalReason,
     ResourceDimension, UnknownCapacity, UnknownCause, UnknownReason, VmObservation,
 };
 
 use super::support::{
-    EPOCH, GIB, V1_1, base, capacity, digest, directive, ledger, open, open_at, proof,
-    receive_through, roomy, run_options, unlisted, vm,
+    EPOCH, GIB, NOW, V1_0, V1_1, base, capacity, digest, directive, ledger, open, open_at,
+    open_with, proof, receive_through, roomy, run_options, unlisted, vm,
 };
 
 /// A listed VM the provider does not describe.
@@ -161,7 +162,7 @@ fn should_record_what_each_effect_did_when_it_is_applied() {
         base(),
         BaseUse {
             guest: Some(GuestOs::Linux),
-            disk_bytes: 60 * GIB,
+            disk_bytes: Some(60 * GIB),
         },
     );
     let key = |n: u128| (EPOCH, DirectiveId::from_u128(n));
@@ -195,7 +196,7 @@ fn should_record_what_each_effect_did_when_it_is_applied() {
     ledger.commit(key(6), &DirectiveKind::DeleteVm { proof: proof(1) });
 
     // then
-    assert_eq!(ledger.images.get(&digest()), Some(&(50 * GIB)));
+    assert_eq!(ledger.images.get(&digest()), Some(&Some(50 * GIB)));
     assert!(started.running && started.guest == Some(GuestOs::Linux));
     assert_eq!(started.memory_bytes, Some(8 * GIB));
     assert!(!stopped.running);
@@ -217,7 +218,7 @@ fn should_refuse_capacity_unknown_when_a_start_targets_a_vm_of_unknown_guest() {
         base(),
         BaseUse {
             guest: None,
-            disk_bytes: 60 * GIB,
+            disk_bytes: Some(60 * GIB),
         },
     );
     ledger.commit(
@@ -368,7 +369,11 @@ fn should_refuse_capacity_unknown_for_every_fit_when_nothing_has_been_listed_sin
     let before: Vec<_> = kinds.iter().map(|k| ledger.admits(k)).collect();
     ledger.apply_inventory(&Inventory::Complete { vms: Vec::new() });
     let without_images: Vec<_> = kinds.iter().map(|k| ledger.admits(k)).collect();
-    ledger.apply_images(&BTreeSet::new(), &BTreeMap::new());
+    ledger.apply_images(
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        &MeasuredDisks::default(),
+    );
 
     // then
     let unknown = |dimension| Err(RefusalReason::CapacityUnknown { dimension });
@@ -450,6 +455,7 @@ fn should_settle_held_image_reservations_when_the_image_store_is_listed() {
     ledger.apply_images(
         &BTreeSet::from([digest()]),
         &BTreeMap::from([(base(), GuestOs::Linux)]),
+        &MeasuredDisks::default(),
     );
 
     // then
@@ -682,6 +688,7 @@ fn should_count_a_listed_base_vm_when_the_image_store_does_not_list_it() {
             (base_named("mfb-stray"), GuestOs::Macos),
             (base_named("mfb-undescribed"), GuestOs::Macos),
         ]),
+        &MeasuredDisks::default(),
     );
     let stored = ledger.used();
     let stored_unknown = ledger.unknown();
@@ -722,6 +729,7 @@ fn should_count_a_running_base_vm_s_memory_and_guest_when_the_image_store_lists_
     ledger.apply_images(
         &BTreeSet::new(),
         &BTreeMap::from([(base(), GuestOs::Macos)]),
+        &MeasuredDisks::default(),
     );
 
     // when
@@ -736,4 +744,195 @@ fn should_count_a_running_base_vm_s_memory_and_guest_when_the_image_store_lists_
 
 fn base_named(name: &str) -> mayfly_protocol::BaseName {
     mayfly_protocol::BaseName::new(name).expect("a valid base name")
+}
+
+/// A ledger over a roomy host with no disk ceiling configured: every one is measured.
+fn measured_ledger() -> Ledger {
+    let mut ledger = ledger(roomy());
+    ledger.sizing.image_disk_bytes = None;
+    ledger.sizing.base_disk_bytes = None;
+    ledger.sizing.clone_disk_bytes = None;
+    ledger
+}
+
+#[test]
+fn should_refuse_capacity_unknown_when_a_pull_needs_a_disk_not_measured_yet() {
+    // given: no ceiling configured and the image's manifest not measured
+    let ledger = measured_ledger();
+    let pull = DirectiveKind::PullImage { digest: digest() };
+
+    // when
+    let admitted = ledger.admits(&pull);
+
+    // then: unknown, never a guess (ADR 0052); the executor is told to measure it first
+    assert_eq!(
+        admitted,
+        Err(RefusalReason::CapacityUnknown {
+            dimension: ResourceDimension::Disk
+        })
+    );
+    assert_eq!(ledger.unmeasured(&pull), Some(&digest()));
+}
+
+#[test]
+fn should_size_each_creation_by_its_manifest_when_no_ceiling_is_configured() {
+    // given: the image's manifest measured at 30 GiB before its pull
+    let mut ledger = measured_ledger();
+    let pull = DirectiveKind::PullImage { digest: digest() };
+    ledger.learn_image(&digest(), 30 * GIB);
+    let materialise = DirectiveKind::MaterialiseImage {
+        digest: digest(),
+        base_name: base(),
+        runner_version: "2.330.0".to_owned(),
+    };
+    let clone = DirectiveKind::CloneVm {
+        base_name: base(),
+        vm_name: vm(1),
+    };
+    let key = |n: u128| (EPOCH, DirectiveId::from_u128(n));
+
+    // when
+    let pulled = ledger.admits(&pull);
+    ledger.commit(key(1), &pull);
+    let made = ledger.admits(&materialise);
+    ledger.commit(key(2), &materialise);
+    let cloned = ledger.admits(&clone);
+    ledger.commit(key(3), &clone);
+
+    // then: the image, its base and the clone each at the manifest's disk
+    assert_eq!(ledger.unmeasured(&pull), None);
+    assert_eq!(pulled, Ok(capacity(0, 0, 0, 30)));
+    assert_eq!(made, Ok(capacity(0, 0, 0, 30)));
+    assert_eq!(cloned, Ok(capacity(1, 0, 0, 30)));
+    assert_eq!(ledger.used(), capacity(1, 0, 0, 90));
+}
+
+#[test]
+fn should_size_by_the_configured_ceiling_when_one_is_configured() {
+    // given: ceilings configured (50, 60, 80 GiB) and a manifest measured at 30 GiB
+    let mut ledger = ledger(roomy());
+    ledger.learn_image(&digest(), 30 * GIB);
+    let pull = DirectiveKind::PullImage { digest: digest() };
+
+    // when
+    let pulled = ledger.admits(&pull);
+
+    // then: the configured value overrides the measured one
+    assert_eq!(pulled, Ok(capacity(0, 0, 0, 50)));
+    assert_eq!(ledger.unmeasured(&pull), None);
+}
+
+#[test]
+fn should_count_listed_images_and_bases_at_their_measured_disks_when_no_ceiling_is_configured() {
+    // given: a restart: the store lists an image and a base with their manifests' disks, and
+    // a second image it could not measure
+    let mut ledger = measured_ledger();
+    let other = ImageDigest::new(&format!("sha256:{}", "b".repeat(64))).expect("a digest");
+
+    // when
+    ledger.apply_images(
+        &BTreeSet::from([digest()]),
+        &BTreeMap::from([(base(), GuestOs::Linux)]),
+        &MeasuredDisks {
+            images: BTreeMap::from([(digest(), 30 * GIB)]),
+            bases: BTreeMap::from([(base(), 30 * GIB)]),
+            base_images: BTreeMap::from([(base(), digest())]),
+        },
+    );
+    let measured_use = ledger.used();
+    let clone = ledger.admits(&DirectiveKind::CloneVm {
+        base_name: base(),
+        vm_name: vm(1),
+    });
+    let known = ledger.unknown();
+    ledger.apply_images(
+        &BTreeSet::from([digest(), other]),
+        &BTreeMap::from([(base(), GuestOs::Linux)]),
+        &MeasuredDisks::default(),
+    );
+
+    // then: measured sizes are kept across listings; an unmeasured image makes disk unknown
+    assert_eq!(measured_use, capacity(0, 0, 0, 60));
+    assert_eq!(clone, Ok(capacity(1, 0, 0, 30)));
+    assert!(known.is_empty(), "{known:?}");
+    assert_eq!(
+        ledger.unknown().get(&ResourceDimension::Disk),
+        Some(&BTreeSet::from([UnknownCause::ImagesNotRead]))
+    );
+}
+
+#[test]
+fn should_size_a_base_by_its_image_when_its_own_size_did_not_read() {
+    // given: the store lists the image and its base, neither with a size (the kept manifest
+    // no longer reads), but names the base's image
+    let mut ledger = measured_ledger();
+    let listed = |disks: MeasuredDisks| (BTreeSet::from([digest()]), disks);
+    let (images, unsized_disks) = listed(MeasuredDisks {
+        base_images: BTreeMap::from([(base(), digest())]),
+        ..MeasuredDisks::default()
+    });
+    let bases = BTreeMap::from([(base(), GuestOs::Linux)]);
+    ledger.apply_images(&images, &bases, &unsized_disks);
+    let unknown_before = ledger.unmeasured_listed();
+    let clone = DirectiveKind::CloneVm {
+        base_name: base(),
+        vm_name: vm(1),
+    };
+    let refused = ledger.admits(&clone);
+
+    // when: the next pass measured the image again
+    ledger.apply_images(
+        &images,
+        &bases,
+        &MeasuredDisks {
+            images: BTreeMap::from([(digest(), 30 * GIB)]),
+            base_images: BTreeMap::from([(base(), digest())]),
+            ..MeasuredDisks::default()
+        },
+    );
+
+    // then: unknown until then (never zero), then both sized by the image
+    assert_eq!(unknown_before, BTreeSet::from([digest()]));
+    assert_eq!(
+        refused,
+        Err(RefusalReason::CapacityUnknown {
+            dimension: ResourceDimension::Disk
+        })
+    );
+    assert!(ledger.unmeasured_listed().is_empty());
+    assert_eq!(ledger.used(), capacity(0, 0, 0, 60));
+    assert_eq!(ledger.admits(&clone), Ok(capacity(1, 0, 0, 30)));
+}
+
+#[test]
+fn should_measure_only_a_fresh_admissible_pull_when_its_disk_is_unknown() {
+    // given: no ceiling configured, a session open at EPOCH
+    let pull = |id: u128| directive(id, EPOCH, DirectiveKind::PullImage { digest: digest() });
+    let mut dp = open_with(Mode::Normal, measured_ledger());
+    let stale = directive(
+        2,
+        Epoch::new(4),
+        DirectiveKind::PullImage { digest: digest() },
+    );
+    let mut expired = pull(3);
+    expired.deadline = mayfly_domain::Deadline::at(Millis::new(1));
+    let safe = open_with(Mode::Safe, measured_ledger());
+    let configured = open_with(Mode::Normal, ledger(roomy()));
+
+    // when
+    let fresh = dp.worth_measuring(V1_0, &pull(1), NOW);
+    let old = dp.worth_measuring(V1_0, &stale, NOW);
+    let late = dp.worth_measuring(V1_0, &expired, NOW);
+    let held = safe.worth_measuring(V1_0, &pull(1), NOW);
+    let sized = configured.worth_measuring(V1_0, &pull(1), NOW);
+    let _ = dp.receive(V1_0, &pull(1), NOW);
+    let repeat = dp.worth_measuring(V1_0, &pull(1), NOW);
+
+    // then: only the fresh, admissible pull of an unmeasured image is worth a fetch
+    assert!(fresh);
+    assert!(!old, "a stale epoch");
+    assert!(!late, "past its deadline");
+    assert!(!held, "held in safe mode");
+    assert!(!sized, "a configured ceiling");
+    assert!(!repeat, "a duplicate already in the table");
 }

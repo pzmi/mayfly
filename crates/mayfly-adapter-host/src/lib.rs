@@ -20,5 +20,8 @@
 mod probe;
 pub mod source;
 
-pub use probe::{HostConfig, OsProbe, ProviderView, reading, slept};
+pub use probe::{
+    HostConfig, OsProbe, ProviderView, RESERVE_MEMORY_FLOOR, VmShape, reading, reserve_memory,
+    slept, vm_slots,
+};
 pub use source::{Clocks, HostSource, Memory, Os, ReadFailed, Volume};

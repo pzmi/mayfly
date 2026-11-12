@@ -59,6 +59,12 @@ pub trait HostSource: Send + Sync {
     /// [`ReadFailed`] when it cannot be read.
     fn memory(&self) -> Result<Memory, ReadFailed>;
 
+    /// The CPUs this process may run on.
+    ///
+    /// # Errors
+    /// [`ReadFailed`] when it cannot be read.
+    fn cpus(&self) -> Result<u32, ReadFailed>;
+
     /// The identity of this boot: it changes on every boot and never within one.
     ///
     /// # Errors
@@ -109,6 +115,13 @@ impl HostSource for Os {
         platform::memory()
     }
 
+    /// The standard library's count (`sched_getaffinity` and the cgroup quota on Linux,
+    /// the online CPUs on macOS): the CPUs this process may run on, not more.
+    fn cpus(&self) -> Result<u32, ReadFailed> {
+        let count = std::thread::available_parallelism().map_err(|_| ReadFailed)?;
+        u32::try_from(count.get()).map_err(|_| ReadFailed)
+    }
+
     fn boot_id(&self) -> Result<String, ReadFailed> {
         platform::boot_id()
     }
@@ -135,9 +148,44 @@ fn duration(t: rustix::time::Timespec) -> Result<Duration, ReadFailed> {
 mod platform {
     use super::{Duration, Memory, ReadFailed, duration};
 
+    /// `/proc/meminfo`, bounded by this process's cgroup v2 `memory.max` when that is lower,
+    /// as the CPU count is bounded by the cgroup's quota: what a VM here may really use.
     pub(super) fn memory() -> Result<Memory, ReadFailed> {
         let text = std::fs::read_to_string("/proc/meminfo").map_err(|_| ReadFailed)?;
-        parse_meminfo(&text)
+        let memory = parse_meminfo(&text)?;
+        let limit = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|groups| cgroup_path(&groups))
+            .and_then(|path| {
+                std::fs::read_to_string(format!("/sys/fs/cgroup{path}/memory.max")).ok()
+            });
+        match limit {
+            Some(text) => limited(memory, &text),
+            None => Ok(memory),
+        }
+    }
+
+    /// The cgroup v2 path of `/proc/self/cgroup` (its `0::` line); `None` without one (no
+    /// unified hierarchy: no v2 limit applies).
+    pub(super) fn cgroup_path(text: &str) -> Option<String> {
+        text.lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .map(|path| path.trim().trim_end_matches('/').to_owned())
+    }
+
+    /// `memory` bounded by a cgroup v2 `memory.max` of `text`: `max` is no limit; a number
+    /// lowers the total and the available memory to it; anything else is a failed read, never
+    /// ignored (ADR 0052). Pinned by `tests::should_bound_memory_by_the_cgroup_when_its_limit_is_lower`.
+    pub(super) fn limited(memory: Memory, text: &str) -> Result<Memory, ReadFailed> {
+        let text = text.trim();
+        if text == "max" {
+            return Ok(memory);
+        }
+        let max: u64 = text.parse().map_err(|_| ReadFailed)?;
+        Ok(Memory {
+            total_bytes: memory.total_bytes.min(max),
+            available_bytes: memory.available_bytes.min(max),
+        })
     }
 
     pub(super) fn boot_id() -> Result<String, ReadFailed> {
@@ -228,6 +276,36 @@ mod platform {
 
             // then
             assert_eq!(memory, Err(ReadFailed));
+        }
+
+        #[test]
+        fn should_bound_memory_by_the_cgroup_when_its_limit_is_lower() {
+            // given
+            let memory = Memory {
+                total_bytes: 64 << 30,
+                available_bytes: 48 << 30,
+            };
+
+            // when
+            let bounded = limited(memory, "17179869184\n");
+            let unbounded = limited(memory, "max\n");
+            let higher = limited(memory, &(128_u64 << 30).to_string());
+            let garbage = limited(memory, "lots");
+            let path = cgroup_path("0::/user.slice/session-1.scope\n");
+
+            // then
+            assert_eq!(
+                bounded,
+                Ok(Memory {
+                    total_bytes: 16 << 30,
+                    available_bytes: 16 << 30,
+                })
+            );
+            assert_eq!(unbounded, Ok(memory));
+            assert_eq!(higher, Ok(memory));
+            assert_eq!(garbage, Err(ReadFailed));
+            assert_eq!(path.as_deref(), Some("/user.slice/session-1.scope"));
+            assert_eq!(cgroup_path("12:cpu:/x\n"), None);
         }
 
         #[test]

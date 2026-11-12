@@ -323,6 +323,11 @@ impl ImageWorld for ImageTartWorld {
         self.publish_image(content, guest, Damage::None, None)
     }
 
+    fn disk_bytes(&self, content: &[u8]) -> u64 {
+        // Two disk chunks, `chunk-1:` and `chunk-2:` each before the content.
+        u64::try_from(2 * (content.len() + 8)).expect("a small image")
+    }
+
     fn publish_drifted(&self, content: &[u8], claimed: &[u8]) -> ImageDigest {
         // The registry serves `content`'s manifest at the digest of `claimed`'s.
         let claimed_digest = self.publish_image(claimed, GuestOs::Macos, Damage::None, None);

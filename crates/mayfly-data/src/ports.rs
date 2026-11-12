@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use mayfly_data_domain::Inventory;
+use mayfly_data_domain::{Inventory, MeasuredDisks};
 use mayfly_domain::{
     Epoch, ImageDigest, Millis, ObservationId, OwnedVmName, ProviderInstanceId, Secret,
 };
@@ -121,6 +121,10 @@ pub struct ImageListing {
     /// the guest their clones run (macOS or Linux). An `mfb-*` VM not listed here is counted by
     /// the ledger from the inventory, in full (`Ledger::base_vm`), so every base is counted once.
     pub bases: BTreeMap<BaseName, GuestOs>,
+    /// The disk each listed image and base reconstructs to, measured from its verified
+    /// manifest (ADR 0052's amendment of 2026-11-12); one the store could not measure is left
+    /// out and counted unknown, never at a default.
+    pub disks: MeasuredDisks,
 }
 
 /// The local image cache and the bases made from it (plan §8.1, domain-model §9.3, ADR 0039,
@@ -133,6 +137,15 @@ pub trait ImageStore: Send + Sync {
     /// # Errors
     /// [`VmError`]: the listing says nothing, and the ledger keeps what it had.
     fn list(&self) -> impl Future<Output = Result<ImageListing, VmError>> + Send;
+
+    /// The disk `digest` reconstructs to, by its manifest fetched by digest and checked to hash
+    /// to it, before any layer is pulled (IC-15): the disk layers' uncompressed sizes summed.
+    /// Reads only; nothing is kept or created.
+    ///
+    /// # Errors
+    /// [`VmError::Definite`] for a digest the registry does not hold, a manifest that does not
+    /// hash to it, or one whose sizes do not read: the size stays unknown.
+    fn measure(&self, digest: &ImageDigest) -> impl Future<Output = Result<u64, VmError>> + Send;
 
     /// Pulls `digest`, by digest only, never a tag (IC-01), and keeps it only when its raw
     /// manifest hashes to the digest and its content matches that manifest (IC-02). One pull per digest at a time: a concurrent pull of the

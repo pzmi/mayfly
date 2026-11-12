@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use mayfly_control_domain::capacity;
 use mayfly_control_domain::reconcile::PolicyOf;
-use mayfly_domain::{PoolName, Resources, SecretRef};
+use mayfly_domain::{PoolName, SecretRef};
 use toml::{Table, Value};
 
 use crate::exit_code;
@@ -111,39 +111,76 @@ pub enum GithubScope {
 }
 
 /// `[host]`: what the operator keeps for the host itself (ADR 0024), and what the host offers
-/// and its VMs take on disk. The sizing keys have no default (ADR 0052: the data plane's ledger
-/// is sized by the operator, never by a guess): optional in the schema, so a file without them
-/// still validates, and required by `mayflyd` (`crate::daemon::load`).
+/// and its VMs take on disk. Every sizing key is optional and overrides what is measured or
+/// documented when absent (ADR 0052 as amended 2026-11-12, `crate::sizing`): slots and the
+/// memory reserve from the host probe's memory and CPUs, the disk ceilings from each image's
+/// verified manifest, macOS guests at Apple's limit. None is a guess: what cannot be measured
+/// is unknown, and the data plane refuses `capacity_unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostConfig {
-    /// Memory left unallocated to VMs, in MiB.
-    pub reserve_memory_mib: u64,
+    /// Memory left unallocated to VMs, in MiB; `None`: a quarter of the host's memory, at
+    /// least 8 GiB, measured by the probe.
+    pub reserve_memory_mib: Option<u64>,
     /// Disk left unallocated to VMs, in GiB.
     pub reserve_disk_gib: u64,
-    /// The VMs this host runs at once, of any guest OS.
+    /// CPUs left to the person using the machine when slots are measured; `None`:
+    /// [`DEFAULT_RESERVE_CPUS`].
+    pub reserve_cpus: Option<u32>,
+    /// The VMs this host runs at once, of any guest OS; `None`: measured.
     pub vm_slots: Option<u32>,
-    /// The macOS guests the hypervisor runs at once, foreign ones included: at most 2, Apple's
-    /// limit.
+    /// The macOS guests the hypervisor runs at once, foreign ones included; `None` or more than
+    /// [`MACOS_GUESTS_LIMIT`]: Apple's limit ([`HostConfig::macos_guests`]).
     pub macos_guests: Option<u32>,
-    /// The disk ceiling of one pulled image, and of one base made from it, in GiB.
+    /// The disk ceiling of one pulled image, and of one base made from it, in GiB; `None`:
+    /// each image's manifest.
     pub image_disk_gib: Option<u64>,
-    /// The disk ceiling of one clone, in GiB.
+    /// The disk ceiling of one clone, in GiB; `None`: its base's image's manifest.
     pub clone_disk_gib: Option<u64>,
 }
 
+/// Apple's limit: at most two macOS guests run at once on one Mac (the macOS licence's limit on
+/// virtual instances, which Virtualization.framework enforces by refusing a third). Linux
+/// guests are not bound by it.
+pub const MACOS_GUESTS_LIMIT: u32 = 2;
+
+/// CPUs kept for the person using the machine when `reserve_cpus` is not configured.
+pub const DEFAULT_RESERVE_CPUS: u32 = 2;
+
 impl HostConfig {
-    /// The reserves as a resource amount in bytes.
+    /// The disk reserve in bytes.
     #[must_use]
-    pub const fn reserve(&self) -> Resources {
-        Resources::new(self.reserve_memory_mib * MIB, self.reserve_disk_gib * GIB)
+    pub const fn reserve_disk_bytes(&self) -> u64 {
+        self.reserve_disk_gib.saturating_mul(GIB)
+    }
+
+    /// The memory reserve in bytes when configured.
+    #[must_use]
+    pub fn reserve_memory_bytes(&self) -> Option<u64> {
+        self.reserve_memory_mib.map(|mib| mib.saturating_mul(MIB))
+    }
+
+    /// The CPU reserve: configured, else [`DEFAULT_RESERVE_CPUS`].
+    #[must_use]
+    pub fn reserve_cpus(&self) -> u32 {
+        self.reserve_cpus.unwrap_or(DEFAULT_RESERVE_CPUS)
+    }
+
+    /// The macOS guests in effect: the configured count capped at [`MACOS_GUESTS_LIMIT`], else
+    /// the limit itself. Pinned by
+    /// `tests/config.rs::should_cap_macos_guests_at_apples_limit_when_more_are_configured`.
+    #[must_use]
+    pub fn macos_guests(&self) -> u32 {
+        self.macos_guests
+            .map_or(MACOS_GUESTS_LIMIT, |n| n.min(MACOS_GUESTS_LIMIT))
     }
 }
 
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
-            reserve_memory_mib: 4096,
+            reserve_memory_mib: None,
             reserve_disk_gib: 50,
+            reserve_cpus: None,
             vm_slots: None,
             macos_guests: None,
             image_disk_gib: None,
@@ -769,6 +806,7 @@ fn section_keys(key: &str) -> &'static [&'static str] {
         "host" => &[
             "reserve_memory_mib",
             "reserve_disk_gib",
+            "reserve_cpus",
             "vm_slots",
             "macos_guests",
             "image_disk_gib",
@@ -930,14 +968,12 @@ fn read_github(reader: &mut Reader) -> Option<GithubConfig> {
 fn read_host(reader: &mut Reader) -> HostConfig {
     let default = HostConfig::default();
     HostConfig {
-        reserve_memory_mib: reader
-            .uint(
-                "reserve_memory_mib",
-                &(0..=4_194_304),
-                "reserve_memory_mib = 4096",
-                false,
-            )
-            .unwrap_or(default.reserve_memory_mib),
+        reserve_memory_mib: reader.uint(
+            "reserve_memory_mib",
+            &(0..=4_194_304),
+            "reserve_memory_mib = 8192",
+            false,
+        ),
         reserve_disk_gib: reader
             .uint(
                 "reserve_disk_gib",
@@ -946,8 +982,9 @@ fn read_host(reader: &mut Reader) -> HostConfig {
                 false,
             )
             .unwrap_or(default.reserve_disk_gib),
+        reserve_cpus: reader.narrow("reserve_cpus", 0..=1024, "reserve_cpus = 2"),
         vm_slots: reader.narrow("vm_slots", 1..=1024, "vm_slots = 2"),
-        macos_guests: reader.narrow("macos_guests", 0..=2, "macos_guests = 2"),
+        macos_guests: reader.narrow("macos_guests", 0..=1024, "macos_guests = 2"),
         image_disk_gib: reader.uint(
             "image_disk_gib",
             &(1..=1_048_576),

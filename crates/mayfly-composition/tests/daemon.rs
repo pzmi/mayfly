@@ -214,10 +214,15 @@ max_running = 2
     }
 
     fn start(&self) -> Daemon {
+        self.start_with(Stdio::null())
+    }
+
+    /// Starts `mayflyd` with its stderr going to `stderr`.
+    fn start_with(&self, stderr: Stdio) -> Daemon {
         let mut child = self
             .mayflyd(&["--config", &self.config().display().to_string()])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("start mayflyd");
         let stdout = child.stdout.take().expect("stdout");
@@ -401,7 +406,7 @@ fn should_converge_on_the_same_inventory_when_the_daemon_is_killed_and_restarted
 }
 
 #[test]
-fn should_refuse_to_start_when_the_role_the_images_or_the_sizing_are_missing() {
+fn should_refuse_to_start_when_the_role_or_the_images_are_missing() {
     // given
     let world = World::new(false);
     let config = world.config().display().to_string();
@@ -424,15 +429,14 @@ fn should_refuse_to_start_when_the_role_the_images_or_the_sizing_are_missing() {
     assert_eq!(split.status.code(), Some(64));
     assert_eq!(no_images.status.code(), Some(78));
     let report = String::from_utf8_lossy(&no_images.stderr);
-    for field in [
-        "images: required to run mayflyd",
-        "host.vm_slots: required to run mayflyd",
-        "host.macos_guests: required",
-        "host.image_disk_gib: required",
-        "host.clone_disk_gib: required",
-    ] {
-        assert!(report.contains(field), "{field} in {report}");
-    }
+    assert!(
+        report.contains("images: required to run mayflyd"),
+        "{report}"
+    );
+    assert!(
+        !report.contains("host."),
+        "no sizing key is required (ADR 0052's amendment): {report}"
+    );
     assert_eq!(no_config.status.code(), Some(64));
     assert!(
         !world.state().join("journal.db").exists(),
@@ -631,5 +635,42 @@ fn should_refuse_before_writing_when_an_ancestor_is_open_to_others() {
         std::fs::read_dir(&open).expect("open").count(),
         0,
         "nothing was created or written below the open directory"
+    );
+}
+
+#[test]
+fn should_start_and_report_each_sizing_source_when_no_sizing_key_is_configured() {
+    // given: the world's config without any `[host]` sizing key
+    let world = World::new(true);
+    let text = std::fs::read_to_string(world.config()).expect("the config");
+    let without_sizing = text.replace(
+        "[host]\nvm_slots = 2\nmacos_guests = 0\nimage_disk_gib = 50\nclone_disk_gib = 60\n",
+        "",
+    );
+    assert_ne!(text, without_sizing, "the sizing keys were removed");
+    std::fs::write(world.config(), without_sizing).expect("the config");
+    let log = world.path("stderr.log");
+    let stderr = std::fs::File::create(&log).expect("the stderr file");
+
+    // when
+    let daemon = world.start_with(Stdio::from(stderr));
+    daemon.ready();
+    let code = daemon.terminate();
+
+    // then: it starts, and the start-up report names every value's source
+    assert_eq!(code, Some(0));
+    let report = std::fs::read_to_string(&log).expect("the stderr log");
+    for line in [
+        "mayflyd sizing vm_slots=",
+        "mayflyd sizing macos_guests=2 source=apple_limit",
+        "mayflyd sizing reserve_cpus=2 source=default",
+        "mayflyd sizing image_disk_gib=per_image source=manifest",
+        "mayflyd sizing clone_disk_gib=per_image source=manifest",
+    ] {
+        assert!(report.contains(line), "{line} in {report}");
+    }
+    assert!(
+        report.contains("vm_slots=") && report.contains("source=measured"),
+        "{report}"
     );
 }
