@@ -1,0 +1,31 @@
+schema_version = 1
+state_dir = "/var/lib/mayfly"
+
+[github]
+organisation = "example-org"
+app_client_id = "Iv1.0123456789abcdef"
+installation_id = 12345678
+private_key = "file:/etc/mayfly/app-key.pem"
+
+[host]
+vm_slots = 0
+macos_guests = 3
+
+[provider]
+tart_home = "/var/lib/mayfly/tart"
+
+[images]
+repository = "https://ghcr.io/example-org/runner:latest"
+realm_hosts = ["Auth.Example.com"]
+
+[images.runners]
+"2.330" = "not-a-checksum"
+
+[[pools]]
+name = "mac"
+tier = "trusted"
+image_manifest = "/etc/mayfly/images/mac.toml"
+guest_os = "macos"
+cpu = 4
+memory_mib = 8192
+max_running = 2

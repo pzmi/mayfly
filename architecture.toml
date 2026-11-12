@@ -203,8 +203,11 @@ mayfly-adapter-github = { aws-lc-rs = ["default"], base64 = ["default"], reqwest
 # names through the sysctl crate (a macOS-only target dependency).
 mayfly-adapter-host = { rustix = ["default", "fs", "time"], sysctl = ["default"] }
 # The configuration is TOML read as a raw table (plan section 11); the state-dir lock is flock(2)
-# through rustix, safe, with no libc (plan section 13).
-mayfly-composition = { rustix = ["default", "fs", "process"], toml = ["default"] }
+# through rustix, safe, with no libc (plan section 13). The daemon (RT-02, ADR 0091): its runtime,
+# timers and SIGTERM/SIGINT through Tokio (rt-multi-thread, time, signal), the supervision
+# tree's cancellation and the planes' polling on one task (sync, macros); sha2 keys the guest
+# challenge of each directive id; tracing for the supervised loops' WARNING and ERROR events.
+mayfly-composition = { rustix = ["default", "fs", "process"], sha2 = ["default"], tokio = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal"], toml = ["default"], tracing = ["std"] }
 # signal-hook records the catchable signals a foreground `run` receives (DP-04), so a test can
 # prove mayfly never signals `tart run` (ADR 0037).
 mayfly-fake-tart = { rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], signal-hook = ["iterator"], toml = ["default"] }
@@ -229,8 +232,9 @@ mayfly-adapter-sqlite = { tempfile = ["default"] }
 mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io-util", "time", "sync"] }
 # The directive loop's component tests (CP-02) poll the control plane's consumers and the data
 # plane's executor together on one current-thread runtime (`tokio::join!`, `select!`), and hold
-# a send on a `watch` gate to stage a relay takeover; nothing spawned.
-mayfly-composition = { tempfile = ["default"], tokio = ["rt", "macros", "sync"] }
+# a send on a `watch` gate to stage a relay takeover, through the Tokio the crate already uses;
+# the daemon's integration test (RT-02) keeps its state in tempdirs and reads the fake's JSON.
+mayfly-composition = { serde_json = ["default"], tempfile = ["default"] }
 # The executor's component tests poll it and their script together on a current-thread runtime
 # (`tokio::join!`), nothing spawned (DP-01).
 mayfly-data = { tokio = ["rt", "macros"] }

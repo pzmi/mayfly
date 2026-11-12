@@ -15,3 +15,7 @@ pub const LOCK_REFUSED: u8 = 69;
 /// The state dir cannot be used: not a directory, not owned by the service user, wider than
 /// `0700`, or an I/O error (`EX_CANTCREAT`).
 pub const STATE_DIR_UNUSABLE: u8 = 73;
+
+/// The daemon stopped for any other reason (a start-up that failed, a link lost before
+/// recovery completed): a service manager may restart it.
+pub const FAILED: u8 = 1;

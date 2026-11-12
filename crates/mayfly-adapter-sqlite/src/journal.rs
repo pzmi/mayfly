@@ -443,6 +443,33 @@ impl<H: StoreHooks> Journal for SqliteJournal<H> {
     }
 }
 
+/// Start-up's structural verification (plan §10, P1): SQLite's own `quick_check` of every page,
+/// index and constraint the file holds, on the read connection. Anything but `ok` is a store
+/// that does not verify: the run enters safe mode (`mayfly_control::recovery::verify`). Rejected
+/// alternative: the full `integrity_check`, which also cross-checks every index entry and is
+/// linear in the store's size beyond what start-up can afford on a large journal; `quick_check`
+/// finds the corruption a crash or a disk fault leaves. Pinned by
+/// `tests/structure.rs::should_verify_the_structure_when_the_journal_is_sound`.
+impl<H: StoreHooks> mayfly_control::recovery::StructureCheck for SqliteJournal<H> {
+    async fn verify(&self) -> Result<bool, StorageError> {
+        self.read(|c| {
+            let mut statement = c
+                .prepare("PRAGMA quick_check")
+                .map_err(|e| crate::classify::classify(&e))?;
+            let mut rows = statement
+                .query([])
+                .map_err(|e| crate::classify::classify(&e))?;
+            let mut sound = true;
+            while let Some(row) = rows.next().map_err(|e| crate::classify::classify(&e))? {
+                let line: String = row.get(0).map_err(|e| crate::classify::classify(&e))?;
+                sound &= line == "ok";
+            }
+            Ok(sound)
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

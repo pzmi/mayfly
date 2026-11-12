@@ -1,0 +1,6 @@
+invalid configuration: 5 errors
+  host.vm_slots: 0 is outside 1 to 1024 (fix: use a value from 1 to 1024)
+  host.macos_guests: 3 is outside 0 to 2 (fix: use a value from 0 to 2)
+  images.repository: is not a bare OCI repository (fix: write `host/path` in lowercase, with no scheme, tag or digest, like `ghcr.io/acme/runner-macos`)
+  images.runners: holds an entry that is not a runner version and its checksum (fix: write `"X.Y.Z" = "<64 lowercase hex digits>"`, the SHA-256 of that runner package)
+  images.realm_hosts: holds an entry that is not a lowercase host name (fix: list host names only, like `realm_hosts = ["auth.example.com"]`)

@@ -15,7 +15,7 @@ then `cargo xtask check` (and `cargo xtask quick` while iterating).
 D1–D15 were the plan's first decisions; D*n* is ADR *n*+1 and stays a valid alias. From ADR 0017
 on, the ADR number is the decision id and no new D-id is minted (ADR 0001, amended 2026-11-09);
 rows below list every ADR that binds tasks. **Proposed** decisions are planner defaults the owner
-may override; until then tasks follow them as written (none is Proposed today: the owner accepted
+may override; until then tasks follow them as written (ADR 0091 is Proposed; the owner accepted
 ADRs 0003, 0004, 0006-0020, 0023, 0041 and 0042 on 2026-11-09). Only the owner flips a decision to
 Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `doc/event-store.md`
 §8.3 (E1–E9) are ADRs 0021 and 0024–0040; the answers on upgrades, distribution and the App's permissions are ADRs 0043–0045.
@@ -74,6 +74,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0069](adr/0069-the-capacity-carve-keeps-the-headroom-and-what-quarantines-owe.md) | The capacity carve: an open pool keeps its headroom and what its quarantines owe ahead of later pools (`EXACT`); per pool, `capacity_policy = "demand"` keeps only for the VMs it waits for (`DEMAND`), default `"exact"` until GH-00 answers whether `maxCapacity` caps `totalAssignedJobs`. Refines 0024. | Accepted (owner, 2026-11-10) |
 | [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
 | [ADR 0087](adr/0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: mayfly's own private `TART_HOME`; a durable, fail-closed registry of the bases it made, kept on the data plane as host evidence; the Reserved → … → Ready → Retiring state machine with recovery by observation; clone only from a revalidated Ready base, never delete a quarantined one; full verification from a raw manifest fetched by digest; signature policy recorded. Amends 0039. | Accepted (owner, 2026-11-11) |
+| [ADR 0091](adr/0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition (RT-02): the host id generated once and never replaced, `[images]` required by `mayflyd`, a link that ends is a run that ends (a new run mints the new epoch), the start-up `ReportInventory` sent outside the journal (an exception to ADR 0034), the platform's standard places when the configuration names none (owner, 2026-11-12). | Proposed |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
@@ -1316,6 +1317,70 @@ each), a timer loop sleeping until `AttemptSaga::next_due` then calling `expire_
 on every resend), the relay's `send` deadline through `delivery::send_deadline`, and one
 `HostSessions` shared by the handshake, the saga and the sink. The per-kind deadlines are
 `SagaConfig` (defaults; P6's per-guest-OS deadlines are config to add).
+As built (RT-02, ADR 0091, Proposed): `mayfly_composition::daemon` runs `mayflyd --role all`
+(`--role control|data` exits 64 until LNK-01; `--config` is required, OPS-01 passes it).
+Places (ADR 0091 decision 5, owner 2026-11-12): `state_dir` and `tart_home` are optional; the
+defaults are `mayfly_composition::paths` (macOS `~/Library/Application Support/mayfly` with
+`TART_HOME` at `<state>/tart`; Linux `$XDG_STATE_HOME/mayfly` and `$XDG_DATA_HOME/mayfly/tart`),
+a configured `state_dir` alone puts `TART_HOME` at `<state_dir>/tart`; the configuration
+overrides every path; RT-02 writes no logs. Both places are held to ADR 0087's layout rule
+before anything is written (`paths::prepare_private`): `verify::check_path` on each (every
+ancestor owned by root or the daemon's user and not writable by others unless sticky, a link on
+the way only when trusted, the place itself never a symlink, so a symlinked `state_dir` that
+RT-01's lock followed is now refused), then each missing level created alone `0700` by `mkdir`
+and `verify::check_private` on it, all before the state-dir lock (exit 73 on a refusal). The
+shims, diagnostics and image directories are created the same way. The host id is read without
+following a link: a dangling `host-id` link, or one a permission error hides, is refused, never
+regenerated.
+Start-up: the state-dir lock (the owner lease on SQLite); the host id kept in
+`<state_dir>/host-id` (ADR 0091 decision 1); the journal `<state_dir>/journal.db` opened with its
+`StructureCheck` (`PRAGMA quick_check`); the data plane from observation only: the epoch floor
+`<TART_HOME>/mayfly-epoch-floor.json` (`FloorFile`; an unreadable one is refused, and a missing
+one is refused while the host holds a recorded base or an `mf-*`/`mfb-*` VM, ADR 0026), one
+shared `BaseRecords` at `<state_dir>/images/bases.json`, `TartImageStore::recover`,
+`RegistryManifests` with the configured realm hosts, `OsProbe` over its own `TartProvider`,
+shims under `<state_dir>/shims`, diagnostics under `<state_dir>/diagnostics`, `TART_HOME`
+created `0700`, `tart` the first on `PATH`, `mayfly` beside `mayflyd`,
+the daemon under umask `077`, children given only the allowlisted environment. Then per run:
+`Startup::open` (ES-04's `prepare` with a `BuildId` of the version), the configured pools
+applied (`ConfigurePool` only when one changed: the static demand), `ReportInventory` sent
+outside the journal (ADR 0091 decision 4), every inventory to the run's one `Startup` until
+`recover` completes, every observation through the `Inbox`, `resume_held` on each later
+inventory while one is held; after recovery `catch_up` per consumer (saga and relay, each with
+its own worker and `Kicks`), retried with a doubling backoff (0.5 s to 30 s) until both return
+`Ok` or the run is cancelled, then the ready line on stdout, `mayflyd ready host=<id> epoch=<n>
+mode=<normal|safe>` (its promise: this run's recovery finished and every consumer caught up
+once); kicks drained, a 60 s coarse timer, the saga's `next_due` timer calling `expire_due`, the
+reconciler with `reconciler_policies` ticking on its kicks and `next_due`, the SQLite ledger on
+an `AnchoredStoreClock` (wall at start plus monotonic), the runtime clock as each worker's
+`DeliveryTimer`, the relay's `send` bounded by `send_deadline`, one `HostSessions` per run shared
+by the handshake, saga and sink, `DirectiveDetails` from the pools (`ConfigDetails`: run options,
+a keyed nonce per directive id, `Placements`), a mid-run unknown kind entering safe mode. A link
+that ends is a run that ends (ADR 0091 decision 3). SIGTERM and SIGINT both mean P24 until RT-05
+gives Ctrl-C its terminal-mode stop: loops end between units of work, `BeginShutdown`/`EndRun`,
+VMs left under their shims, the loops bounded at 25 s and the runtime's shutdown at 5 s more.
+Config: `[images] repository, runners, realm_hosts` (required by `mayflyd`, ADR 0091 decision 2)
+and `[host] vm_slots, macos_guests (at most 2), image_disk_gib, clone_disk_gib`, optional in the
+schema with no default and required by `mayflyd` (ADR 0052: exit 78 naming each missing key).
+Pinned by `crates/mayfly-composition/tests/daemon.rs`: start over fake-tart, SIGKILL, restart,
+the unrecorded VM reported, nothing deleted, the floor at the last epoch, the pool configured
+once, a second daemon 69, SIGTERM exit 0, the journal `0600`; a link lost after recovery gives a
+second ready at a newer epoch and records run 1 unclean, one lost before recovery exits 1 (the
+`SessionCut` seam); a missing floor beside an `mf-*` VM exits 1; a missing role, `[images]` or
+sizing key is refused; with no place configured, the platform's places are created `0700` under
+an injected `HOME`; a state directory under a `0777` ancestor exits 73 with nothing written. Run as non-root too: `setpriv --reuid=65534 --regid=65534 --clear-groups
+env -i PATH=/usr/bin:/bin HOME=/tmp TMPDIR=/tmp <test binary>` for `tests/daemon.rs` (7 tests),
+`mayfly-composition`'s unit tests (22, `identity` and `paths` among them) and
+`mayfly-adapter-tart`'s `floor` tests (4), from a world-readable copy of the binaries (the session
+scratchpad is root-only): all passed. `env -i` because the sandbox's `SSL_CERT_FILE` names a
+root-only file, which the in-process tests' registry client cannot read as another user. Left to their tasks: GitHub's view in
+recovery (none is passed: every runner reads `unreachable` and a held cleanup stays held; GH-04,
+CP-05), the secrets provider built (`UriSecretProvider::from_process`) but read by no client yet
+(GH-02), the `LaunchStore` shared with the guest transport and filled by no link end yet (CP-05,
+ADR 0082), `Placements` filled by CP-07 (until then a clone is held `image_base_unknown`), P4's
+pool terms on the host (no pool is open before an image is pinned), `crash_loop` (OPS-05), the
+operator socket (RT-03), logging's subscriber (RT-04), Ctrl-C's terminal mode (RT-05), and per-OS
+stop graces (a fixed 30 s).
 
 #### RT-03 Operator socket API and `mayfly` CLI
 Cites: plan §11. Unix socket `0600`, JSON request/response, commands of plan §11 that exist so far
@@ -1336,6 +1401,10 @@ actor. `quarantine resolve --release` passes an observation id the CP-06 policy 
 card). Accept adds: a test that a request claiming an operator in its body is decided under the
 peer's uid, and that a non-socket caller (a policy, startup) cannot obtain an operator actor.
 
+Note (RT-02, ADR 0091 decision 5): the socket's default place, when the configuration names
+none, is `$XDG_RUNTIME_DIR/mayfly.sock` on Linux and `<state dir>/mayfly.sock` on macOS
+(`mayfly_composition::paths` holds the other defaults).
+
 #### RT-04 Observability
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint
 (socket or loopback), redaction test feeding secrets through every log path.
@@ -1345,6 +1414,9 @@ anywhere (ADR 0036).
 Note (DEC-07, ADR 0066 amended): a counter of vanished VMs, `mayfly_vms_vanished_total{pool,
 discovered_by}` (`inventory`, `stop_vm`, `start_vm`), fed by `VmVanished`; the control plane has
 no metrics port yet, so DEC-07 adds none.
+
+Note (RT-02, ADR 0091 decision 5): log files, if any, default to `~/Library/Logs/mayfly` on
+macOS and `$XDG_STATE_HOME/mayfly/logs` on Linux (`mayfly_composition::paths`); RT-02 writes none.
 
 #### RT-05 Terminal mode: a clean stop on Ctrl-C
 Cites: plan §10 (P23 drain, P24 shutdown), §11; ADR 0031; ADR 0087 decision 1. The owner runs
@@ -1566,6 +1638,10 @@ install created and nothing else (philosophy §4.3); the purge of state, VMs and
 (ADR 0044). `doctor` also warns when the GitHub App holds more permissions than ADR 0045's list
 needs (once GH-02 exposes them).
 Accept: plist golden; doctor JSON golden on Linux with fakes; (owner) install on the Mac.
+
+Note (RT-02): a P24 stop takes up to 25 s for the loops and 5 s for the runtime
+(`daemon::SHUTDOWN_DEADLINE`, `RUNTIME_SHUTDOWN`), so the plist's `ExitTimeOut` is at least 30 s;
+the plist passes `--config`, which `mayflyd` requires.
 
 #### OPS-02 Image manifest
 Cites: plan §8, OPS. Manifest schema (`schema`, provider, OS, arch, digest-pinned source, runner

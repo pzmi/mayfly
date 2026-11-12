@@ -21,12 +21,14 @@
 //!   shim itself, the body of `mayfly vm-shim` (ADR 0037).
 //! - [`shim`]: a shim's directory and the re-adoption inputs it gives a restarted data plane.
 //! - [`config`]: what composition passes in.
+//! - [`floor`]: the external epoch floor in `TART_HOME` (ADR 0026), the data plane's `FloorStore`.
 //!
 //! Never a real `tart` in tests: the contract runs against `mayfly-fake-tart`, and against real
 //! Tart only in the hardware lane (HW-01).
 
 pub mod bases;
 pub mod config;
+pub mod floor;
 pub mod guest;
 pub mod images;
 pub mod oci;
@@ -40,6 +42,7 @@ pub mod verify;
 
 pub use bases::BaseRecords;
 pub use config::{Deadlines, ShimProgram, TartConfig};
+pub use floor::{FloorFile, FloorUnreadable};
 pub use guest::{GuestConfig, GuestDeadlines, TartGuestTransport};
 pub use images::{ConfigError, ImageConfig, ImageDeadlines, TartImageStore};
 pub use oci::{FetchError, ManifestSource, RegistryManifests};

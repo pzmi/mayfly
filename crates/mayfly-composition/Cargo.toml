@@ -12,20 +12,26 @@ publish = false
 workspace = true
 
 [dependencies]
+mayfly-adapter-host = { version = "0.1.0", path = "../mayfly-adapter-host" }
+mayfly-adapter-link = { version = "0.1.0", path = "../mayfly-adapter-link" }
+mayfly-adapter-secrets = { version = "0.1.0", path = "../mayfly-adapter-secrets" }
+mayfly-adapter-sqlite = { version = "0.1.0", path = "../mayfly-adapter-sqlite" }
 mayfly-adapter-tart = { version = "0.1.0", path = "../mayfly-adapter-tart" }
+mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
 mayfly-control-domain = { version = "0.1.0", path = "../mayfly-control-domain" }
+mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
+mayfly-data-domain = { version = "0.1.0", path = "../mayfly-data-domain" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
+mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 toml = "1.2.1"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-mayfly-adapter-link = { path = "../mayfly-adapter-link" }
-mayfly-adapter-sqlite = { path = "../mayfly-adapter-sqlite" }
-mayfly-control = { path = "../mayfly-control" }
-mayfly-data = { path = "../mayfly-data" }
-mayfly-data-domain = { path = "../mayfly-data-domain" }
-mayfly-protocol = { path = "../mayfly-protocol" }
 mayfly-testkit = { path = "../mayfly-testkit" }
 mayfly-testkit-data = { path = "../mayfly-testkit-data" }
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
+serde_json = "1.0.154"
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros", "sync"] }

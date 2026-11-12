@@ -1,4 +1,4 @@
-invalid configuration: 14 errors
+invalid configuration: 13 errors
   state_dir: is not an absolute path (fix: use an absolute path, `state_dir = "/var/lib/mayfly"`; `~` and `..` are not expanded)
   github.app_client_id: required, but absent (fix: add `app_client_id = "Iv1.0123456789abcdef"`)
   github.installation_id: 0 is below 1 (fix: use 1 or more)
@@ -6,7 +6,6 @@ invalid configuration: 14 errors
   github.organisation: is not a GitHub organisation login (fix: use 1 to 39 letters, digits and hyphens, not starting or ending with a hyphen)
   github.mode: classic runner registration is not supported (ADR 0028): mayfly serves GitHub Runner Scale Sets only (fix: remove `mode`)
   provider.kind: "qemu" is not a provider (fix: use `kind = "tart"`, the only provider)
-  provider.tart_home: required, but absent (fix: add `tart_home = "/var/lib/mayfly/tart"`)
   pools[0].tier: "untrusted" is not supported: v0.x serves the trusted tier only (ADR 0027) (fix: use `tier = "trusted"`)
   pools[0].image_manifest: required, but absent (fix: add `image_manifest = "/etc/mayfly/images/mac.toml"`)
   pools[0].guest_os: "freebsd" is not a guest OS (fix: use `guest_os = "macos"` or `guest_os = "linux"`)

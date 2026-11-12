@@ -165,7 +165,11 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     // when
     let config = Config::parse(&text).unwrap();
     // then
-    assert_eq!(config.state_dir, PathBuf::from("/var/lib/mayfly"));
+    assert_eq!(config.state_dir, Some(PathBuf::from("/var/lib/mayfly")));
+    assert_eq!(
+        config.provider.tart_home,
+        Some(PathBuf::from("/var/lib/mayfly/tart"))
+    );
     assert_eq!(
         config.github.scope,
         GithubScope::Repository {
@@ -177,7 +181,19 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     assert_eq!(config.github.private_key.scheme(), "keychain");
     assert_eq!(config.host.reserve_memory_mib, 8192);
     assert_eq!(config.host.reserve().disk_bytes, 100 * 1024 * 1024 * 1024);
+    assert_eq!(
+        (config.host.vm_slots, config.host.macos_guests),
+        (Some(4), Some(1))
+    );
+    assert_eq!(
+        (config.host.image_disk_gib, config.host.clone_disk_gib),
+        (Some(80), Some(90))
+    );
     assert_eq!(config.provider.kind, ProviderKind::Tart);
+    let images = config.images.as_ref().unwrap();
+    assert_eq!(images.repository, "ghcr.io/example-org/runner-macos");
+    assert_eq!(images.realm_hosts, ["auth.example.com"]);
+    assert_eq!(images.runners.keys().collect::<Vec<_>>(), ["2.330.0"]);
     assert_eq!(config.pools.len(), 2);
     let mac = &config.pools[0];
     assert_eq!(mac.name.as_str(), "mac");
@@ -236,6 +252,15 @@ fn should_apply_the_defaults_when_the_optional_keys_are_absent() {
     assert_eq!(pool.capacity_policy, CapacityPolicy::Exact);
     assert_eq!(config.host.reserve_memory_mib, 4096);
     assert_eq!(config.host.reserve_disk_gib, 50);
+    assert_eq!(
+        (config.host.vm_slots, config.host.macos_guests),
+        (None, None)
+    );
+    assert_eq!(
+        (config.host.image_disk_gib, config.host.clone_disk_gib),
+        (None, None)
+    );
+    assert_eq!(config.images, None);
     assert_eq!(config.provider.kind, ProviderKind::Tart);
     assert!(matches!(
         config.github.scope,
@@ -598,4 +623,16 @@ fn should_load_a_file_when_it_is_valid_and_refuse_it_when_it_is_not() {
         invalid.exit_code(),
         mayfly_composition::exit_code::CONFIG_INVALID
     );
+}
+
+#[test]
+fn should_leave_the_places_to_the_platform_when_the_file_names_none() {
+    // given
+    let text = read("valid", "defaults.toml");
+    // when
+    let config = Config::parse(&text).unwrap();
+    // then
+    assert_eq!(config.state_dir, None);
+    assert_eq!(config.provider.tart_home, None);
+    assert_eq!(config.provider.kind, ProviderKind::Tart);
 }

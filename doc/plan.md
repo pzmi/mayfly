@@ -673,6 +673,18 @@ ahead of the pools after it, its whole headroom or only what it waits for; `"dem
 `doc/github-scaleset.md` §12 item 6, unverified until GH-00, and starves a pool carved nothing if
 GitHub counts only jobs assigned under the `maxCapacity` mayfly sent. An older build refuses the
 key (unknown keys are refused).
+As built (RT-02, ADR 0091; owner, 2026-11-12: "reasonable defaults out of the box"): `state_dir`
+and `[provider] tart_home` are optional. Without them `mayflyd` uses the platform's standard
+places, creating them `0700` and then running its usual checks: on macOS `~/Library/Application
+Support/mayfly` with `TART_HOME` at `<state>/tart`; on Linux `$XDG_STATE_HOME/mayfly`
+(`~/.local/state/mayfly`) with `TART_HOME` at `$XDG_DATA_HOME/mayfly/tart`
+(`~/.local/share/mayfly/tart`). A configured `state_dir` alone puts `TART_HOME` at
+`<state_dir>/tart`; the configuration overrides every path. Nothing goes in a purgeable cache
+directory. Service mode configures `/Library/Application Support/mayfly` (macOS) or
+`/var/lib/mayfly` (Linux) explicitly (OPS-01). `mayflyd` also requires `[images]` (repository,
+pinned runners, realm hosts) and `[host]`'s `vm_slots`, `macos_guests` (at most 2),
+`image_disk_gib` and `clone_disk_gib` (ADR 0052: no default for a fact of the host); each is
+optional for `config validate`.
 
 ---
 

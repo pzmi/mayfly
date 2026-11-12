@@ -12,10 +12,21 @@ private_key = "keychain:mayfly/app-key"
 [host]
 reserve_memory_mib = 8192
 reserve_disk_gib = 100
+vm_slots = 4
+macos_guests = 1
+image_disk_gib = 80
+clone_disk_gib = 90
 
 [provider]
 kind = "tart"
 tart_home = "/var/lib/mayfly/tart"
+
+[images]
+repository = "ghcr.io/example-org/runner-macos"
+realm_hosts = ["auth.example.com"]
+
+[images.runners]
+"2.330.0" = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
 
 [[pools]]
 name = "mac"

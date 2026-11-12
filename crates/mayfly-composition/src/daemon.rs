@@ -1,0 +1,1410 @@
+//! `mayflyd --role all`: both planes of one host in one process, joined by the in-process link
+//! (plan §3, §10; ADR 0091).
+//!
+//! # Start-up (plan §10, P1)
+//!
+//! 0. The places: the configuration's `state_dir` and `tart_home`, else the platform's
+//!    ([`crate::paths`], ADR 0091 decision 5); each is created `0700` when missing.
+//! 1. **The owner lease**: the state-dir lock ([`StateDirLock`]), which on SQLite is the one
+//!    control plane per store of `doc/event-store.md` §4.5; a second daemon exits 69.
+//! 2. The host's identity ([`crate::identity`]; never generated beside an existing journal),
+//!    then the journal opened and migrated (the adapter takes its backup before a migration).
+//! 3. The data plane from observation only: the epoch floor read from `TART_HOME`
+//!    ([`FloorFile`], fail closed: unreadable, or missing while the host holds mayfly's VMs or
+//!    bases, refuses the start, ADR 0026), the image registry's bases recovered
+//!    (`TartImageStore::recover`, ADR 0087), and the executor's ledger rebuilt from the
+//!    provider, the image store and the host probe ([`Executor::start`]).
+//! 4. **A run** ([`Startup::open`]): stored kinds and structure verified (§6.3), projections
+//!    prepared, `StartRun`, the data plane's hello, `MintEpoch` above the journal and the floor,
+//!    admission closed, the welcome; the data plane raises its floor (fsync) and enters.
+//! 5. The pools of the configuration are applied (`ConfigurePool` when one changed): the
+//!    static demand (`min_prepared`, `max_running`) the reconciler reads.
+//! 6. An inventory is asked for at once (`ReportInventory`, sent on the link outside the
+//!    journal: a read with no effect, ADR 0091 decision 4), and every inventory goes to
+//!    [`Startup::recover`] (the same `Startup` for every pass of the run, CP-04) until it
+//!    completes, which opens admission, or reports safe mode.
+//! 7. Then the durable consumers catch up, each with its own worker (`catch_up` per consumer,
+//!    ES-05): the attempt saga and the directive relay; once both caught up, one ready line is
+//!    reported ([`Ready`]); the saga's deadline timer and the reconciler start.
+//!
+//! While the run lasts: every observation goes through the inbox (P8); every later inventory
+//! also goes to [`Startup::resume_held`] while an attempt's cleanup is held (CP-04); each
+//! consumer drains its kicks, and all catch up on a coarse timer ([`COARSE`]); a stored kind
+//! this build cannot decode, met by a save, enters safe mode (§6.3 rule 4).
+//!
+//! # A session that ends is a run that ends
+//!
+//! The control plane mints a new epoch for every data-plane session (plan §3.2), and `HostRun`
+//! mints once per run, so a link that ends (the data plane's serve returned) ends the run: the
+//! next run's `StartRun` records the previous one unclean and mints above it, and the data
+//! plane enters the new session with its ledger kept. `formal/link.qnt`'s reconnect and
+//! `formal/recovery.qnt`'s restart already model exactly this, so no model changes. A run that
+//! ends before its recovery completed stops the daemon (exit 1) rather than loop.
+//! [`SessionCut`] ends a session on request: the seam a test loses the link through (production
+//! never cuts).
+//!
+//! # Shutdown (P24)
+//!
+//! SIGTERM or SIGINT cancels the root ([`Shutdown`]). Each supervised loop ends between two
+//! units of work, so no save is cut; nothing more is admitted or acquired (the reconciler has
+//! stopped); `BeginShutdown` and `EndRun` record a clean end; the control plane's link halves are
+//! dropped, and the data plane's serve returns once every effect in flight finished. VMs are
+//! left running under their shims (ADR 0037) for the next start to adopt. The loops are
+//! bounded by [`SHUTDOWN_DEADLINE`] and the runtime by [`RUNTIME_SHUTDOWN`], under a service
+//! manager's own. RT-05 adds terminal mode's
+//! own stop for Ctrl-C.
+//!
+//! # Seams left for later tasks
+//!
+//! GitHub (GH-02, GH-04, CP-05): the secrets are resolved by a provider built here
+//! ([`UriSecretProvider::from_process`], which withholds every `env:` name from children), and
+//! recovery is handed no GitHub view until a registration view exists, so every runner reads
+//! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
+//! by nothing until the control plane mints JIT configs. Image placement (CP-07):
+//! [`Placements`] stays empty, so a clone is held `image_base_unknown`. The operator socket
+//! (RT-03), logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
+//! (OPS-05) and split roles (LNK-01) are separate tasks.
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use mayfly_adapter_host::{HostConfig as ProbeConfig, OsProbe, ProviderView, ReadFailed};
+use mayfly_adapter_link::inproc;
+use mayfly_adapter_secrets::UriSecretProvider;
+use mayfly_adapter_sqlite::{OpenError, SqliteJournal, SqliteLedger, SqliteOptions};
+use mayfly_adapter_tart::bases::SignaturePolicy;
+use mayfly_adapter_tart::{
+    BaseRecords, Deadlines, FloorFile, FloorUnreadable, GuestConfig, GuestDeadlines, ImageConfig,
+    ImageDeadlines, RegistryManifests, ShimProgram, TartConfig, TartGuestTransport, TartImageStore,
+    TartProvider,
+};
+use mayfly_control::delivery::{
+    DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, SinkConfig,
+};
+use mayfly_control::inbox::Inbox;
+use mayfly_control::projection::{self, BuildId};
+use mayfly_control::reconciler::{Reconciler, ReconcilerConfig};
+use mayfly_control::recovery::{
+    Recovery, Startup, StartupConfig, StartupError, enter_safe_mode, session_ended,
+};
+use mayfly_control::saga::{AttemptSaga, SagaConfig};
+use mayfly_control::sessions::HostSessions;
+use mayfly_control::store::{AggregateStore, Clock as _, Outcome, SaveError, SaveRequest};
+use mayfly_control_domain::attempt::GuestOs as DomainOs;
+use mayfly_control_domain::operations::hostrun::{HostRun, HostRunCommand, SafeModeReason};
+use mayfly_control_domain::pool::{ConfigurePool, Pool, PoolCommand, PoolConfig, TrustTier};
+use mayfly_control_domain::{Actor, Command, ControlAggregates};
+use mayfly_data::{Config as DataConfig, Executor, Inventory, LaunchSecrets, LaunchStore, Ports};
+use mayfly_data_domain::Sizing;
+use mayfly_domain::{
+    CommandId, Deadline, DirectiveId, Epoch, HostId, Millis, OwnedVmName, ProviderInstanceId,
+    Resources, Secret,
+};
+use mayfly_protocol::{
+    Capacity, Directive, DirectiveKind, DirectiveSink as _, Mode, ObservationKind, SUPPORTED,
+    SecretHandle,
+};
+use sha2::{Digest as _, Sha256};
+use tokio::sync::watch;
+
+use crate::clocks::{AnchoredStoreClock, DataClock, OsRng, RandomObservationIds, SystemClock};
+use crate::config::{Config, ConfigError, ConfigErrorKind, ConfigErrors, GuestOs, LoadError, Tier};
+use crate::details::{ConfigDetails, Placements};
+use crate::exit_code;
+use crate::identity::{IdentityError, host_id, random_bytes};
+use crate::paths::{self, Places, PlatformEnv};
+use crate::state_dir::{StateDirError, StateDirLock};
+use crate::supervise::{Cuttable, Notifier, SessionCut, Shutdown, ShutdownSignal};
+
+/// How often every consumer catches up and the reconciler passes without a kick: the
+/// level-triggered floor under the kicks (a lost kick costs at most this).
+pub const COARSE: Duration = Duration::from_secs(60);
+
+/// The longest a P24 stop takes before the daemon stops waiting for its loops; the runtime is
+/// then given [`RUNTIME_SHUTDOWN`] more, so the process exits within 30 s (OPS-01's launchd
+/// `ExitTimeOut` must be at least that).
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(25);
+
+/// How long the runtime's remaining tasks (blocking file work) get once the daemon stopped.
+pub const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
+
+/// The least a timer loop waits between two turns, so a deadline already past is acted on
+/// once a turn, never in a busy loop.
+const TIMER_FLOOR: Duration = Duration::from_millis(100);
+
+/// How long the data plane waits between two inventories while nothing asks.
+const OBSERVE_EVERY: Millis = Millis::new(30_000);
+
+/// The deadline of the inventory asked for at the start of a run.
+const INVENTORY_DEADLINE: Millis = Millis::new(60_000);
+
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+/// The run's actor for the commands of a clean stop.
+const SHUTDOWN: &str = "shutdown";
+
+const ID_DOMAIN: &[u8] = b"mayfly-daemon-v1\n";
+
+/// What `mayflyd` is started with besides its configuration.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// The configuration file.
+    pub config: PathBuf,
+    /// The `tart` executable, absolute (the binary resolves it from `PATH`).
+    pub tart: PathBuf,
+    /// The `mayfly` executable that runs `mayfly vm-shim` (ADR 0037), absolute.
+    pub shim_program: PathBuf,
+    /// The environment children may get: [`child_environment`] of the daemon's.
+    pub environment: Vec<(OsString, OsString)>,
+    /// This build's version.
+    pub version: String,
+    /// The variables the default places are read from ([`PlatformEnv::from_process`] in the
+    /// binary; a test passes its own).
+    pub env: PlatformEnv,
+}
+
+/// The ready report of a run: recovery completed (or safe mode reported), and every consumer
+/// caught up once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ready {
+    /// The host.
+    pub host: HostId,
+    /// The run's epoch.
+    pub epoch: Epoch,
+    /// The session's mode: `safe` when the journal is not trusted.
+    pub mode: Mode,
+}
+
+impl std::fmt::Display for Ready {
+    /// The ready line: `mayflyd ready host=<id> epoch=<n> mode=<normal|safe>`. Its promise:
+    /// start-up recovery of this run has finished (admission opened, or safe mode reported) and
+    /// every durable consumer has caught up once (its first `catch_up` returned). Pinned by
+    /// `tests/daemon.rs::should_converge_on_the_same_inventory_when_the_daemon_is_killed_and_restarted`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match self.mode {
+            Mode::Normal => "normal",
+            Mode::Safe => "safe",
+        };
+        write!(
+            f,
+            "mayflyd ready host={} epoch={} mode={mode}",
+            self.host,
+            self.epoch.get()
+        )
+    }
+}
+
+/// Why the daemon stopped other than by a signal.
+#[derive(Debug)]
+pub enum DaemonError {
+    /// The configuration did not load or lacks what the daemon needs.
+    Config(LoadError),
+    /// The state directory could not be locked or used.
+    StateDir(StateDirError),
+    /// The state directory or `TART_HOME`, or an ancestor of either, lets someone else swap it
+    /// (ADR 0087's layout rule); nothing was written.
+    Places(mayfly_adapter_tart::verify::UnsafeLayout),
+    /// The host's identity could not be had.
+    Identity(IdentityError),
+    /// The journal did not open.
+    Journal(OpenError),
+    /// The epoch floor exists and does not read.
+    Floor(FloorUnreadable),
+    /// The epoch floor is missing beside mayfly's own VMs or bases.
+    FloorMissing {
+        /// The floor file.
+        path: PathBuf,
+        /// What of mayfly's the host holds.
+        evidence: String,
+    },
+    /// The image store refused its configuration or its directories.
+    Images(mayfly_adapter_tart::ConfigError),
+    /// Something the daemon needs at start could not be had, by name.
+    Start(&'static str),
+    /// A run's start-up failed.
+    Startup(StartupError),
+    /// The data plane did not enter the session the control plane opened.
+    Session(String),
+    /// The link ended before the run's recovery completed.
+    SessionLost,
+}
+
+impl DaemonError {
+    /// The exit code (ADR 0031, ADR 0046): the configuration 78, the lock 69, the state
+    /// directory or `TART_HOME` unusable 73, anything else [`exit_code::FAILED`].
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Config(e) => e.exit_code(),
+            Self::StateDir(e) => e.exit_code(),
+            Self::Places(_) => exit_code::STATE_DIR_UNUSABLE,
+            Self::Identity(_)
+            | Self::Journal(_)
+            | Self::Floor(_)
+            | Self::FloorMissing { .. }
+            | Self::Images(_)
+            | Self::Start(_)
+            | Self::Startup(_)
+            | Self::Session(_)
+            | Self::SessionLost => exit_code::FAILED,
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(e) => e.fmt(f),
+            Self::StateDir(e) => e.fmt(f),
+            Self::Places(e) => write!(
+                f,
+                "refusing an unsafe directory layout: {e:?}; every ancestor must be owned by \
+                 root or this user and not writable by others unless sticky"
+            ),
+            Self::Identity(e) => e.fmt(f),
+            Self::Journal(e) => e.fmt(f),
+            Self::Floor(e) => e.fmt(f),
+            Self::FloorMissing { path, evidence } => write!(
+                f,
+                "the epoch floor {} is missing but this host holds mayfly's {evidence}: a lost \
+                 floor beside a journal restored from a backup could mint an epoch a VM already \
+                 saw (ADR 0026); restore the floor file before starting",
+                path.display()
+            ),
+            Self::Images(e) => write!(f, "the image store refused to start: {e:?}"),
+            Self::Start(what) => write!(f, "cannot start: {what}"),
+            Self::Startup(e) => write!(f, "start-up failed: {e}"),
+            Self::Session(why) => write!(f, "the data plane did not enter the session: {why}"),
+            Self::SessionLost => f.write_str("the link ended before recovery completed"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonError {}
+
+/// What `[host]` must say for `mayflyd` (ADR 0052: no default for a fact of the host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSizing {
+    /// The VMs this host runs at once.
+    pub vm_slots: u32,
+    /// The macOS guests the hypervisor runs at once (at most 2).
+    pub macos_guests: u32,
+    /// The disk ceiling of one image, and of one base made from it, in GiB.
+    pub image_disk_gib: u64,
+    /// The disk ceiling of one clone, in GiB.
+    pub clone_disk_gib: u64,
+}
+
+/// The daemon's configuration as `mayflyd` needs it.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    /// The whole file.
+    pub config: Config,
+    /// `[images]`.
+    pub images: crate::config::ImagesConfig,
+    /// `[host]`'s sizing.
+    pub sizing: HostSizing,
+    /// The state directory and `TART_HOME`: the configuration's, else the platform's standard
+    /// places (ADR 0091 decision 5, [`crate::paths`]).
+    pub places: Places,
+}
+
+fn missing(field: &str, problem: &str, fix: &str) -> ConfigError {
+    ConfigError {
+        field: field.to_owned(),
+        kind: ConfigErrorKind::Missing,
+        problem: problem.to_owned(),
+        fix: fix.to_owned(),
+    }
+}
+
+/// The daemon's configuration: the file valid, `[images]` present and `[host]`'s sizing keys
+/// given, each missing one named (exit 78). Pinned by
+/// `tests/daemon.rs::should_refuse_to_start_when_the_role_the_images_or_the_sizing_are_missing`.
+///
+/// # Errors
+/// [`LoadError`] when the file does not load or lacks what the daemon needs.
+pub fn load(path: &Path, env: &PlatformEnv) -> Result<Loaded, LoadError> {
+    let config = Config::load(path)?;
+    let mut errors = Vec::new();
+    let places = paths::resolve(
+        config.state_dir.as_deref(),
+        config.provider.tart_home.as_deref(),
+        paths::defaults(env),
+    );
+    if places.is_none() {
+        errors.push(missing(
+            "state_dir",
+            "no default place: HOME is not set to an absolute path",
+            "add `state_dir = \"/var/lib/mayfly\"`, or run mayflyd with HOME set",
+        ));
+    }
+    if config.images.is_none() {
+        errors.push(missing(
+            "images",
+            "required to run mayflyd: the data plane pulls images from it",
+            "add `[images]` with `repository = \"ghcr.io/acme/runner-macos\"`",
+        ));
+    }
+    let sized = "required to run mayflyd: the host's capacity is the operator's, never a default (ADR 0052)";
+    let host = config.host;
+    for (key, given, example) in [
+        ("vm_slots", host.vm_slots.is_some(), "vm_slots = 2"),
+        (
+            "macos_guests",
+            host.macos_guests.is_some(),
+            "macos_guests = 2",
+        ),
+        (
+            "image_disk_gib",
+            host.image_disk_gib.is_some(),
+            "image_disk_gib = 100",
+        ),
+        (
+            "clone_disk_gib",
+            host.clone_disk_gib.is_some(),
+            "clone_disk_gib = 100",
+        ),
+    ] {
+        if !given {
+            errors.push(missing(
+                &format!("host.{key}"),
+                sized,
+                &format!("add `{example}` under `[host]`, measured for this host"),
+            ));
+        }
+    }
+    match (
+        places,
+        config.images.clone(),
+        host.vm_slots,
+        host.macos_guests,
+        host.image_disk_gib,
+        host.clone_disk_gib,
+    ) {
+        (
+            Some(places),
+            Some(images),
+            Some(vm_slots),
+            Some(macos_guests),
+            Some(image_disk_gib),
+            Some(clone_disk_gib),
+        ) if errors.is_empty() => Ok(Loaded {
+            config,
+            places,
+            images,
+            sizing: HostSizing {
+                vm_slots,
+                macos_guests,
+                image_disk_gib,
+                clone_disk_gib,
+            },
+        }),
+        _ => Err(LoadError::Invalid(ConfigErrors(errors))),
+    }
+}
+
+/// The daemon's environment as children may receive it: only the allowlisted names
+/// (`mayfly_adapter_tart::config::ALLOWED_VARIABLES`, ADR 0058), so no secret value of the
+/// daemon's environment is held in [`Options`].
+#[must_use]
+pub fn child_environment(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    vars.into_iter()
+        .filter(|(name, _)| mayfly_adapter_tart::config::allowed(name))
+        .collect()
+}
+
+type Journal = SqliteJournal;
+type Store = AggregateStore<Journal, SystemClock, OsRng, Notifier>;
+type Ledger = SqliteLedger<AnchoredStoreClock>;
+type Worker = DeliveryWorker<Journal, Ledger, OsRng, SystemClock>;
+type Exec = Executor<
+    TartProvider,
+    TartImageStore<RegistryManifests>,
+    TartGuestTransport<SharedLaunches>,
+    OsProbe<ProviderOf>,
+    DataClock,
+    RandomObservationIds,
+>;
+
+/// The data plane's JIT store, shared between the guest transport and the link's data-plane
+/// end (ADR 0082), which fills it once the control plane mints configs (CP-05).
+#[derive(Debug, Clone, Default)]
+pub struct SharedLaunches(Arc<LaunchStore>);
+
+impl LaunchSecrets for SharedLaunches {
+    fn take(
+        &self,
+        handle: SecretHandle,
+        vm: &OwnedVmName,
+        instance_id: &ProviderInstanceId,
+    ) -> Option<Secret<String>> {
+        self.0.take(handle, vm, instance_id)
+    }
+
+    fn discard(&self, handle: SecretHandle) {
+        self.0.discard(handle);
+    }
+}
+
+/// What the host probe asks the provider (DP-06's `ProviderView`), over a Tart adapter of its
+/// own.
+#[derive(Debug)]
+pub struct ProviderOf(TartProvider);
+
+impl ProviderView for ProviderOf {
+    async fn inventory(&self) -> Inventory {
+        mayfly_data::VmProvider::inventory(&self.0).await
+    }
+
+    async fn version(&self) -> Result<String, ReadFailed> {
+        self.0.probe().await.map_err(|_| ReadFailed)
+    }
+}
+
+fn private_dir(path: &Path) -> Result<(), DaemonError> {
+    paths::prepare_private(path).map_err(DaemonError::Places)
+}
+
+fn derive(parts: &[&[u8]]) -> u128 {
+    let mut hasher = Sha256::new();
+    hasher.update(ID_DOMAIN);
+    for part in parts {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut head = [0_u8; 16];
+    head.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(head)
+}
+
+/// The data plane's sizing (ADR 0052: the operator's): disks from `[host]`, a base sized as its
+/// image, a VM's memory floor the smallest pool's.
+fn sizing(config: &Config, host: HostSizing) -> Sizing {
+    let image = host.image_disk_gib.saturating_mul(GIB);
+    Sizing {
+        image_disk_bytes: image,
+        base_disk_bytes: image,
+        clone_disk_bytes: host.clone_disk_gib.saturating_mul(GIB),
+        vm_memory_bytes: config
+            .pools
+            .iter()
+            .map(|p| p.memory_mib)
+            .min()
+            .unwrap_or(0)
+            .saturating_mul(MIB),
+    }
+}
+
+/// What of mayfly's this host holds while its epoch floor is missing, if anything: a recorded
+/// base, an `mf-*` or `mfb-*` VM, or a registry or listing that cannot be read (which cannot
+/// prove there is none). A missing floor is "no session yet" only on a host with none of it
+/// (ADR 0026). Pinned by
+/// `tests/daemon.rs::should_refuse_to_start_when_the_floor_is_missing_beside_our_vms`.
+async fn ours_without_floor(bases: &BaseRecords, provider: &TartProvider) -> Option<String> {
+    match bases.read() {
+        Err(_) => return Some("the base registry does not read".to_owned()),
+        Ok(record) if !record.bases.is_empty() => {
+            return Some(format!("{} recorded base(s)", record.bases.len()));
+        }
+        Ok(_) => {}
+    }
+    match mayfly_data::VmProvider::inventory(provider).await {
+        Inventory::Incomplete { .. } => Some("the VM listing is incomplete".to_owned()),
+        Inventory::Complete { vms } => {
+            let ours: Vec<&str> = vms
+                .iter()
+                .map(|vm| vm.name.as_str())
+                .filter(|name| name.starts_with("mf-") || name.starts_with("mfb-"))
+                .collect();
+            (!ours.is_empty()).then(|| format!("VM(s) {}", ours.join(", ")))
+        }
+    }
+}
+
+fn tart_config(places: &Places, options: &Options) -> TartConfig {
+    TartConfig {
+        tart: options.tart.clone(),
+        tart_home: places.tart_home.clone(),
+        shims: places.state_dir.join("shims"),
+        shim: ShimProgram {
+            program: options.shim_program.clone(),
+            args: vec!["vm-shim".into()],
+        },
+        environment: options.environment.clone(),
+        deadlines: Deadlines::host(),
+        output_limit: 1 << 20,
+        run_log_limit: 16 << 20,
+        poll: Duration::from_millis(200),
+        redact: Vec::new(),
+    }
+}
+
+/// The data plane, built from observation only.
+async fn data_plane(
+    loaded: &Loaded,
+    options: &Options,
+    host: &HostId,
+) -> Result<(Exec, FloorFile, String), DaemonError> {
+    let (config, images) = (&loaded.config, &loaded.images);
+    let state_dir = &loaded.places.state_dir;
+    let tart = tart_config(&loaded.places, options);
+    private_dir(&tart.tart_home)?;
+    private_dir(&tart.shims)?;
+    private_dir(&state_dir.join("diagnostics"))?;
+    let floor = FloorFile::in_home(&tart.tart_home);
+    let bases = Arc::new(BaseRecords::open(
+        state_dir.join("images").join("bases.json"),
+    ));
+    let view = ProviderOf(TartProvider::new(tart.clone(), Arc::clone(&bases)));
+    let floor_epoch = match floor.stored().map_err(DaemonError::Floor)? {
+        Some(epoch) => epoch,
+        None => {
+            if let Some(evidence) = ours_without_floor(&bases, &view.0).await {
+                return Err(DaemonError::FloorMissing {
+                    path: floor.path().to_path_buf(),
+                    evidence,
+                });
+            }
+            Epoch::new(0)
+        }
+    };
+    let manifests = RegistryManifests::with_realm_hosts(images.realm_hosts.clone())
+        .map_err(|_| DaemonError::Start("the registry client's TLS setup"))?;
+    let store = TartImageStore::new(
+        tart.clone(),
+        ImageConfig {
+            repository: images.repository.clone(),
+            runners: images.runners.clone(),
+            deployment_id: host.to_string(),
+            signature: SignaturePolicy::DigestOnly,
+            deadlines: ImageDeadlines {
+                pull: Duration::from_secs(3600),
+                install: Duration::from_secs(900),
+                halt: Duration::from_secs(120),
+            },
+        },
+        Arc::clone(&bases),
+        manifests,
+    )
+    .map_err(DaemonError::Images)?;
+    if store.recover().await.is_err() {
+        tracing::warn!("image_bases_not_recovered");
+    }
+    let probe = OsProbe::new(
+        ProbeConfig {
+            provider_home: tart.tart_home.clone(),
+            vm_slots: loaded.sizing.vm_slots,
+            macos_guests: loaded.sizing.macos_guests,
+            reserve: Capacity {
+                vm_slots: 0,
+                macos_guests: 0,
+                resources: config.host.reserve(),
+            },
+            disk_low_water_bytes: config.host.reserve().disk_bytes,
+            memory_low_water_bytes: config.host.reserve().memory_bytes,
+            wake_gap: Duration::from_secs(60),
+        },
+        view,
+    );
+    let boot_id = probe
+        .boot_id()
+        .map_err(|_| DaemonError::Start("the host's boot id"))?;
+    let guest = TartGuestTransport::new(
+        tart.clone(),
+        GuestConfig {
+            deadlines: GuestDeadlines {
+                verify: Duration::from_secs(60),
+                launch: Duration::from_secs(120),
+                status: Duration::from_secs(30),
+                diagnostics: Duration::from_secs(120),
+            },
+            claims_limit: 64 << 10,
+            diagnostics_limit: 8 << 20,
+            diagnostics_dir: state_dir.join("diagnostics"),
+        },
+        SharedLaunches::default(),
+    );
+    let ids = RandomObservationIds::seeded()
+        .map_err(|_| DaemonError::Start("the operating system's random generator"))?;
+    let exec = Executor::start(
+        DataConfig {
+            host_id: host.clone(),
+            sizing: sizing(config, loaded.sizing),
+            concurrency: 4,
+            observe_every: OBSERVE_EVERY,
+            listing_timeout: Millis::new(30_000),
+            boot_id: boot_id.clone(),
+            dp_version: options.version.clone(),
+        },
+        Ports {
+            provider: TartProvider::new(tart, bases),
+            images: store,
+            guest,
+            host: probe,
+            clock: DataClock::started(),
+            ids,
+        },
+        floor_epoch,
+    )
+    .await
+    .map_err(|_| DaemonError::Start("a probe of the host"))?;
+    Ok((exec, floor, boot_id))
+}
+
+/// The first wait after a failed start-up `catch_up`; it doubles up to [`CATCH_UP_BACKOFF_MAX`].
+const CATCH_UP_BACKOFF_FIRST: Duration = Duration::from_millis(500);
+
+/// The longest wait between two start-up `catch_up` attempts.
+const CATCH_UP_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Runs `catch_up` (every consumer's, `true` when all returned `Ok`) until it succeeds, waiting
+/// through `sleep` with a doubling backoff from [`CATCH_UP_BACKOFF_FIRST`] to
+/// [`CATCH_UP_BACKOFF_MAX`] between attempts; `false` when `cancel` ends it first. The ready line
+/// follows only a `true`, so it never claims consumers that have not caught up. Pinned by
+/// `tests::should_report_caught_up_only_after_a_failed_catch_up_succeeds_when_retried`.
+async fn until_caught_up<C, CF, S, SF>(
+    mut catch_up: C,
+    mut sleep: S,
+    cancel: &mut ShutdownSignal,
+) -> bool
+where
+    C: FnMut() -> CF,
+    CF: Future<Output = bool>,
+    S: FnMut(Duration) -> SF,
+    SF: Future<Output = ()>,
+{
+    let mut wait = CATCH_UP_BACKOFF_FIRST;
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        if catch_up().await {
+            return true;
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return false,
+            () = sleep(wait) => {}
+        }
+        wait = (wait * 2).min(CATCH_UP_BACKOFF_MAX);
+    }
+}
+
+/// Everything a run borrows.
+struct Daemon<'a> {
+    config: &'a Config,
+    sizing: HostSizing,
+    host: HostId,
+    boot_id: String,
+    version: String,
+    journal: Journal,
+    store: Store,
+    notifier: Notifier,
+    details: ConfigDetails,
+    build: BuildId,
+    delivery: DeliveryConfig,
+    store_clock: AnchoredStoreClock,
+}
+
+/// The opened session one run's control plane serves.
+struct Session<'r, 's, D, O> {
+    startup: &'r Startup<'s, Journal, SystemClock, OsRng, Notifier>,
+    sessions: &'r HostSessions,
+    epoch: Epoch,
+    mode: Mode,
+    directives: D,
+    observations: O,
+}
+
+/// How a run ended.
+enum RunEnd {
+    /// The root was cancelled: the daemon stops.
+    Shutdown,
+    /// The link ended after recovery completed: a new run follows.
+    SessionEnded,
+}
+
+/// Runs the daemon until `shutdown` is cancelled (by [`crate::supervise::on_signals`] in the
+/// binary), reporting each run's [`Ready`] to `ready`.
+///
+/// # Errors
+/// [`DaemonError`]; a cancelled run is `Ok`.
+pub async fn run(
+    options: Options,
+    shutdown: Shutdown,
+    ready: &(dyn Fn(&Ready) + Sync),
+) -> Result<(), DaemonError> {
+    run_with(options, shutdown, ready, &SessionCut::default()).await
+}
+
+/// [`run`], each data-plane session ended early by `cut` when a test asks (production never
+/// cuts).
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_with(
+    options: Options,
+    shutdown: Shutdown,
+    ready: &(dyn Fn(&Ready) + Sync),
+    cut: &SessionCut,
+) -> Result<(), DaemonError> {
+    let loaded = load(&options.config, &options.env).map_err(DaemonError::Config)?;
+    let config = &loaded.config;
+    let state_dir = &loaded.places.state_dir;
+    // Both places are checked, ancestors included, before anything is written in either.
+    mayfly_adapter_tart::verify::check_path(state_dir).map_err(DaemonError::Places)?;
+    mayfly_adapter_tart::verify::check_path(&loaded.places.tart_home)
+        .map_err(DaemonError::Places)?;
+    private_dir(state_dir)?;
+    private_dir(&loaded.places.tart_home)?;
+    let _owner = StateDirLock::acquire(state_dir).map_err(DaemonError::StateDir)?;
+    let journal_path = state_dir.join("journal.db");
+    let host = host_id(state_dir, &journal_path).map_err(DaemonError::Identity)?;
+    let _secrets = UriSecretProvider::from_process(
+        std::slice::from_ref(&config.github.private_key),
+        mayfly_adapter_secrets::DEFAULT_DEADLINE,
+    );
+    let journal = SqliteJournal::open(&journal_path, SqliteOptions::new(SystemClock.now()))
+        .map_err(DaemonError::Journal)?;
+    let (mut exec, floor, boot_id) = data_plane(&loaded, &options, &host).await?;
+    let notifier = Notifier::new();
+    let rng = OsRng::seeded().map_err(|_| DaemonError::Start("the random generator"))?;
+    let projections =
+        projection::control().map_err(|_| DaemonError::Start("the projection specs"))?;
+    let store = AggregateStore::new::<ControlAggregates>(
+        journal.clone(),
+        SystemClock,
+        rng,
+        notifier.clone(),
+    )
+    .map_err(|_| DaemonError::Start("the aggregate store"))?
+    .with_projections(projections);
+    let key: [u8; 32] = random_bytes().map_err(|_| DaemonError::Start("the random generator"))?;
+    let daemon = Daemon {
+        config,
+        sizing: loaded.sizing,
+        boot_id,
+        host,
+        version: options.version.clone(),
+        journal,
+        store,
+        notifier,
+        details: ConfigDetails::new(
+            config,
+            loaded.sizing.clone_disk_gib,
+            key,
+            Placements::default(),
+        ),
+        build: BuildId::new(&options.version).map_err(|_| DaemonError::Start("the build id"))?,
+        delivery: DeliveryConfig::default(),
+        store_clock: AnchoredStoreClock::now_anchored(),
+    };
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let mut root = shutdown.signal();
+        let bounded = async {
+            root.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_DEADLINE).await;
+        };
+        let ended = tokio::select! {
+            ended = daemon.run_once(&mut exec, &floor, &shutdown, ready, cut) => ended?,
+            () = bounded => {
+                tracing::error!("shutdown_deadline_passed");
+                RunEnd::Shutdown
+            }
+        };
+        match ended {
+            RunEnd::Shutdown => return Ok(()),
+            RunEnd::SessionEnded => {
+                tracing::warn!("data_plane_session_ended");
+            }
+        }
+    }
+}
+
+impl Daemon<'_> {
+    async fn run_once(
+        &self,
+        exec: &mut Exec,
+        floor: &FloorFile,
+        shutdown: &Shutdown,
+        ready: &(dyn Fn(&Ready) + Sync),
+        cut: &SessionCut,
+    ) -> Result<RunEnd, DaemonError> {
+        let sessions = HostSessions::new();
+        let startup = Startup::new(
+            &self.store,
+            sessions.clone(),
+            StartupConfig {
+                host: self.host.clone(),
+                boot_id: self.boot_id.clone(),
+                version: self.version.clone(),
+                reserves: self.config.host.reserve(),
+                crash_loop: false,
+            },
+        );
+        let (mut dp_link, cp_link) = inproc::link(
+            inproc::DEFAULT_CAPACITY,
+            SUPPORTED.to_vec(),
+            SUPPORTED.to_vec(),
+        );
+        let opening = async {
+            let mut cp_link = cp_link;
+            let opened = startup
+                .open(
+                    &mut cp_link,
+                    &self.journal,
+                    (&self.journal, self.store.projections(), &self.build),
+                )
+                .await;
+            opened.map(|opened| (opened, cp_link))
+        };
+        let (entered, opened) = tokio::join!(exec.enter(&mut dp_link, floor), opening);
+        let (opened, cp_link) = opened.map_err(DaemonError::Startup)?;
+        entered.map_err(|e| DaemonError::Session(format!("{e:?}")))?;
+        let (cp_directives, cp_observations) = cp_link
+            .split()
+            .map_err(|e| DaemonError::Session(e.to_string()))?;
+        let (dp_directives, dp_observations) = dp_link
+            .split()
+            .map_err(|e| DaemonError::Session(e.to_string()))?;
+        self.configure_pools(opened.epoch).await;
+        let inventory = Directive {
+            directive_id: DirectiveId::from_u128(derive(&[
+                b"report_inventory",
+                self.host.as_str().as_bytes(),
+                &opened.epoch.get().to_be_bytes(),
+            ])),
+            epoch: opened.epoch,
+            attempt: None,
+            deadline: Deadline::after(self.store.clock().now(), INVENTORY_DEADLINE),
+            kind: DirectiveKind::ReportInventory,
+        };
+        if cp_directives.send(inventory).await.is_err() {
+            tracing::warn!("inventory_request_not_sent");
+        }
+        let data = async move {
+            let (mut source, sink) = (Cuttable::new(dp_directives, cut.clone()), dp_observations);
+            exec.serve(&mut source, &sink).await
+        };
+        let control = self.control_plane(
+            Session {
+                startup: &startup,
+                sessions: &sessions,
+                epoch: opened.epoch,
+                mode: opened.mode,
+                directives: cp_directives,
+                observations: cp_observations,
+            },
+            shutdown,
+            ready,
+        );
+        let (served, ended) = tokio::join!(data, control);
+        session_ended(&sessions, &self.host);
+        if !matches!(ended, Ok(RunEnd::Shutdown)) {
+            tracing::warn!(end = ?served, "data_plane_serve_ended");
+        }
+        ended
+    }
+
+    /// Applies each configured pool to its `Pool` stream when it changed (`ConfigurePool` at
+    /// the next revision): the static demand the reconciler plans from. A pool the file no
+    /// longer names is left as it is (decommissioning is the operator's).
+    async fn configure_pools(&self, epoch: Epoch) {
+        for pool in &self.config.pools {
+            let Ok(state) = self.store.load::<Pool>(pool.name.as_str()).await else {
+                tracing::warn!(pool = pool.name.as_str(), "pool_not_configured");
+                continue;
+            };
+            let wanted = PoolConfig {
+                revision: state.config.map_or(1, |c| c.revision.saturating_add(1)),
+                tier: match pool.tier {
+                    Tier::Trusted => TrustTier::Trusted,
+                },
+                os: match pool.guest_os {
+                    GuestOs::Macos => DomainOs::Macos,
+                    GuestOs::Linux => DomainOs::Linux,
+                },
+                vm_resources: Resources::new(
+                    pool.memory_mib.saturating_mul(MIB),
+                    self.sizing.clone_disk_gib.saturating_mul(GIB),
+                ),
+                max_running: pool.max_running,
+                min_prepared: pool.min_prepared,
+                breaker_threshold: pool.breaker.failures,
+                breaker_window: Millis::new(
+                    u64::try_from(pool.breaker.window.as_millis()).unwrap_or(u64::MAX),
+                ),
+            };
+            if state.config.is_some_and(|c| {
+                PoolConfig {
+                    revision: wanted.revision,
+                    ..c
+                } == wanted
+            }) {
+                continue;
+            }
+            let id = CommandId::from_u128(derive(&[
+                b"configure_pool",
+                pool.name.as_str().as_bytes(),
+                format!("{wanted:?}").as_bytes(),
+            ]));
+            let command = Command::new(
+                id,
+                self.store.clock().now(),
+                epoch,
+                Actor::Startup,
+                PoolCommand::ConfigurePool(ConfigurePool {
+                    revision: wanted.revision,
+                    tier: wanted.tier,
+                    os: wanted.os,
+                    vm_resources: wanted.vm_resources,
+                    max_running: wanted.max_running,
+                    min_prepared: Some(wanted.min_prepared),
+                    breaker_threshold: wanted.breaker_threshold,
+                    breaker_window: wanted.breaker_window,
+                }),
+            );
+            match self
+                .store
+                .execute::<Pool>(SaveRequest::new(pool.name.as_str(), command))
+                .await
+            {
+                Ok(Outcome::Accepted { .. }) => {}
+                Ok(Outcome::Refused { rejection, .. }) => {
+                    tracing::warn!(
+                        pool = pool.name.as_str(),
+                        code = mayfly_control_domain::Rejection::code(&rejection),
+                        "pool_configuration_refused"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(pool = pool.name.as_str(), "pool_not_configured");
+                }
+            }
+        }
+    }
+
+    /// The control plane's side of one run: the supervised loops, then the clean end when the
+    /// root was cancelled. Owns the link's control-plane halves, so the data plane's serve ends
+    /// once this returns.
+    async fn control_plane<D, O>(
+        &self,
+        session: Session<'_, '_, D, O>,
+        shutdown: &Shutdown,
+        ready: &(dyn Fn(&Ready) + Sync),
+    ) -> Result<RunEnd, DaemonError>
+    where
+        D: mayfly_protocol::DirectiveSink + Clone + 'static,
+        O: mayfly_protocol::ObservationSource,
+    {
+        let Session {
+            startup,
+            sessions,
+            epoch,
+            mode,
+            directives,
+            mut observations,
+        } = session;
+        let workers = || -> Result<Worker, DaemonError> {
+            Ok(DeliveryWorker::new(
+                self.journal.clone(),
+                self.journal.ledger(self.store_clock),
+                OsRng::seeded().map_err(|_| DaemonError::Start("the random generator"))?,
+                SystemClock,
+                self.delivery,
+            ))
+        };
+        let (saga_worker, relay_worker) = (workers()?, workers()?);
+        let saga = AttemptSaga::new(&self.store, sessions.clone(), SagaConfig::default());
+        let relay = DirectiveRelay::new(LinkSink::new(
+            &self.store,
+            directives,
+            SystemClock,
+            self.details.clone(),
+            sessions.clone(),
+            SinkConfig::default(),
+            &self.delivery,
+        ));
+        let reconciler = Reconciler::new(
+            &self.store,
+            &self.journal,
+            ReconcilerConfig {
+                policies: crate::config::reconciler_policies(self.config),
+                ..ReconcilerConfig::new(epoch)
+            },
+            self.notifier.reconciler.clone(),
+        );
+        reconciler.set_safe_mode(mode == Mode::Safe);
+        let run = Shutdown::new();
+        let (recovered_tx, recovered) = watch::channel(None::<Mode>);
+        let inbox = Inbox::new(&self.store, self.host.clone(), epoch);
+        let empty = BTreeMap::new();
+
+        let forward = {
+            let mut root = shutdown.signal();
+            let mut ours = run.signal();
+            let run = run.clone();
+            async move {
+                tokio::select! {
+                    () = root.cancelled() => run.cancel(),
+                    () = ours.cancelled() => {}
+                }
+            }
+        };
+
+        let observe = {
+            let mut cancel = run.signal();
+            let run = run.clone();
+            let saga = &saga;
+            let inbox = &inbox;
+            let empty = &empty;
+            let reconciler = &reconciler;
+            async move {
+                let mut done = false;
+                let mut held = false;
+                loop {
+                    let observation = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Ok(RunEnd::Shutdown),
+                        received = observations.recv() => received,
+                    };
+                    let Ok(observation) = observation else {
+                        run.cancel();
+                        return if done {
+                            Ok(RunEnd::SessionEnded)
+                        } else {
+                            Err(DaemonError::SessionLost)
+                        };
+                    };
+                    let is_inventory = matches!(
+                        observation.kind,
+                        ObservationKind::Inventory { .. }
+                            | ObservationKind::InventoryIncomplete { .. }
+                    );
+                    if is_inventory && !done {
+                        match startup.recover(&observation, empty, saga).await {
+                            Ok(Recovery::Waiting { .. }) => {}
+                            Ok(Recovery::Completed(recovered)) => {
+                                done = true;
+                                held = !recovered.held.is_empty();
+                                for name in &recovered.reported {
+                                    tracing::warn!(vm = name.as_str(), "unrecorded_vm_reported");
+                                }
+                                let _ = recovered_tx.send(Some(Mode::Normal));
+                            }
+                            Ok(Recovery::SafeMode { .. }) => {
+                                done = true;
+                                reconciler.set_safe_mode(true);
+                                let _ = recovered_tx.send(Some(Mode::Safe));
+                            }
+                            Err(error) => {
+                                run.cancel();
+                                return Err(DaemonError::Startup(error));
+                            }
+                        }
+                        continue;
+                    }
+                    if inbox.record(&observation).await.is_err() {
+                        tracing::warn!("observation_not_recorded");
+                    }
+                    if is_inventory && held {
+                        match startup.resume_held(&observation, empty, saga).await {
+                            Ok(still) => held = !still.is_empty(),
+                            Err(_) => tracing::warn!("held_cleanup_not_reconsidered"),
+                        }
+                    }
+                }
+            }
+        };
+
+        let consume = {
+            let mut cancel = run.signal();
+            let mut recovered = recovered.clone();
+            let (saga, relay) = (&saga, &relay);
+            let (saga_worker, relay_worker) = (&saga_worker, &relay_worker);
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    // `Ok` only: a run whose recovery failed drops the sender, and an `Err` here must
+                    // not read as recovered (no ready, no consumer); the run's cancel ends this loop.
+                    Ok(_) = recovered.wait_for(Option::is_some) => {}
+                }
+                let catch_up = || async {
+                    let saga_ok = saga_worker.catch_up(saga).await.is_ok();
+                    if !saga_ok {
+                        tracing::warn!(consumer = "attempt_saga", "consumer_catch_up_failed");
+                    }
+                    let relay_ok = relay_worker.catch_up(relay).await.is_ok();
+                    if !relay_ok {
+                        tracing::warn!(consumer = "directive_relay", "consumer_catch_up_failed");
+                    }
+                    saga_ok && relay_ok
+                };
+                if !until_caught_up(catch_up, tokio::time::sleep, &mut cancel).await {
+                    return;
+                }
+                let mode = (*recovered.borrow()).unwrap_or(Mode::Safe);
+                ready(&Ready {
+                    host: self.host.clone(),
+                    epoch,
+                    mode,
+                });
+                let mut coarse = tokio::time::Instant::now() + COARSE;
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return,
+                        () = self.notifier.saga.wait() => {
+                            if saga_worker.drain_kicked(saga, &self.notifier.saga).await.is_err() {
+                                tracing::warn!(consumer = "attempt_saga", "consumer_drain_failed");
+                            }
+                        }
+                        () = self.notifier.relay.wait() => {
+                            if relay_worker.drain_kicked(relay, &self.notifier.relay).await.is_err() {
+                                tracing::warn!(consumer = "directive_relay", "consumer_drain_failed");
+                            }
+                        }
+                        () = tokio::time::sleep_until(coarse) => {
+                            catch_up().await;
+                            coarse = tokio::time::Instant::now() + COARSE;
+                        }
+                    }
+                }
+            }
+        };
+
+        let timeouts = {
+            let mut cancel = run.signal();
+            let mut recovered = recovered.clone();
+            let saga = &saga;
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = recovered.wait_for(Option::is_some) => {}
+                }
+                loop {
+                    let wait = saga.next_due().map_or(COARSE, |due| {
+                        Duration::from_millis(
+                            due.get().saturating_sub(self.store.clock().now().get()),
+                        )
+                        .clamp(TIMER_FLOOR, COARSE)
+                    });
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = tokio::time::sleep(wait) => {}
+                    }
+                    let _report = saga.expire_due().await;
+                }
+            }
+        };
+
+        let reconcile = {
+            let mut cancel = run.signal();
+            let mut recovered = recovered.clone();
+            let reconciler = &reconciler;
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = recovered.wait_for(Option::is_some) => {}
+                }
+                loop {
+                    if reconciler.tick().await.is_err() {
+                        tracing::warn!("reconciler_pass_failed");
+                    }
+                    let wait = Duration::from_millis(
+                        reconciler
+                            .next_due()
+                            .get()
+                            .saturating_sub(self.store.clock().now().get()),
+                    )
+                    .clamp(Duration::from_secs(1), COARSE);
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = self.notifier.reconciler.wait() => {}
+                        () = tokio::time::sleep(wait) => {}
+                    }
+                }
+            }
+        };
+
+        let unknown = {
+            let mut cancel = run.signal();
+            let reconciler = &reconciler;
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => {}
+                    () = self.notifier.unknown_kind() => {
+                        reconciler.set_safe_mode(true);
+                        if enter_safe_mode(
+                            &self.store,
+                            sessions,
+                            &self.host,
+                            epoch,
+                            SafeModeReason::UnknownEventKind,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::error!("safe_mode_not_recorded");
+                        }
+                    }
+                }
+            }
+        };
+
+        let ((), ended, (), (), (), ()) =
+            tokio::join!(forward, observe, consume, timeouts, reconcile, unknown);
+        if matches!(ended, Ok(RunEnd::Shutdown)) {
+            self.end_run(epoch).await;
+        }
+        ended
+    }
+
+    /// P24's record: `BeginShutdown` then `EndRun`, under the run's epoch.
+    async fn end_run(&self, epoch: Epoch) {
+        let Ok(state) = self.store.load::<HostRun>(self.host.as_str()).await else {
+            tracing::error!("run_end_not_recorded");
+            return;
+        };
+        for (step, body) in [
+            (&b"begin_shutdown"[..], HostRunCommand::BeginShutdown),
+            (&b"end_run"[..], HostRunCommand::EndRun),
+        ] {
+            let id = CommandId::from_u128(derive(&[
+                step,
+                self.host.as_str().as_bytes(),
+                &state.run_no.to_be_bytes(),
+            ]));
+            let command = Command::new(
+                id,
+                self.store.clock().now(),
+                epoch,
+                Actor::Automation { policy: SHUTDOWN },
+                body,
+            );
+            let saved: Result<Outcome<_>, SaveError> = self
+                .store
+                .execute::<HostRun>(SaveRequest::new(self.host.as_str(), command))
+                .await;
+            if !matches!(saved, Ok(Outcome::Accepted { .. })) {
+                tracing::error!("run_end_not_recorded");
+                return;
+            }
+        }
+    }
+}
+
+/// Runs `mayflyd --role all` on its own runtime until SIGTERM or SIGINT: the binary's whole
+/// body, under umask `077`. Each run's ready line goes to stdout ([`Ready`]'s `Display`), flushed.
+///
+/// # Errors
+/// [`DaemonError`]; its [`DaemonError::exit_code`] is the process's.
+pub fn serve(options: Options) -> Result<(), DaemonError> {
+    // Everything the daemon creates (journal, floor, records, logs) is its user's alone (plan
+    // §13), whatever umask it was started with; children inherit it.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| DaemonError::Start("the async runtime"))?;
+    let ended = runtime.block_on(async {
+        let shutdown = Shutdown::new();
+        let print = |ready: &Ready| {
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{ready}");
+            let _ = out.flush();
+        };
+        let daemon = run(options, shutdown.clone(), &print);
+        tokio::pin!(daemon);
+        tokio::select! {
+            ended = &mut daemon => ended,
+            installed = crate::supervise::on_signals(shutdown) => {
+                if installed.is_err() {
+                    return Err(DaemonError::Start("the signal handlers"));
+                }
+                daemon.await
+            }
+        }
+    });
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    ended
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn should_report_caught_up_only_after_a_failed_catch_up_succeeds_when_retried() {
+        // given
+        let attempts = Cell::new(0);
+        let waits = RefCell::new(Vec::new());
+        let shutdown = Shutdown::new();
+        let mut cancel = shutdown.signal();
+
+        // when
+        let caught_up = runtime().block_on(until_caught_up(
+            || {
+                attempts.set(attempts.get() + 1);
+                let ok = attempts.get() > 2;
+                async move { ok }
+            },
+            |wait| {
+                waits.borrow_mut().push(wait);
+                async {}
+            },
+            &mut cancel,
+        ));
+
+        // then
+        assert!(caught_up);
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            waits.into_inner(),
+            [CATCH_UP_BACKOFF_FIRST, CATCH_UP_BACKOFF_FIRST * 2]
+        );
+    }
+
+    #[test]
+    fn should_not_report_caught_up_when_cancelled_while_catch_up_fails() {
+        // given
+        let shutdown = Shutdown::new();
+        let mut cancel = shutdown.signal();
+        let attempts = Cell::new(0);
+
+        // when
+        let caught_up = runtime().block_on(until_caught_up(
+            || {
+                attempts.set(attempts.get() + 1);
+                shutdown.cancel();
+                async { false }
+            },
+            |_| std::future::pending::<()>(),
+            &mut cancel,
+        ));
+
+        // then
+        assert!(!caught_up);
+        assert_eq!(attempts.get(), 1);
+    }
+}

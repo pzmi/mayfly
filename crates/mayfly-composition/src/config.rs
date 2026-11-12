@@ -44,16 +44,36 @@ const GIB: u64 = 1024 * MIB;
 /// The whole configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// The state directory: journal, socket and lock live under it (plan §13).
-    pub state_dir: PathBuf,
+    /// The state directory: journal, host id, base registry, shims (plan §13). `None` when the
+    /// file names none: `mayflyd` takes the platform's standard place (`crate::paths`, ADR 0091
+    /// decision 5).
+    pub state_dir: Option<PathBuf>,
     /// The GitHub side.
     pub github: GithubConfig,
     /// The host's operator reserves.
     pub host: HostConfig,
     /// The VM provider.
     pub provider: ProviderConfig,
+    /// Where images come from (`[images]`, ADR 0091): optional in the schema, so a file without
+    /// it still validates, and required by `mayflyd`, which cannot build its image store
+    /// without a repository.
+    pub images: Option<ImagesConfig>,
     /// The pools, in file order; one pool is one scale set (ADR 0040). Never empty.
     pub pools: Vec<PoolConfig>,
+}
+
+/// `[images]`: the OCI repository the data plane pulls images from by digest (ADR 0039,
+/// ADR 0087) and the runner packages it may install (ADR 0030). One repository per deployment,
+/// as the image store is built (`mayfly_adapter_tart::ImageConfig`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImagesConfig {
+    /// `host/path`, no scheme, tag or digest (`ghcr.io/acme/runner-macos`).
+    pub repository: String,
+    /// Pinned runner packages: version `X.Y.Z` to the SHA-256 of its package, 64 lowercase hex
+    /// digits; a version not listed is never installed.
+    pub runners: BTreeMap<String, String>,
+    /// Hosts besides the registry's own a token realm may be on (lowercase host names).
+    pub realm_hosts: Vec<String>,
 }
 
 /// `[github]`.
@@ -86,13 +106,25 @@ pub enum GithubScope {
     },
 }
 
-/// `[host]`: what the operator keeps for the host itself (ADR 0024).
+/// `[host]`: what the operator keeps for the host itself (ADR 0024), and what the host offers
+/// and its VMs take on disk. The sizing keys have no default (ADR 0052: the data plane's ledger
+/// is sized by the operator, never by a guess): optional in the schema, so a file without them
+/// still validates, and required by `mayflyd` (`crate::daemon::load`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostConfig {
     /// Memory left unallocated to VMs, in MiB.
     pub reserve_memory_mib: u64,
     /// Disk left unallocated to VMs, in GiB.
     pub reserve_disk_gib: u64,
+    /// The VMs this host runs at once, of any guest OS.
+    pub vm_slots: Option<u32>,
+    /// The macOS guests the hypervisor runs at once, foreign ones included: at most 2, Apple's
+    /// limit.
+    pub macos_guests: Option<u32>,
+    /// The disk ceiling of one pulled image, and of one base made from it, in GiB.
+    pub image_disk_gib: Option<u64>,
+    /// The disk ceiling of one clone, in GiB.
+    pub clone_disk_gib: Option<u64>,
 }
 
 impl HostConfig {
@@ -108,6 +140,10 @@ impl Default for HostConfig {
         Self {
             reserve_memory_mib: 4096,
             reserve_disk_gib: 50,
+            vm_slots: None,
+            macos_guests: None,
+            image_disk_gib: None,
+            clone_disk_gib: None,
         }
     }
 }
@@ -117,8 +153,19 @@ impl Default for HostConfig {
 pub struct ProviderConfig {
     /// The provider kind; `tart` is the only one.
     pub kind: ProviderKind,
-    /// The Tart home directory (`TART_HOME`), dedicated to mayfly (plan §13).
-    pub tart_home: PathBuf,
+    /// The Tart home directory (`TART_HOME`), dedicated to mayfly (plan §13, ADR 0087). `None`
+    /// when the file names none: `mayflyd` takes the platform's standard place (`crate::paths`).
+    pub tart_home: Option<PathBuf>,
+}
+
+impl Default for ProviderConfig {
+    /// Tart, in the platform's standard home.
+    fn default() -> Self {
+        Self {
+            kind: ProviderKind::Tart,
+            tart_home: None,
+        }
+    }
 }
 
 /// The VM providers.
@@ -393,26 +440,27 @@ impl Config {
                 "github",
                 "host",
                 "provider",
+                "images",
                 "pools",
             ],
         );
         root.table.remove("schema_version");
-        let state_dir = root.path("state_dir", "state_dir = \"/var/lib/mayfly\"", true);
+        let state_dir = root.path("state_dir", "state_dir = \"/var/lib/mayfly\"", false);
         let github = root.read_section("github", true, read_github);
         let host = root.read_section("host", false, |reader| Some(read_host(reader)));
-        let provider = root.read_section("provider", true, read_provider);
+        let provider = root.read_section("provider", false, read_provider);
+        let images = root.read_section("images", false, read_images);
         let pools = read_pools(&mut root);
         let errors = root.finish();
-        match (state_dir, github, provider, pools) {
-            (Some(state_dir), Some(github), Some(provider), Some(pools)) if errors.is_empty() => {
-                Ok(Self {
-                    state_dir,
-                    github,
-                    host: host.unwrap_or_default(),
-                    provider,
-                    pools,
-                })
-            }
+        match (github, pools) {
+            (Some(github), Some(pools)) if errors.is_empty() => Ok(Self {
+                state_dir,
+                github,
+                host: host.unwrap_or_default(),
+                provider: provider.unwrap_or_default(),
+                images,
+                pools,
+            }),
             _ => Err(ConfigErrors(errors)),
         }
     }
@@ -713,7 +761,15 @@ fn section_keys(key: &str) -> &'static [&'static str] {
             "installation_id",
             "private_key",
         ],
-        "host" => &["reserve_memory_mib", "reserve_disk_gib"],
+        "host" => &[
+            "reserve_memory_mib",
+            "reserve_disk_gib",
+            "vm_slots",
+            "macos_guests",
+            "image_disk_gib",
+            "clone_disk_gib",
+        ],
+        "images" => &["repository", "runners", "realm_hosts"],
         _ => &["kind", "tart_home"],
     }
 }
@@ -885,7 +941,150 @@ fn read_host(reader: &mut Reader) -> HostConfig {
                 false,
             )
             .unwrap_or(default.reserve_disk_gib),
+        vm_slots: reader.narrow("vm_slots", 1..=1024, "vm_slots = 2"),
+        macos_guests: reader.narrow("macos_guests", 0..=2, "macos_guests = 2"),
+        image_disk_gib: reader.uint(
+            "image_disk_gib",
+            &(1..=1_048_576),
+            "image_disk_gib = 100",
+            false,
+        ),
+        clone_disk_gib: reader.uint(
+            "clone_disk_gib",
+            &(1..=1_048_576),
+            "clone_disk_gib = 100",
+            false,
+        ),
     }
+}
+
+fn image_repository_ok(text: &str) -> bool {
+    let mut parts = text.split('/');
+    let host = parts.next().unwrap_or("");
+    let host_ok = !host.is_empty()
+        && !host.starts_with(['.', ':'])
+        && !host.contains("..")
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-:".contains(&b));
+    let path: Vec<&str> = parts.collect();
+    host_ok
+        && !path.is_empty()
+        && path.iter().all(|p| {
+            !p.is_empty()
+                && *p != "."
+                && *p != ".."
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+        })
+}
+
+fn runner_version_ok(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
+        })
+}
+
+fn sha256_ok(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn realm_host_ok(text: &str) -> bool {
+    (1..=253).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
+        && !text.starts_with(['.', '-'])
+        && !text.contains("..")
+}
+
+fn read_images(reader: &mut Reader) -> Option<ImagesConfig> {
+    let repository = reader
+        .string(
+            "repository",
+            "repository = \"ghcr.io/acme/runner-macos\"",
+            true,
+        )
+        .filter(|text| {
+            let ok = image_repository_ok(text);
+            if !ok {
+                reader.invalid(
+                    "repository",
+                    "is not a bare OCI repository",
+                    "write `host/path` in lowercase, with no scheme, tag or digest, like `ghcr.io/acme/runner-macos`",
+                );
+            }
+            ok
+        });
+    let runners = match reader.value("runners", "[images.runners]", false) {
+        None => Some(BTreeMap::new()),
+        Some(Value::Table(table)) => {
+            let mut runners = BTreeMap::new();
+            let mut ok = true;
+            for (version, sha) in table {
+                match sha {
+                    Value::String(sha) if runner_version_ok(&version) && sha256_ok(&sha) => {
+                        runners.insert(version, sha);
+                    }
+                    _ => {
+                        ok = false;
+                        reader.invalid(
+                            "runners",
+                            "holds an entry that is not a runner version and its checksum",
+                            "write `\"X.Y.Z\" = \"<64 lowercase hex digits>\"`, the SHA-256 of that runner package",
+                        );
+                    }
+                }
+            }
+            ok.then_some(runners)
+        }
+        Some(other) => {
+            reader.wrong_type("runners", "a table", &other, "[images.runners]");
+            None
+        }
+    };
+    let realm_hosts =
+        match reader.value("realm_hosts", "realm_hosts = [\"auth.example.com\"]", false) {
+            None => Some(Vec::new()),
+            Some(Value::Array(items)) => {
+                let count = items.len();
+                let hosts: Vec<String> = items
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        Value::String(host) if realm_host_ok(&host) => Some(host),
+                        _ => None,
+                    })
+                    .collect();
+                if hosts.len() == count {
+                    Some(hosts)
+                } else {
+                    reader.invalid(
+                        "realm_hosts",
+                        "holds an entry that is not a lowercase host name",
+                        "list host names only, like `realm_hosts = [\"auth.example.com\"]`",
+                    );
+                    None
+                }
+            }
+            Some(other) => {
+                reader.wrong_type(
+                    "realm_hosts",
+                    "an array of host names",
+                    &other,
+                    "realm_hosts = [\"auth.example.com\"]",
+                );
+                None
+            }
+        };
+    Some(ImagesConfig {
+        repository: repository?,
+        runners: runners?,
+        realm_hosts: realm_hosts?,
+    })
 }
 
 fn read_provider(reader: &mut Reader) -> Option<ProviderConfig> {
@@ -902,9 +1101,8 @@ fn read_provider(reader: &mut Reader) -> Option<ProviderConfig> {
             None
         }
     };
-    let tart_home = reader.path("tart_home", "tart_home = \"/var/lib/mayfly/tart\"", true);
-    kind.zip(tart_home)
-        .map(|(kind, tart_home)| ProviderConfig { kind, tart_home })
+    let tart_home = reader.path("tart_home", "tart_home = \"/var/lib/mayfly/tart\"", false);
+    kind.map(|kind| ProviderConfig { kind, tart_home })
 }
 
 fn read_pools(root: &mut Reader) -> Option<Vec<PoolConfig>> {

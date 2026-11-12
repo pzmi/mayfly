@@ -1,0 +1,18 @@
+# A quick start: no state_dir and no [provider], so mayflyd takes the platform's standard
+# places (ADR 0091 decision 5).
+schema_version = 1
+
+[github]
+organisation = "example-org"
+app_client_id = "Iv1.0123456789abcdef"
+installation_id = 12345678
+private_key = "env:MAYFLY_APP_KEY"
+
+[[pools]]
+name = "lin"
+tier = "trusted"
+image_manifest = "/etc/mayfly/images/lin.toml"
+guest_os = "linux"
+cpu = 2
+memory_mib = 4096
+max_running = 2
