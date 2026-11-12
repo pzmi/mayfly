@@ -713,13 +713,30 @@ where
             digest,
             base_name,
             runner_version,
-        } => outcome(
-            ports
+        } => {
+            let made = ports
                 .images
                 .materialise(&digest, &base_name, &runner_version)
-                .await,
-            |()| ObservationKind::ImageMaterialised { digest, base_name },
-        ),
+                .await;
+            // the base's measured disk, as the store lists it (ADR 0052's amendment): the
+            // control plane plans its clones at it (CP-07); a listing that fails or a base
+            // that did not measure answers none, never a default
+            let disk_bytes = if made.is_ok() {
+                ports
+                    .images
+                    .list()
+                    .await
+                    .ok()
+                    .and_then(|listing| listing.disks.bases.get(&base_name).copied())
+            } else {
+                None
+            };
+            outcome(made, |()| ObservationKind::ImageMaterialised {
+                digest,
+                base_name,
+                disk_bytes,
+            })
+        }
         DirectiveKind::EvictImage { base_name } => {
             outcome(ports.images.evict(&base_name).await, |()| {
                 ObservationKind::ImageEvicted { base_name }

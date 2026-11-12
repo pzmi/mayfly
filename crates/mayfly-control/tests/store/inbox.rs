@@ -621,6 +621,7 @@ fn should_ack_without_recording_when_the_kind_is_not_an_attempts() {
             ObservationKind::ImageMaterialised {
                 digest: mayfly_domain::ImageDigest::sample(),
                 base_name: base.clone(),
+                disk_bytes: None,
             },
         ),
         plain(0x35, ObservationKind::ImageEvicted { base_name: base }),

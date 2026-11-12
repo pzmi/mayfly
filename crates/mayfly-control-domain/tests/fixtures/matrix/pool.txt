@@ -8,6 +8,7 @@ unconfigured x resume -> refused not_configured
 unconfigured x start_drain -> refused not_configured
 unconfigured x complete_drain -> refused not_configured
 unconfigured x count_failure -> refused not_configured
+unconfigured x trip_runner_version -> refused not_configured
 unconfigured x reset_by_operator -> refused not_configured
 unconfigured x reset_by_automation -> refused not_configured
 unconfigured x decommission -> refused not_configured
@@ -21,6 +22,7 @@ active x resume -> refused not_paused
 active x start_drain -> accepted pool_drain_started/v1
 active x complete_drain -> refused not_draining
 active x count_failure -> accepted attempt_failure_counted/v1
+active x trip_runner_version -> accepted pool_breaker_tripped/v2
 active x reset_by_operator -> refused not_tripped
 active x reset_by_automation -> refused operator_only
 active x decommission -> refused not_drained
@@ -34,6 +36,7 @@ paused x resume -> accepted pool_resumed/v1
 paused x start_drain -> accepted pool_drain_started/v1
 paused x complete_drain -> refused not_draining
 paused x count_failure -> accepted attempt_failure_counted/v1
+paused x trip_runner_version -> accepted pool_breaker_tripped/v2
 paused x reset_by_operator -> refused not_tripped
 paused x reset_by_automation -> refused operator_only
 paused x decommission -> refused not_drained
@@ -47,6 +50,7 @@ draining x resume -> accepted pool_resumed/v1
 draining x start_drain -> refused already_draining
 draining x complete_drain -> accepted pool_drain_completed/v1
 draining x count_failure -> accepted attempt_failure_counted/v1
+draining x trip_runner_version -> accepted pool_breaker_tripped/v2
 draining x reset_by_operator -> refused not_tripped
 draining x reset_by_automation -> refused operator_only
 draining x decommission -> refused not_drained
@@ -60,6 +64,7 @@ drained x resume -> accepted pool_resumed/v1
 drained x start_drain -> refused already_draining
 drained x complete_drain -> refused not_draining
 drained x count_failure -> accepted attempt_failure_counted/v1
+drained x trip_runner_version -> accepted pool_breaker_tripped/v2
 drained x reset_by_operator -> refused not_tripped
 drained x reset_by_automation -> refused operator_only
 drained x decommission -> accepted pool_decommissioned/v1
@@ -73,6 +78,7 @@ decommissioned x resume -> refused decommissioned
 decommissioned x start_drain -> refused decommissioned
 decommissioned x complete_drain -> refused decommissioned
 decommissioned x count_failure -> refused decommissioned
+decommissioned x trip_runner_version -> refused decommissioned
 decommissioned x reset_by_operator -> refused decommissioned
 decommissioned x reset_by_automation -> refused decommissioned
 decommissioned x decommission -> refused decommissioned
@@ -86,6 +92,7 @@ tripped x resume -> refused not_paused
 tripped x start_drain -> accepted pool_drain_started/v1
 tripped x complete_drain -> refused not_draining
 tripped x count_failure -> accepted, no event
+tripped x trip_runner_version -> accepted, no event
 tripped x reset_by_operator -> accepted pool_breaker_reset/v1
 tripped x reset_by_automation -> refused operator_only
 tripped x decommission -> refused not_drained

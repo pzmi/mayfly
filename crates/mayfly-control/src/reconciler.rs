@@ -57,6 +57,9 @@ use crate::store::{
     AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier, stream_of,
 };
 
+/// The `placements` phase code of a placement clones may be made from.
+const MATERIALISED: &str = "materialised";
+
 /// The reconciler's name: the actor of its commands.
 pub const RECONCILER: &str = "reconciler";
 
@@ -187,7 +190,8 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
         })
     }
 
-    /// Runs a pass when one is due: a host, pool or scale-set stream was kicked since the last
+    /// Runs a pass when one is due: a host, pool, scale-set or placement stream (a base
+    /// materialised or evicted admits or closes a pool on its host, CP-07) was kicked since the last
     /// look, or the interval passed by the clock. `None` when nothing was due. Pinned by
     /// `tests/store/reconciler.rs::should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked`.
     ///
@@ -196,7 +200,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
     pub async fn tick(&self) -> Result<Option<PassReport>, ReconcileError> {
         let kicked = self.kicks.take().iter().any(|stream| {
             let s = stream.as_str();
-            s.starts_with("host-") || s.starts_with("pool-") || s.starts_with("scaleset-")
+            s.starts_with("host-")
+                || s.starts_with("pool-")
+                || s.starts_with("scaleset-")
+                || s.starts_with("placement-")
         });
         if !kicked && self.store.clock().now() < self.next_due() {
             return Ok(None);
@@ -477,6 +484,10 @@ fn versions_digest(view: &FleetView) -> [u8; 32] {
     for (id, row) in &view.attempts {
         put(b"a", &id.to_string(), row.revision);
     }
+    // a placement admits a pool on a host (CP-07): a pass it changed plans under new ids
+    for (key, row) in &view.placements {
+        put(b"m", key, row.revision);
+    }
     hasher.finalize().into()
 }
 
@@ -563,6 +574,12 @@ pub fn inputs_of(
                         .collect()
                 })
                 .unwrap_or_default();
+            let placed = view
+                .placements
+                .values()
+                .filter(|p| p.host_id == host_id && p.phase == MATERIALISED)
+                .map(|p| (p.digest.clone(), p.disk_bytes))
+                .collect();
             Some(HostView {
                 host_id,
                 report: row
@@ -589,6 +606,7 @@ pub fn inputs_of(
                         )
                     })
                     .collect(),
+                placed,
                 leases,
             })
         })

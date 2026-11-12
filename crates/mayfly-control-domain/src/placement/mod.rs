@@ -33,11 +33,15 @@
 //! The digest's own pin and the previous digest are the `Pool`'s (`ImagePinned{digest,
 //! previous}`); this stream keeps the base pointer within one digest. Not modelled in
 //! `formal/`: one stream whose effects are single-flight by construction; see
-//! `doc/formal-models.md`, "Not modelled".
+//! `doc/formal-models.md`, "Not modelled". The cross-stream rules (P17: a pool admissible on a
+//! host only once its pin is materialised there, a base evicted only once nothing references
+//! it) are `formal/scheduling.qnt`'s `placedOn` and `leasesKeepTheirBase` (CP-07); the
+//! placement manager's pure pass is [`policy::plan`].
 
 mod cases;
 mod decide;
 mod events;
+pub mod policy;
 mod state;
 
 pub use decide::{Decision, decide, evolve};

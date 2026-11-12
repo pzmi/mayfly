@@ -27,7 +27,7 @@ case failure_outside_window_does_not_trip accepted
   attempt_failure_counted/v1 {"attempt_id":"0000000000000000000000000000a002","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","stage":"boot","at":700000}
 case failure_trips_breaker accepted
   attempt_failure_counted/v1 {"attempt_id":"0000000000000000000000000000a002","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","stage":"boot","at":2000}
-  pool_breaker_tripped/v1 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","failures":2,"at":2000}
+  pool_breaker_tripped/v2 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","failures":2,"at":2000,"reason":"failures"}
 case image_not_verified refused image_not_verified
 case newer_epoch_is_recorded accepted
   pool_epoch_advanced/v1 {"epoch":2}
@@ -48,10 +48,14 @@ case reconfigure_pool accepted
   pool_configured/v1 {"revision":2,"tier":"trusted","os":"macos","vm_resources":{"memory_bytes":8589934592,"disk_bytes":64424509440},"max_running":2,"min_prepared":0,"breaker_threshold":2,"breaker_window":600000}
 case resume_pool accepted
   pool_resumed/v1 {}
+case runner_version_trips_breaker accepted
+  pool_breaker_tripped/v2 {"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","failures":1,"at":2500,"reason":"runner_version"}
 case same_attempt_counted_once accepted
 case same_pin_records_nothing accepted
 case stale_revision refused stale_revision
 case stale_run refused stale_run
 case start_pool_drain accepted
   pool_drain_started/v1 {}
+case trip_breaker_not_configured refused not_configured
 case tripped_counts_nothing accepted
+case tripped_trips_nothing_more accepted

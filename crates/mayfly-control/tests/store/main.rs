@@ -11,6 +11,7 @@ mod counter;
 mod delivery;
 mod inbox;
 mod link_sink;
+mod placement;
 mod projections;
 mod reconciler;
 mod recovery;

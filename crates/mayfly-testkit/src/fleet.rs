@@ -20,7 +20,10 @@
 //! ([`World::drift`], reported later or never), its `insufficient_resources` refusal of a clone
 //! that does not fit that capacity, `target_absent` answers that record a vanished VM (ADR
 //! 0066's replacement path), pool drains and resumes, image pin changes, host drains, the gate,
-//! the breaker and quarantines. [`SimOptions::lag`] makes the reconciler read the projections
+//! the breaker and quarantines. It also plays P17's placement of each pin on every host
+//! ([`World::place`]: the placement stream driven to `Materialised` as the placement manager and
+//! the data plane's answers would), so the reconciler's placement check admits the pool (CP-07);
+//! a pin change is placed at once. [`SimOptions::lag`] makes the reconciler read the projections
 //! as they were some steps before (a read model behind the journal), and [`SimOptions::plan`]
 //! swaps the pure pass for a variant: the negative control that proves the checks are not
 //! vacuous (`tests/store/reconciler.rs::should_find_violations_when_a_plan_ignores_admission`).
@@ -51,6 +54,10 @@ use mayfly_control_domain::demand::{EventName, Offer};
 use mayfly_control_domain::host::{
     AdmissionCause, ApplyPoolTerms, Drain, Holds, Host, HostCommand, HostState, LeasePhase,
     ReleaseEvidence,
+};
+use mayfly_control_domain::image::RunnerVersion;
+use mayfly_control_domain::placement::{
+    ImagePlacement, PlacementCommand, PlacementPhase, placement_instance,
 };
 use mayfly_control_domain::pool::{
     ConfigurePool, Pool, PoolCommand, PoolMode, PoolState, TrustTier, terms,
@@ -229,7 +236,65 @@ impl<'s> World<'s> {
         self.hosts.push(id.clone());
         self.report(&id, capacity);
         for pool in self.pools.clone() {
+            if let Some(pin) = self.pool(&pool.name).image_pin {
+                self.place(&pin);
+            }
             self.apply_terms(&pool.name);
+        }
+    }
+
+    /// P17, played: the placement of `digest` on every host driven to `Materialised` (request,
+    /// pull, materialisation, each directive sent and answered), as the placement manager, the
+    /// relay and the data plane's answers would. A placement already materialised records
+    /// nothing (each later step is refused by the aggregate, harmlessly).
+    pub fn place(&mut self, digest: &ImageDigest) {
+        let actor = Actor::Automation {
+            policy: "placement_manager",
+        };
+        for host in self.hosts.clone() {
+            let instance = placement_instance(&host, digest);
+            let _ = self.command::<ImagePlacement>(
+                &instance,
+                actor,
+                PlacementCommand::RequestPlacement {
+                    host_id: host.clone(),
+                    digest: digest.clone(),
+                    runner_version: RunnerVersion::new(2, 330, 0),
+                },
+            );
+            for answer in [PlacementAnswer::Pulled, PlacementAnswer::Materialised] {
+                let directive_id = DirectiveId::from_u128(self.mint().as_u128());
+                let deadline = Deadline::after(self.store.clock().now(), Millis::new(3_600_000));
+                if self
+                    .command::<ImagePlacement>(
+                        &instance,
+                        actor,
+                        PlacementCommand::IssueDirective {
+                            directive_id,
+                            deadline,
+                        },
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+                let _ = self.command::<ImagePlacement>(
+                    &instance,
+                    actor,
+                    PlacementCommand::RecordSent {
+                        directive_id,
+                        deadline,
+                    },
+                );
+                let body = match answer {
+                    PlacementAnswer::Pulled => PlacementCommand::RecordPulled { directive_id },
+                    PlacementAnswer::Materialised => PlacementCommand::RecordMaterialised {
+                        directive_id,
+                        disk_bytes: None,
+                    },
+                };
+                let _ = self.command::<ImagePlacement>(&instance, actor, body);
+            }
         }
     }
 
@@ -267,9 +332,17 @@ impl<'s> World<'s> {
         );
     }
 
-    /// Configures `spec`, pins the sample image, ensures its scale set and opens a session with
-    /// no job assigned, then applies its terms on every host (P4).
+    /// Configures `spec`, pins the sample image and places it on every host (P17,
+    /// [`World::place`]), ensures its scale set and opens a session with no job assigned, then
+    /// applies its terms on every host (P4).
     pub fn configure_pool(&mut self, spec: PoolSpec) {
+        self.configure_unplaced(spec);
+        self.place(&ImageDigest::sample());
+    }
+
+    /// [`World::configure_pool`] without the placement: the pin's base is on no host, so the
+    /// reconciler admits nothing for the pool until a placement of it is materialised (CP-07).
+    pub fn configure_unplaced(&mut self, spec: PoolSpec) {
         let pool = spec.name.clone();
         let _ = self.command::<Pool>(
             pool.as_str(),
@@ -459,6 +532,17 @@ impl<'s> World<'s> {
             .pool(&lease.pool)
             .image_pin
             .unwrap_or_else(ImageDigest::sample);
+        // P2 starts only on a pin materialised on the host, under a read of its placement
+        // (CP-07, `mayfly_control::start`)
+        let placement = placement_instance(host, &image_digest);
+        let placement_stream =
+            stream_of::<ImagePlacement>(&placement).unwrap_or_else(|e| panic!("{e}"));
+        let (placed, placed_head) =
+            block_on(self.store.load_with_head::<ImagePlacement>(&placement))
+                .unwrap_or_else(|e| panic!("{e}"));
+        if placed.phase != PlacementPhase::Materialised {
+            return false;
+        }
         let body = AttemptCommand::StartAttempt(StartAttempt {
             attempt_id: attempt,
             host_id: host.clone(),
@@ -476,7 +560,8 @@ impl<'s> World<'s> {
             body,
         );
         let request = SaveRequest::new(attempt.to_string(), command)
-            .with_read(stream, ExpectedRevision::of(head.map(|h| h.revision)));
+            .with_read(stream, ExpectedRevision::of(head.map(|h| h.revision)))
+            .with_read(placement_stream, ExpectedRevision::of(placed_head));
         match block_on(self.store.save::<Attempt>(request)) {
             Ok(Outcome::Accepted { .. }) => {
                 self.started.push(attempt);
@@ -742,6 +827,8 @@ impl LaggedReads {
             views::Attempts::NAME,
             views::Pools::NAME,
             views::ScaleSets::NAME,
+            views::Images::NAME,
+            views::Placements::NAME,
         ] {
             let spec = ProjectionName::new(name).unwrap_or_else(|e| panic!("{e}"));
             let mut rows = BTreeMap::new();
@@ -1195,6 +1282,13 @@ fn policies() -> BTreeMap<PoolName, PolicyOf> {
         .collect()
 }
 
+/// The answers [`World::place`] plays, in order.
+#[derive(Debug, Clone, Copy)]
+enum PlacementAnswer {
+    Pulled,
+    Materialised,
+}
+
 /// The image a pin change alternates with the sample one.
 fn other_image() -> ImageDigest {
     ImageDigest::new(&format!("sha256:{}", "b".repeat(64))).unwrap_or_else(|e| panic!("{e}"))
@@ -1389,10 +1483,11 @@ pub fn simulate_with(seed: u64, steps: usize, options: SimOptions) -> Simulation
                     pool.as_str(),
                     Actor::Automation { policy: "image" },
                     PoolCommand::PinImage {
-                        digest,
+                        digest: digest.clone(),
                         verified_ref: Some(EventId::from_u128(8)),
                     },
                 );
+                world.place(&digest);
                 world.apply_terms(&pool);
             }
             _ => {

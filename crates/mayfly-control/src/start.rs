@@ -11,7 +11,16 @@
 //!
 //! The pool's image is read without a condition: an attempt started on an image the pool
 //! replaced a moment later is retired by the reconciler (`ImageReplaced`), as every attempt of
-//! the old image is.
+//! the old image is. **The image's base must be materialised on the host** (P17, CP-07): the
+//! start reads the placement of the pinned image on the lease's host and is saved with a read
+//! of that placement stream at the revision showing it `Materialised`, so an eviction (or any
+//! write to the placement) between the read and the commit refuses the unit and the retry reads
+//! the pin and the placement again; a pin not materialised there starts nothing
+//! ([`Started::NotPlaced`]). Without it an attempt reserved under one pin and started after a
+//! repin would take the new, unplaced image while the old base, no longer referenced, could be
+//! evicted (`formal/scheduling.qnt`'s `startAttempt`, `startWithoutPlacementViolatesTest`;
+//! pinned by `tests/store/start.rs::should_start_nothing_when_the_pin_is_not_materialised_on_the_host`
+//! and `should_refuse_the_start_at_commit_when_the_placement_moves_after_the_read`).
 //!
 //! The command id is derived from the attempt and the host revision read, so a call repeated
 //! over the same host revision is answered by its receipt and starts nothing twice, and a retry
@@ -19,9 +28,10 @@
 
 use mayfly_control_domain::attempt::{Attempt, AttemptCommand, AttemptRejection, StartAttempt};
 use mayfly_control_domain::host::Host;
+use mayfly_control_domain::placement::{ImagePlacement, PlacementPhase, placement_instance};
 use mayfly_control_domain::pool::Pool;
 use mayfly_control_domain::{Actor, Command};
-use mayfly_domain::{AttemptId, CommandId, Epoch, HostId};
+use mayfly_domain::{AttemptId, CommandId, Epoch, HostId, ImageDigest};
 
 use crate::ids::derive;
 use crate::journal::{Appended, ExpectedRevision, Journal};
@@ -34,14 +44,23 @@ pub const START: &str = "attempt_start";
 
 const ID_DOMAIN: &[u8] = b"mayfly-attempt-start-v1\n";
 
-/// The id of the `StartAttempt` of `attempt` decided over host revision `host_revision` (`None`
-/// for a host stream with no event), derived from the attempt and the revision.
+/// The id of the `StartAttempt` of `attempt` on `image` decided over host revision
+/// `host_revision` (`None` for a host stream with no event), derived from the three: a start
+/// decided again after a repin is a new command, never `command_id_reused`.
 #[must_use]
-pub fn start_command_id(attempt: AttemptId, host_revision: Option<u64>) -> CommandId {
+pub fn start_command_id(
+    attempt: AttemptId,
+    host_revision: Option<u64>,
+    image: &ImageDigest,
+) -> CommandId {
     let revision = host_revision.map_or_else(Vec::new, |r| r.to_be_bytes().to_vec());
     CommandId::from_u128(derive(
         ID_DOMAIN,
-        &[&attempt.as_u128().to_be_bytes(), &revision],
+        &[
+            &attempt.as_u128().to_be_bytes(),
+            &revision,
+            image.as_str().as_bytes(),
+        ],
     ))
 }
 
@@ -72,6 +91,10 @@ pub enum Started {
     NoLease,
     /// The lease's pool has no pinned image: nothing to start from.
     NoImage,
+    /// The pinned image's base is not materialised on the host (P17): nothing to clone from.
+    /// The caller waits for a placement kick (the placement stream moving) and starts again
+    /// then; it neither releases the lease nor retries at once.
+    NotPlaced,
     /// The attempt refused (`already_started`, `stale_run`).
     Refused(AttemptRejection),
 }
@@ -99,6 +122,17 @@ pub async fn start_attempt<J: Journal, C: Clock, R: Rng, N: StoreNotifier>(
             let Some(image_digest) = pool.image_pin else {
                 return Ok(Started::NoImage);
             };
+            let placement = placement_instance(&request.host, &image_digest);
+            let placement_stream =
+                stream_of::<ImagePlacement>(&placement).map_err(SaveError::InvalidName)?;
+            let (placed, placed_head) = store.load_with_head::<ImagePlacement>(&placement).await?;
+            if placed.phase != PlacementPhase::Materialised
+                || placed.digest.as_ref() != Some(&image_digest)
+            {
+                return Ok(Started::NotPlaced);
+            }
+            let command_id =
+                start_command_id(request.attempt, head.map(|r| r.get()), &image_digest);
             let body = AttemptCommand::StartAttempt(StartAttempt {
                 attempt_id: request.attempt,
                 host_id: request.host.clone(),
@@ -109,14 +143,15 @@ pub async fn start_attempt<J: Journal, C: Clock, R: Rng, N: StoreNotifier>(
                 retry_budget: request.retry_budget,
             });
             let command = Command::new(
-                start_command_id(request.attempt, head.map(|r| r.get())),
+                command_id,
                 store.clock().now(),
                 request.run_epoch,
                 Actor::Automation { policy: START },
                 body,
             );
             let save = SaveRequest::new(request.attempt, command)
-                .with_read(host_stream, ExpectedRevision::of(head));
+                .with_read(host_stream, ExpectedRevision::of(head))
+                .with_read(placement_stream, ExpectedRevision::of(placed_head));
             Ok(match store.save::<Attempt>(save).await? {
                 Outcome::Accepted { appended, replayed } => Started::Started { appended, replayed },
                 Outcome::Refused { rejection, .. } => Started::Refused(rejection),

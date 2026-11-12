@@ -16,8 +16,8 @@
 //!   build differs, or with a stream behind its head (ES-I11; ES-12 makes it online with dual
 //!   writes and a cutover fence). The cutover is refused while a stream moved since it was
 //!   folded, and a generation belongs to the rebuild that claimed it.
-//! - [`views`]: `attempts`, `pending_effects`, `slots`, `pools`, `recent_failures`, `hosts` and
-//!   `scale_sets`.
+//! - [`views`]: `attempts`, `pending_effects`, `slots`, `pools`, `recent_failures`, `hosts`,
+//!   `scale_sets`, `images` and `placements`.
 //!
 //! **Locality (ES-I10).** A spec sees one stream and returns suffixes; the fold keys them under
 //! that stream; the journal refuses a write for a stream the unit does not append to, or a key
@@ -41,8 +41,8 @@ pub use rebuild::{
 pub use spec::{EventMeta, ProjectionSpec, RowChange, Rows, SpecEvent, SpecState, sync_rows};
 
 /// The control plane's projections: [`views::Attempts`], [`views::PendingEffects`],
-/// [`views::Slots`], [`views::Pools`], [`views::RecentFailures`], [`views::Hosts`] and
-/// [`views::ScaleSets`].
+/// [`views::Slots`], [`views::Pools`], [`views::RecentFailures`], [`views::Hosts`],
+/// [`views::ScaleSets`], [`views::Images`] and [`views::Placements`].
 ///
 /// # Errors
 /// [`ProjectionError::InvalidSpec`] if a spec's name is not a journal name (a build-time
@@ -56,6 +56,8 @@ pub fn control() -> Result<Projections, ProjectionError> {
         Projection::of::<views::RecentFailures>()?,
         Projection::of::<views::Hosts>()?,
         Projection::of::<views::ScaleSets>()?,
+        Projection::of::<views::Images>()?,
+        Projection::of::<views::Placements>()?,
     ])
 }
 
@@ -74,6 +76,8 @@ mod tests {
             "recent_failures",
             "hosts",
             "scale_sets",
+            "images",
+            "placements",
         ];
 
         // when

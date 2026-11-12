@@ -15,7 +15,8 @@ use mayfly_domain::AttemptId;
 
 use crate::journal::{MAX_PAGE, ProjectionName, StorageError};
 use crate::projection::views::{
-    AttemptRow, FailureRow, HostRow, PendingEffectRow, PoolRow, ScaleSetRow, SlotRow,
+    AttemptRow, FailureRow, HostRow, ImageRow, PendingEffectRow, PlacementRow, PoolRow,
+    ScaleSetRow, SlotRow,
 };
 use crate::projection::{ProjectionSpec, ProjectionStore, views};
 
@@ -142,7 +143,8 @@ pub async fn pending_effects<P: ProjectionStore>(
 }
 
 /// What the reconciler reads (CP-03): every host, its live leases, every attempt, every pool
-/// and every scale set, each by its stream (attempts by id). Rows of different projections are
+/// and every scale set, each by its stream (attempts by id); and, for the reconciler's placement
+/// check and the placement manager (CP-07), every image and every placement by its stream. Rows of different projections are
 /// read page by page, not as one snapshot ([`all_rows`]); the reconciler is level-triggered and
 /// its commands are checked again by the aggregates that decide them, so a pass over rows a
 /// unit moved meanwhile plans at worst what the next pass corrects (P5).
@@ -158,6 +160,10 @@ pub struct FleetView {
     pub pools: BTreeMap<String, PoolRow>,
     /// Every scale set, by scale-set stream.
     pub scale_sets: BTreeMap<String, ScaleSetRow>,
+    /// Every image, by image stream.
+    pub images: BTreeMap<String, ImageRow>,
+    /// Every placement of an image on a host, by placement stream.
+    pub placements: BTreeMap<String, PlacementRow>,
 }
 
 /// The reconciler's [`FleetView`]. Pinned by
@@ -182,6 +188,14 @@ pub async fn fleet<P: ProjectionStore>(store: &P) -> Result<FleetView, QueryErro
             .into_iter()
             .collect(),
         scale_sets: all_rows::<views::ScaleSets, P>(store)
+            .await?
+            .into_iter()
+            .collect(),
+        images: all_rows::<views::Images, P>(store)
+            .await?
+            .into_iter()
+            .collect(),
+        placements: all_rows::<views::Placements, P>(store)
             .await?
             .into_iter()
             .collect(),

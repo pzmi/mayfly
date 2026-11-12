@@ -6,7 +6,7 @@
 use mayfly_domain::{AttemptId, CommandId, Epoch, EventId, ImageDigest, Millis, Resources, Sample};
 
 use super::events::PoolEvent;
-use super::state::{ConfigurePool, PoolCommand, PoolRejection, PoolState, TrustTier};
+use super::state::{ConfigurePool, PoolCommand, PoolRejection, PoolState, TripReason, TrustTier};
 use super::{Pool, decide, evolve};
 use crate::aggregate::{DeterminismCase, Expect};
 use crate::attempt::{GuestOs, Stage};
@@ -63,6 +63,14 @@ fn failure(n: u128, at_ms: u64) -> PoolCommand {
         digest: digest(),
         stage: Stage::Boot,
         at: Millis::new(at_ms),
+    }
+}
+
+fn runner_version_expired() -> PoolCommand {
+    PoolCommand::TripBreaker {
+        digest: digest(),
+        reason: TripReason::RunnerVersion,
+        at: Millis::new(2_500),
     }
 }
 
@@ -193,6 +201,16 @@ pub(super) fn cases() -> Vec<DeterminismCase<Pool>> {
             failure(1, 1_500),
         ),
         accepted("tripped_counts_nothing", tripped(), failure(3, 3_000)),
+        accepted(
+            "runner_version_trips_breaker",
+            one_failure(),
+            runner_version_expired(),
+        ),
+        accepted(
+            "tripped_trips_nothing_more",
+            tripped(),
+            runner_version_expired(),
+        ),
         case(
             "operator_resets_breaker",
             tripped(),
@@ -228,6 +246,11 @@ pub(super) fn cases() -> Vec<DeterminismCase<Pool>> {
             "operator_only",
             tripped(),
             PoolCommand::ResetBreaker { digest: digest() },
+        ),
+        refused(
+            "trip_breaker_not_configured",
+            Vec::new(),
+            runner_version_expired(),
         ),
         case(
             "not_tripped",

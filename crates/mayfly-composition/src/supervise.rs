@@ -104,6 +104,10 @@ pub struct Notifier {
     pub relay: Kicks,
     /// The reconciler.
     pub reconciler: Kicks,
+    /// The image placement manager (CP-07).
+    pub placement: Kicks,
+    /// The placement relay's worker (CP-07).
+    pub placement_relay: Kicks,
     unknown: Arc<(AtomicBool, Notify)>,
 }
 
@@ -125,6 +129,8 @@ impl Notifier {
             saga: Kicks::new(KICK_CAPACITY),
             relay: Kicks::new(KICK_CAPACITY),
             reconciler: Kicks::new(KICK_CAPACITY),
+            placement: Kicks::new(KICK_CAPACITY),
+            placement_relay: Kicks::new(KICK_CAPACITY),
             unknown: Arc::new((AtomicBool::new(false), Notify::new())),
         }
     }
@@ -154,6 +160,8 @@ impl StoreNotifier for Notifier {
         self.saga.committed(commit);
         self.relay.committed(commit);
         self.reconciler.committed(commit);
+        self.placement.committed(commit);
+        self.placement_relay.committed(commit);
     }
 
     fn unknown_kind(&self, _stream: &StreamId, _kind: &StoredKind) {
@@ -247,7 +255,9 @@ mod tests {
         // then
         assert_eq!(notifier.saga.take(), std::slice::from_ref(&stream));
         assert_eq!(notifier.relay.take(), std::slice::from_ref(&stream));
-        assert_eq!(notifier.reconciler.take(), [stream]);
+        assert_eq!(notifier.reconciler.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.placement.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.placement_relay.take(), [stream]);
     }
 
     #[test]

@@ -132,6 +132,7 @@ fn materialised() -> Vec<Step> {
         materialising(),
         [PlacementCommand::RecordMaterialised {
             directive_id: id(2),
+            disk_bytes: Some(53_687_091_200),
         }],
     )
 }
@@ -153,6 +154,7 @@ fn refreshed() -> Vec<Step> {
         refreshing(),
         [PlacementCommand::RecordMaterialised {
             directive_id: id(3),
+            disk_bytes: None,
         }],
     )
 }
@@ -342,6 +344,7 @@ fn base_cases() -> Vec<DeterminismCase<ImagePlacement>> {
             materialising(),
             PlacementCommand::RecordMaterialised {
                 directive_id: id(2),
+                disk_bytes: Some(53_687_091_200),
             },
         ),
         accepted(
@@ -371,6 +374,7 @@ fn base_cases() -> Vec<DeterminismCase<ImagePlacement>> {
             refreshing(),
             PlacementCommand::RecordMaterialised {
                 directive_id: id(3),
+                disk_bytes: None,
             },
         ),
         accepted(

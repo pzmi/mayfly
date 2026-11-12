@@ -989,6 +989,14 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   references}` (`EvictionRequested`) needs `Materialised`, nothing pending and zero references
   (`base_referenced`), and evicts the previous base first. The digest's pin and its previous
   digest stay the `Pool`'s (`ImagePinned{digest, previous}`).
+- **As built (CP-07):** P17's manager places every pool's pin on every host, issues each
+  placement's due directive, records a sent directive past its deadline as unknown, and evicts a
+  materialised base no pool pins and no live lease references; a failed placement is not
+  requested again. A pool is admissible on a host only once its pin is materialised there: the
+  reconciler's check (`reconcile::HostView::placed`), not `Host`'s. P18 trips the pin's breaker
+  through `Pool`'s `TripBreaker{digest, reason: runner_version, at}` (`PoolBreakerTripped` v2
+  names its reason). Withdrawal is refused while a pool pins the image, saved with a read of
+  every pool stream.
 
 ### 6.8 `HostRun` [Operations]
 

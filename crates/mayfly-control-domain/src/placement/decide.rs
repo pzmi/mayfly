@@ -55,9 +55,10 @@ pub fn decide(state: &PlacementState, command: Command<PlacementCommand>) -> Dec
             directive_id,
             observed,
         } => decide_drift(state, directive_id, observed)?,
-        PlacementCommand::RecordMaterialised { directive_id } => {
-            decide_materialised(state, directive_id)?
-        }
+        PlacementCommand::RecordMaterialised {
+            directive_id,
+            disk_bytes,
+        } => decide_materialised(state, directive_id, disk_bytes)?,
         PlacementCommand::RecordEvicted { directive_id } => decide_evicted(state, directive_id)?,
         PlacementCommand::RecordRefused {
             directive_id,
@@ -239,12 +240,17 @@ fn decide_drift(
     ])
 }
 
-fn decide_materialised(state: &PlacementState, directive_id: DirectiveId) -> Decision {
+fn decide_materialised(
+    state: &PlacementState,
+    directive_id: DirectiveId,
+    disk_bytes: Option<u64>,
+) -> Decision {
     match pending_for(state, directive_id)?.directive {
         PlacementDirective::MaterialiseImage { runner_version } => {
             Ok(vec![PlacementEvent::ImageMaterialised(ImageMaterialised {
                 directive_id,
                 runner_version,
+                disk_bytes,
             })])
         }
         PlacementDirective::PullImage | PlacementDirective::EvictImage { .. } => {
@@ -453,6 +459,9 @@ pub fn evolve(mut state: PlacementState, event: &PlacementEvent) -> PlacementSta
             state.base = Some(e.runner_version);
             state.wanted = Some(e.runner_version);
             state.phase = PlacementPhase::Materialised;
+            if e.disk_bytes.is_some() {
+                state.disk_bytes = e.disk_bytes;
+            }
         }
         PlacementEvent::BaseRefreshRequested(e) => state.wanted = Some(e.runner_version),
         PlacementEvent::BaseRolledBack(e) => {

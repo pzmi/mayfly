@@ -66,6 +66,7 @@ fn host(name: &str, pools: &[(&str, u32)]) -> HostView {
                 )
             })
             .collect(),
+        placed: [(ImageDigest::sample(), None)].into_iter().collect(),
         leases: Vec::new(),
     }
 }
@@ -456,6 +457,68 @@ fn should_plan_releases_before_reservations_when_a_pass_does_both() {
         "{:?}",
         pass.commands
     );
+}
+
+#[test]
+fn should_reserve_nothing_on_a_host_when_the_pin_is_not_placed_there() {
+    // given: two hosts with open terms; the pool's pin is materialised on h2 only
+    let mut h1 = host("h1", &[("lin", 4)]);
+    h1.placed.clear();
+    let h2 = host("h2", &[("lin", 4)]);
+    let unplaced = {
+        let mut h = h2.clone();
+        h.placed.clear();
+        h
+    };
+
+    // when
+    let pass = plan_pass(&inputs(vec![h1.clone(), h2], vec![linux("lin", Some(2))]));
+    let nowhere = plan_pass(&inputs(vec![h1, unplaced], vec![linux("lin", Some(2))]));
+
+    // then: P17, only where the base is; nothing anywhere before, and nothing advertised
+    assert_eq!(
+        reserves(&pass.commands),
+        vec![
+            ("h2".to_owned(), "lin".to_owned()),
+            ("h2".to_owned(), "lin".to_owned())
+        ]
+    );
+    assert!(reserves(&nowhere.commands).is_empty());
+    assert_eq!(
+        capacity_of(&nowhere.commands, "lin").map_or(0, |c| c.reported_max),
+        0
+    );
+}
+
+#[test]
+fn should_cap_reservations_by_the_hosts_disk_when_the_placed_base_is_measured() {
+    // given: 1000 GiB of disk; a pool with no configured disk (`clone_disk_gib` absent) and 4
+    // jobs; its base measured at 400 GiB on h1, not measured on h2 (an older data plane)
+    let mut lin = linux("lin", Some(4));
+    lin.vm = Resources::new(4 * GIB, 0);
+    let mut measured = host("h1", &[("lin", 4)]);
+    measured
+        .placed
+        .insert(ImageDigest::sample(), Some(400 * GIB));
+    let unmeasured = host("h2", &[("lin", 4)]);
+
+    // when
+    let capped = plan_pass(&inputs(vec![measured], vec![lin.clone()]));
+    let unknown = plan_pass(&inputs(vec![unmeasured], vec![lin]));
+
+    // then: two 400 GiB clones fit 1000 GiB; an unmeasured base plans none (0, the data plane's
+    // gate refuses what does not fit, I33), never a default
+    let disks = |pass: &mayfly_control_domain::reconcile::Pass| -> Vec<u64> {
+        pass.commands
+            .iter()
+            .filter_map(|c| match c {
+                PassCommand::ReserveSlot { resources, .. } => Some(resources.disk_bytes),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(disks(&capped), vec![400 * GIB, 400 * GIB]);
+    assert_eq!(disks(&unknown), vec![0, 0, 0, 0]);
 }
 
 #[test]

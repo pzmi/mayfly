@@ -23,6 +23,13 @@
 //!   planned with it (`tests/reconcile.rs::should_derive_waiting_beyond_live_runners_when_jobs_are_assigned`).
 //! - **Each pool's policy** through its [`PolicyOf`] (the composition root maps the operator's
 //!   `capacity_policy` with `mayfly_composition::config::plan_policy`).
+//! - **Placement** (P17, CP-07): a pool is admissible on a host only once its pinned image's
+//!   base is materialised there ([`HostView::placed`]): before, the host carves it nothing,
+//!   tells its scale set nothing beyond its live runners and reserves nothing for it, whatever
+//!   its terms. The `Host` aggregate does not check placement; the data plane clones only from
+//!   a base it holds (ADR 0039), the backstop (`formal/scheduling.qnt`'s `placedOn`,
+//!   `leasesKeepTheirBase`; pinned by
+//!   `tests/reconcile.rs::should_reserve_nothing_on_a_host_when_the_pin_is_not_placed_there`).
 //!
 //! What it plans:
 //!
@@ -196,6 +203,10 @@ pub struct HostView {
     pub draining: bool,
     /// Pool terms as applied here.
     pub terms: BTreeMap<PoolName, HostTerms>,
+    /// The images whose base is materialised here (`ImagePlacement` in `Materialised`, P17),
+    /// each with the disk its base reconstructs to when the data plane measured it: a pool is
+    /// admissible on this host only once its pin is one of them (CP-07).
+    pub placed: BTreeMap<ImageDigest, Option<u64>>,
     /// Its live leases.
     pub leases: Vec<LeaseView>,
 }
@@ -390,6 +401,35 @@ fn report_id(host: &HostView) -> u64 {
     host.report.map_or(0, |r| r.report_id)
 }
 
+/// Whether `pool`'s pinned image has its base materialised on `host` (P17): only then is the
+/// pool admissible there. A pool with no pin is not (its terms are closed too).
+fn placed_on(pool: &PoolView, host: &HostView) -> bool {
+    pool.image_pin
+        .as_ref()
+        .is_some_and(|pin| host.placed.contains_key(pin))
+}
+
+/// What one VM of `pool` needs on `host`: the pool's configured shape, with its disk taken from
+/// the pinned image's base on that host when the configuration names none (CP-07, ADR 0052's
+/// amendment of 2026-11-12). A pool's disk of 0 is "not configured" (`clone_disk_gib` absent:
+/// the composition root configures the pool with no disk); then a clone is planned at the disk
+/// its base reconstructs to, as the data plane measured it from the image's manifest
+/// (`ImageMaterialised::disk_bytes`, protocol 1.4). A base whose disk was not reported (an
+/// older data plane, a manifest that did not measure) leaves it 0: unknown is never a default,
+/// and the data plane's gate (I33) refuses what does not fit, as before. A configured disk
+/// always wins. Pinned by
+/// `tests/reconcile.rs::should_cap_reservations_by_the_hosts_disk_when_the_placed_base_is_measured`.
+fn vm_on(pool: &PoolView, host: &HostView) -> Resources {
+    if pool.vm.disk_bytes != 0 {
+        return pool.vm;
+    }
+    let measured = pool
+        .image_pin
+        .as_ref()
+        .and_then(|pin| host.placed.get(pin).copied().flatten());
+    Resources::new(pool.vm.memory_bytes, measured.unwrap_or(0))
+}
+
 /// The image is the pool's pinned one (any image while none is pinned).
 fn current_image(pool: &PoolView, image: Option<&ImageDigest>) -> bool {
     pool.image_pin
@@ -480,8 +520,8 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
                     PoolInput {
                         pool: p.pool.clone(),
                         os: p.os,
-                        vm: p.vm,
-                        open: terms.is_some_and(|t| t.open),
+                        vm: vm_on(p, host),
+                        open: terms.is_some_and(|t| t.open) && placed_on(p, host),
                         max_running: terms.map_or(0, |t| t.max_running),
                         wanted,
                         policy: (p.policy)(wanted),

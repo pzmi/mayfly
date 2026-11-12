@@ -24,8 +24,9 @@
 //!    [`Startup::recover`] (the same `Startup` for every pass of the run, CP-04) until it
 //!    completes, which opens admission, or reports safe mode.
 //! 7. Then the durable consumers catch up, each with its own worker (`catch_up` per consumer,
-//!    ES-05): the attempt saga and the directive relay; once both caught up, one ready line is
-//!    reported ([`Ready`]); the saga's deadline timer and the reconciler start.
+//!    ES-05): the attempt saga, the directive relay and the placement relay; once all caught
+//!    up, one ready line is reported ([`Ready`]); the saga's deadline timer, the reconciler and
+//!    the image placement manager start.
 //!
 //! While the run lasts: every observation goes through the inbox (P8); every later inventory
 //! also goes to [`Startup::resume_held`] while an attempt's cleanup is held (CP-04); each
@@ -60,8 +61,11 @@
 //! ([`UriSecretProvider::from_process`], which withholds every `env:` name from children), and
 //! recovery is handed no GitHub view until a registration view exists, so every runner reads
 //! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
-//! by nothing until the control plane mints JIT configs. Image placement (CP-07):
-//! [`Placements`] stays empty, so a clone is held `image_base_unknown`. The operator socket
+//! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
+//! placement manager places every pool's pin on this host and [`Placements`] follows its
+//! passes; but nothing in `mayflyd` registers, verifies or pins an image yet (OPS-02's manifest
+//! and pin), and no policy applies a pool's terms to the host (P4, CP-08), so no pool is
+//! admissible under `mayflyd` until both land. The operator socket
 //! (RT-03), logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
 //! (OPS-05) and split roles (LNK-01) are separate tasks.
 
@@ -83,9 +87,11 @@ use mayfly_adapter_tart::{
     TartImageStore, TartProvider,
 };
 use mayfly_control::delivery::{
-    DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, SinkConfig,
+    DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, PlacementRelay, PlacementRelayConfig,
+    SinkConfig,
 };
 use mayfly_control::inbox::Inbox;
+use mayfly_control::placement::{PlacementConfig, PlacementIndex, PlacementManager};
 use mayfly_control::projection::{self, BuildId};
 use mayfly_control::reconciler::{Reconciler, ReconcilerConfig};
 use mayfly_control::recovery::{
@@ -669,6 +675,9 @@ struct Daemon<'a> {
     store: Store,
     notifier: Notifier,
     details: ConfigDetails,
+    /// The bases clones are made from, shared with `details`, replaced after every placement
+    /// pass (CP-07).
+    placements: Placements,
     build: BuildId,
     delivery: DeliveryConfig,
     store_clock: AnchoredStoreClock,
@@ -754,6 +763,7 @@ pub async fn run_with(
     .map_err(|_| DaemonError::Start("the aggregate store"))?
     .with_projections(projections);
     let key: [u8; 32] = random_bytes().map_err(|_| DaemonError::Start("the random generator"))?;
+    let placements = Placements::default();
     let daemon = Daemon {
         config,
         reserves: reading.reserve.resources,
@@ -763,12 +773,8 @@ pub async fn run_with(
         journal,
         store,
         notifier,
-        details: ConfigDetails::new(
-            config,
-            config.host.clone_disk_gib,
-            key,
-            Placements::default(),
-        ),
+        details: ConfigDetails::new(config, config.host.clone_disk_gib, key, placements.clone()),
+        placements,
         build: BuildId::new(&options.version).map_err(|_| DaemonError::Start("the build id"))?,
         delivery: DeliveryConfig::default(),
         store_clock: AnchoredStoreClock::now_anchored(),
@@ -994,8 +1000,25 @@ impl Daemon<'_> {
                 self.delivery,
             ))
         };
-        let (saga_worker, relay_worker) = (workers()?, workers()?);
+        let (saga_worker, relay_worker, placement_worker) = (workers()?, workers()?, workers()?);
         let saga = AttemptSaga::new(&self.store, sessions.clone(), SagaConfig::default());
+        let index = PlacementIndex::default();
+        let placement_relay = PlacementRelay::new(
+            &self.store,
+            directives.clone(),
+            SystemClock,
+            sessions.clone(),
+            PlacementRelayConfig::default(),
+            &self.delivery,
+            index.clone(),
+        );
+        let manager = PlacementManager::new(
+            &self.store,
+            &self.journal,
+            PlacementConfig::new(epoch),
+            self.notifier.placement.clone(),
+            index.clone(),
+        );
         let relay = DirectiveRelay::new(LinkSink::new(
             &self.store,
             directives,
@@ -1015,9 +1038,10 @@ impl Daemon<'_> {
             self.notifier.reconciler.clone(),
         );
         reconciler.set_safe_mode(mode == Mode::Safe);
+        manager.set_safe_mode(mode == Mode::Safe);
         let run = Shutdown::new();
         let (recovered_tx, recovered) = watch::channel(None::<Mode>);
-        let inbox = Inbox::new(&self.store, self.host.clone(), epoch);
+        let inbox = Inbox::new(&self.store, self.host.clone(), epoch).with_placements(index);
         let empty = BTreeMap::new();
 
         let forward = {
@@ -1039,6 +1063,7 @@ impl Daemon<'_> {
             let inbox = &inbox;
             let empty = &empty;
             let reconciler = &reconciler;
+            let manager = &manager;
             async move {
                 let mut done = false;
                 let mut held = false;
@@ -1075,6 +1100,7 @@ impl Daemon<'_> {
                             Ok(Recovery::SafeMode { .. }) => {
                                 done = true;
                                 reconciler.set_safe_mode(true);
+                                manager.set_safe_mode(true);
                                 let _ = recovered_tx.send(Some(Mode::Safe));
                             }
                             Err(error) => {
@@ -1100,8 +1126,9 @@ impl Daemon<'_> {
         let consume = {
             let mut cancel = run.signal();
             let mut recovered = recovered.clone();
-            let (saga, relay) = (&saga, &relay);
-            let (saga_worker, relay_worker) = (&saga_worker, &relay_worker);
+            let (saga, relay, placement_relay) = (&saga, &relay, &placement_relay);
+            let (saga_worker, relay_worker, placement_worker) =
+                (&saga_worker, &relay_worker, &placement_worker);
             async move {
                 tokio::select! {
                     () = cancel.cancelled() => return,
@@ -1118,7 +1145,11 @@ impl Daemon<'_> {
                     if !relay_ok {
                         tracing::warn!(consumer = "directive_relay", "consumer_catch_up_failed");
                     }
-                    saga_ok && relay_ok
+                    let placement_ok = placement_worker.catch_up(placement_relay).await.is_ok();
+                    if !placement_ok {
+                        tracing::warn!(consumer = "placement_relay", "consumer_catch_up_failed");
+                    }
+                    saga_ok && relay_ok && placement_ok
                 };
                 if !until_caught_up(catch_up, tokio::time::sleep, &mut cancel).await {
                     return;
@@ -1142,6 +1173,15 @@ impl Daemon<'_> {
                         () = self.notifier.relay.wait() => {
                             if relay_worker.drain_kicked(relay, &self.notifier.relay).await.is_err() {
                                 tracing::warn!(consumer = "directive_relay", "consumer_drain_failed");
+                            }
+                        }
+                        () = self.notifier.placement_relay.wait() => {
+                            if placement_worker
+                                .drain_kicked(placement_relay, &self.notifier.placement_relay)
+                                .await
+                                .is_err()
+                            {
+                                tracing::warn!(consumer = "placement_relay", "consumer_drain_failed");
                             }
                         }
                         () = tokio::time::sleep_until(coarse) => {
@@ -1207,14 +1247,58 @@ impl Daemon<'_> {
             }
         };
 
+        // P17 (CP-07): the placement manager's passes, on its kicks, its interval and the next
+        // directive deadline; after each, the clone details' bases follow this host's
+        // materialised placements
+        let place = {
+            let mut cancel = run.signal();
+            let mut recovered = recovered.clone();
+            let manager = &manager;
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = recovered.wait_for(Option::is_some) => {}
+                }
+                loop {
+                    match manager.tick().await {
+                        Ok(Some(report)) => {
+                            self.placements.replace(
+                                report
+                                    .bases
+                                    .iter()
+                                    .filter(|((host, _), _)| *host == self.host)
+                                    .map(|((_, digest), name)| (digest.clone(), name.as_str())),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(_) => tracing::warn!("placement_pass_failed"),
+                    }
+                    let wait = Duration::from_millis(
+                        manager
+                            .next_due()
+                            .get()
+                            .saturating_sub(self.store.clock().now().get()),
+                    )
+                    .clamp(Duration::from_secs(1), COARSE);
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = self.notifier.placement.wait() => {}
+                        () = tokio::time::sleep(wait) => {}
+                    }
+                }
+            }
+        };
+
         let unknown = {
             let mut cancel = run.signal();
             let reconciler = &reconciler;
+            let manager = &manager;
             async move {
                 tokio::select! {
                     () = cancel.cancelled() => {}
                     () = self.notifier.unknown_kind() => {
                         reconciler.set_safe_mode(true);
+                        manager.set_safe_mode(true);
                         if enter_safe_mode(
                             &self.store,
                             sessions,
@@ -1232,8 +1316,9 @@ impl Daemon<'_> {
             }
         };
 
-        let ((), ended, (), (), (), ()) =
-            tokio::join!(forward, observe, consume, timeouts, reconcile, unknown);
+        let ((), ended, (), (), (), (), ()) = tokio::join!(
+            forward, observe, consume, timeouts, reconcile, place, unknown
+        );
         if matches!(ended, Ok(RunEnd::Shutdown)) {
             self.end_run(epoch).await;
         }

@@ -7,6 +7,8 @@ Date: 2026-11-10
 Accepted (owner, 2026-11-10). Amends ADR 0024 (the ledger's unknown facts), marked there.
 Amended 2026-11-12 (owner, RT-06): a measured fact is not an assumption; the host's sizing
 keys are optional and measured when absent (see the amendment below).
+Amended 2026-11-12 (owner, CP-07): the control plane plans a pool without `clone_disk_gib` at
+its placed base's measured disk, carried by protocol 1.4.
 
 ## Context
 
@@ -169,3 +171,26 @@ the re-measure by `mayfly-data`'s
 registry fetch for a fenced pull by `should_fetch_no_manifest_when_a_pull_is_stale` and
 `should_measure_only_a_fresh_admissible_pull_when_its_disk_is_unknown`; and IC-15's broken
 stores (`GuessingSizeStore`, `TrustingMeasureStore`).
+
+## Amended 2026-11-12 (owner): the control plane plans at the placed base's measured disk (CP-07)
+
+The RT-06 amendment above says that until the control plane places a pool's image (CP-07), a
+pool without `clone_disk_gib` plans its VMs with no disk. The owner decided (2026-11-12, CP-07's
+F3) how that ends: the data plane answers a materialisation with the disk the base reconstructs
+to, measured from its image's verified manifest (the size this ADR's RT-06 amendment already
+measures), in protocol 1.4's optional `disk_bytes` on `ImageMaterialised`; the control plane
+records it on the placement (`ImageMaterialised` v2 in the journal) and plans each clone of a pool
+without `clone_disk_gib` at its placed base's disk on that host. A configured `clone_disk_gib`
+still wins.
+
+Decision 1 holds: a base whose disk was not reported (a data plane of protocol 1.3 or older, a
+manifest that did not measure, a listing that failed) is unknown, never a default; its clones are
+planned with no disk, and the data plane's gate (I33) refuses what does not fit, as before. An
+older control plane ignores the field (an optional field of a newer minor) and plans with no disk,
+which is correct by the same gate; a 1.3 session gets no field. Pinned by
+`mayfly-control-domain`'s
+`tests/reconcile.rs::should_cap_reservations_by_the_hosts_disk_when_the_placed_base_is_measured`,
+`mayfly-control`'s `tests/store/placement.rs::should_cap_reservations_by_the_hosts_disk_when_the_placed_base_reports_its_disk`
+and `should_plan_no_disk_when_the_materialised_answer_carries_none`, `mayfly-protocol`'s
+`should_leave_the_base_disk_out_when_the_session_is_older_than_measured_disk` and `mayfly-data`'s
+`tests/executor/effects.rs::should_answer_the_bases_measured_disk_when_a_materialisation_is_applied`.

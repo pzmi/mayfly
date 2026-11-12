@@ -11,6 +11,9 @@
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
 //!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
 //!   over the link (`doc/event-store.md` §3.4, §5).
+//! - [`placement`]: the image placement manager (P17, P18): pins placed on every host, bases
+//!   materialised and evicted, runner-version expiry tripping the breaker, withdrawal refused
+//!   while pinned (CP-07).
 //! - [`reconciler`]: the reconciler (P5): a pass that reads the fleet, plans with the pure
 //!   `reconcile::plan_pass` and issues reservations, retirements, releases and capacity inputs.
 //! - [`saga`]: the `attempt_saga` durable consumer: the next command per attempt (P6) and the
@@ -28,6 +31,7 @@ pub mod delivery;
 mod ids;
 pub mod inbox;
 pub mod journal;
+pub mod placement;
 pub mod projection;
 pub mod queries;
 pub mod reconciler;

@@ -316,6 +316,7 @@ pub fn applied(kind: &DirectiveKind) -> ObservationKind {
         } => ObservationKind::ImageMaterialised {
             digest: digest.clone(),
             base_name: base_name.clone(),
+            disk_bytes: None,
         },
         DirectiveKind::EvictImage { base_name } => ObservationKind::ImageEvicted {
             base_name: base_name.clone(),

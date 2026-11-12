@@ -142,6 +142,9 @@ pub struct PlacementState {
     pub pending: Option<Pending>,
     /// Why it failed, in `Failed`.
     pub failure: Option<PlacementFailure>,
+    /// The disk a base of this image reconstructs to, as the data plane last measured it (every
+    /// base of one digest is its image's size); `None` until one is reported.
+    pub disk_bytes: Option<u64>,
 }
 
 impl PlacementState {
@@ -159,6 +162,7 @@ impl PlacementState {
             eviction: None,
             pending: None,
             failure: None,
+            disk_bytes: None,
         }
     }
 
@@ -212,6 +216,10 @@ pub enum PlacementCommand {
     RecordMaterialised {
         /// The directive answered.
         directive_id: DirectiveId,
+        /// The base's disk as the data plane measured it, when it reported one (protocol 1.4);
+        /// left out of the intent when absent, so an answer without it digests as before.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disk_bytes: Option<u64>,
     },
     /// The base was evicted.
     RecordEvicted {

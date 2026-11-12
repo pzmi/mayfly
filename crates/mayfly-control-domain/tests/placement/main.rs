@@ -4,6 +4,7 @@
 //! previous base for rollback) and the properties over random command sequences.
 
 mod matrix;
+mod policy;
 mod properties;
 mod rules;
 mod support;

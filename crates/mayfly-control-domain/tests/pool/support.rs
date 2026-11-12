@@ -2,7 +2,7 @@
 
 use mayfly_control_domain::attempt::{GuestOs, Stage};
 use mayfly_control_domain::pool::{
-    ConfigurePool, Pool, PoolCommand, PoolEvent, PoolRejection, PoolState, TrustTier,
+    ConfigurePool, Pool, PoolCommand, PoolEvent, PoolRejection, PoolState, TripReason, TrustTier,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command};
 use mayfly_domain::{AttemptId, CommandId, Epoch, EventId, ImageDigest, Millis, Resources, Sample};
@@ -57,6 +57,15 @@ pub fn failure(n: u128, at_ms: u64) -> PoolCommand {
         attempt_id: AttemptId::from_u128(0xA000 + n),
         digest: digest(),
         stage: Stage::Verify,
+        at: Millis::new(at_ms),
+    }
+}
+
+/// P18: the pin's runner version expired at `at_ms`.
+pub fn runner_version_expired(at_ms: u64) -> PoolCommand {
+    PoolCommand::TripBreaker {
+        digest: digest(),
+        reason: TripReason::RunnerVersion,
         at: Millis::new(at_ms),
     }
 }
@@ -148,6 +157,7 @@ pub fn stimuli() -> Vec<(&'static str, Step)> {
         ("start_drain", auto(PoolCommand::StartPoolDrain)),
         ("complete_drain", auto(PoolCommand::CompletePoolDrain)),
         ("count_failure", auto(failure(9, 4_000))),
+        ("trip_runner_version", auto(runner_version_expired(5_000))),
         (
             "reset_by_operator",
             at(1, OPERATOR, PoolCommand::ResetBreaker { digest: digest() }),

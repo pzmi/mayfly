@@ -16,6 +16,16 @@
  * `report` (a `CapacityReported` applied by `RecordCapacityReport`), `dp` (the data plane
  * executes or reports) or `world` (something we do not control changes).
  *
+ * Image placement (CP-07, policy P17): `host.pins` is each pool's pinned image as the
+ * reconciler's pass reads it (`Pool`'s `ImagePinned`) and `host.bases` the images whose base is
+ * materialised on this host (the `placements` projection over `ImagePlacement`). The pass
+ * reserves for a pool only once its pin's base is materialised here, and carves nothing for it
+ * before (`placedOn`); the `Host` aggregate itself does not check placement (CP-07, F2). An
+ * attempt takes the pool's current pin when it starts (P2), and starts only while that pin's
+ * base is materialised on its host (`startAttempt`); the data plane clones only from a base it
+ * holds, the backstop (`dpCreate`). A base is evicted only when no started lease runs it and no
+ * lease is unstarted (`evict`), so every started lease keeps its base (`leasesKeepTheirBase`).
+ *
  * Ghost state (`g`) records history for the invariants and never feeds a guard.
  */
 module scheduling_machine {
@@ -78,13 +88,18 @@ module scheduling_machine {
   /// `started`: the lease's attempt stream has its `AttemptStarted` (P2's `StartAttempt`, saved
   /// with a read of the host stream at the revision showing the lease reserved). The data plane
   /// sees no lease: it clones for a started attempt that asks (CP-03F).
-  type Lease = { phase: str, slot: int, gen: int, pool: str, running: bool, started: bool }
+  /// `img` is the pool's pin when the attempt started (P2 reads the pin then, not at the
+  /// reservation): the base its VM is cloned from; 0 before the start.
+  type Lease = { phase: str, slot: int, gen: int, pool: str, running: bool, started: bool, img: int }
 
   /// `policy` and `waiting` are the capacity policy's inputs per pool (ADR 0069, DEC-06): the
   /// pool's configured `capacity_policy` (`EXACT` or `DEMAND`) and the jobs it is told are
   /// waiting for new VMs. Both are fixed at `init`: the properties are stated for a fixed demand.
+  /// `pins` and `bases` are the image placement the pass reads (CP-07): each pool's pinned image
+  /// (1 or 2) and, per pool, the images whose base is materialised on this host.
   type Host = {
     report: Report, gateClosed: bool, drain: str, policy: str -> str, waiting: str -> int,
+    pins: str -> int, bases: str -> Set[int],
   }
 
   type Terms = { rev: int, open: bool }
@@ -193,6 +208,10 @@ module scheduling_machine {
   pure def lowest(xs: Set[int]): int = xs.fold(NO_SLOT, (m, x) => if (x < m) x else m)
 
   pure def gateOpen(h: Host): bool = h.report.id > 0 and not(h.gateClosed) and h.drain == NO_DRAIN
+
+  /// The pool's pinned image has its base materialised on this host (P17): only then does the
+  /// pass carve for it or reserve for it (CP-07).
+  pure def placedOn(h: Host, pool: str): bool = h.bases.get(pool).contains(h.pins.get(pool))
 
   // ---- the capacity policy (`capacity::plan`) ------------------------------------------------
 
@@ -316,7 +335,7 @@ module scheduling_machine {
   /// `cap` its waiting jobs when its policy is `DEMAND`.
   pure def countsOf(h: Host, ls: int -> Lease, ts: str -> Terms, pool: str): Counts = {
     pool: pool,
-    open: gateOpen(h) and ts.get(pool).open,
+    open: gateOpen(h) and ts.get(pool).open and placedOn(h, pool),
     live: countOf(ls, pool, live),
     runners: countOf(ls, pool, runner),
     stopped: countOf(ls, pool, stoppedQuarantined),
@@ -363,16 +382,21 @@ module scheduling_machine {
   /// The `maxCapacity` sent for a pool's scale set: its deliverable while admission is open,
   /// only its live runners while it is closed (OD15).
   pure def reportedMaxOf(h: Host, p: Plan, ls: int -> Lease, ts: str -> Terms, pool: str): int =
-    if (gateOpen(h) and ts.get(pool).open) deliverableOf(p, ls, pool) else countOf(ls, pool, runner)
+    if (gateOpen(h) and ts.get(pool).open and placedOn(h, pool)) deliverableOf(p, ls, pool)
+    else countOf(ls, pool, runner)
 
   // ---- guards -------------------------------------------------------------------------------
 
+  /// What a `ReserveSlot` the pass plans needs: the `Host`'s own checks (the gate, the pool's
+  /// terms, `max_running`, a free slot, the report), and the pass's placement check (CP-07),
+  /// which the `Host` aggregate does not repeat.
   pure def canReserve(h: Host, ls: int -> Lease, ts: str -> Terms, a: int, pool: str): bool = {
     val r = h.report
     and {
       ls.get(a).phase == FREE,
       gateOpen(h),
       ts.get(pool).open,
+      placedOn(h, pool),
       countOf(ls, pool, live) < MAX_RUNNING,
       freeSlotsOf(r, ls).size() > 0,
       fitsReport(r, ls, pool),
@@ -431,9 +455,10 @@ module scheduling_machine {
   ): bool = all {
     host' = {
       report: NO_REPORT, gateClosed: false, drain: NO_DRAIN, policy: policy, waiting: waiting,
+      pins: POOLS.mapBy(_ => 1), bases: POOLS.mapBy(_ => Set()),
     },
     leases' = ATTEMPTS.mapBy(_ =>
-      { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false }),
+      { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false, img: 0 }),
     slotGen' = SLOTS.mapBy(_ => 0),
     terms' = POOLS.mapBy(_ => { rev: 0, open: false }),
     pools' = POOLS.mapBy(_ => { rev: 1, active: true, failures: 0, tripped: false }),
@@ -485,8 +510,10 @@ module scheduling_machine {
   /// ledger (I33); a create that does not fit is refused (`insufficient_resources`) and changes
   /// nothing. It does not see the host's lease: a started, unquarantined attempt asks, and the
   /// guards of `startAttempt` and `releaseUnstarted` keep that attempt's lease held (CP-03F).
+  /// It clones only from a base it holds (ADR 0039): a lease's base must be materialised.
   action dpCreate(a: int): bool = all {
     leases.get(a).started,
+    host.bases.get(leases.get(a).pool).contains(leases.get(a).img),
     leases.get(a).phase != QUARANTINED,
     vms.get(a) == ABSENT,
     not(created.get(a)),
@@ -578,8 +605,9 @@ module scheduling_machine {
   action reserve(a: int, pool: str): bool = {
     val s = lowest(freeSlotsOf(host.report, leases))
     val gen = slotGen.get(s) + 1
-    val after =
-      leases.set(a, { phase: RESERVED, slot: s, gen: gen, pool: pool, running: false, started: false })
+    val after = leases.set(a,
+      { phase: RESERVED, slot: s, gen: gen, pool: pool, running: false, started: false,
+        img: 0 })
     val r = host.report
     all {
       canReserve(host, leases, terms, a, pool),
@@ -662,9 +690,19 @@ module scheduling_machine {
   /// lease reserved, so a release that commits first refuses the start (CP-03F).
   def canStart(ls: int -> Lease, a: int): bool = ls.get(a).phase == RESERVED and not(ls.get(a).started)
 
+  /// CP-07: the start takes the pool's pin as it is now and needs that pin's base materialised
+  /// on the host. One step here, because the Rust start (`mayfly_control::start`) saves
+  /// `StartAttempt` with a read of the placement stream at the revision showing it
+  /// `Materialised`: an eviction (or any write) to that placement between the read and the
+  /// commit refuses the start, and the retry reads the pin and the placement again.
   action startAttempt(a: int): bool = {
     val l = leases.get(a)
-    all { canStart(leases, a), commit("command", host, leases.set(a, { ...l, started: true }), g) }
+    all {
+      canStart(leases, a),
+      placedOn(host, l.pool),
+      commit("command", host,
+        leases.set(a, { ...l, started: true, img: host.pins.get(l.pool) }), g),
+    }
   }
 
   /// `ReleaseSlot{attempt_never_started}`: the reconciler plans it from a read that may be stale
@@ -759,11 +797,70 @@ module scheduling_machine {
     all { p.tripped, setPool(pool, { ...p, failures: 0, tripped: false, rev: p.rev + 1 }) }
   }
 
+  // ---- image placement (CP-07, P17) --------------------------------------------------------
+
+  /// The placement of the pool's pin reaches `Materialised` on this host (`ImageMaterialised`,
+  /// recorded on its `ImagePlacement` stream): pulled, then its base made. The stream's own
+  /// steps (one pull at a time, unknown outcomes) are its matrices', not this model's.
+  action materialise(pool: str): bool = all {
+    not(placedOn(host, pool)),
+    commit("dp", { ...host, bases: host.bases.set(pool,
+      host.bases.get(pool).union(Set(host.pins.get(pool)))) }, leases, g),
+  }
+
+  /// `PinImage`: the pool's pin moves to the other image (`ImagePinned{digest, previous}`). Its
+  /// base is not on this host yet; the previous one stays until nothing references it.
+  action repin(pool: str): bool = {
+    val p = pools.get(pool)
+    all {
+      host' = { ...host, pins: host.pins.set(pool, 3 - host.pins.get(pool)) },
+      pools' = pools.set(pool, { ...p, rev: p.rev + 1 }),
+      leases' = leases, slotGen' = slotGen, terms' = terms, dp' = dp, vms' = vms,
+      created' = created, sent' = sent,
+      g' = { ...g, lastKind: "command" },
+    }
+  }
+
+  /// Whether a started live lease of `pool` runs image `img`: a reference to its base.
+  pure def referenced(ls: int -> Lease, pool: str, img: int): bool =
+    ATTEMPTS.exists(a => live(ls.get(a)) and ls.get(a).started and ls.get(a).pool == pool
+      and ls.get(a).img == img)
+
+  /// A live lease whose attempt has not started: it has no image yet, so the placement manager
+  /// counts it as referencing every base on its host (fail closed, CP-07).
+  pure def unstartedLease(ls: int -> Lease): bool =
+    ATTEMPTS.exists(a => live(ls.get(a)) and not(ls.get(a).started))
+
+  /// Whether the base of `img` may be evicted for `pool`: unpinned, materialised, no started
+  /// lease runs it and no lease is unstarted.
+  pure def canEvict(h: Host, ls: int -> Lease, pool: str, img: int): bool = and {
+    img != h.pins.get(pool),
+    h.bases.get(pool).contains(img),
+    not(referenced(ls, pool, img)),
+    not(unstartedLease(ls)),
+  }
+
+  /// `RequestEviction` (P17): a base no pool pins and no live lease references is evicted (the
+  /// placement manager counts the references; the data plane re-checks its dependents). One
+  /// step here, though the manager decides on rows it read earlier: it saves the eviction with
+  /// a read of the host stream and of every pool stream at the revisions it read, so a lease
+  /// reserved, released or quarantined, or a pin moved, in between refuses the unit; a start in
+  /// between is of a lease the read showed unstarted, which already blocked the eviction; and a
+  /// start that read the placement before the eviction committed is refused by its own read of
+  /// the placement stream (`startAttempt`). Every input of the guard is therefore unchanged at
+  /// the commit, which is what the atomic step states.
+  action evict(pool: str, img: int): bool = all {
+    canEvict(host, leases, pool, img),
+    commit("dp", { ...host, bases: host.bases.set(pool, host.bases.get(pool).exclude(Set(img))) },
+      leases, g),
+  }
+
   // ---- the relation -------------------------------------------------------------------------
 
   action step = {
     nondet a = ATTEMPTS.oneOf()
     nondet pool = POOLS.oneOf()
+    nondet img = Set(1, 2).oneOf()
     any {
       dpReport,
       dpCreate(a),
@@ -790,6 +887,9 @@ module scheduling_machine {
       resumePool(pool),
       countFailure(pool),
       resetBreaker(pool),
+      materialise(pool),
+      repin(pool),
+      evict(pool, img),
     }
   }
 
@@ -815,6 +915,7 @@ module scheduling_machine {
       dpDelete(a),
       release(a),
       vmFactsChange,
+      materialise(pool),
     }
   }
 
@@ -892,6 +993,14 @@ module scheduling_machine {
   /// is not known; nothing unknown is assumed (ADR 0052).
   val noStartWhileCapacityUnknown = not(g.dpStartedUnknown)
 
+  /// leasesKeepTheirBase (CP-07, P17): every started live lease's base stays materialised on
+  /// the host: an attempt starts only on a placed pin, and a base is evicted only once no
+  /// started lease runs it and no lease is unstarted, so a clone is never asked of a base that
+  /// is gone.
+  val leasesKeepTheirBase = ATTEMPTS.forall(a =>
+    (live(leases.get(a)) and leases.get(a).started)
+      implies host.bases.get(leases.get(a).pool).contains(leases.get(a).img))
+
   /// generationsMonotonic: a slot's generation only grows, and every lease's generation is at
   /// most its slot's.
   val generationsMonotonic = not(g.genNotIncreasing) and ATTEMPTS.forall(a =>
@@ -951,6 +1060,7 @@ module scheduling_machine {
     i33DataPlaneNeverOvercommits,
     noVmWithoutLease,
     noStartWhileCapacityUnknown,
+    leasesKeepTheirBase,
     generationsMonotonic,
     macosGuestsAtMostTwo,
     externalConsumptionShrinksAdmissible,
@@ -1112,7 +1222,7 @@ module scheduling {
         if (ls.get(a).phase == QUARANTINED and ls.get(a).pool == pool)
           plus(s, less(vmOf(pool), holdsOf(ls.get(a))))
         else s),
-      open: gateOpen(h) and ts.get(pool).open,
+      open: gateOpen(h) and ts.get(pool).open and placedOn(h, pool),
     }
     if (h.policy.get(pool) == DEMAND) demandShape(exact, h.waiting.get(pool)) else exact
   }
@@ -1120,24 +1230,26 @@ module scheduling {
   /// Every lease one attempt can hold, as the plan reads it (its slot and generation do not
   /// matter to it).
   pure val LEASES: Set[Lease] = Set(
-    { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false },
-    { phase: RELEASED, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false })
+    { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false, img: 0 },
+    { phase: RELEASED, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false, img: 0 })
     .union(tuples(Set(RESERVED, ACTIVATED, QUARANTINED), POOLS, Set(true, false))
       .filter(t => t._1 == QUARANTINED or t._3)
-      .map(t => { phase: t._1, slot: 0, gen: 0, pool: t._2, running: t._3, started: false }))
+      .map(t => { phase: t._1, slot: 0, gen: 0, pool: t._2, running: t._3, started: false, img: 1 }))
 
   /// shapesFromLeases (DEC-06F): for every assignment of leases to the attempts with at most
   /// `MAX_RUNNING` live per pool, either policy and every number of waiting jobs, the gate and
-  /// the terms open or closed, `shapeOfCounts(countsOf(..))` (what the state machine's plan
-  /// carves from, through `carveCounts`) is KER-05D's lease fold `shapeOf`.
+  /// the terms open or closed, the pin's base placed or not (CP-07), `shapeOfCounts(countsOf(..))`
+  /// (what the state machine's plan carves from, through `carveCounts`) is KER-05D's lease fold
+  /// `shapeOf`.
   pure val shapesFromLeasesAgree = tuples(LEASES, LEASES, LEASES)
     .map(t => Map(1 -> t._1, 2 -> t._2, 3 -> t._3))
     .filter(ls => POOLS.forall(p => countOf(ls, p, live) <= MAX_RUNNING))
     .forall(ls => tuples(POOLS, Set(EXACT, DEMAND), 0.to(MAX_RUNNING + 1), Set(true, false),
-      Set(true, false)).forall(t => {
+      Set(true, false), Set(true, false)).forall(t => {
         val h = {
           report: { ...NO_REPORT, id: 1 }, gateClosed: not(t._4), drain: NO_DRAIN,
           policy: POOLS.mapBy(_ => t._2), waiting: POOLS.mapBy(_ => t._3),
+          pins: POOLS.mapBy(_ => 1), bases: POOLS.mapBy(_ => if (t._6) Set(1) else Set()),
         }
         val ts = POOLS.mapBy(_ => { rev: 0, open: t._5 })
         shapeOf(h, ls, ts, t._1) == shapeOfCounts(countsOf(h, ls, ts, t._1))
@@ -1405,6 +1517,7 @@ module scheduling {
   /// a scenario runs once (`quint test` samples a scenario with a nondeterministic choice).
   action readyWith(fm: int, fmac: int): bool =
     dpReport.then(applyReport(reportOf(1, fm, fmac))).then(applyTerms(LINUX)).then(applyTerms(MACOS))
+      .then(materialise(LINUX)).then(materialise(MACOS))
 
   action ready = readyWith(0, 0)
 
@@ -1458,6 +1571,7 @@ module scheduling {
       .then(applyReport(reportOf(1, 0, 0)))
       .expect(host.report.id == 2)
       .then(applyTerms(LINUX)).then(applyTerms(MACOS))
+      .then(materialise(LINUX)).then(materialise(MACOS))
       .then(reserve(1, LINUX)).then(reserve(2, LINUX))
       .expect(not(canReserve(host, leases, terms, 3, MACOS)) and allocationWithinReport)
   }
@@ -1585,5 +1699,85 @@ module scheduling {
       .then(releaseOnStaleRead(1))
       .then(dpCreate(1))
       .expect(not(noVmWithoutLease))
+  }
+
+  // CP-07 (P17): a pool whose pin has no base on the host is carved nothing, told only its live
+  // runners and reserved nothing, whatever its terms; once its base is materialised it admits.
+  run pinAdmitsOnlyOncePlacedTest = {
+    initWith(0, 0).then(dpReport).then(applyReport(reportOf(1, 0, 0)))
+      .then(applyTerms(LINUX)).then(applyTerms(MACOS))
+      .expect(terms.get(LINUX).open and not(placedOn(host, LINUX)))
+      .expect(not(canReserve(host, leases, terms, 1, LINUX)) and plan.carveLinux == 0)
+      .expect(reportedMaxOf(host, plan, leases, terms, LINUX) == 0 and allInvariants)
+      .then(materialise(LINUX))
+      .expect(canReserve(host, leases, terms, 1, LINUX) and plan.carveLinux == 2)
+      .then(reserve(1, LINUX)).then(startAttempt(1)).expect(leases.get(1).img == 1 and allInvariants)
+  }
+
+  // CP-07 (P17): a new pin closes the pool on the host until its own base is materialised;
+  // the previous base stays while a live lease references it, and is evicted once released.
+  run repinKeepsTheOldBaseWhileReferencedTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1)).then(repin(LINUX))
+      .expect(not(canReserve(host, leases, terms, 2, LINUX)) and plan.carveLinux == 0)
+      // the lease reserved under the old pin still clones from its base
+      .then(dpCreate(1)).expect(vms.get(1) == RUNNING and allInvariants)
+      .expect(referenced(leases, LINUX, 1))
+      .then(materialise(LINUX))
+      .then(reserve(2, LINUX)).then(startAttempt(2)).expect(leases.get(2).img == 2 and allInvariants)
+      .then(dpDelete(1)).then(release(1))
+      .then(evict(LINUX, 1))
+      .expect(host.bases.get(LINUX) == Set(2) and allInvariants)
+  }
+
+  // CP-07 review: a lease reserved under one pin and started after a repin takes the new pin,
+  // and only once that pin's base is materialised; the old base is not evicted while the lease
+  // is unstarted, and is once it started on the new one.
+  run repinBetweenReserveAndStartTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(repin(LINUX))
+      .expect(canStart(leases, 1) and not(placedOn(host, LINUX)))
+      .expect(not(canEvict(host, leases, LINUX, 1)))
+      .then(materialise(LINUX))
+      .then(startAttempt(1)).expect(leases.get(1).img == 2 and allInvariants)
+      .expect(canEvict(host, leases, LINUX, 1))
+      .then(evict(LINUX, 1))
+      .then(dpCreate(1)).expect(vms.get(1) == RUNNING and allInvariants)
+  }
+
+  /// Negative control of `leasesKeepTheirBase`: a start that takes the pin without the placement
+  /// check (P2 reading the pool alone, as before CP-07's review).
+  action startIgnoringPlacement(a: int): bool = {
+    val l = leases.get(a)
+    all {
+      canStart(leases, a),
+      commit("command", host,
+        leases.set(a, { ...l, started: true, img: host.pins.get(l.pool) }), g),
+    }
+  }
+
+  // Reserved under the old pin and started after the repin, without the check the attempt runs
+  // an image whose base is not on the host: `leasesKeepTheirBase` fails, so the start needs it.
+  run startWithoutPlacementViolatesTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(repin(LINUX))
+      .then(startIgnoringPlacement(1))
+      .expect(not(leasesKeepTheirBase))
+  }
+
+  /// Negative control of `leasesKeepTheirBase`: an eviction that does not count live leases.
+  action evictIgnoringReferences(pool: str, img: int): bool = all {
+    img != host.pins.get(pool),
+    host.bases.get(pool).contains(img),
+    commit("dp", { ...host, bases: host.bases.set(pool, host.bases.get(pool).exclude(Set(img))) },
+      leases, g),
+  }
+
+  // Evicting the previous base under a live lease leaves it without its base.
+  run evictWhileReferencedViolatesTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1)).then(repin(LINUX))
+      .then(evictIgnoringReferences(LINUX, 1))
+      .expect(not(leasesKeepTheirBase))
   }
 }

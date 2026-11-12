@@ -34,6 +34,7 @@
 
 mod kicks;
 mod link_sink;
+mod placement_relay;
 mod relay;
 mod values;
 mod worker;
@@ -47,6 +48,9 @@ use crate::store::Clock;
 
 pub use kicks::Kicks;
 pub use link_sink::{DirectiveDetails, LinkSink, SinkConfig, SinkStats, compose, send_deadline};
+pub use placement_relay::{
+    PLACEMENT_RELAY, PlacementRelay, PlacementRelayConfig, compose_placement,
+};
 pub use relay::{DirectiveRelay, DirectiveSink, RelayedDirective, SinkError};
 pub use values::{
     Claim, ConsumerError, ConsumerName, ConsumerState, Delivery, DeliveryKey, LeaseError,

@@ -28,7 +28,7 @@ impl ProtocolVersion {
 }
 
 /// The version this build writes when the session allows it.
-pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 3);
+pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 4);
 
 /// The minor that added what the data plane cannot determine (ADR 0052: the refusal
 /// `capacity_unknown`, a capacity report's `unknown` dimensions, a listed VM's facts) and
@@ -50,6 +50,14 @@ pub const VANISHED_TARGET: ProtocolVersion = ProtocolVersion::new(1, 2);
 /// launch `proof_mismatch`, which the control plane quarantines (ADR 0038: no delivery
 /// unchecked).
 pub const GUEST_IDENTITY: ProtocolVersion = ProtocolVersion::new(1, 3);
+
+/// The minor that added a materialised base's measured disk (`ImageMaterialised::disk_bytes`,
+/// ADR 0052's amendment of 2026-11-12; CP-07): the disk its image's manifest reconstructs to, so
+/// the control plane plans a clone at it when `clone_disk_gib` is not configured. A session
+/// below it is written without it ([`crate::ObservationKind::written_in`]); the control plane
+/// then reads it as unknown and plans the clone with no disk, and the data plane's gate (I33)
+/// refuses what does not fit, as before.
+pub const MEASURED_BASE_DISK: ProtocolVersion = ProtocolVersion::new(1, 4);
 
 /// What this build speaks: the highest minor of each major, one entry per major.
 pub const SUPPORTED: &[ProtocolVersion] = &[CURRENT];

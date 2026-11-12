@@ -157,6 +157,11 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
 - **Protocol 1.3 (DP-05).** `LaunchRunner`'s optional `instance_id`, the one `VmCloned`
   reported, which the data plane checks right before delivering the JIT config; a launch
   without it (a 1.2 session) is refused `proof_mismatch` (ADR 0038, ADR 0082).
+- **Protocol 1.4 (CP-07).** `ImageMaterialised`'s optional `disk_bytes`: the disk the base
+  reconstructs to, measured from its image's verified manifest (ADR 0052's amendment of
+  2026-11-12), at which the control plane plans a clone when `clone_disk_gib` is not configured.
+  A 1.3 or older session gets none; the control plane reads that as unknown and plans the clone
+  with no disk, and the data plane's gate (I33) refuses what does not fit, as before.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly

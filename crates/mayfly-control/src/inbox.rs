@@ -33,8 +33,20 @@
 //!   totals, foreign and base use, never `free` (pinned by
 //!   `should_admit_nothing_in_a_dimension_when_the_report_lists_it_unknown`).
 //!
-//! Image and host facts are not routed here (`Recorded::not_routed`): their aggregates' inboxes
-//! are later tasks'. The report's own non-VM use (`ReportedCapacity::base`) is not separable from
+//! - **Answers to placement directives** (CP-07) go to the placement stream: `ImagePulled` and
+//!   `ImageMaterialised` by their host and digest, `ImageEvicted`, a refusal and an unknown
+//!   outcome by the directive, found in the [`PlacementIndex`] the placement manager keeps; an
+//!   answer whose placement is not known is not routed (`unknown_placement`), and the
+//!   manager's timeout makes its outcome `Unknown`, never a success. A complete inventory also
+//!   resolves a placement directive of `Unknown` outcome by the base's absence only: a
+//!   materialisation whose base is not listed did not apply (`RecordNotApplied`), an eviction
+//!   whose base is not listed did (`RecordEvicted`); a listed base proves nothing (it may be
+//!   half made, or still being removed), so it leaves the outcome `Unknown` (ADR 0025). A pull
+//!   is not resolved by a listing (images are not VMs): only its late answer resolves it.
+//!   Pinned by `tests/store/placement.rs::should_resolve_an_unknown_materialisation_only_when_its_base_is_absent`.
+//!
+//! Host facts are not routed here (`Recorded::not_routed`): their aggregates' inboxes are later
+//! tasks'. The report's own non-VM use (`ReportedCapacity::base`) is not separable from
 //! the protocol's `used` and is recorded as zero: what does not fit is refused
 //! `insufficient_resources` by the data plane's ledger (ADR 0024), which holds the host (CP-03);
 //! CP-04B adds the field and a conservative interim.
@@ -48,6 +60,10 @@ use mayfly_control_domain::attempt::{
 };
 use mayfly_control_domain::capacity::ReportedCapacity;
 use mayfly_control_domain::host::{Host, HostCommand};
+use mayfly_control_domain::image::base_name;
+use mayfly_control_domain::placement::{
+    ImagePlacement, PendingOutcome, PlacementCommand, PlacementDirective, placement_instance,
+};
 use mayfly_control_domain::{Actor, Aggregate, Command};
 use mayfly_domain::{AttemptId, CommandId, Epoch, Generation, HostId, ObservationId, OwnedVmName};
 use mayfly_protocol::{
@@ -56,6 +72,7 @@ use mayfly_protocol::{
 
 use crate::ids::derive;
 use crate::journal::{InboxKey, InboxSource, Journal, JournalValueError, MessageId};
+use crate::placement::PlacementIndex;
 use crate::store::{AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier};
 
 /// The inbox's name: the actor of its commands.
@@ -108,6 +125,7 @@ pub struct Inbox<'s, J, C, R, N> {
     host: HostId,
     run_epoch: Epoch,
     names: Mutex<BTreeMap<OwnedVmName, AttemptId>>,
+    placements: PlacementIndex,
 }
 
 impl<J, C, R, N> std::fmt::Debug for Inbox<'_, J, C, R, N> {
@@ -127,7 +145,16 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
             host,
             run_epoch,
             names: Mutex::new(BTreeMap::new()),
+            placements: PlacementIndex::default(),
         }
+    }
+
+    /// Routes answers to placement directives through `index`, the placement manager's
+    /// (CP-07); without it every such answer is not routed.
+    #[must_use]
+    pub fn with_placements(mut self, index: PlacementIndex) -> Self {
+        self.placements = index;
+        self
     }
 
     /// Records `observation` (see the module docs). `Ok` is the caller's licence to ack it.
@@ -171,6 +198,18 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
                         recorded.add(saved)?;
                     }
                 }
+                self.resolve_placements(observation, vms, &mut recorded)
+                    .await?;
+            }
+            ObservationKind::ImagePulled { digest }
+            | ObservationKind::ImageMaterialised { digest, .. } => {
+                let instance = placement_instance(&self.host, digest);
+                self.placement_answer(observation, Some(instance), &mut recorded)
+                    .await?;
+            }
+            ObservationKind::ImageEvicted { .. } => {
+                self.placement_answer(observation, None, &mut recorded)
+                    .await?;
             }
             ObservationKind::RunnerExited { vm_name, .. }
             | ObservationKind::VmObservedStopped { vm_name } => {
@@ -206,10 +245,127 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
                         .await;
                     recorded.add(saved)?;
                 }
+                _ if observation.answers.is_some_and(|a| {
+                    a.attempt.is_none() && self.placements.get(a.directive_id).is_some()
+                }) =>
+                {
+                    self.placement_answer(observation, None, &mut recorded)
+                        .await?;
+                }
                 _ => recorded.not_routed = Some(kind_name(&observation.kind)),
             },
         }
         Ok(recorded)
+    }
+
+    /// Records an answer to a placement directive on its placement stream: `instance` when the
+    /// observation names its host and digest, else the one the index knows for the directive.
+    async fn placement_answer(
+        &self,
+        observation: &Observation,
+        instance: Option<String>,
+        recorded: &mut Recorded,
+    ) -> Result<(), SaveError> {
+        let Some(directive_id) = observation.answers.map(|a| a.directive_id) else {
+            recorded.not_routed = Some(kind_name(&observation.kind));
+            return Ok(());
+        };
+        let Some(instance) =
+            instance.or_else(|| self.placements.get(directive_id).map(|p| p.instance))
+        else {
+            recorded.not_routed = Some("unknown_placement");
+            return Ok(());
+        };
+        let body = match &observation.kind {
+            ObservationKind::ImagePulled { .. } => PlacementCommand::RecordPulled { directive_id },
+            ObservationKind::ImageMaterialised { disk_bytes, .. } => {
+                PlacementCommand::RecordMaterialised {
+                    directive_id,
+                    disk_bytes: *disk_bytes,
+                }
+            }
+            ObservationKind::ImageEvicted { .. } => {
+                PlacementCommand::RecordEvicted { directive_id }
+            }
+            ObservationKind::DirectiveRefused { reason } => PlacementCommand::RecordRefused {
+                directive_id,
+                reason: refusal(*reason),
+            },
+            ObservationKind::OutcomeUnknown { .. } => {
+                PlacementCommand::RecordOutcomeUnknown { directive_id }
+            }
+            _ => {
+                recorded.not_routed = Some(kind_name(&observation.kind));
+                return Ok(());
+            }
+        };
+        let saved = self
+            .save::<ImagePlacement>(
+                &instance,
+                &directive_id.as_u128().to_be_bytes(),
+                observation.epoch,
+                observation.observation_id,
+                None,
+                body,
+            )
+            .await;
+        if matches!(saved, Ok(Outcome::Accepted { .. })) {
+            self.placements.remove(directive_id);
+        }
+        recorded.add(saved)
+    }
+
+    /// A complete inventory resolves this host's placement directives of `Unknown` outcome by
+    /// their base's absence only (see the module docs).
+    async fn resolve_placements(
+        &self,
+        observation: &Observation,
+        vms: &[VmObservation],
+        recorded: &mut Recorded,
+    ) -> Result<(), SaveError> {
+        for (directive_id, pending) in self.placements.on_host(&self.host) {
+            let state = self.store.load::<ImagePlacement>(&pending.instance).await?;
+            let Some(open) = state
+                .pending
+                .filter(|p| p.directive_id == directive_id)
+                .filter(|p| matches!(p.outcome, PendingOutcome::Unknown { .. }))
+            else {
+                continue;
+            };
+            let listed = |version| {
+                let name = base_name(&pending.digest, version);
+                vms.iter().any(|vm| vm.name == name)
+            };
+            let body = match open.directive {
+                PlacementDirective::MaterialiseImage { runner_version }
+                    if !listed(runner_version) =>
+                {
+                    PlacementCommand::RecordNotApplied { directive_id }
+                }
+                PlacementDirective::EvictImage { runner_version } if !listed(runner_version) => {
+                    PlacementCommand::RecordEvicted { directive_id }
+                }
+                PlacementDirective::MaterialiseImage { .. }
+                | PlacementDirective::EvictImage { .. }
+                | PlacementDirective::PullImage => continue,
+            };
+            let message = format!("placement/{directive_id}");
+            let saved = self
+                .save::<ImagePlacement>(
+                    &pending.instance,
+                    &directive_id.as_u128().to_be_bytes(),
+                    observation.epoch,
+                    observation.observation_id,
+                    Some(&message),
+                    body,
+                )
+                .await;
+            if matches!(saved, Ok(Outcome::Accepted { .. })) {
+                self.placements.remove(directive_id);
+            }
+            recorded.add(saved)?;
+        }
+        Ok(())
     }
 
     fn observed(

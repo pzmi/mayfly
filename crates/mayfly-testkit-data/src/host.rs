@@ -23,9 +23,16 @@ pub struct FakeImageStore {
     state: Arc<Mutex<(ImageListing, Option<VmError>)>>,
     manifests: Arc<Mutex<BTreeMap<ImageDigest, u64>>>,
     measured: Arc<Mutex<Vec<ImageDigest>>>,
+    listing_fails: Arc<Mutex<bool>>,
 }
 
 impl FakeImageStore {
+    /// Every later listing fails (an unreadable registry), every other call as before; or none
+    /// does (`false`).
+    pub fn fail_listing(&self, fails: bool) {
+        *lock(&self.listing_fails) = fails;
+    }
+
     /// A store holding `listing`.
     #[must_use]
     pub fn new(listing: ImageListing) -> Self {
@@ -89,6 +96,9 @@ impl FakeImageStore {
 
 impl ImageStore for FakeImageStore {
     async fn list(&self) -> Result<ImageListing, VmError> {
+        if *lock(&self.listing_fails) {
+            return Err(VmError::Definite);
+        }
         let state = lock(&self.state);
         state.1.map_or_else(|| Ok(state.0.clone()), Err)
     }

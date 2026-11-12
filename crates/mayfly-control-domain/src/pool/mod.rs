@@ -13,6 +13,9 @@
 //!   `tests/pool/rules.rs::should_reset_only_by_an_operator_when_a_breaker_is_tripped`).
 //! - **The pin is a verified digest**: `PinImage` without the image's verification is refused
 //!   (`tests/pool/rules.rs::should_refuse_a_pin_when_the_image_is_not_verified`).
+//! - **P18**: `TripBreaker{reason: runner_version}` trips the digest's breaker whatever its
+//!   count and closes the terms like a counted trip; only an operator resets it
+//!   (`tests/pool/rules.rs::should_close_the_terms_when_the_runner_version_trips_the_breaker`).
 //! - **Tier immutability per revision** and **`min_prepared` defaults to 0** (ADR 0028)
 //!   (`tests/pool/rules.rs::should_default_min_prepared_to_zero_when_the_configuration_names_none`,
 //!   `tests/pool/rules.rs::should_refuse_a_configuration_when_its_revision_is_not_newer`).
@@ -30,13 +33,13 @@ mod state;
 
 pub use decide::{Decision, decide, evolve};
 pub use events::{
-    AttemptFailureCounted, ImagePinned, PoolBreakerReset, PoolBreakerTripped, PoolConfigured,
-    PoolDecommissioned, PoolDrainCompleted, PoolDrainStarted, PoolEpochAdvanced, PoolEvent,
-    PoolPaused, PoolResumed,
+    AttemptFailureCounted, ImagePinned, PoolBreakerReset, PoolBreakerTripped, PoolBreakerTrippedV1,
+    PoolConfigured, PoolDecommissioned, PoolDrainCompleted, PoolDrainStarted, PoolEpochAdvanced,
+    PoolEvent, PoolPaused, PoolResumed,
 };
 pub use state::{
     Breaker, ConfigurePool, Failure, MIN_PREPARED_DEFAULT, PoolCommand, PoolConfig, PoolMode,
-    PoolRejection, PoolState, PoolTerms, TrustTier, terms,
+    PoolRejection, PoolState, PoolTerms, TripReason, TrustTier, terms,
 };
 
 use crate::aggregate::{Aggregate, DeterminismCase, DeterminismCases};

@@ -22,6 +22,16 @@ pub enum TrustTier {
     Trusted,
 }
 
+/// Why a digest's breaker tripped (`PoolBreakerTripped` from version 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TripReason {
+    /// Stage failures reached the threshold inside the window (I27, P15).
+    Failures,
+    /// The image's runner version expired (P18, ADR 0030 decision 2): GitHub refuses its runner.
+    RunnerVersion,
+}
+
 /// The pool's mode (`doc/domain-model.md` §6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolMode {
@@ -204,6 +214,16 @@ pub enum PoolCommand {
         /// When.
         at: Millis,
     },
+    /// Trip a digest's breaker for a named reason other than counted failures (P18: the
+    /// image's runner version expired). A breaker already tripped records nothing.
+    TripBreaker {
+        /// The digest.
+        digest: ImageDigest,
+        /// Why.
+        reason: TripReason,
+        /// When.
+        at: Millis,
+    },
     /// An operator closes a tripped breaker.
     ResetBreaker {
         /// The digest.
@@ -222,6 +242,7 @@ impl CommandBody for PoolCommand {
         "start_pool_drain",
         "complete_pool_drain",
         "count_attempt_failure",
+        "trip_breaker",
         "reset_breaker",
         "decommission",
     ];
@@ -235,6 +256,7 @@ impl CommandBody for PoolCommand {
             Self::StartPoolDrain => "start_pool_drain",
             Self::CompletePoolDrain => "complete_pool_drain",
             Self::CountAttemptFailure { .. } => "count_attempt_failure",
+            Self::TripBreaker { .. } => "trip_breaker",
             Self::ResetBreaker { .. } => "reset_breaker",
             Self::Decommission => "decommission",
         }

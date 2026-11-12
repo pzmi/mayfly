@@ -123,6 +123,11 @@ pub enum ObservationKind {
         digest: ImageDigest,
         /// The base.
         base_name: BaseName,
+        /// The disk the base reconstructs to, measured from its image's verified manifest;
+        /// `None` when it did not measure (never a default, ADR 0052). From protocol 1.4
+        /// ([`crate::MEASURED_BASE_DISK`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disk_bytes: Option<u64>,
     },
     /// An image base was evicted.
     ImageEvicted {
@@ -198,13 +203,20 @@ impl ObservationKind {
     /// data plane refuses it either way (ADR 0052, correction of 2026-11-10). Pinned by
     /// `should_write_only_what_the_session_accepted_when_it_is_older_than_the_unknown_facts`
     /// and `should_write_proof_mismatch_when_the_session_is_older_than_the_vanished_target`.
+    /// Below [`crate::MEASURED_BASE_DISK`] (1.4) an `ImageMaterialised` is written without its
+    /// disk (pinned by `should_leave_the_base_disk_out_when_the_session_is_older_than_measured_disk`).
     #[must_use]
     pub fn written_in(self, version: ProtocolVersion) -> Self {
+        let this = if version < crate::MEASURED_BASE_DISK {
+            self.without_base_disk()
+        } else {
+            self
+        };
         if version >= VANISHED_TARGET {
-            return self;
+            return this;
         }
         let before_facts = version < UNKNOWN_FACTS;
-        match self {
+        match this {
             Self::DirectiveRefused {
                 reason: RefusalReason::TargetAbsent,
             } => Self::DirectiveRefused {
@@ -254,6 +266,42 @@ impl ObservationKind {
             | Self::HypervisorLimitHit
             | Self::ImagePulled { .. }
             | Self::ImageMaterialised { .. }
+            | Self::ImageEvicted { .. }
+            | Self::DirectiveRefused { .. }
+            | Self::OutcomeUnknown { .. }
+            | Self::CapacityReported(..)
+            | Self::Inventory { .. }) => other,
+        }
+    }
+}
+
+impl ObservationKind {
+    /// The kind as protocol 1.3 carries it: an `ImageMaterialised` without its disk.
+    fn without_base_disk(self) -> Self {
+        match self {
+            Self::ImageMaterialised {
+                digest, base_name, ..
+            } => Self::ImageMaterialised {
+                digest,
+                base_name,
+                disk_bytes: None,
+            },
+            other @ (Self::VmCloned { .. }
+            | Self::VmBooted
+            | Self::GuestVerified { .. }
+            | Self::GuestRejected { .. }
+            | Self::RunnerLaunched
+            | Self::RunnerLaunchUnknown
+            | Self::RunnerExited { .. }
+            | Self::DiagnosticsExported { .. }
+            | Self::DiagnosticsLost { .. }
+            | Self::VmStopped
+            | Self::VmDeleted
+            | Self::VmObservedStopped { .. }
+            | Self::InventoryIncomplete { .. }
+            | Self::HostFacts(..)
+            | Self::HypervisorLimitHit
+            | Self::ImagePulled { .. }
             | Self::ImageEvicted { .. }
             | Self::DirectiveRefused { .. }
             | Self::OutcomeUnknown { .. }
@@ -571,6 +619,35 @@ mod tests {
             written,
             [mismatch.clone(), mismatch, absent.clone(), absent.clone()]
         );
+    }
+
+    #[test]
+    fn should_leave_the_base_disk_out_when_the_session_is_older_than_measured_disk() {
+        use mayfly_domain::Sample as _;
+
+        // given
+        let base =
+            crate::BaseName::new("mfb-0123456789ab-r2-330-0").unwrap_or_else(|e| panic!("{e}"));
+        let materialised = ObservationKind::ImageMaterialised {
+            digest: ImageDigest::sample(),
+            base_name: base.clone(),
+            disk_bytes: Some(50 << 30),
+        };
+
+        // when
+        let older = materialised.clone().written_in(crate::GUEST_IDENTITY);
+        let current = materialised.clone().written_in(crate::MEASURED_BASE_DISK);
+
+        // then: a 1.3 reader gets the 1.3 shape; the control plane reads it as unknown
+        assert_eq!(
+            older,
+            ObservationKind::ImageMaterialised {
+                digest: ImageDigest::sample(),
+                base_name: base,
+                disk_bytes: None,
+            }
+        );
+        assert_eq!(current, materialised);
     }
 
     fn report_with_unknown_memory() -> CapacityReport {

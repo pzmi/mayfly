@@ -99,6 +99,7 @@ fn should_answer_what_each_effect_observed_when_it_is_applied() {
                 vec![ObservationKind::ImageMaterialised {
                     digest: digest(),
                     base_name: BaseName::new("mfb-two").expect("a valid base name"),
+                    disk_bytes: None,
                 }],
                 vec![ObservationKind::ImageEvicted { base_name: base() }],
                 vec![ObservationKind::VmBooted],
@@ -368,5 +369,75 @@ fn should_fetch_no_manifest_when_a_pull_is_stale() {
             }]
         );
         assert!(!fakes.images.measured().contains(&asked));
+    });
+}
+
+/// The answer to one `MaterialiseImage` of `digest()` into `mfb-two`, the store's listing
+/// failing from the session's start when `listing_fails`.
+async fn materialised(fakes: &Fakes, listing_fails: bool) -> Vec<ObservationKind> {
+    let mut exec = fakes.open(2).await;
+    fakes.images.fail_listing(listing_fails);
+    let kind = DirectiveKind::MaterialiseImage {
+        digest: digest(),
+        base_name: BaseName::new("mfb-two").expect("a valid base name"),
+        runner_version: "2.330.0".to_owned(),
+    };
+    let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+        feed.send(directive(1, kind)).await;
+        tap.wait_for(answers(1)).await;
+        tap
+    })
+    .await;
+    answers_to(&seen, 1)
+}
+
+#[test]
+fn should_answer_the_bases_measured_disk_when_a_materialisation_is_applied() {
+    run(async {
+        // given: the image's manifest measures 40 GiB, so its base lists at 40 GiB
+        let fakes = Fakes::new(probe(4));
+        fakes.images.manifest(&digest(), 40 * GIB);
+
+        // when
+        let answered = materialised(&fakes, false).await;
+
+        // then: the control plane plans its clones at it (protocol 1.4, CP-07)
+        assert_eq!(
+            answered,
+            vec![ObservationKind::ImageMaterialised {
+                digest: digest(),
+                base_name: BaseName::new("mfb-two").expect("a valid base name"),
+                disk_bytes: Some(40 * GIB),
+            }]
+        );
+    });
+}
+
+#[test]
+fn should_answer_no_disk_when_the_listing_fails_after_a_materialisation() {
+    run(async {
+        // given: the image measures, but the store's listing fails once the session is open
+        let fakes = Fakes::new(probe(4));
+        fakes.images.manifest(&digest(), 40 * GIB);
+
+        // when
+        let answered = materialised(&fakes, true).await;
+
+        // then: the base is made, its disk unknown: none, never a default (ADR 0052)
+        assert_eq!(
+            answered,
+            vec![ObservationKind::ImageMaterialised {
+                digest: digest(),
+                base_name: BaseName::new("mfb-two").expect("a valid base name"),
+                disk_bytes: None,
+            }]
+        );
+        assert!(
+            fakes
+                .images
+                .listing()
+                .bases
+                .contains_key(&BaseName::new("mfb-two").expect("a valid base name"))
+        );
     });
 }

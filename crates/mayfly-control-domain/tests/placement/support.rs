@@ -78,7 +78,10 @@ pub const fn pulled() -> PlacementCommand {
 }
 
 pub const fn materialised() -> PlacementCommand {
-    PlacementCommand::RecordMaterialised { directive_id: id() }
+    PlacementCommand::RecordMaterialised {
+        directive_id: id(),
+        disk_bytes: None,
+    }
 }
 
 pub const fn evicted() -> PlacementCommand {

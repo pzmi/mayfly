@@ -119,7 +119,7 @@ materialising x issue -> refused directive_pending
 materialising x record_sent -> accepted placement_directive_sent/v1
 materialising x record_pulled -> refused not_pending
 materialising x record_drift -> refused not_pending
-materialising x record_materialised -> accepted image_materialised/v1
+materialising x record_materialised -> accepted image_materialised/v2
 materialising x record_evicted -> refused not_pending
 materialising x record_refused -> accepted placement_directive_refused/v1 placement_failed/v1
 materialising x unknown_before_deadline -> refused not_sent
@@ -157,7 +157,7 @@ refreshing x issue -> refused directive_pending
 refreshing x record_sent -> accepted placement_directive_sent/v1
 refreshing x record_pulled -> refused not_pending
 refreshing x record_drift -> refused not_pending
-refreshing x record_materialised -> accepted image_materialised/v1
+refreshing x record_materialised -> accepted image_materialised/v2
 refreshing x record_evicted -> refused not_pending
 refreshing x record_refused -> accepted placement_directive_refused/v1
 refreshing x unknown_before_deadline -> refused not_sent

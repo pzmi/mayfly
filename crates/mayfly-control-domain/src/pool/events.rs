@@ -4,7 +4,7 @@
 use mayfly_domain::{AttemptId, Epoch, EventId, ImageDigest, Millis, Resources};
 use serde::{Deserialize, Serialize};
 
-use super::state::TrustTier;
+use super::state::{TripReason, TrustTier};
 use crate::attempt::{GuestOs, Stage};
 use crate::event::DomainEvent;
 use crate::event_set;
@@ -127,7 +127,7 @@ impl DomainEvent for AttemptFailureCounted {
 }
 
 /// The breaker of a digest opened: nothing is admitted with it until an operator resets it
-/// (I27).
+/// (I27). Version 2 names why (CP-07, P18): counted failures, or the runner version's expiry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PoolBreakerTripped {
@@ -137,11 +137,41 @@ pub struct PoolBreakerTripped {
     pub failures: u32,
     /// When.
     pub at: Millis,
+    /// Why; `None` for a trip recorded by version 1, which tripped on failures only.
+    pub reason: Option<TripReason>,
 }
 
 impl DomainEvent for PoolBreakerTripped {
     const EVENT_TYPE: &'static str = "pool_breaker_tripped";
+    const SCHEMA_VERSION: u32 = 2;
+}
+
+/// Version 1 of [`PoolBreakerTripped`] (KER-05), without the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PoolBreakerTrippedV1 {
+    /// The digest.
+    pub digest: ImageDigest,
+    /// Failures in the window when it tripped.
+    pub failures: u32,
+    /// When.
+    pub at: Millis,
+}
+
+impl DomainEvent for PoolBreakerTrippedV1 {
+    const EVENT_TYPE: &'static str = "pool_breaker_tripped";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Version 1 named no reason: it read the same as a failures trip, so the reason stays unknown
+/// (`None`) rather than assumed.
+fn upcast_tripped_v1(old: PoolBreakerTrippedV1) -> PoolEvent {
+    PoolEvent::PoolBreakerTripped(PoolBreakerTripped {
+        digest: old.digest,
+        failures: old.failures,
+        at: old.at,
+        reason: None,
+    })
 }
 
 /// An operator reset a digest's breaker.
@@ -194,5 +224,8 @@ event_set! {
         PoolBreakerReset(PoolBreakerReset),
         /// See [`PoolDecommissioned`].
         PoolDecommissioned(PoolDecommissioned),
+    }
+    legacy {
+        PoolBreakerTrippedV1 => upcast_tripped_v1,
     }
 }

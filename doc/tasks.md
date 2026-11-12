@@ -210,6 +210,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-05 | Registration manager and reaper | KER-09, GH-03, CP-02 | opus | |
 | CP-06 | Breaker, quarantine and Unknown-escalation policies | KER-10, CP-03 | sonnet | |
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | |
+| CP-08 | Terms policy P4: a pool's terms applied on every host | CP-07, RT-02 | sonnet | |
+| DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07 | opus | |
 | DP-01 | Data-plane executor and observer, resource ledger, fake provider | KER-08 | opus | |
 | DP-02 | In-process link transport and link contract suite | KER-02 | sonnet | |
 | DP-03 | `mayfly-fake-tart` binary with fault knobs (landed) | FND-02 | sonnet | |
@@ -939,6 +941,10 @@ took the frame: a deadline runs only from the send, so a held directive never ti
 `sessions::HostSessions`; `doc/event-store.md` §5.2 "As built (CP-02)". The cross-plane
 component tests are `crates/mayfly-composition/tests/directive_loop/` (one also on SQLite).
 
+Note (CP-07): P2's `start_attempt` answers `Started::NotPlaced` when the pin's base is not
+materialised on the host; whoever drives P2 waits for a placement kick and starts again then,
+never releasing the lease or retrying at once.
+
 #### CP-03 Reconciler
 Cites: plan §9, §10; dm P5, P22, P23; ADRs 0024, 0028. Level-triggered pass (≤ 1/min plus events):
 desired from the scale sets, capacity from the latest **reported** capacity per host, per-scale-set
@@ -1172,6 +1178,97 @@ digits, so the manager passes the full digest it read (`PlacementState::digest`)
 (`tests/placement/rules.rs::should_refuse_another_digest_when_it_shares_the_twelve_digit_prefix`).
 `RequestPlacement` while the placement is under way or `Materialised` records nothing, whatever its
 runner version: a runner refresh is `RequestRefresh`, never a second request.
+Size: LARGE (production code in four crates, a durable consumer, the inbox, a model change).
+Note (CP-07, scope): `mayflyd` admits a pool on its host only once three tasks have landed: CP-07
+(the pin placed, the base materialised, `Placements` filled), CP-08 (P4: the pool's terms applied
+on the host; without them `Host` refuses every reservation) and OPS-02 (an image registered,
+verified and pinned from the pool's manifest; nothing in `mayflyd` pins one before it).
+Note (CP-07, as built): model first, `formal/scheduling.qnt` gains each pool's pin and the bases
+materialised on the host (`placedOn`, `materialise`, `repin`, `evict`), the invariant
+`leasesKeepTheirBase` and two negative controls (`startWithoutPlacementViolatesTest`,
+`evictWhileReferencedViolatesTest`). An attempt takes the pool's pin when it starts (P2), not at
+its reservation, and starts only while that pin's base is materialised on its host: the start is
+saved with a read of the placement stream (`start::Started::NotPlaced`, which means "wait for a
+placement kick", never a release or a hot retry;
+`tests/store/start.rs::should_start_nothing_when_the_pin_is_not_materialised_on_the_host`,
+`should_refuse_the_start_at_commit_when_the_placement_moves_after_the_read`; the model's
+`repinBetweenReserveAndStartTest`). An eviction is saved with a read of the host stream and of
+every pool stream at the revisions its pass read, and a lease whose attempt the pass did not see
+counts as referencing every base on its host (fail closed), so the reference check holds at the
+commit (`tests/store/placement.rs::should_refuse_the_eviction_when_a_lease_is_reserved_between_the_read_and_the_save`,
+`should_keep_every_base_on_a_host_when_a_lease_there_has_no_attempt_yet`; the model's `evict`
+says why one atomic step is faithful). In safe mode the manager records only timeouts
+(`should_record_only_timeouts_when_the_manager_is_in_safe_mode`). The admission check is the reconciler's, not `Host`'s (decided
+2026-11-12, `Host` unchanged): `reconcile::HostView::placed` from the new `placements` projection; a pool whose pin
+is not materialised on a host is carved nothing, told nothing beyond its live runners and reserved
+nothing there (`tests/reconcile.rs::should_reserve_nothing_on_a_host_when_the_pin_is_not_placed_there`).
+The pure pass is `placement::policy::plan` (request per host, the due directive, timeouts, eviction
+of an unpinned base no live lease references, P18's trip); the driver is
+`mayfly_control::placement::PlacementManager`, the relay the new `placement_relay` consumer
+(`delivery::PlacementRelay`, held in safe mode), and the inbox records the answers on the placement
+stream through the manager's `PlacementIndex`; a complete inventory resolves an `Unknown`
+materialisation or eviction by the base's absence only (a listed base proves nothing, ADR 0025),
+and an `Unknown` pull only by its late answer. **Limitation (recorded at the review, 2026-11-12):**
+nothing on the link proves that a pull or a materialisation *completed*: the inventory lists a
+base's VM but not that it is `Ready`, and no observation carries the data plane's image listing.
+A placement whose pull or materialisation became `Unknown` (its answer lost, for instance over a
+restart) therefore stays `Unknown`, and its pool not admissible on that host, until a late answer
+arrives; no new directive is issued while it is unknown (P7), and no operator asserts its outcome
+(ADR 0025). The fix is DP-08: a protocol minor carrying the data plane's image listing (pulled
+images verified against their digests, `Ready` bases of the owned-base registry), from which the
+inbox resolves it. A failed placement is not requested again (P17's
+failure path); the operator path is OPS-06's `mayfly image refresh <pool>`, which requests the
+pool's placements again, a failed one included (planned there), or a new pin. P18: `Pool`'s new `TripBreaker{digest, reason, at}` (`PoolBreakerTripped` v2 with
+an optional `reason`; v1 upcast to `None`); the manager trips under a command id derived from
+the pool, the digest and the expiry's instant, so an operator's reset is final for that expiry
+(`should_leave_the_breaker_reset_when_an_operator_resets_it_after_the_expiry`). `withdraw_image` is refused while a pool pins the
+image: the pools are listed on every try, and the withdrawal saved with a read of every pool
+stream (`should_refuse_a_withdrawal_when_a_pin_commits_between_the_check_and_the_save`). `mayflyd` runs the manager and the relay, and
+replaces `Placements` with this host's materialised bases after every pass. The measured disk
+(owner, 2026-11-12, F3): protocol 1.4 adds `ImageMaterialised`'s optional `disk_bytes` (the data
+plane answers a materialisation with the base's disk from its store's listing, measured from the
+manifest), the journal's `ImageMaterialised` v2 records it (v1 upcast to `None`), the
+`placements` row carries it, and `reconcile::vm_on` plans a pool whose disk is not configured at
+its placed base's disk on that host
+(`tests/reconcile.rs::should_cap_reservations_by_the_hosts_disk_when_the_placed_base_is_measured`,
+`tests/store/placement.rs::should_cap_reservations_by_the_hosts_disk_when_the_placed_base_reports_its_disk`);
+an answer without it (a 1.3 data plane) reads as unknown, and the clone is planned with 0 disk, the
+data plane's gate (I33) refusing what does not fit
+(`tests/store/placement.rs::should_plan_no_disk_when_the_materialised_answer_carries_none`). The
+model's disk accounting needs no change for F3: it already plans every VM at a disk of its own
+(`VM_DISK`), which the Rust plan now matches where it planned 0 before; the data plane reports the
+base's disk from its listing (`mayfly-data`'s
+`tests/executor/effects.rs::should_answer_the_bases_measured_disk_when_a_materialisation_is_applied`,
+`should_answer_no_disk_when_the_listing_fails_after_a_materialisation`). The link matrix
+gains `welcome_e6_v1.5` as the unspoken minor.
+
+#### DP-08 Image listing on the link: resolve `Unknown` placements after a restart
+Cites: dm P7, P17, §6.7; plan §3.2; ADRs 0025, 0039, 0087. Near the front of the queue: a terminal
+Ctrl-C during a pull (RT-05a) leaves its outcome `Unknown` routinely, and until this lands such a
+placement stays `Unknown` and its pool not admissible on that host (CP-07's limitation). A protocol
+minor carries the data plane's image listing (the pulled images, each verified against its
+digest, and the `Ready` bases of the owned-base registry, ADR 0087) in an observation, sent with
+or beside the inventory; an older session gets none. The inbox resolves an `Unknown` pull from it
+(the image listed: `RecordPulled`; a complete listing without it: `RecordNotApplied`) and an
+`Unknown` materialisation (the base listed `Ready`: `RecordMaterialised`, with its disk; absent:
+`RecordNotApplied`), never issuing a new directive while the outcome is unknown (P7) and never
+asserting one (ADR 0025). Model first: the image store model (`formal/image_store.qnt`) or the
+scheduling model's placement, whichever the resolution's safety rests on, with a negative control
+(a listing read as completion before `Ready`).
+Accept: over fake-tart, `mayflyd` restarted mid-pull resolves the placement from the listing
+without a new directive, and the pool becomes admissible once the base is `Ready`; a listed base
+that is not `Ready` resolves nothing; a 1.4 session is written without the listing.
+
+#### CP-08 Terms policy P4
+Cites: dm P4, §6.2, §6.3; ADR 0024. Issue `ApplyPoolTerms` (`pool::terms`) to every host serving
+the pool on any `Pool` event that bumps `terms_revision` (configuration, pin, pause, resume, drain,
+a breaker trip or reset), keyed `(pool, revision)`, retried with backoff; an older revision is
+refused by `Host`, and no gap can open admission. Today only the fleet test kit applies terms
+(`World::apply_terms`), so under `mayflyd` `Host` refuses every reservation.
+Accept: component tests on fakes (each terms-bumping event reaches every host, a stale revision is
+refused, a closed breaker closes the terms there); `mayflyd` over fake-tart opens a pool on its host
+once the pool is pinned (pinned through the store in the test until OPS-02) and its base is
+materialised (CP-07).
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,
@@ -1416,7 +1513,7 @@ recovery (none is passed: every runner reads `unreachable` and a held cleanup st
 CP-05), the secrets provider built (`UriSecretProvider::from_process`) but read by no client yet
 (GH-02), the `LaunchStore` shared with the guest transport and filled by no link end yet (CP-05,
 ADR 0082), `Placements` filled by CP-07 (until then a clone is held `image_base_unknown`), P4's
-pool terms on the host (no pool is open before an image is pinned), `crash_loop` (OPS-05), the
+pool terms on the host (CP-08; no pool is open before an image is pinned), `crash_loop` (OPS-05), the
 operator socket (RT-03), logging's subscriber (RT-04), Ctrl-C's terminal mode (RT-05), and per-OS
 stop graces (a fixed 30 s).
 
@@ -1945,6 +2042,9 @@ version, capabilities, host requirements), `mayfly image verify`, refusal of tag
 Accept: valid/invalid fixtures.
 DEC-01: manifest fields runner version and its SHA, launcher hash, guest-agent requirement (images
 without it refused, ADR 0038); `image withdraw` with CP-07.
+Note (CP-07): the pin use case saves `PinImage` with a read of the image's `Image` stream and
+refuses a withdrawn image. That closes the one window `withdraw_image` cannot: a pool stream
+created and pinned after the withdrawal's last listing of the pools.
 
 #### OPS-03 ⛳ Release workflow
 Cites: fnd §7. Tag-triggered release: macOS arm64 (and Linux) archives, `SHA256SUMS`, build
@@ -1976,6 +2076,10 @@ verify; move the pool's base pointer keeping the previous; GC unreferenced bases
 warnings in `status`, the optional daily runner-only refresh per pool, rollback to the previous
 base.
 Accept: e2e on fake-tart: refresh, use, roll back; a SHA mismatch refuses the runner.
+Note (CP-07): the operator path for a `Failed` placement (P17's failure path: a refused pull or
+first materialisation, or a drift) is this command: it requests the pool's placements again, a
+failed one included (`RequestPlacement` after `Failed` starts again); the placement manager never
+does it on its own.
 
 #### OPS-07 `mayfly diagnostics bundle`
 Cites: ADR 0036, philosophy §5.1. A local, redacted archive (version, config with references only,

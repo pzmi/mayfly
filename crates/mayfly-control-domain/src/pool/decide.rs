@@ -11,7 +11,7 @@ use super::events::{
 };
 use super::state::{
     Breaker, ConfigurePool, Failure, MIN_PREPARED_DEFAULT, PoolCommand, PoolConfig, PoolMode,
-    PoolRejection, PoolState,
+    PoolRejection, PoolState, TripReason,
 };
 use crate::attempt::Stage;
 use crate::command::{Actor, Command};
@@ -65,6 +65,7 @@ fn decide_unconfigured(body: PoolCommand) -> Decision {
         | PoolCommand::StartPoolDrain
         | PoolCommand::CompletePoolDrain
         | PoolCommand::CountAttemptFailure { .. }
+        | PoolCommand::TripBreaker { .. }
         | PoolCommand::ResetBreaker { .. }
         | PoolCommand::Decommission => Err(PoolRejection::NotConfigured),
     }
@@ -131,6 +132,9 @@ fn decide_configured(state: &PoolState, actor: Actor, body: PoolCommand) -> Deci
             stage,
             at,
         } => Ok(decide_count_failure(state, attempt_id, digest, stage, at)),
+        PoolCommand::TripBreaker { digest, reason, at } => {
+            Ok(decide_trip(state, digest, reason, at))
+        }
         PoolCommand::ResetBreaker { digest } => decide_reset(state, actor, digest),
         PoolCommand::Decommission => match state.mode {
             PoolMode::Drained => Ok(vec![PoolEvent::PoolDecommissioned(PoolDecommissioned {})]),
@@ -200,9 +204,42 @@ fn decide_count_failure(
             digest,
             failures,
             at,
+            reason: Some(TripReason::Failures),
         }));
     }
     events
+}
+
+/// P18: the breaker of `digest` trips for `reason` whatever its count (the failures in the
+/// window are recorded as they stand); one already tripped records nothing, so a repeated
+/// expiry is idempotent. **An operator's reset is final for that expiry**: the placement
+/// manager issues the trip under a command id derived from the pool, the digest and the
+/// expiry's instant (`mayfly_control::placement`), so once an operator reset the breaker, the
+/// manager's next passes, which still read the expiry and plan the trip again, are answered by
+/// the first trip's receipt and record nothing; only a newer expiry (another instant) trips it
+/// again. Pinned by
+/// `tests/pool/rules.rs::should_close_the_terms_when_the_runner_version_trips_the_breaker` and
+/// `mayfly-control`'s
+/// `tests/store/placement.rs::should_leave_the_breaker_reset_when_an_operator_resets_it_after_the_expiry`.
+fn decide_trip(
+    state: &PoolState,
+    digest: ImageDigest,
+    reason: TripReason,
+    at: Millis,
+) -> Vec<PoolEvent> {
+    let empty = Breaker::default();
+    let breaker = state.breakers.get(&digest).unwrap_or(&empty);
+    if breaker.tripped_at.is_some() {
+        return vec![];
+    }
+    let window = state.config.map_or(Millis::new(0), |c| c.breaker_window);
+    let failures = u32::try_from(in_window(breaker, window, at)).unwrap_or(u32::MAX);
+    vec![PoolEvent::PoolBreakerTripped(PoolBreakerTripped {
+        digest,
+        failures,
+        at,
+        reason: Some(reason),
+    })]
 }
 
 fn decide_reset(state: &PoolState, actor: Actor, digest: ImageDigest) -> Decision {

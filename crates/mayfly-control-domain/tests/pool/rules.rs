@@ -1,11 +1,46 @@
 //! The pool's own rules (`doc/domain-model.md` §6.2): the breaker (I27), the verified pin,
 //! configuration revisions, `min_prepared`'s default and the run-epoch fence (I18).
 
-use mayfly_control_domain::pool::{MIN_PREPARED_DEFAULT, PoolCommand, PoolEvent, terms};
+use mayfly_control_domain::pool::{
+    MIN_PREPARED_DEFAULT, PoolCommand, PoolEvent, TripReason, terms,
+};
 
 use super::support::{
     OPERATOR, POLICY, apply, at, auto, configure, digest, failure, outcome, pin, reach,
+    runner_version_expired,
 };
+
+#[test]
+fn should_close_the_terms_when_the_runner_version_trips_the_breaker() {
+    // given: one failure in the window, below the threshold of 3
+    let state = reach([configure(1, None), pin(), failure(1, 1_000)]);
+    let open = terms(&state);
+
+    // when
+    let (tripped, events) =
+        apply(&state, auto(runner_version_expired(2_000))).unwrap_or_else(|r| panic!("{r:?}"));
+    let (_, again) =
+        apply(&tripped, auto(runner_version_expired(3_000))).unwrap_or_else(|r| panic!("{r:?}"));
+
+    // then: P18 trips whatever the count, names its reason, and closes the terms
+    assert!(matches!(
+        events.as_slice(),
+        [PoolEvent::PoolBreakerTripped(t)]
+            if t.reason == Some(TripReason::RunnerVersion) && t.failures == 1
+    ));
+    assert!(again.is_empty(), "a tripped breaker trips once");
+    let closed = terms(&tripped);
+    assert!(open.is_some_and(|t| t.open));
+    assert!(closed.is_some_and(|t| !t.open));
+    assert!(closed.map(|t| t.revision) > open.map(|t| t.revision));
+    assert_eq!(
+        outcome(
+            &tripped,
+            auto(PoolCommand::ResetBreaker { digest: digest() })
+        ),
+        "operator_only"
+    );
+}
 
 #[test]
 fn should_default_min_prepared_to_zero_when_the_configuration_names_none() {

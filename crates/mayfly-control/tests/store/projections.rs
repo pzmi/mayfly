@@ -10,7 +10,7 @@ use mayfly_control::journal::{
     StreamHead, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
 use mayfly_control::projection::views::{
-    Attempts, Hosts, PendingEffects, Pools, RecentFailures, ScaleSets, Slots,
+    Attempts, Hosts, Images, PendingEffects, Placements, Pools, RecentFailures, ScaleSets, Slots,
 };
 use mayfly_control::projection::{
     BuildId, ProjectionSpec, ProjectionStore, SpecEvent, control, prepare,
@@ -78,6 +78,8 @@ fn should_subscribe_to_every_kind_a_projection_reacts_to_when_case_histories_are
         ("recent_failures", subscriptions::<RecentFailures>()),
         ("hosts", subscriptions::<Hosts>()),
         ("scale_sets", subscriptions::<ScaleSets>()),
+        ("images", subscriptions::<Images>()),
+        ("placements", subscriptions::<Placements>()),
     ];
 
     // when

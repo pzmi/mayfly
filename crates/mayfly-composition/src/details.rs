@@ -12,9 +12,10 @@
 //!   nonce (the data plane executes a repeat once) and nothing outside the process can predict
 //!   one. A restart draws a new key, so a directive resent under the next run's epoch gets
 //!   another nonce: it is a new execution there anyway (ADR 0042).
-//! - **The image base** a clone is made from: [`Placements`], which the image placement
-//!   manager fills as bases are materialised on the host (CP-07). Until it does, no base is
-//!   known and a clone is held `image_base_unknown`, never sent to a guessed base (ADR 0039).
+//! - **The image base** a clone is made from: [`Placements`], which the daemon replaces after
+//!   every pass of the image placement manager with the bases materialised on this host
+//!   (`mayfly_control::placement`, CP-07). An image with no materialised base has none, and its
+//!   clone is held `image_base_unknown`, never sent to a guessed base (ADR 0039).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -44,6 +45,18 @@ impl Placements {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(digest, base);
+    }
+
+    /// Replaces every base with `bases`: what the placement manager's last pass read as
+    /// materialised on this host (CP-07), so an evicted base is forgotten. A name that is not a
+    /// valid `mfb-*` base name is left out, never sent to a clone (ADR 0039). Pinned by
+    /// `tests::should_forget_an_evicted_base_when_the_placements_are_replaced`.
+    pub fn replace<'n>(&self, bases: impl IntoIterator<Item = (ImageDigest, &'n str)>) {
+        let fresh: BTreeMap<ImageDigest, BaseName> = bases
+            .into_iter()
+            .filter_map(|(digest, name)| Some((digest, BaseName::new(name).ok()?)))
+            .collect();
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = fresh;
     }
 
     fn get(&self, digest: &ImageDigest) -> Option<BaseName> {
@@ -208,5 +221,25 @@ max_running = 2
             details.image_base(&pool, &ImageDigest::sample()),
             Some(base)
         );
+    }
+
+    #[test]
+    fn should_forget_an_evicted_base_when_the_placements_are_replaced() {
+        // given
+        let placements = Placements::default();
+        let details = ConfigDetails::new(&config(), Some(90), [7; 32], placements.clone());
+        let pool = PoolName::new("mac").unwrap_or_else(|e| panic!("{e}"));
+        placements.replace([(ImageDigest::sample(), "mfb-000000000000-r2-330-0")]);
+        let placed = details.image_base(&pool, &ImageDigest::sample());
+
+        // when: the base is evicted; a malformed name is never a base
+        placements.replace([(ImageDigest::sample(), "ghcr.io/example/image:latest")]);
+
+        // then
+        assert_eq!(
+            placed.map(|b| b.to_string()),
+            Some("mfb-000000000000-r2-330-0".to_owned())
+        );
+        assert_eq!(details.image_base(&pool, &ImageDigest::sample()), None);
     }
 }

@@ -162,7 +162,9 @@ impl DomainEvent for PlacementFailed {
 }
 
 /// A base named by the digest and this runner version exists; the base pointer moves to it and
-/// the base it moved from is kept for rollback.
+/// the base it moved from is kept for rollback. Version 2 records the disk the base
+/// reconstructs to, as the data plane measured it from the image's manifest (CP-07, protocol
+/// 1.4): what the control plane plans a clone at when `clone_disk_gib` is not configured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ImageMaterialised {
@@ -170,11 +172,39 @@ pub struct ImageMaterialised {
     pub directive_id: DirectiveId,
     /// The runner installed: with the digest, the base's name.
     pub runner_version: RunnerVersion,
+    /// The base's measured disk; `None` when the data plane did not report it (an older data
+    /// plane, or a manifest that did not measure): unknown, never a default (ADR 0052).
+    pub disk_bytes: Option<u64>,
 }
 
 impl DomainEvent for ImageMaterialised {
     const EVENT_TYPE: &'static str = "image_materialised";
+    const SCHEMA_VERSION: u32 = 2;
+}
+
+/// Version 1 of [`ImageMaterialised`] (KER-11), without the disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ImageMaterialisedV1 {
+    /// The directive answered.
+    pub directive_id: DirectiveId,
+    /// The runner installed: with the digest, the base's name.
+    pub runner_version: RunnerVersion,
+}
+
+impl DomainEvent for ImageMaterialisedV1 {
+    const EVENT_TYPE: &'static str = "image_materialised";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Version 1 recorded no disk: it reads as unknown, so a clone of that base is planned with no
+/// disk and the data plane's gate (I33) refuses what does not fit, as before CP-07.
+fn upcast_materialised_v1(old: ImageMaterialisedV1) -> PlacementEvent {
+    PlacementEvent::ImageMaterialised(ImageMaterialised {
+        directive_id: old.directive_id,
+        runner_version: old.runner_version,
+        disk_bytes: None,
+    })
 }
 
 /// Another base of the same digest is wanted (a runner-only refresh).
@@ -266,5 +296,8 @@ event_set! {
         EvictionRequested(EvictionRequested),
         /// See [`ImageEvicted`].
         ImageEvicted(ImageEvicted),
+    }
+    legacy {
+        ImageMaterialisedV1 => upcast_materialised_v1,
     }
 }
