@@ -13,7 +13,11 @@
 //!   not counted as a runner (mutant 11, `tests/demand.rs::should_not_count_prepared_vms_when_the_shortfall_is_computed`).
 //! - [`wire_max`]: the `maxCapacity` header of every poll (ADR 0029): the capacity policy's
 //!   reported max while open or paused (paused, it reports only live runners), 0 while draining or
-//!   in safe mode (`tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`).
+//!   in safe mode (`tests/demand.rs::should_send_zero_when_draining_or_in_safe_mode`); while a
+//!   refusal sink is up, pinned at the assigned count (ADR 0090).
+//! - [`classify_assigned`] and [`runner_may_start`] (github.com, ADR 0090 with its 2026-11-12
+//!   amendment): a `JobAssigned` is classified from its workflow run's lookup against the pool's
+//!   [`TrustPolicy`], and a runner starts only for a job classified trusted that waits for one.
 //! - [`trust`] and [`admits`]: the offer's trust class (ADR 0027) and whether the pool's tier
 //!   takes it (I32).
 //! - [`decide_offer`] and [`plan_acquire`]: `PlanAcquire`. In order: an offer the pool's tier does
@@ -24,7 +28,8 @@
 //!   while the assigned jobs plus every open reservation stay below deliverable (I23, mutant 19:
 //!   `tests/demand.rs::should_acquire_only_while_assigned_is_below_deliverable_when_offers_exceed_it`).
 //!
-//! The model is `formal/scaleset.qnt` (`desiredOf`, `wireMax`, `offerStep`).
+//! The model is `formal/scaleset.qnt` (`desiredOf`, `wireMax`, `offerStep`, `lookupRun`,
+//! `vmMayStart`).
 //!
 //! **Assumptions** where `doc/github-scaleset.md` marks a fact client-assumed or [open: HW-02]
 //! (§12), each on the safe side and named in the model:
@@ -142,17 +147,24 @@ pub const fn shortfall(desired: u32, runners: &RunnerCounts) -> u32 {
     desired.saturating_sub(counted)
 }
 
-/// The `maxCapacity` sent on every poll (ADR 0029, I07, I24).
+/// The `maxCapacity` sent on every poll (ADR 0029, I07, I24). `sink_pin` is the assigned count
+/// of the latest statistics while a refusal sink is up (ADR 0090, amended 2026-11-12): the wire
+/// max is pinned at it, never above the reported max, so GitHub assigns nothing new the sink could
+/// take (`formal/scaleset.qnt`'s `wireMax`; pinned by
+/// `tests/demand.rs::should_pin_the_wire_max_at_the_assigned_count_when_a_sink_is_up`).
 #[must_use]
-pub const fn wire_max(capacity: &Capacity) -> u32 {
+pub const fn wire_max(capacity: &Capacity, sink_pin: Option<u32>) -> u32 {
     match capacity.mode {
-        WireMode::Open | WireMode::Paused => capacity.reported_max,
+        WireMode::Open | WireMode::Paused => match sink_pin {
+            Some(assigned) if assigned < capacity.reported_max => assigned,
+            Some(_) | None => capacity.reported_max,
+        },
         WireMode::Draining | WireMode::SafeMode => 0,
     }
 }
 
-/// An offer's `eventName`, as the GitHub ACL maps it (A5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An offer's or a workflow run's `eventName`, as the GitHub ACL maps it (A5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventName {
     /// `push`.
@@ -344,4 +356,203 @@ pub fn plan_acquire(budget: &Budget, offers: &[Offer]) -> AcquirePlan {
         }
     }
     plan
+}
+
+// ---- assigned jobs (github.com, ADR 0090) --------------------------------------------------
+
+/// A workflow job's `jobId` as a `JobAssigned`, `JobStarted` or `JobCompleted` carries it: a
+/// string at GitHub, length-bounded by the ACL and never interpolated (`doc/github-scaleset.md`
+/// §4.3).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkflowJobId(pub String);
+
+/// A workflow run's `workflowRunId`: the run the REST lookup reads (ADR 0090; that it is the
+/// REST API's run is [open: HW-02, item 8]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkflowRunId(pub u64);
+
+/// What identifies a job GitHub assigned to the scale set directly: `(jobId, workflowRunId)`,
+/// never `runnerRequestId`, which is 0 on github.com (`doc/github-scaleset.md` §4.3).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct JobKey {
+    /// `jobId`.
+    pub job_id: WorkflowJobId,
+    /// `workflowRunId`.
+    pub run_id: WorkflowRunId,
+}
+
+/// A repository's full name, `owner/name`, as the ACL bounded it (for a `JobAssigned`,
+/// `ownerName/repositoryName`). Compared exactly, never interpolated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RepositoryName(pub String);
+
+/// A `JobAssigned` with what the classification reads from the message itself. A field the
+/// message lacked is `None`, `Unknown` or empty, and the job is then unclassifiable (A5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignedJob {
+    /// The job.
+    pub key: JobKey,
+    /// `ownerName/repositoryName`.
+    pub repository: Option<RepositoryName>,
+    /// `eventName`.
+    pub event_name: EventName,
+    /// `requestLabels`.
+    pub labels: Vec<String>,
+}
+
+/// What the workflow-run lookup (`GET /repos/{owner}/{repo}/actions/runs/{run_id}`, GH-10)
+/// answered for a pending assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum RunLookup {
+    /// The run's facts.
+    Found(RunFacts),
+    /// An error, a timeout, an absent run or a missing field: the job is refused (ADR 0090).
+    Failed,
+}
+
+/// A workflow run's facts as the lookup decoded them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunFacts {
+    /// `repository.full_name`: the base repository.
+    pub repository: Option<RepositoryName>,
+    /// `head_repository.full_name`: a fork's when it is not the base.
+    pub head_repository: Option<RepositoryName>,
+    /// `event`.
+    pub event_name: EventName,
+}
+
+/// The pool's trust settings (GH-08's configuration, ADR 0090): what a looked-up assignment must
+/// match to be trusted, and what happens to a refused one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustPolicy {
+    /// The scale set's name: an assignment routed to it names it among its labels.
+    pub scale_set_name: String,
+    /// `allowed_repositories`: full names.
+    pub allowed_repositories: BTreeSet<RepositoryName>,
+    /// `allowed_events` (default [`TrustPolicy::default_events`]). `Unknown` is never trusted,
+    /// listed or not: an event the ACL could not name is unclassifiable first.
+    pub allowed_events: BTreeSet<EventName>,
+    /// `cancel_refused_runs` (default false): a refused run is cancelled instead of sunk.
+    pub cancel_refused_runs: bool,
+}
+
+impl TrustPolicy {
+    /// The default `allowed_events` (owner, 2026-11-12, ADR 0090): `push`, `pull_request` from
+    /// the base repository, `workflow_dispatch`, `schedule`, `merge_group`, `release`.
+    #[must_use]
+    pub fn default_events() -> BTreeSet<EventName> {
+        [
+            EventName::Push,
+            EventName::PullRequest,
+            EventName::WorkflowDispatch,
+            EventName::Schedule,
+            EventName::MergeGroup,
+            EventName::Release,
+        ]
+        .into_iter()
+        .collect()
+    }
+}
+
+/// Why an assigned job was refused (`AssignedJobRefused{reason}`, ADR 0090).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// Its repository is not one of the pool's `allowed_repositories` (or no policy applies).
+    RepositoryNotAllowed,
+    /// Its event is not one of the pool's `allowed_events`.
+    EventNotAllowed,
+    /// Its run's head repository is not the base: a fork's.
+    Fork,
+    /// A field the classification needs is missing, unknown or contradicts the other source (A5).
+    Unclassifiable,
+    /// Its run could not be looked up.
+    LookupFailed,
+}
+
+/// An assigned job's class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classification {
+    /// A runner may start for it.
+    Trusted,
+    /// No runner starts for it; it goes to a sink or is cancelled.
+    Refused(RefusalReason),
+}
+
+/// Classifies an assignment from its message and its run's lookup (ADR 0090, owner 2026-11-11
+/// and 2026-11-12; `formal/scaleset.qnt`'s `lookupRun` with `TRUST`). In order: a failed lookup
+/// refuses; the repository must be known, agree between the message and the run, and be allowed;
+/// the labels must name the scale set; the message's and the run's event must both be known,
+/// agree, and be allowed (a `JobAssigned` without an event name is unclassifiable, A5); the head repository must be known and be the
+/// base. With no policy applied every job is refused (fail closed). Pinned by
+/// `tests/demand.rs::should_trust_only_an_allowed_event_of_an_allowed_repository_when_an_assignment_is_classified`.
+#[must_use]
+pub fn classify_assigned(
+    policy: Option<&TrustPolicy>,
+    job: &AssignedJob,
+    lookup: &RunLookup,
+) -> Classification {
+    let refuse = Classification::Refused;
+    let run = match lookup {
+        RunLookup::Found(run) => run,
+        RunLookup::Failed => return refuse(RefusalReason::LookupFailed),
+    };
+    let (Some(repository), Some(base)) = (&job.repository, &run.repository) else {
+        return refuse(RefusalReason::Unclassifiable);
+    };
+    if repository != base {
+        return refuse(RefusalReason::Unclassifiable);
+    }
+    let Some(policy) = policy else {
+        return refuse(RefusalReason::RepositoryNotAllowed);
+    };
+    if !policy.allowed_repositories.contains(base) {
+        return refuse(RefusalReason::RepositoryNotAllowed);
+    }
+    if !job.labels.contains(&policy.scale_set_name) {
+        return refuse(RefusalReason::Unclassifiable);
+    }
+    let unknown = job.event_name == EventName::Unknown || run.event_name == EventName::Unknown;
+    if unknown || job.event_name != run.event_name {
+        return refuse(RefusalReason::Unclassifiable);
+    }
+    if !policy.allowed_events.contains(&run.event_name) {
+        return refuse(RefusalReason::EventNotAllowed);
+    }
+    match &run.head_repository {
+        None => refuse(RefusalReason::Unclassifiable),
+        Some(head) if head != base => refuse(RefusalReason::Fork),
+        Some(_) => Classification::Trusted,
+    }
+}
+
+/// What [`runner_may_start`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerGate {
+    /// The pool's wire mode.
+    pub mode: WireMode,
+    /// The scale set's session is active (not degraded, closing or absent).
+    pub active: bool,
+    /// Jobs waiting for a runner that mayfly classified trusted: acquired offers (GHES) and
+    /// assignments whose lookup classified them trusted (github.com).
+    pub waiting: u32,
+    /// Runners mayfly started that have no job yet.
+    pub idle: u32,
+}
+
+/// Whether the reconciler may start (and mint) one more runner for the scale set (ADR 0090; the
+/// model's `vmMayStart`): only for a classified-trusted job that waits for one, more such jobs
+/// than idle runners, while open and active. A refused or pending job holds nothing and backs
+/// nothing (GH-00S). Pinned by
+/// `tests/demand.rs::should_start_a_runner_only_for_a_trusted_job_when_one_waits`.
+#[must_use]
+pub const fn runner_may_start(gate: &RunnerGate) -> bool {
+    let open = match gate.mode {
+        WireMode::Open => true,
+        WireMode::Paused | WireMode::Draining | WireMode::SafeMode => false,
+    };
+    open && gate.active && gate.idle < gate.waiting
 }

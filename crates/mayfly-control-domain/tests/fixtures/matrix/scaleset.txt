@@ -19,6 +19,14 @@ unconfigured x capacity_stale -> accepted, no event
 unconfigured x recovered -> refused not_ensured
 unconfigured x start_closing -> refused not_ensured
 unconfigured x stale_run -> refused not_ensured
+unconfigured x trust_policy -> accepted scale_set_epoch_advanced/v1 trust_policy_applied/v1
+unconfigured x lookup_trusted -> refused not_pending
+unconfigured x lookup_failed -> refused not_pending
+unconfigured x start_sink -> refused not_refused
+unconfigured x sink_ended -> refused no_sink
+unconfigured x cancel_answer -> refused cancel_not_due
+unconfigured x vanished_same -> refused not_ensured
+unconfigured x recreated_new -> refused not_ensured
 ensured x ensure -> accepted, no event
 ensured x ensure_other -> refused scale_set_mismatch
 ensured x begin_open -> accepted session_open_requested/v1
@@ -39,6 +47,14 @@ ensured x capacity_stale -> accepted, no event
 ensured x recovered -> refused not_degraded
 ensured x start_closing -> refused no_session
 ensured x stale_run -> refused stale_run
+ensured x trust_policy -> accepted trust_policy_applied/v1
+ensured x lookup_trusted -> refused not_pending
+ensured x lookup_failed -> refused not_pending
+ensured x start_sink -> refused not_refused
+ensured x sink_ended -> refused no_sink
+ensured x cancel_answer -> refused cancel_not_due
+ensured x vanished_same -> accepted scale_set_vanished/v1
+ensured x recreated_new -> refused not_vanished
 opening x ensure -> accepted, no event
 opening x ensure_other -> refused scale_set_mismatch
 opening x begin_open -> accepted, no event
@@ -59,6 +75,14 @@ opening x capacity_stale -> refused stale_capacity
 opening x recovered -> refused not_degraded
 opening x start_closing -> refused no_session
 opening x stale_run -> refused stale_run
+opening x trust_policy -> accepted trust_policy_applied/v1
+opening x lookup_trusted -> refused not_pending
+opening x lookup_failed -> refused not_pending
+opening x start_sink -> refused not_refused
+opening x sink_ended -> refused no_sink
+opening x cancel_answer -> refused cancel_not_due
+opening x vanished_same -> accepted scale_set_vanished/v1
+opening x recreated_new -> refused not_vanished
 active x ensure -> accepted, no event
 active x ensure_other -> refused scale_set_mismatch
 active x begin_open -> refused session_live
@@ -79,6 +103,14 @@ active x capacity_stale -> refused stale_capacity
 active x recovered -> refused not_degraded
 active x start_closing -> accepted closing_started/v1
 active x stale_run -> refused stale_run
+active x trust_policy -> accepted trust_policy_applied/v1
+active x lookup_trusted -> refused not_pending
+active x lookup_failed -> refused not_pending
+active x start_sink -> refused not_refused
+active x sink_ended -> refused no_sink
+active x cancel_answer -> refused cancel_not_due
+active x vanished_same -> refused session_live
+active x recreated_new -> refused not_vanished
 active_reserved x ensure -> accepted, no event
 active_reserved x ensure_other -> refused scale_set_mismatch
 active_reserved x begin_open -> refused session_live
@@ -99,6 +131,14 @@ active_reserved x capacity_stale -> refused stale_capacity
 active_reserved x recovered -> refused not_degraded
 active_reserved x start_closing -> accepted closing_started/v1
 active_reserved x stale_run -> refused stale_run
+active_reserved x trust_policy -> accepted trust_policy_applied/v1
+active_reserved x lookup_trusted -> refused not_pending
+active_reserved x lookup_failed -> refused not_pending
+active_reserved x start_sink -> refused not_refused
+active_reserved x sink_ended -> refused no_sink
+active_reserved x cancel_answer -> refused cancel_not_due
+active_reserved x vanished_same -> refused session_live
+active_reserved x recreated_new -> refused not_vanished
 active_reopened x ensure -> accepted, no event
 active_reopened x ensure_other -> refused scale_set_mismatch
 active_reopened x begin_open -> refused session_live
@@ -111,7 +151,7 @@ active_reopened x deleted_second -> refused unknown_session
 active_reopened x message_first -> refused session_mismatch
 active_reopened x message_second -> accepted message_recorded/v1
 active_reopened x message_second_at_floor -> accepted message_recorded/v1
-active_reopened x message_second_below_floor -> accepted message_recorded/v1 session_degraded/v1
+active_reopened x message_second_below_floor -> accepted message_ids_restarted/v1 message_recorded/v1
 active_reopened x acquire_answer -> accepted, no event
 active_reopened x acquire_nothing -> refused not_acquiring
 active_reopened x capacity_next -> accepted capacity_applied/v1
@@ -119,6 +159,14 @@ active_reopened x capacity_stale -> refused stale_capacity
 active_reopened x recovered -> refused not_degraded
 active_reopened x start_closing -> accepted closing_started/v1
 active_reopened x stale_run -> refused stale_run
+active_reopened x trust_policy -> accepted trust_policy_applied/v1
+active_reopened x lookup_trusted -> refused not_pending
+active_reopened x lookup_failed -> refused not_pending
+active_reopened x start_sink -> refused not_refused
+active_reopened x sink_ended -> refused no_sink
+active_reopened x cancel_answer -> refused cancel_not_due
+active_reopened x vanished_same -> refused session_live
+active_reopened x recreated_new -> refused not_vanished
 backoff_stale x ensure -> accepted, no event
 backoff_stale x ensure_other -> refused scale_set_mismatch
 backoff_stale x begin_open -> refused stale_session_pending
@@ -139,6 +187,14 @@ backoff_stale x capacity_stale -> refused stale_capacity
 backoff_stale x recovered -> refused not_degraded
 backoff_stale x start_closing -> refused no_session
 backoff_stale x stale_run -> refused stale_run
+backoff_stale x trust_policy -> accepted trust_policy_applied/v1
+backoff_stale x lookup_trusted -> refused not_pending
+backoff_stale x lookup_failed -> refused not_pending
+backoff_stale x start_sink -> refused not_refused
+backoff_stale x sink_ended -> refused no_sink
+backoff_stale x cancel_answer -> refused cancel_not_due
+backoff_stale x vanished_same -> refused stale_session_pending
+backoff_stale x recreated_new -> refused not_vanished
 backoff x ensure -> accepted, no event
 backoff x ensure_other -> refused scale_set_mismatch
 backoff x begin_open -> accepted session_open_requested/v1
@@ -159,6 +215,14 @@ backoff x capacity_stale -> refused stale_capacity
 backoff x recovered -> refused not_degraded
 backoff x start_closing -> refused no_session
 backoff x stale_run -> refused stale_run
+backoff x trust_policy -> accepted trust_policy_applied/v1
+backoff x lookup_trusted -> refused not_pending
+backoff x lookup_failed -> refused not_pending
+backoff x start_sink -> refused not_refused
+backoff x sink_ended -> refused no_sink
+backoff x cancel_answer -> refused cancel_not_due
+backoff x vanished_same -> accepted scale_set_vanished/v1
+backoff x recreated_new -> refused not_vanished
 degraded x ensure -> accepted, no event
 degraded x ensure_other -> refused scale_set_mismatch
 degraded x begin_open -> refused session_live
@@ -179,6 +243,98 @@ degraded x capacity_stale -> refused stale_capacity
 degraded x recovered -> accepted session_recovered/v1
 degraded x start_closing -> accepted closing_started/v1
 degraded x stale_run -> refused stale_run
+degraded x trust_policy -> accepted trust_policy_applied/v1
+degraded x lookup_trusted -> refused not_pending
+degraded x lookup_failed -> refused not_pending
+degraded x start_sink -> refused not_refused
+degraded x sink_ended -> refused no_sink
+degraded x cancel_answer -> refused cancel_not_due
+degraded x vanished_same -> refused session_live
+degraded x recreated_new -> refused not_vanished
+active_refused x ensure -> accepted, no event
+active_refused x ensure_other -> refused scale_set_mismatch
+active_refused x begin_open -> refused session_live
+active_refused x opened_first -> accepted, no event
+active_refused x opened_second -> refused session_live
+active_refused x loss_expired -> accepted session_lost/v1
+active_refused x loss_conflicted -> accepted session_lost/v1
+active_refused x deleted_first -> refused unknown_session
+active_refused x deleted_second -> refused unknown_session
+active_refused x message_first -> accepted message_recorded/v1
+active_refused x message_second -> refused session_mismatch
+active_refused x message_second_at_floor -> refused session_mismatch
+active_refused x message_second_below_floor -> refused session_mismatch
+active_refused x acquire_answer -> accepted, no event
+active_refused x acquire_nothing -> refused not_acquiring
+active_refused x capacity_next -> accepted capacity_applied/v1
+active_refused x capacity_stale -> refused stale_capacity
+active_refused x recovered -> refused not_degraded
+active_refused x start_closing -> accepted closing_started/v1
+active_refused x stale_run -> refused stale_run
+active_refused x trust_policy -> accepted, no event
+active_refused x lookup_trusted -> refused not_pending
+active_refused x lookup_failed -> refused not_pending
+active_refused x start_sink -> accepted sink_started/v1
+active_refused x sink_ended -> refused no_sink
+active_refused x cancel_answer -> refused cancel_not_due
+active_refused x vanished_same -> refused session_live
+active_refused x recreated_new -> refused not_vanished
+active_sink x ensure -> accepted, no event
+active_sink x ensure_other -> refused scale_set_mismatch
+active_sink x begin_open -> refused session_live
+active_sink x opened_first -> accepted, no event
+active_sink x opened_second -> refused session_live
+active_sink x loss_expired -> accepted session_lost/v1
+active_sink x loss_conflicted -> accepted session_lost/v1
+active_sink x deleted_first -> refused unknown_session
+active_sink x deleted_second -> refused unknown_session
+active_sink x message_first -> accepted message_recorded/v1
+active_sink x message_second -> refused session_mismatch
+active_sink x message_second_at_floor -> refused session_mismatch
+active_sink x message_second_below_floor -> refused session_mismatch
+active_sink x acquire_answer -> accepted, no event
+active_sink x acquire_nothing -> refused not_acquiring
+active_sink x capacity_next -> accepted capacity_applied/v1
+active_sink x capacity_stale -> refused stale_capacity
+active_sink x recovered -> refused not_degraded
+active_sink x start_closing -> accepted closing_started/v1
+active_sink x stale_run -> refused stale_run
+active_sink x trust_policy -> accepted, no event
+active_sink x lookup_trusted -> refused not_pending
+active_sink x lookup_failed -> refused not_pending
+active_sink x start_sink -> refused sink_not_due
+active_sink x sink_ended -> accepted sink_ended/v1
+active_sink x cancel_answer -> refused cancel_not_due
+active_sink x vanished_same -> refused session_live
+active_sink x recreated_new -> refused not_vanished
+active_pending_cancel x ensure -> accepted, no event
+active_pending_cancel x ensure_other -> refused scale_set_mismatch
+active_pending_cancel x begin_open -> refused session_live
+active_pending_cancel x opened_first -> accepted, no event
+active_pending_cancel x opened_second -> refused session_live
+active_pending_cancel x loss_expired -> accepted session_lost/v1
+active_pending_cancel x loss_conflicted -> accepted session_lost/v1
+active_pending_cancel x deleted_first -> refused unknown_session
+active_pending_cancel x deleted_second -> refused unknown_session
+active_pending_cancel x message_first -> accepted message_recorded/v1
+active_pending_cancel x message_second -> refused session_mismatch
+active_pending_cancel x message_second_at_floor -> refused session_mismatch
+active_pending_cancel x message_second_below_floor -> refused session_mismatch
+active_pending_cancel x acquire_answer -> accepted, no event
+active_pending_cancel x acquire_nothing -> refused not_acquiring
+active_pending_cancel x capacity_next -> accepted capacity_applied/v1
+active_pending_cancel x capacity_stale -> refused stale_capacity
+active_pending_cancel x recovered -> refused not_degraded
+active_pending_cancel x start_closing -> accepted closing_started/v1
+active_pending_cancel x stale_run -> refused stale_run
+active_pending_cancel x trust_policy -> accepted trust_policy_applied/v1
+active_pending_cancel x lookup_trusted -> accepted assigned_job_trusted/v1
+active_pending_cancel x lookup_failed -> refused not_pending
+active_pending_cancel x start_sink -> refused sink_not_due
+active_pending_cancel x sink_ended -> refused no_sink
+active_pending_cancel x cancel_answer -> accepted cancel_answered/v1
+active_pending_cancel x vanished_same -> refused session_live
+active_pending_cancel x recreated_new -> refused not_vanished
 closing x ensure -> accepted, no event
 closing x ensure_other -> refused scale_set_mismatch
 closing x begin_open -> refused closing
@@ -199,6 +355,14 @@ closing x capacity_stale -> refused stale_capacity
 closing x recovered -> refused not_degraded
 closing x start_closing -> accepted, no event
 closing x stale_run -> refused stale_run
+closing x trust_policy -> accepted trust_policy_applied/v1
+closing x lookup_trusted -> refused not_pending
+closing x lookup_failed -> refused not_pending
+closing x start_sink -> refused not_refused
+closing x sink_ended -> refused no_sink
+closing x cancel_answer -> refused cancel_not_due
+closing x vanished_same -> refused session_live
+closing x recreated_new -> refused not_vanished
 closed x ensure -> accepted, no event
 closed x ensure_other -> refused scale_set_mismatch
 closed x begin_open -> accepted session_open_requested/v1
@@ -219,3 +383,39 @@ closed x capacity_stale -> refused stale_capacity
 closed x recovered -> refused not_degraded
 closed x start_closing -> refused no_session
 closed x stale_run -> refused stale_run
+closed x trust_policy -> accepted trust_policy_applied/v1
+closed x lookup_trusted -> refused not_pending
+closed x lookup_failed -> refused not_pending
+closed x start_sink -> refused not_refused
+closed x sink_ended -> refused no_sink
+closed x cancel_answer -> refused cancel_not_due
+closed x vanished_same -> accepted scale_set_vanished/v1
+closed x recreated_new -> refused not_vanished
+vanished x ensure -> refused scale_set_vanished
+vanished x ensure_other -> refused scale_set_vanished
+vanished x begin_open -> refused not_ensured
+vanished x opened_first -> refused not_ensured
+vanished x opened_second -> refused not_ensured
+vanished x loss_expired -> refused not_ensured
+vanished x loss_conflicted -> refused not_ensured
+vanished x deleted_first -> refused not_ensured
+vanished x deleted_second -> refused not_ensured
+vanished x message_first -> refused not_ensured
+vanished x message_second -> refused not_ensured
+vanished x message_second_at_floor -> refused not_ensured
+vanished x message_second_below_floor -> refused not_ensured
+vanished x acquire_answer -> accepted, no event
+vanished x acquire_nothing -> refused not_acquiring
+vanished x capacity_next -> accepted capacity_applied/v1
+vanished x capacity_stale -> refused stale_capacity
+vanished x recovered -> refused not_ensured
+vanished x start_closing -> refused not_ensured
+vanished x stale_run -> refused stale_run
+vanished x trust_policy -> accepted trust_policy_applied/v1
+vanished x lookup_trusted -> refused not_pending
+vanished x lookup_failed -> refused not_pending
+vanished x start_sink -> refused not_refused
+vanished x sink_ended -> refused no_sink
+vanished x cancel_answer -> refused cancel_not_due
+vanished x vanished_same -> accepted, no event
+vanished x recreated_new -> accepted scale_set_recreated/v1

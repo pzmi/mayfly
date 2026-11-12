@@ -5,9 +5,11 @@
 use mayfly_domain::{Epoch, PoolName};
 use serde::{Deserialize, Serialize};
 
-use super::state::{DegradedCause, JobFact, LossCause, MessageId, MessageOrigin, SessionId};
+use super::state::{
+    CancelAnswer, DegradedCause, JobFact, LossCause, MessageId, MessageOrigin, SessionId,
+};
 use crate::attempt::RunnerRequestId;
-use crate::demand::{Capacity, Declined, Statistics};
+use crate::demand::{Capacity, Declined, JobKey, RefusalReason, Statistics, TrustPolicy};
 use crate::event::DomainEvent;
 use crate::event_set;
 use crate::pool::TrustTier;
@@ -175,7 +177,9 @@ impl DomainEvent for AcquireObserved {
 pub struct CapacityApplied {
     /// The input.
     pub capacity: Capacity,
-    /// The `maxCapacity` every poll now sends (ADR 0029).
+    /// The `maxCapacity` the input sets (ADR 0029), a snapshot at the time it was applied: while a
+    /// refusal sink is up the wire max also follows the latest statistics' assigned count, so a
+    /// poller reads [`super::ScaleSetState::wire_max`], never this field (GH-04).
     pub wire_max: u32,
     /// `min(deliverable, totalAssignedJobs)` of the latest statistics.
     pub desired: u32,
@@ -232,6 +236,137 @@ impl DomainEvent for SessionClosed {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// A session's first message came strictly below its floor: it cannot be a redelivery (those
+/// come oldest first), so GitHub restarted its numbering (A1 refuted, `doc/github-scaleset.md`
+/// §4.1). Recorded for the operator ahead of the message, which applies as new; the cursor and
+/// the floor restart from it (`formal/scaleset.qnt`'s `a1RestartIsRecoveredTest`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MessageIdsRestarted {
+    /// The message that starts the new numbering.
+    pub message_id: MessageId,
+    /// The session's floor it came below.
+    pub floor: MessageId,
+}
+
+impl DomainEvent for MessageIdsRestarted {
+    const EVENT_TYPE: &'static str = "message_ids_restarted";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// The pool's trust policy (GH-08) now classifies every later lookup (ADR 0090).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TrustPolicyApplied {
+    /// The policy.
+    pub policy: TrustPolicy,
+}
+
+impl DomainEvent for TrustPolicyApplied {
+    const EVENT_TYPE: &'static str = "trust_policy_applied";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// A pending assignment's workflow run was looked up and the job classified trusted: a runner
+/// may start for it (ADR 0090).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AssignedJobTrusted {
+    /// The job.
+    pub job: JobKey,
+}
+
+impl DomainEvent for AssignedJobTrusted {
+    const EVENT_TYPE: &'static str = "assigned_job_trusted";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// A pending assignment was refused: no runner starts for it, and it goes to a refusal sink or,
+/// with `cancel_refused_runs`, its run is cancelled (ADR 0090). A recorded fact for the
+/// operator, never only a log line; the use case that records it logs `job_refused` at WARN
+/// (GH-08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AssignedJobRefused {
+    /// The job.
+    pub job: JobKey,
+    /// Why.
+    pub reason: RefusalReason,
+}
+
+impl DomainEvent for AssignedJobRefused {
+    const EVENT_TYPE: &'static str = "assigned_job_refused";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// A refusal sink was decided for a refused job (IMG-03): the wire max is pinned at the assigned
+/// count until it ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SinkStarted {
+    /// The refused job it was started for (GitHub picks the job it gets).
+    pub job: JobKey,
+}
+
+impl DomainEvent for SinkStarted {
+    const EVENT_TYPE: &'static str = "sink_started";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// The refusal sink's VM was deleted: the pin lifts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SinkEnded {}
+
+impl DomainEvent for SinkEnded {
+    const EVENT_TYPE: &'static str = "sink_ended";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// GitHub answered the cancel of a refused job's run; it is never asked again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CancelAnswered {
+    /// The refused job.
+    pub job: JobKey,
+    /// The answer.
+    pub answer: CancelAnswer,
+}
+
+impl DomainEvent for CancelAnswered {
+    const EVENT_TYPE: &'static str = "cancel_answered";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// A create or read answered 404 for the journaled scale set: GitHub deleted it as dormant
+/// (`doc/github-scaleset.md` §3.1). The stream is `Unconfigured` until it is re-created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ScaleSetVanished {
+    /// The scale set that vanished.
+    pub github_id: ScaleSetId,
+}
+
+impl DomainEvent for ScaleSetVanished {
+    const EVENT_TYPE: &'static str = "scale_set_vanished";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// The vanished scale set was created again: a new id, a new numbering (cursor and floor reset),
+/// and the old set's reservations, classifications and refusals dropped, since its assigned jobs
+/// went back to GitHub's queue (`formal/scaleset.qnt`'s `recreateScaleSet`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ScaleSetRecreated {
+    /// GitHub's id of the new scale set.
+    pub github_id: ScaleSetId,
+}
+
+impl DomainEvent for ScaleSetRecreated {
+    const EVENT_TYPE: &'static str = "scale_set_recreated";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 event_set! {
     /// Everything that happens to a pool's scale set.
     pub enum ScaleSetEvent {
@@ -263,5 +398,23 @@ event_set! {
         ClosingStarted(ClosingStarted),
         /// See [`SessionClosed`].
         SessionClosed(SessionClosed),
+        /// See [`MessageIdsRestarted`].
+        MessageIdsRestarted(MessageIdsRestarted),
+        /// See [`TrustPolicyApplied`].
+        TrustPolicyApplied(TrustPolicyApplied),
+        /// See [`AssignedJobTrusted`].
+        AssignedJobTrusted(AssignedJobTrusted),
+        /// See [`AssignedJobRefused`].
+        AssignedJobRefused(AssignedJobRefused),
+        /// See [`SinkStarted`].
+        SinkStarted(SinkStarted),
+        /// See [`SinkEnded`].
+        SinkEnded(SinkEnded),
+        /// See [`CancelAnswered`].
+        CancelAnswered(CancelAnswered),
+        /// See [`ScaleSetVanished`].
+        ScaleSetVanished(ScaleSetVanished),
+        /// See [`ScaleSetRecreated`].
+        ScaleSetRecreated(ScaleSetRecreated),
     }
 }

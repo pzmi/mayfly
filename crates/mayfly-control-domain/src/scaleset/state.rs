@@ -1,14 +1,16 @@
 //! The scale set's folded state, the value types its commands and events carry, its commands and
 //! its refusals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mayfly_domain::{Epoch, OwnedVmName, PoolName};
 use serde::{Deserialize, Serialize};
 
 use crate::aggregate::{CommandBody, Rejection};
 use crate::attempt::RunnerRequestId;
-use crate::demand::{Capacity, Offer, Statistics};
+use crate::demand::{
+    AssignedJob, Capacity, JobKey, Offer, RunLookup, RunnerGate, Statistics, TrustPolicy, WireMode,
+};
 use crate::pool::TrustTier;
 use crate::registration::{JobResult, RunnerId, ScaleSetId};
 
@@ -27,10 +29,11 @@ pub const PROTOCOL_DRIFT_THRESHOLD: u32 = 3;
 pub const SESSION_CONFLICT_ESCALATION: u32 = 5;
 
 /// A message's `messageId`. Assumed to increase per scale set, across sessions (A1,
-/// client-assumed, `doc/github-scaleset.md` §4.1 and §12 item 4; a restarted numbering is
-/// KER-06G's): the statistics cursor is kept across sessions, so an
-/// older message's statistics never replace newer ones, and a session's floor (the cursor at its
-/// open) tells a message recorded in an earlier session from a new one.
+/// client-assumed, `doc/github-scaleset.md` §4.1 and §12 item 4): the statistics cursor is kept
+/// across sessions, so an older message's statistics never replace newer ones, and a session's
+/// floor (the cursor at its open) tells a message recorded in an earlier session from a new one.
+/// A session's first message strictly below the floor starts a new numbering
+/// (`MessageIdsRestarted`, KER-06G).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MessageId(pub u64);
@@ -83,9 +86,10 @@ pub enum LossCause {
 pub enum DegradedCause {
     /// Unknown message types reached [`PROTOCOL_DRIFT_THRESHOLD`] (R7).
     ProtocolDrift,
-    /// A message at or below the session's floor that A1 does not explain: GitHub's ids did not
-    /// increase across sessions (A1 refuted, or not delivered oldest first). Nothing it carried
-    /// was applied; the operator decides (`MessageOrigin::IdRegressed`).
+    /// A message at or below the cursor that is neither the stream's last record redelivered as
+    /// the session's first message nor a restarted numbering: an id reused within a session or
+    /// delivered out of order (A1 refuted). Nothing it carried was applied; the operator decides
+    /// (`MessageOrigin::IdRegressed`).
     MessageIdsRegressed,
 }
 
@@ -93,14 +97,16 @@ pub enum DegradedCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
-    /// Above the floor: a message this stream has not recorded; it applies in full.
+    /// Above the cursor, or the first message of a restarted numbering (`MessageIdsRestarted`
+    /// recorded before it): a message this stream has not recorded; it applies in full.
     Fresh,
     /// The stream's last record (its id is the floor), redelivered as the session's first
     /// message because its ack was lost: recorded so it can be acked, it applies nothing again
     /// (no statistics, no plan, no release, no drift).
     Redelivered,
-    /// At or below the floor otherwise: A1 does not explain it, so it applies nothing and the
-    /// session is degraded (`DegradedCause::MessageIdsRegressed`).
+    /// At or below the cursor otherwise: A1 does not explain it (a reused id, even one with a
+    /// receipt, is never a duplicate), so it applies nothing and the session is degraded
+    /// (`DegradedCause::MessageIdsRegressed`).
     IdRegressed,
 }
 
@@ -130,10 +136,19 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobFact {
-    /// `JobAssigned`: never counted for demand.
+    /// `JobAssigned`: never counted for demand. On github.com (`runnerRequestId` 0) the job is
+    /// classified from `job` before any runner starts (ADR 0090).
     Assigned {
-        /// The job.
+        /// The job's `runnerRequestId` (0 on github.com: never a key there).
         request_id: RunnerRequestId,
+        /// The job's key and classifying fields, when the message carried a `jobId` and a
+        /// `workflowRunId` (KER-06G; absent in records written before it). Without them the
+        /// assignment cannot be keyed: it is never classified trusted, so it backs no runner and
+        /// holds nothing, but no `AssignedJobRefused` is recorded for it and no sink or cancel can
+        /// target it (a known gap until HW-02 shows whether github.com ever omits them; the
+        /// in-guest hook still fails it, ADR 0090).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<AssignedJob>,
     },
     /// `JobStarted`: the job is bound to a runner; its reservation is released.
     Started {
@@ -144,6 +159,9 @@ pub enum JobFact {
         /// The runner's name when it is one of mayfly's VM names (the ACL parses it; any other
         /// name is `None`).
         runner_name: Option<OwnedVmName>,
+        /// The job's key, when the message named one: releases its classification (KER-06G).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<JobKey>,
     },
     /// `JobCompleted` (a cancel included): the reservation, if any, is released.
     Completed {
@@ -153,6 +171,9 @@ pub enum JobFact {
         result: JobResult,
         /// The runner's id, when the message carried one.
         runner_id: Option<RunnerId>,
+        /// The job's key, when the message named one: releases its classification (KER-06G).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job: Option<JobKey>,
     },
 }
 
@@ -161,7 +182,7 @@ impl JobFact {
     #[must_use]
     pub const fn request_id(&self) -> RunnerRequestId {
         match self {
-            Self::Assigned { request_id }
+            Self::Assigned { request_id, .. }
             | Self::Started { request_id, .. }
             | Self::Completed { request_id, .. } => *request_id,
         }
@@ -234,6 +255,45 @@ pub struct ScaleSetState {
     pub acquired: BTreeSet<RunnerRequestId>,
     /// Unknown message types since the session opened or recovered.
     pub drift: u32,
+    /// A `MessageIdsRestarted` was recorded (A1 refuted, recovered).
+    pub renumbered: bool,
+    /// The pool's trust policy (GH-08); none applied refuses every assignment.
+    pub policy: Option<TrustPolicy>,
+    /// Assigned directly, its workflow run not looked up yet: no runner starts for it (ADR 0090).
+    pub pending: BTreeMap<JobKey, Assignment>,
+    /// Assigned directly and classified trusted, no `JobStarted` or `JobCompleted` yet. Kept
+    /// with its assignment so that a changed trust policy sends it back to `pending`.
+    pub trusted: BTreeMap<JobKey, Assignment>,
+    /// Assigned directly and refused (`AssignedJobRefused`), until a job fact, a new assignment
+    /// of it or a re-created scale set shows it gone. Holds nothing.
+    pub refused: BTreeSet<JobKey>,
+    /// Refused jobs whose cancel was answered: never asked again.
+    pub cancel_tried: BTreeSet<JobKey>,
+    /// A refusal sink is up: the wire max is pinned at the assigned count.
+    pub sink_live: bool,
+    /// Refused jobs a sink was started for: one sink per refusal.
+    pub sink_tried: BTreeSet<JobKey>,
+}
+
+/// A job assigned to the scale set and not acquired by mayfly, as the stream keeps it while it
+/// is pending or trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    /// Its `runnerRequestId`: 0 on github.com; on GHES the id an acquire may still name, which
+    /// then makes it an acquired job and drops this entry (the model's union
+    /// `acquired ∪ trusted`, never counted twice).
+    pub request_id: RunnerRequestId,
+    /// The assignment's key and classifying fields.
+    pub job: AssignedJob,
+}
+
+/// What to do about a refused job now (ADR 0090, amended 2026-11-12, option A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusalAction {
+    /// `StartSink`: a disposable Linux runner whose hook fails whatever job it gets.
+    StartSink(JobKey),
+    /// `CancelRun` (`cancel_refused_runs`): ask GitHub to cancel the job's run.
+    CancelRun(JobKey),
 }
 
 impl ScaleSetState {
@@ -259,6 +319,14 @@ impl ScaleSetState {
             acquiring: BTreeSet::new(),
             acquired: BTreeSet::new(),
             drift: 0,
+            renumbered: false,
+            policy: None,
+            pending: BTreeMap::new(),
+            trusted: BTreeMap::new(),
+            refused: BTreeSet::new(),
+            cancel_tried: BTreeSet::new(),
+            sink_live: false,
+            sink_tried: BTreeSet::new(),
         }
     }
 
@@ -291,10 +359,120 @@ impl ScaleSetState {
         self.open_conflicts >= SESSION_CONFLICT_ESCALATION
     }
 
-    /// The `maxCapacity` to send on the next poll ([`crate::demand::wire_max`]).
+    /// The `maxCapacity` to send on the next poll ([`crate::demand::wire_max`]): pinned at the
+    /// latest statistics' assigned count while a refusal sink is up.
     #[must_use]
     pub const fn wire_max(&self) -> u32 {
-        crate::demand::wire_max(&self.capacity)
+        crate::demand::wire_max(&self.capacity, self.sink_pin())
+    }
+
+    /// The assigned count the wire max is pinned at while a sink is up.
+    #[must_use]
+    pub const fn sink_pin(&self) -> Option<u32> {
+        if !self.sink_live {
+            return None;
+        }
+        match self.statistics {
+            Some(s) => Some(s.total_assigned_jobs),
+            None => Some(0),
+        }
+    }
+
+    /// Whether a message whose `(session, message)` receipt exists is a `DuplicateMessage`, acked
+    /// without a write: only when its id is the cursor's, since within a session only the cursor
+    /// can be redelivered (oldest first). A receipt for any other id is a reused id (a restarted
+    /// numbering), recorded anew so that it degrades the session; the receipt check alone would
+    /// drop it silently (`formal/scaleset.qnt`'s `record`, `restartWithinASessionDegradesTest`;
+    /// the listener's check, GH-04). Pinned by
+    /// `tests/scaleset/rules.rs::should_degrade_the_session_when_an_id_at_or_below_the_cursor_comes_later_in_a_session`.
+    #[must_use]
+    pub fn is_duplicate(&self, message_id: MessageId) -> bool {
+        self.cursor == Some(message_id)
+    }
+
+    /// Whether the stream's scale set was found gone and is not re-created yet.
+    #[must_use]
+    pub const fn vanished(&self) -> bool {
+        match self.phase {
+            Phase::Unconfigured => self.github_id.is_some(),
+            Phase::Ensured
+            | Phase::Opening
+            | Phase::Active
+            | Phase::Backoff(_)
+            | Phase::Degraded(_)
+            | Phase::Closing
+            | Phase::Closed => false,
+        }
+    }
+
+    /// Whether the cancel option is on.
+    #[must_use]
+    pub fn cancels_refused_runs(&self) -> bool {
+        self.policy.as_ref().is_some_and(|p| p.cancel_refused_runs)
+    }
+
+    /// Jobs mayfly classified trusted that wait for a runner: acquired offers and trusted
+    /// assignments (the model's `vmWaiting`).
+    #[must_use]
+    pub fn waiting(&self) -> u32 {
+        let assigned = self
+            .trusted
+            .values()
+            .filter(|a| !self.acquired.contains(&a.request_id))
+            .count();
+        let waiting = self.acquired.len().saturating_add(assigned);
+        u32::try_from(waiting).unwrap_or(u32::MAX)
+    }
+
+    /// [`crate::demand::runner_may_start`] for this scale set with `idle` runners started and
+    /// waiting for a job. Pinned by
+    /// `tests/scaleset/trust.rs::should_start_no_runner_when_an_assignment_is_pending_or_refused`.
+    #[must_use]
+    pub fn runner_may_start(&self, idle: u32) -> bool {
+        crate::demand::runner_may_start(&RunnerGate {
+            mode: self.capacity.mode,
+            active: self.plans_offers(),
+            waiting: self.waiting(),
+            idle,
+        })
+    }
+
+    /// Whether a sink may start now for some refused job: the pool open and the session active,
+    /// no cancel option, no sink up, and no trusted or pending assignment GitHub could hand it
+    /// instead (the model's `startSink` guard, `sinkOnlyForARefusedJob`).
+    #[must_use]
+    pub fn sink_may_start(&self) -> bool {
+        let open = match self.capacity.mode {
+            WireMode::Open => true,
+            WireMode::Paused | WireMode::Draining | WireMode::SafeMode => false,
+        };
+        open && self.plans_offers()
+            && !self.cancels_refused_runs()
+            && !self.sink_live
+            && self.pending.is_empty()
+            && self.waiting() == 0
+    }
+
+    /// The next refusal action the control plane takes, if any: with `cancel_refused_runs`, a
+    /// cancel of a refused run not answered yet; otherwise a sink for a refused job none was
+    /// started for, when [`Self::sink_may_start`]. Pinned by
+    /// `tests/scaleset/trust.rs::should_cancel_only_a_refused_run_when_the_option_is_on`.
+    #[must_use]
+    pub fn refusal_action(&self) -> Option<RefusalAction> {
+        if self.cancels_refused_runs() {
+            return self
+                .refused
+                .iter()
+                .find(|job| !self.cancel_tried.contains(*job))
+                .map(|job| RefusalAction::CancelRun(job.clone()));
+        }
+        if !self.sink_may_start() {
+            return None;
+        }
+        self.refused
+            .iter()
+            .find(|job| !self.sink_tried.contains(*job))
+            .map(|job| RefusalAction::StartSink(job.clone()))
     }
 }
 
@@ -365,6 +543,50 @@ pub enum ScaleSetCommand {
     RecordSessionRecovered,
     /// Delete the live session in order.
     StartClosing,
+    /// The pool's trust policy (GH-08), applied to every later lookup.
+    ApplyTrustPolicy(TrustPolicy),
+    /// A pending assignment's workflow run was looked up (GH-10).
+    RecordRunLookup {
+        /// The job.
+        job: JobKey,
+        /// What the lookup answered.
+        lookup: RunLookup,
+    },
+    /// A refusal sink is about to be started for a refused job (IMG-03).
+    StartSink {
+        /// The refused job.
+        job: JobKey,
+    },
+    /// The refusal sink's VM was deleted.
+    RecordSinkEnded,
+    /// A cancel of a refused job's run was answered (GH-10).
+    RecordCancelAnswer {
+        /// The refused job.
+        job: JobKey,
+        /// The answer.
+        answer: CancelAnswer,
+    },
+    /// A create or read answered 404 for the journaled scale set: GitHub deleted it as dormant.
+    RecordScaleSetVanished {
+        /// The journaled scale set.
+        github_id: ScaleSetId,
+    },
+    /// The vanished scale set was created again under a new id (ADR 0040: mayfly re-creates its
+    /// own set, never deletes one).
+    RecordScaleSetRecreated {
+        /// GitHub's id of the new scale set.
+        github_id: ScaleSetId,
+    },
+}
+
+/// What GitHub answered to a cancel of a refused run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelAnswer {
+    /// 202: GitHub accepted the cancel; a `JobCompleted` follows.
+    Accepted,
+    /// 409 or an error answer: nothing changed at GitHub; its release fails the job.
+    Refused,
 }
 
 impl CommandBody for ScaleSetCommand {
@@ -379,6 +601,13 @@ impl CommandBody for ScaleSetCommand {
         "apply_capacity",
         "record_session_recovered",
         "start_closing",
+        "apply_trust_policy",
+        "record_run_lookup",
+        "start_sink",
+        "record_sink_ended",
+        "record_cancel_answer",
+        "record_scale_set_vanished",
+        "record_scale_set_recreated",
     ];
 
     fn command_type(&self) -> &'static str {
@@ -393,6 +622,13 @@ impl CommandBody for ScaleSetCommand {
             Self::ApplyCapacity(_) => "apply_capacity",
             Self::RecordSessionRecovered => "record_session_recovered",
             Self::StartClosing => "start_closing",
+            Self::ApplyTrustPolicy(_) => "apply_trust_policy",
+            Self::RecordRunLookup { .. } => "record_run_lookup",
+            Self::StartSink { .. } => "start_sink",
+            Self::RecordSinkEnded => "record_sink_ended",
+            Self::RecordCancelAnswer { .. } => "record_cancel_answer",
+            Self::RecordScaleSetVanished { .. } => "record_scale_set_vanished",
+            Self::RecordScaleSetRecreated { .. } => "record_scale_set_recreated",
         }
     }
 }
@@ -434,6 +670,21 @@ pub enum ScaleSetRejection {
     CapacityConflict,
     /// The session is not degraded.
     NotDegraded,
+    /// The scale set vanished: it is re-created (`RecordScaleSetRecreated`), never ensured anew.
+    ScaleSetVanished,
+    /// The scale set did not vanish.
+    NotVanished,
+    /// The job is not a pending assignment.
+    NotPending,
+    /// The job is not refused.
+    NotRefused,
+    /// A sink may not start now: the pool or session is held, the cancel option is on, a sink is
+    /// up or was started for the job, or a trusted or pending assignment is known.
+    SinkNotDue,
+    /// No sink is up.
+    NoSink,
+    /// No cancel is due for the job: the option is off, or its cancel was answered already.
+    CancelNotDue,
 }
 
 impl Rejection for ScaleSetRejection {
@@ -454,6 +705,13 @@ impl Rejection for ScaleSetRejection {
         "stale_capacity",
         "capacity_conflict",
         "not_degraded",
+        "scale_set_vanished",
+        "not_vanished",
+        "not_pending",
+        "not_refused",
+        "sink_not_due",
+        "no_sink",
+        "cancel_not_due",
     ];
 
     fn code(&self) -> &'static str {
@@ -474,6 +732,13 @@ impl Rejection for ScaleSetRejection {
             Self::StaleCapacity => "stale_capacity",
             Self::CapacityConflict => "capacity_conflict",
             Self::NotDegraded => "not_degraded",
+            Self::ScaleSetVanished => "scale_set_vanished",
+            Self::NotVanished => "not_vanished",
+            Self::NotPending => "not_pending",
+            Self::NotRefused => "not_refused",
+            Self::SinkNotDue => "sink_not_due",
+            Self::NoSink => "no_sink",
+            Self::CancelNotDue => "cancel_not_due",
         }
     }
 }

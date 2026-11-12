@@ -1,5 +1,6 @@
 //! The demand rules of plan §7.2 (`mayfly_control_domain::demand`): desired from statistics,
-//! the shortfall, the wire max of each mode, trust classification and `PlanAcquire`. The named
+//! the shortfall, the wire max of each mode (and its pin while a refusal sink is up), trust
+//! classification of offers and of direct assignments, the runner gate and `PlanAcquire`. The named
 //! killers of curated mutants 5, 6, 11 and 19 (verification §9) are here; `formal/scaleset.qnt`
 //! kills 4, 5, 6, 7 and 19 in the model.
 
@@ -7,8 +8,9 @@ use std::collections::BTreeSet;
 
 use mayfly_control_domain::attempt::RunnerRequestId;
 use mayfly_control_domain::demand::{
-    self, Budget, Capacity, DeclineReason, Declined, EventName, Offer, OfferDecision, RunnerCounts,
-    Statistics, TrustClass, WireMode,
+    self, AssignedJob, Budget, Capacity, Classification, DeclineReason, Declined, EventName,
+    JobKey, Offer, OfferDecision, RefusalReason, RepositoryName, RunFacts, RunLookup, RunnerCounts,
+    RunnerGate, Statistics, TrustClass, TrustPolicy, WireMode, WorkflowJobId, WorkflowRunId,
 };
 use mayfly_control_domain::pool::TrustTier;
 use proptest::prelude::*;
@@ -135,13 +137,216 @@ fn should_send_zero_when_draining_or_in_safe_mode() {
     };
     // when
     let sent = [
-        demand::wire_max(&with(WireMode::Open, 4)),
-        demand::wire_max(&with(WireMode::Paused, 2)),
-        demand::wire_max(&with(WireMode::Draining, 2)),
-        demand::wire_max(&with(WireMode::SafeMode, 4)),
+        demand::wire_max(&with(WireMode::Open, 4), None),
+        demand::wire_max(&with(WireMode::Paused, 2), None),
+        demand::wire_max(&with(WireMode::Draining, 2), None),
+        demand::wire_max(&with(WireMode::SafeMode, 4), None),
     ];
     // then: open sends the reported max, paused the live runners, drain and safe mode zero
     assert_eq!(sent, [4, 2, 0, 0]);
+}
+
+/// ADR 0090 (amended 2026-11-12): while a refusal sink is up the wire max is pinned at the
+/// assigned count, so GitHub assigns nothing new the sink could take; never above the reported
+/// max, and still zero while draining or in safe mode (`formal/scaleset.qnt`'s `wireMax`).
+#[test]
+fn should_pin_the_wire_max_at_the_assigned_count_when_a_sink_is_up() {
+    // given
+    let with = |mode| Capacity {
+        revision: 1,
+        deliverable: 4,
+        reported_max: 3,
+        mode,
+    };
+    // when
+    let sent = [
+        demand::wire_max(&with(WireMode::Open), Some(1)),
+        demand::wire_max(&with(WireMode::Open), Some(5)),
+        demand::wire_max(&with(WireMode::Paused), Some(0)),
+        demand::wire_max(&with(WireMode::Draining), Some(1)),
+        demand::wire_max(&with(WireMode::Open), None),
+    ];
+    // then
+    assert_eq!(sent, [1, 3, 0, 0, 3]);
+}
+
+// ---- assigned jobs (github.com, ADR 0090) ------------------------------------------------
+
+const BASE: &str = "octo-org/app";
+
+fn name(full: &str) -> Option<RepositoryName> {
+    Some(RepositoryName(full.to_owned()))
+}
+
+fn policy() -> TrustPolicy {
+    TrustPolicy {
+        scale_set_name: "mayfly-linux".to_owned(),
+        allowed_repositories: [RepositoryName(BASE.to_owned())].into_iter().collect(),
+        allowed_events: TrustPolicy::default_events(),
+        cancel_refused_runs: false,
+    }
+}
+
+fn assignment(repository: Option<&str>, event_name: EventName, label: &str) -> AssignedJob {
+    AssignedJob {
+        key: JobKey {
+            job_id: WorkflowJobId("job-1".to_owned()),
+            run_id: WorkflowRunId(4242),
+        },
+        repository: repository.and_then(name),
+        event_name,
+        labels: vec![label.to_owned()],
+    }
+}
+
+fn found(repository: &str, head: Option<&str>, event_name: EventName) -> RunLookup {
+    RunLookup::Found(RunFacts {
+        repository: name(repository),
+        head_repository: head.and_then(name),
+        event_name,
+    })
+}
+
+/// ADR 0090 (owner, 2026-11-11 and 2026-11-12): each allowed event of an allowed repository's
+/// own branch is trusted; a fork's pull request, every other event, an unlisted repository, a
+/// missing or contradicting field (a `JobAssigned` without an event name included, A5) and a
+/// failed lookup are refused, each with its reason; with
+/// no policy every job is refused.
+#[test]
+fn should_trust_only_an_allowed_event_of_an_allowed_repository_when_an_assignment_is_classified() {
+    // given
+    let policy = policy();
+    let job = |event| assignment(Some(BASE), event, "mayfly-linux");
+    let base = |event| found(BASE, Some(BASE), event);
+    let cases = [
+        (job(EventName::Push), base(EventName::Push)),
+        (job(EventName::PullRequest), base(EventName::PullRequest)),
+        (
+            job(EventName::WorkflowDispatch),
+            base(EventName::WorkflowDispatch),
+        ),
+        (job(EventName::Schedule), base(EventName::Schedule)),
+        (job(EventName::MergeGroup), base(EventName::MergeGroup)),
+        (job(EventName::Release), base(EventName::Release)),
+        (job(EventName::Unknown), base(EventName::Push)),
+        (
+            job(EventName::PullRequest),
+            found(BASE, Some("fork/app"), EventName::PullRequest),
+        ),
+        (
+            job(EventName::PullRequestTarget),
+            base(EventName::PullRequestTarget),
+        ),
+        (job(EventName::WorkflowRun), base(EventName::WorkflowRun)),
+        (job(EventName::IssueComment), base(EventName::IssueComment)),
+        (job(EventName::Unknown), base(EventName::Unknown)),
+        (job(EventName::Push), base(EventName::PullRequest)),
+        (job(EventName::Push), found(BASE, None, EventName::Push)),
+        (
+            assignment(Some("octo-org/other"), EventName::Push, "mayfly-linux"),
+            found("octo-org/other", Some("octo-org/other"), EventName::Push),
+        ),
+        (
+            assignment(None, EventName::Push, "mayfly-linux"),
+            base(EventName::Push),
+        ),
+        (
+            assignment(Some(BASE), EventName::Push, "mayfly-linux"),
+            found("octo-org/other", Some(BASE), EventName::Push),
+        ),
+        (
+            assignment(Some(BASE), EventName::Push, "other-set"),
+            base(EventName::Push),
+        ),
+        (job(EventName::Push), RunLookup::Failed),
+    ];
+    // when
+    let classes: Vec<Classification> = cases
+        .iter()
+        .map(|(job, lookup)| demand::classify_assigned(Some(&policy), job, lookup))
+        .collect();
+    let without_policy = demand::classify_assigned(None, &cases[0].0, &cases[0].1);
+    // then
+    let refused = Classification::Refused;
+    assert_eq!(
+        classes,
+        [
+            Classification::Trusted,
+            Classification::Trusted,
+            Classification::Trusted,
+            Classification::Trusted,
+            Classification::Trusted,
+            Classification::Trusted,
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::Fork),
+            refused(RefusalReason::EventNotAllowed),
+            refused(RefusalReason::EventNotAllowed),
+            refused(RefusalReason::EventNotAllowed),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::RepositoryNotAllowed),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::Unclassifiable),
+            refused(RefusalReason::LookupFailed),
+        ]
+    );
+    assert_eq!(without_policy, refused(RefusalReason::RepositoryNotAllowed));
+}
+
+/// `allowed_events` is the pool's (ADR 0090, amended 2026-11-12): an event it does not list is
+/// refused even if the default lists it, and `Unknown` is never trusted, listed or not.
+#[test]
+fn should_refuse_an_event_when_the_pool_does_not_allow_it() {
+    // given
+    let mut narrow = policy();
+    narrow.allowed_events = [EventName::Push, EventName::Unknown].into_iter().collect();
+    // when
+    let pull_request = demand::classify_assigned(
+        Some(&narrow),
+        &assignment(Some(BASE), EventName::PullRequest, "mayfly-linux"),
+        &found(BASE, Some(BASE), EventName::PullRequest),
+    );
+    let unknown = demand::classify_assigned(
+        Some(&narrow),
+        &assignment(Some(BASE), EventName::Unknown, "mayfly-linux"),
+        &found(BASE, Some(BASE), EventName::Unknown),
+    );
+    // then
+    assert_eq!(
+        pull_request,
+        Classification::Refused(RefusalReason::EventNotAllowed)
+    );
+    assert_eq!(
+        unknown,
+        Classification::Refused(RefusalReason::Unclassifiable)
+    );
+}
+
+/// vmOnlyForAJobClassifiedTrusted (the model's `vmMayStart`): a runner starts only while more
+/// classified-trusted jobs wait than idle runners, the pool open and the session active.
+#[test]
+fn should_start_a_runner_only_for_a_trusted_job_when_one_waits() {
+    // given
+    let gate = |mode, active, waiting, idle| RunnerGate {
+        mode,
+        active,
+        waiting,
+        idle,
+    };
+    // when
+    let decisions = [
+        demand::runner_may_start(&gate(WireMode::Open, true, 1, 0)),
+        demand::runner_may_start(&gate(WireMode::Open, true, 1, 1)),
+        demand::runner_may_start(&gate(WireMode::Open, true, 0, 0)),
+        demand::runner_may_start(&gate(WireMode::Open, false, 1, 0)),
+        demand::runner_may_start(&gate(WireMode::Paused, true, 1, 0)),
+        demand::runner_may_start(&gate(WireMode::Draining, true, 1, 0)),
+        demand::runner_may_start(&gate(WireMode::SafeMode, true, 1, 0)),
+    ];
+    // then
+    assert_eq!(decisions, [true, false, false, false, false, false, false]);
 }
 
 // ---- trust (ADR 0027, I32) ---------------------------------------------------------------

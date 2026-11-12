@@ -516,15 +516,20 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   (ADR 0029). Unknown types degrade the session at `PROTOCOL_DRIFT_THRESHOLD`. The assumptions on
   facts not yet server-observed (A1–A6) are listed in `formal/scaleset.qnt`,
   `doc/github-scaleset.md` §12 and `mayfly_control_domain::demand`.
-  *Planned (GH-00R's model, KER-06G):* on github.com, where jobs are assigned with no offer,
-  `RecordMessage` classifies each `JobAssigned` (`trusted` or `AssignedJobRefused{reason}`) and a
-  runner starts only for a job whose workflow run was looked up and classified trusted; the
-  in-guest hook of every runner fails an untrusted job it receives (ADR 0090, the hard boundary);
-  a refused job holds nothing and goes to a refusal sink (`StartSink`, the wire max pinned
-  meanwhile) or, with `cancel_refused_runs`, its run is cancelled; a session's first message below its floor records
-  `MessageIdsRestarted` and restarts the cursor; a receipt counts as a duplicate only for the
-  cursor's id, any other id at or below it degrades; a 404 for the journaled scale set leads to
-  `RecordScaleSetRecreated{id}`.
+  *As built (KER-06G, GH-00R's model):* on github.com, where jobs are assigned with no offer,
+  `RecordMessage` keeps each `JobAssigned` that names `(jobId, workflowRunId)` pending (a new
+  assignment replaces an earlier classification), and `RecordRunLookup{job, lookup}` classifies
+  it through `demand::classify_assigned` against the pool's policy (`ApplyTrustPolicy`):
+  `AssignedJobTrusted` or `AssignedJobRefused{reason}` (a failed lookup refuses); a runner starts
+  only for a job classified trusted (`demand::runner_may_start`); the in-guest hook of every
+  runner fails an untrusted job it receives (ADR 0090, the hard boundary); a refused job holds
+  nothing and goes to a refusal sink (`StartSink`, the wire max pinned at the assigned count
+  until `RecordSinkEnded`) or, with `cancel_refused_runs`, its run is cancelled
+  (`RecordCancelAnswer`, once); `ScaleSetState::refusal_action` names the next. A session's
+  first message below its floor records `MessageIdsRestarted` and restarts the cursor; a
+  receipt counts as a duplicate only for the cursor's id (`ScaleSetState::is_duplicate`), any
+  other id at or below it degrades; a 404 for the journaled scale set is
+  `RecordScaleSetVanished{id}` (back to `Unconfigured`), then `RecordScaleSetRecreated{id}`.
 - **Events** (as built, KER-06 and its review fix KER-06F): `ScaleSetEpochAdvanced`,
   `ScaleSetEnsured`, `SessionOpenRequested`, `SessionOpened{session_id, statistics, desired}`,
   `SessionLost{cause: expired|conflicted|failed|restarted, stale_session}`,
@@ -536,9 +541,14 @@ observation; the proposed operator assertion was declined (OD10, ADR 0025).
   message_ids_regressed}`, `SessionRecovered`, `ClosingStarted`, `SessionClosed`. The design's
   `SessionExpired`, `SessionConflicted` and `ScaleSetConflicted` are `SessionLost{cause}`, and
   `ReportedMaxChanged` is `CapacityApplied`. Job facts inside `MessageRecorded` are
-  `JobAssigned{request_id}`, `JobStarted{request_id, runner_id, runner_name}` and
-  `JobCompleted{request_id, result, runner_id}`; they are facts for policies, and release a
-  reservation, nothing more.
+  `JobAssigned{request_id, job?}`, `JobStarted{request_id, runner_id, runner_name, job?}` and
+  `JobCompleted{request_id, result, runner_id, job?}` (`job`, KER-06G: the assignment's key and
+  classifying fields, or the key a fact releases); they are facts for policies, and release a
+  reservation or a classification, nothing more. KER-06G adds `MessageIdsRestarted{message_id,
+  floor}`, `TrustPolicyApplied{policy}`, `AssignedJobTrusted{job}`, `AssignedJobRefused{job,
+  reason: repository_not_allowed|event_not_allowed|fork|unclassifiable|lookup_failed}`,
+  `SinkStarted{job}`, `SinkEnded`, `CancelAnswered{job, answer: accepted|refused}`,
+  `ScaleSetVanished{github_id}` and `ScaleSetRecreated{github_id}`.
 - **Protects alone:** I12 (record before ack: ack is issued by the listener only after this
   command's receipt), I13 for demand (a message applies once; statistics from an older message
   never replace newer: `statistics_applied = false`), I23 (`PlanAcquire` budget =

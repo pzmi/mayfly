@@ -1,16 +1,23 @@
 # scaleset: refusal codes, then the outcome of each determinism case
 code acquired_unrequested
+code cancel_not_due
 code capacity_conflict
 code closing
 code no_session
+code no_sink
 code not_acquiring
 code not_degraded
 code not_ensured
 code not_opening
+code not_pending
+code not_refused
+code not_vanished
 code reported_over_deliverable
 code scale_set_mismatch
+code scale_set_vanished
 code session_live
 code session_mismatch
+code sink_not_due
 code stale_capacity
 code stale_run
 code stale_session_pending
@@ -22,6 +29,9 @@ case batch_planned_within_deliverable accepted
   message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[1,2],"declined":[{"request_id":3,"reason":"no_capacity"}],"job_facts":[],"unknown_types":0,"desired":0}
 case begin_open accepted
   session_open_requested/v1 {}
+case cancel_answered accepted
+  cancel_answered/v1 {"job":{"job_id":"job-1","run_id":101},"answer":"accepted"}
+case cancel_not_due_without_the_option refused cancel_not_due
 case capacity_conflict refused capacity_conflict
 case closing refused closing
 case closing_session_deleted accepted
@@ -32,42 +42,73 @@ case degraded_session_plans_nothing accepted
   message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":2,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[{"request_id":6,"reason":"held"}],"job_facts":[],"unknown_types":0,"desired":0}
 case degraded_session_recovered accepted
   session_recovered/v1 {}
+case direct_assignment_waits_for_its_lookup accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":1,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[],"job_facts":[{"assigned":{"request_id":0,"job":{"key":{"job_id":"job-1","run_id":101},"repository":"octo-org/app","event_name":"pull_request","labels":["mayfly-linux"]}}}],"unknown_types":0,"desired":1}
 case drain_sends_zero accepted
   capacity_applied/v1 {"capacity":{"revision":2,"deliverable":2,"reported_max":1,"mode":"draining"},"wire_max":0,"desired":0}
 case ensure_scale_set accepted
   scale_set_epoch_advanced/v1 {"epoch":1}
   scale_set_ensured/v1 {"pool":"pool0","github_id":7,"tier":"trusted"}
+case failed_lookup_refuses accepted
+  assigned_job_refused/v1 {"job":{"job_id":"job-1","run_id":101},"reason":"lookup_failed"}
 case fifth_conflict_in_a_row_escalates accepted
   session_lost/v1 {"cause":"conflicted","stale_session":null}
   session_conflict_escalated/v1 {"conflicts":5}
+case first_message_below_the_floor_restarts_the_numbering accepted
+  message_ids_restarted/v1 {"message_id":1,"floor":3}
+  message_recorded/v1 {"session_id":{"high":2,"low":2},"message_id":1,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":1,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[7],"declined":[],"job_facts":[],"unknown_types":0,"desired":1}
+case id_at_the_cursor_later_in_a_session_degrades_it accepted
+  message_recorded/v1 {"session_id":{"high":2,"low":2},"message_id":4,"origin":"id_regressed","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":1,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":0}
+  session_degraded/v1 {"cause":"message_ids_regressed"}
+case id_below_the_cursor_degrades_the_session accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":3,"origin":"id_regressed","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":2}
+  session_degraded/v1 {"cause":"message_ids_regressed"}
+case job_completed_releases_the_refusal accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":2,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[],"job_facts":[{"completed":{"request_id":0,"result":"failed","runner_id":null,"job":{"job_id":"job-1","run_id":101}}}],"unknown_types":0,"desired":0}
 case job_started_releases_the_reservation accepted
   message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":2,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":2,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[1],"acquire":[],"declined":[],"job_facts":[{"assigned":{"request_id":1}},{"started":{"request_id":1,"runner_id":42,"runner_name":null}}],"unknown_types":0,"desired":2}
-case message_below_the_floor_degrades_the_session accepted
-  message_recorded/v1 {"session_id":{"high":2,"low":2},"message_id":1,"origin":"id_regressed","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":1,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":0}
-  session_degraded/v1 {"cause":"message_ids_regressed"}
+case lookup_classifies_a_base_pull_request_trusted accepted
+  assigned_job_trusted/v1 {"job":{"job_id":"job-1","run_id":101}}
+case lookup_refuses_a_fork accepted
+  assigned_job_refused/v1 {"job":{"job_id":"job-1","run_id":101},"reason":"fork"}
 case newer_epoch_is_recorded accepted
   scale_set_epoch_advanced/v1 {"epoch":2}
   capacity_applied/v1 {"capacity":{"revision":2,"deliverable":1,"reported_max":1,"mode":"paused"},"wire_max":1,"desired":0}
 case no_session refused no_session
+case no_sink refused no_sink
 case not_acquiring refused not_acquiring
 case not_degraded refused not_degraded
 case not_ensured refused not_ensured
 case not_opening refused not_opening
-case older_message_keeps_statistics accepted
-  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":3,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":2}
+case not_pending refused not_pending
+case not_refused refused not_refused
+case not_vanished refused not_vanished
+case reassignment_is_classified_afresh accepted
+  message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":2,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":1,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[],"job_facts":[{"assigned":{"request_id":0,"job":{"key":{"job_id":"job-1","run_id":101},"repository":"octo-org/app","event_name":"pull_request","labels":["mayfly-linux"]}}}],"unknown_types":0,"desired":1}
 case redelivery_in_a_new_session_reserves_nothing_again accepted
   message_recorded/v1 {"session_id":{"high":2,"low":2},"message_id":1,"origin":"redelivered","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":false,"released":[],"acquire":[],"declined":[],"job_facts":[],"unknown_types":0,"desired":0}
 case reopen_after_delete accepted
   session_open_requested/v1 {}
 case reported_over_deliverable refused reported_over_deliverable
 case same_scale_set_records_nothing accepted
+case same_trust_policy_records_nothing accepted
 case scale_set_mismatch refused scale_set_mismatch
+case scale_set_recreated accepted
+  scale_set_recreated/v1 {"github_id":9}
+case scale_set_vanished accepted
+  scale_set_vanished/v1 {"github_id":7}
+case scale_set_vanished_is_not_ensured_anew refused scale_set_vanished
 case session_expired accepted
   session_lost/v1 {"cause":"expired","stale_session":{"high":1,"low":1}}
 case session_live refused session_live
 case session_mismatch refused session_mismatch
 case session_opened accepted
   session_opened/v1 {"session_id":{"high":1,"low":1},"statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"desired":0}
+case sink_ended accepted
+  sink_ended/v1 {}
+case sink_not_due_with_the_cancel_option refused sink_not_due
+case sink_started_for_a_refused_job accepted
+  sink_started/v1 {"job":{"job_id":"job-1","run_id":101}}
 case stale_capacity refused stale_capacity
 case stale_run refused stale_run
 case stale_session_deleted accepted
@@ -75,6 +116,8 @@ case stale_session_deleted accepted
 case stale_session_pending refused stale_session_pending
 case start_closing accepted
   closing_started/v1 {}
+case trust_policy_applied accepted
+  trust_policy_applied/v1 {"policy":{"scale_set_name":"mayfly-linux","allowed_repositories":["octo-org/app"],"allowed_events":["push","pull_request","workflow_dispatch","schedule","merge_group","release"],"cancel_refused_runs":false}}
 case unclassifiable_offer_declined accepted
   message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[{"request_id":5,"reason":"unclassifiable"}],"job_facts":[],"unknown_types":0,"desired":0}
 case unknown_session refused unknown_session
@@ -83,3 +126,4 @@ case unknown_types_degrade_the_session accepted
   session_degraded/v1 {"cause":"protocol_drift"}
 case untrusted_offer_declined accepted
   message_recorded/v1 {"session_id":{"high":1,"low":1},"message_id":1,"origin":"fresh","statistics":{"total_available_jobs":0,"total_acquired_jobs":0,"total_assigned_jobs":0,"total_running_jobs":0,"total_registered_runners":0,"total_busy_runners":0,"total_idle_runners":0},"statistics_applied":true,"released":[],"acquire":[],"declined":[{"request_id":4,"reason":"tier"}],"job_facts":[],"unknown_types":0,"desired":0}
+case vanished_while_a_session_is_live refused session_live

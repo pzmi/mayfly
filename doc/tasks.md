@@ -1639,7 +1639,11 @@ Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §6, §9 (ADR 0048
 journals it before the call) → ack, and `AcquireJobs` for exactly the event's `acquire` list →
 `RecordAcquireResult` (KER-06); empty poll still reconciles; never blocks on VM work; the session
 id and the last acked message id are journaled for crash recovery.
-Accept: component tests F08, F09, F10, F11, F25, F27 (ver §8.4) on fakes.
+Accept: component tests F08, F09, F10, F11, F25, F27 (ver §8.4) on fakes. (KER-06G) Each poll
+sends `ScaleSetState::wire_max()` (pinned while a refusal sink is up), never
+`CapacityApplied.wire_max`, a snapshot; a receipt counts as a `DuplicateMessage` only when
+`ScaleSetState::is_duplicate(id)`, and a reused id with a receipt is recorded anew under its own
+command id (a component test for each).
 DEC-01: the record step is one unit with `InboxKey { github, message_id }`; ack after commit;
 `DuplicateMessage` acked without a write; `PlanAcquire` before `AcquireJobs` (I23, I32); wire
 behaviour of pause, drain and safe mode (ADR 0029); adds F41, F42, F44.
@@ -1699,6 +1703,30 @@ Accept: rules and property tests naming the model's invariants `vmOnlyForAJobCla
 `assignedJobsClassified`, `cancelOnlyRefused`, `sinkOnlyForARefusedJob` and the renumbered branch
 of `a1RefutationIsFlagged`; the mutants RUN_ASSIGNED and CANCEL_ANY fail them
 (`noStepOfAnUntrustedJobRuns` and `sinkRunsNoStep` are the hook's, IMG-02 and IMG-03).
+Note (KER-06G, as built): the trust policy enters the stream as `ApplyTrustPolicy`
+(`TrustPolicyApplied`; none applied refuses every assignment) and the scale set's name is part of
+it (an assignment's labels must name the set); the 404 is its own observation,
+`RecordScaleSetVanished{id}` (`ScaleSetVanished`, back to `Unconfigured`; `EnsureScaleSet` is then
+refused `scale_set_vanished`), before `RecordScaleSetRecreated{id}`; `StartSink` journals
+`SinkStarted`, `RecordSinkEnded` lifts the pin, `RecordCancelAnswer` journals `CancelAnswered`, and
+`ScaleSetState::refusal_action` names the next sink or cancel. The duplicate rule is
+`ScaleSetState::is_duplicate` for the listener (GH-04: a receipt for any other id is recorded anew
+under its own command id). The `job_refused` WARN log and the reconciler's use of
+`runner_may_start` are wired by GH-08, where the use cases that record lookups live. Golden
+fixtures were added, none rewritten; the decisions and matrix goldens were regenerated (a
+session's first message below its floor now restarts, an earlier id later in a session degrades).
+The scaleset conformance driver is VER-02's; the stream's state carries the model's `pending`,
+`trusted`, `refused`, `cancelTried`, `sinkLive`, `sinkTried` and `renumbered` for it.
+Review fixes (KER-06G): a `JobAssigned` without an event name is unclassifiable; pending and
+trusted entries keep their `runnerRequestId`, and an acquire answer that names one drops it, so a
+GHES job assigned while its acquire answer was lost counts once (the model's `acquired ∪
+trusted`); a changed trust policy sends every trusted job back to `pending` for a new lookup (the
+aggregate's own fail-closed rule: the model's `TRUST` is fixed). Gaps kept on the record: a
+`JobAssigned` with no `jobId` or `workflowRunId` cannot be keyed, so it is never trusted and backs
+no runner, but no refusal is journaled and no sink or cancel can target it (HW-02 item 8 shows
+whether github.com ever omits them; the hook still fails it); the scale set's name is carried in
+the trust policy rather than taken from `ScaleSetEnsured`, which does not hold it (adding it
+there is an optional field on an existing event, left to GH-08 if wanted).
 
 #### GH-08 Trust on github.com
 Cites: ADR 0090 (owner, 2026-11-11 and 2026-11-12), `doc/github-scaleset.md` §2, §6.2, §13, ADR
@@ -1723,6 +1751,10 @@ them; a trusted job's runner starts beside a refused one; with `cancel_refused_r
 run is cancelled; with
 `check_fork_pr_setting` an enabled fork setting refuses to start and a disabled one starts; a
 public allowed repository behind a group that does not admit public repositories is reported.
+(KER-06G) Every `AssignedJobRefused` is logged at WARN as `job_refused` (`repository`, `event`,
+`reason`, `run_id`, from the lookup's command), and the reconciler starts and mints a runner only
+while `ScaleSetState::runner_may_start(idle)` holds (a test for each); the pool's settings reach
+the stream as `ApplyTrustPolicy`.
 
 #### GH-09 (Withdrawn) Operator release of a refusal
 Withdrawn by GH-00S (owner, 2026-11-12, ADR 0090 amended): refused jobs hold nothing any more
@@ -1740,6 +1772,9 @@ its answer (202, 409, an error, or none) recorded as an observation, never retri
 answered attempt. Strings are untrusted input, length-bounded.
 Accept: tests over fake-github: a fork's run decoded as one; a lookup timeout answered `failed`;
 a cancel's 202, 409 and lost answer each recorded; no token in an error.
+Note (KER-06G review): the domain compares head and base repositories by full name; a rename
+between assignment and lookup reads as a mismatch (refused, the safe side). Decoding and comparing
+`head_repository.id` against `repository.id` as well would close that; decide it here.
 
 #### GH-07 Several organisations
 Cites: ADR 0040 (amended 2026-11-11), `doc/github-scaleset.md` §1. One daemon serves pools in

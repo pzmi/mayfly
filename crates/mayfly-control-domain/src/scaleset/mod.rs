@@ -15,9 +15,27 @@
 //!   its open) was recorded in an earlier session; it is recorded again so it can be acked and
 //!   applies nothing: no statistics, no plan, no release, no unknown types
 //!   (`tests/scaleset/rules.rs::should_apply_nothing_when_a_message_from_an_earlier_session_is_redelivered`).
-//! - **a1RefutationIsFlagged**: any other message at or below the floor (ids restarted or went
-//!   back) applies nothing and degrades the session, never silently
-//!   (`tests/scaleset/rules.rs::should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor`).
+//! - **a1RefutationIsFlagged**: a session's first message strictly below its floor starts a new
+//!   numbering, recorded as `MessageIdsRestarted` and applied as new
+//!   (`tests/scaleset/rules.rs::should_restart_the_numbering_when_a_new_session_delivers_an_id_below_the_floor`);
+//!   any other message at or below the cursor applies nothing and degrades the session, never
+//!   silently, and only the cursor's id can be a duplicate ([`ScaleSetState::is_duplicate`];
+//!   `tests/scaleset/rules.rs::should_degrade_the_session_when_an_id_at_or_below_the_cursor_comes_later_in_a_session`).
+//! - **assignedJobsClassified** and **vmOnlyForAJobClassifiedTrusted** (ADR 0090): a direct
+//!   assignment is pending until its run's lookup classifies it trusted or refused
+//!   (`AssignedJobRefused`), and a runner starts only for a job classified trusted that waits
+//!   ([`ScaleSetState::runner_may_start`];
+//!   `tests/scaleset/trust.rs::should_start_a_runner_only_after_the_lookup_when_a_job_is_assigned_directly`,
+//!   `tests/scaleset/trust_properties.rs::should_hold_the_trust_invariants_when_assignments_are_random`).
+//! - **sinkOnlyForARefusedJob** and **cancelOnlyRefused** (ADR 0090, amended 2026-11-12): a
+//!   refusal sink starts once per refusal, one at a time, without the cancel option and only
+//!   while no trusted or pending assignment is known, the wire max pinned meanwhile; with
+//!   `cancel_refused_runs` a refused run is cancelled instead, once
+//!   ([`ScaleSetState::refusal_action`]; `tests/scaleset/trust.rs`).
+//! - **Re-ensure** (`recreateScaleSet`): a 404 for the journaled scale set returns the stream to
+//!   `Unconfigured`; `RecordScaleSetRecreated` resets the numbering and drops the old set's
+//!   reservations, classifications and refusals
+//!   (`tests/scaleset/trust.rs::should_reset_the_numbering_and_drop_reservations_when_the_scale_set_is_recreated`).
 //! - **persistentConflictsAreFlagged** (A3): the `SESSION_CONFLICT_ESCALATION`th create in a row
 //!   answered 409 is escalated to the operator
 //!   (`tests/scaleset/rules.rs::should_escalate_once_when_creates_keep_answering_conflict`).
@@ -53,14 +71,16 @@ mod state;
 
 pub use decide::{Decision, decide, evolve};
 pub use events::{
-    AcquireObserved, CapacityApplied, ClosingStarted, MessageRecorded, ScaleSetEnsured,
-    ScaleSetEpochAdvanced, ScaleSetEvent, SessionClosed, SessionConflictEscalated, SessionDegraded,
-    SessionDeleted, SessionLost, SessionOpenRequested, SessionOpened, SessionRecovered,
+    AcquireObserved, AssignedJobRefused, AssignedJobTrusted, CancelAnswered, CapacityApplied,
+    ClosingStarted, MessageIdsRestarted, MessageRecorded, ScaleSetEnsured, ScaleSetEpochAdvanced,
+    ScaleSetEvent, ScaleSetRecreated, ScaleSetVanished, SessionClosed, SessionConflictEscalated,
+    SessionDegraded, SessionDeleted, SessionLost, SessionOpenRequested, SessionOpened,
+    SessionRecovered, SinkEnded, SinkStarted, TrustPolicyApplied,
 };
 pub use state::{
-    DegradedCause, EnsureScaleSet, JobFact, LossCause, MessageId, MessageItem, MessageOrigin,
-    PROTOCOL_DRIFT_THRESHOLD, Phase, RecordMessage, SESSION_CONFLICT_ESCALATION, ScaleSetCommand,
-    ScaleSetRejection, ScaleSetState, SessionId,
+    Assignment, CancelAnswer, DegradedCause, EnsureScaleSet, JobFact, LossCause, MessageId,
+    MessageItem, MessageOrigin, PROTOCOL_DRIFT_THRESHOLD, Phase, RecordMessage, RefusalAction,
+    SESSION_CONFLICT_ESCALATION, ScaleSetCommand, ScaleSetRejection, ScaleSetState, SessionId,
 };
 
 use crate::aggregate::{Aggregate, DeterminismCase, DeterminismCases};

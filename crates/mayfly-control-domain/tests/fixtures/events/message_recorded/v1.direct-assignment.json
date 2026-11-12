@@ -1,0 +1,207 @@
+{
+  "session_id": {
+    "high": 13030963525406393826,
+    "low": 11706234098425720870
+  },
+  "message_id": 100001346,
+  "origin": "fresh",
+  "statistics": {
+    "total_available_jobs": 0,
+    "total_acquired_jobs": 0,
+    "total_assigned_jobs": 10,
+    "total_running_jobs": 1,
+    "total_registered_runners": 1,
+    "total_busy_runners": 1,
+    "total_idle_runners": 0
+  },
+  "statistics_applied": true,
+  "released": [],
+  "acquire": [],
+  "declined": [],
+  "job_facts": [
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-0",
+            "run_id": 18263540129
+          },
+          "repository": "octo-org/app",
+          "event_name": "push",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-1",
+            "run_id": 18263540130
+          },
+          "repository": "octo-org/app",
+          "event_name": "pull_request",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-2",
+            "run_id": 18263540131
+          },
+          "repository": "octo-org/app",
+          "event_name": "pull_request_target",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-3",
+            "run_id": 18263540132
+          },
+          "repository": "octo-org/app",
+          "event_name": "workflow_dispatch",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-4",
+            "run_id": 18263540133
+          },
+          "repository": "octo-org/app",
+          "event_name": "schedule",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-5",
+            "run_id": 18263540134
+          },
+          "repository": "octo-org/app",
+          "event_name": "merge_group",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-6",
+            "run_id": 18263540135
+          },
+          "repository": "octo-org/app",
+          "event_name": "release",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-7",
+            "run_id": 18263540136
+          },
+          "repository": "octo-org/app",
+          "event_name": "workflow_run",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-8",
+            "run_id": 18263540137
+          },
+          "repository": "octo-org/app",
+          "event_name": "issue_comment",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "assigned": {
+        "request_id": 0,
+        "job": {
+          "key": {
+            "job_id": "job-9",
+            "run_id": 18263540138
+          },
+          "repository": null,
+          "event_name": "unknown",
+          "labels": [
+            "mayfly-linux"
+          ]
+        }
+      }
+    },
+    {
+      "started": {
+        "request_id": 0,
+        "runner_id": 4242,
+        "runner_name": null,
+        "job": {
+          "job_id": "job-0",
+          "run_id": 18263540129
+        }
+      }
+    },
+    {
+      "completed": {
+        "request_id": 0,
+        "result": "canceled",
+        "runner_id": null,
+        "job": {
+          "job_id": "job-2",
+          "run_id": 18263540131
+        }
+      }
+    }
+  ],
+  "unknown_types": 0,
+  "desired": 2
+}

@@ -4,7 +4,9 @@
 //! order (a fresh message's key is `2 * id`, a session open's `2 * highest id recorded + 1`, A1):
 //! the order the aggregate claims. Whether that order is GitHub's own is the model's question
 //! (`desiredFromLatestStatistics` compares with GitHub's jobs; A6). A message at or below the
-//! session's floor must apply nothing, and one A1 does not explain must degrade the session.
+//! cursor must apply nothing, and one A1 does not explain must degrade the session, unless it is
+//! a session's first message below its floor, which restarts the numbering
+//! (`MessageIdsRestarted`, the order then restarting from it).
 
 use std::collections::BTreeSet;
 
@@ -149,13 +151,19 @@ fn broken(
             }
         }
     }
+    let restarted = events
+        .iter()
+        .any(|e| matches!(e, ScaleSetEvent::MessageIdsRestarted(_)));
     for event in events {
         match event {
+            ScaleSetEvent::MessageIdsRestarted(_) => {
+                tracker.highest = 0;
+                tracker.latest = tracker.latest.map(|(_, s)| (0, s));
+            }
             ScaleSetEvent::MessageRecorded(m) if m.origin != MessageOrigin::Fresh => {
-                let floor = before.session_floor.map(|f| f.0);
-                if floor.is_none_or(|f| m.message_id.0 > f) {
+                if before.cursor.is_none_or(|c| m.message_id > c) {
                     return Some(
-                        "a message above the floor read as from an earlier session".into(),
+                        "a message above the cursor read as from an earlier session".into(),
                     );
                 }
                 let unchanged = !m.statistics_applied
@@ -177,8 +185,8 @@ fn broken(
                 }
             }
             ScaleSetEvent::MessageRecorded(m) => {
-                if before.session_floor.is_some_and(|f| m.message_id <= f) {
-                    return Some("a message at or below the floor applied as fresh".to_owned());
+                if !restarted && before.cursor.is_some_and(|c| m.message_id <= c) {
+                    return Some("a message at or below the cursor applied as fresh".to_owned());
                 }
                 if let Some(stats) = m.statistics {
                     let key = 2 * m.message_id.0;

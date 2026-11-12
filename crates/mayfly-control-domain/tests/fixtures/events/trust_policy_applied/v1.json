@@ -1,0 +1,18 @@
+{
+  "policy": {
+    "scale_set_name": "mayfly-linux",
+    "allowed_repositories": [
+      "octo-org/app",
+      "octo-org/site"
+    ],
+    "allowed_events": [
+      "push",
+      "pull_request",
+      "workflow_dispatch",
+      "schedule",
+      "merge_group",
+      "release"
+    ],
+    "cancel_refused_runs": false
+  }
+}

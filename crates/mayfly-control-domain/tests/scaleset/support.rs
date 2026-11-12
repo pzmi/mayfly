@@ -3,12 +3,15 @@
 use std::collections::BTreeSet;
 
 use mayfly_control_domain::attempt::RunnerRequestId;
-use mayfly_control_domain::demand::{Capacity, EventName, Offer, Statistics, WireMode};
+use mayfly_control_domain::demand::{
+    AssignedJob, Capacity, EventName, JobKey, Offer, RepositoryName, RunFacts, RunLookup,
+    Statistics, TrustPolicy, WireMode, WorkflowJobId, WorkflowRunId,
+};
 use mayfly_control_domain::pool::TrustTier;
 use mayfly_control_domain::registration::{JobResult, ScaleSetId};
 use mayfly_control_domain::scaleset::{
-    EnsureScaleSet, JobFact, LossCause, MessageId, MessageItem, RecordMessage, ScaleSet,
-    ScaleSetCommand, ScaleSetEvent, ScaleSetRejection, ScaleSetState, SessionId,
+    CancelAnswer, EnsureScaleSet, JobFact, LossCause, MessageId, MessageItem, RecordMessage,
+    ScaleSet, ScaleSetCommand, ScaleSetEvent, ScaleSetRejection, ScaleSetState, SessionId,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, Rejection};
 use mayfly_domain::{CommandId, Epoch, Millis, PoolName, Sample};
@@ -98,6 +101,7 @@ pub const fn started(id: u64) -> MessageItem {
         request_id: RunnerRequestId(id),
         runner_id: None,
         runner_name: None,
+        job: None,
     })
 }
 
@@ -106,13 +110,126 @@ pub const fn completed(id: u64) -> MessageItem {
         request_id: RunnerRequestId(id),
         result: JobResult::Canceled,
         runner_id: None,
+        job: None,
     })
 }
 
 pub const fn assigned_fact(id: u64) -> MessageItem {
     MessageItem::Fact(JobFact::Assigned {
         request_id: RunnerRequestId(id),
+        job: None,
     })
+}
+
+// ---- github.com's direct assignment (ADR 0090) ---------------------------------------------
+
+/// The scale set's name, which an assignment routed to it carries among its labels.
+pub const SCALE_SET_NAME: &str = "mayfly-linux";
+/// The pool's one allowed repository.
+pub const REPOSITORY: &str = "octo-org/app";
+
+pub fn repository(name: &str) -> Option<RepositoryName> {
+    Some(RepositoryName(name.to_owned()))
+}
+
+/// The pool's trust policy: [`REPOSITORY`] and the default events.
+pub fn trust(cancel_refused_runs: bool) -> TrustPolicy {
+    TrustPolicy {
+        scale_set_name: SCALE_SET_NAME.to_owned(),
+        allowed_repositories: [RepositoryName(REPOSITORY.to_owned())]
+            .into_iter()
+            .collect(),
+        allowed_events: TrustPolicy::default_events(),
+        cancel_refused_runs,
+    }
+}
+
+pub fn policy(cancel_refused_runs: bool) -> ScaleSetCommand {
+    ScaleSetCommand::ApplyTrustPolicy(trust(cancel_refused_runs))
+}
+
+pub fn key(n: u64) -> JobKey {
+    JobKey {
+        job_id: WorkflowJobId(format!("job-{n}")),
+        run_id: WorkflowRunId(100 + n),
+    }
+}
+
+/// A `JobAssigned` of job `n` on github.com (`runnerRequestId` 0), from [`REPOSITORY`].
+pub fn assigned_job(n: u64, event_name: EventName) -> AssignedJob {
+    AssignedJob {
+        key: key(n),
+        repository: repository(REPOSITORY),
+        event_name,
+        labels: vec![SCALE_SET_NAME.to_owned()],
+    }
+}
+
+pub fn assign(n: u64) -> MessageItem {
+    MessageItem::Fact(JobFact::Assigned {
+        request_id: RunnerRequestId(0),
+        job: Some(assigned_job(n, EventName::Push)),
+    })
+}
+
+/// A `JobStarted` naming job `n` by its key (`runnerRequestId` 0).
+pub fn started_job(n: u64) -> MessageItem {
+    MessageItem::Fact(JobFact::Started {
+        request_id: RunnerRequestId(0),
+        runner_id: None,
+        runner_name: None,
+        job: Some(key(n)),
+    })
+}
+
+/// A `JobCompleted` naming job `n` by its key, or naming none (`named` false).
+pub fn completed_job(n: u64, named: bool) -> MessageItem {
+    MessageItem::Fact(JobFact::Completed {
+        request_id: RunnerRequestId(0),
+        result: JobResult::Canceled,
+        runner_id: None,
+        job: named.then(|| key(n)),
+    })
+}
+
+/// The run facts of a `push` (or any event) from [`REPOSITORY`]'s own branch.
+pub fn run(event_name: EventName, head: &str) -> RunLookup {
+    RunLookup::Found(RunFacts {
+        repository: repository(REPOSITORY),
+        head_repository: repository(head),
+        event_name,
+    })
+}
+
+/// The lookup of job `n`: trusted (`true`, a push) or untrusted (a `pull_request_target`).
+pub fn lookup(n: u64, trusted: bool) -> ScaleSetCommand {
+    let event_name = if trusted {
+        EventName::Push
+    } else {
+        EventName::PullRequestTarget
+    };
+    ScaleSetCommand::RecordRunLookup {
+        job: key(n),
+        lookup: run(event_name, REPOSITORY),
+    }
+}
+
+pub fn failed_lookup(n: u64) -> ScaleSetCommand {
+    ScaleSetCommand::RecordRunLookup {
+        job: key(n),
+        lookup: RunLookup::Failed,
+    }
+}
+
+/// An open session on github.com's flow, without or with `cancel_refused_runs`.
+pub fn direct_path(cancel_refused_runs: bool) -> Vec<ScaleSetCommand> {
+    let mut path = active_path();
+    path.push(policy(cancel_refused_runs));
+    path
+}
+
+pub fn direct(cancel_refused_runs: bool) -> ScaleSetState {
+    reach(direct_path(cancel_refused_runs))
 }
 
 pub const fn message(
@@ -248,10 +365,45 @@ pub fn matrix_states() -> Vec<(&'static str, ScaleSetState)> {
                 ],
             )]),
         ),
+        (
+            "active_refused",
+            active_then(&[
+                policy(false),
+                message(FIRST, 1, Some(assigned(1)), vec![assign(1)]),
+                lookup(1, false),
+            ]),
+        ),
+        (
+            "active_sink",
+            active_then(&[
+                policy(false),
+                message(FIRST, 1, Some(assigned(1)), vec![assign(1)]),
+                lookup(1, false),
+                ScaleSetCommand::StartSink { job: key(1) },
+            ]),
+        ),
+        (
+            "active_pending_cancel",
+            active_then(&[
+                policy(true),
+                message(FIRST, 1, Some(assigned(2)), vec![assign(1), assign(2)]),
+                lookup(1, false),
+            ]),
+        ),
         ("closing", active_then(&[ScaleSetCommand::StartClosing])),
         (
             "closed",
             active_then(&[ScaleSetCommand::StartClosing, deleted(FIRST)]),
+        ),
+        (
+            "vanished",
+            active_then(&[
+                loss(LossCause::Expired),
+                deleted(FIRST),
+                ScaleSetCommand::RecordScaleSetVanished {
+                    github_id: ScaleSetId(7),
+                },
+            ]),
         ),
     ]
 }
@@ -298,5 +450,32 @@ pub fn stimuli() -> Vec<(&'static str, Step)> {
         ("recovered", auto(ScaleSetCommand::RecordSessionRecovered)),
         ("start_closing", auto(ScaleSetCommand::StartClosing)),
         ("stale_run", at(0, ScaleSetCommand::StartClosing)),
+        ("trust_policy", auto(policy(false))),
+        ("lookup_trusted", auto(lookup(2, true))),
+        ("lookup_failed", auto(failed_lookup(1))),
+        (
+            "start_sink",
+            auto(ScaleSetCommand::StartSink { job: key(1) }),
+        ),
+        ("sink_ended", auto(ScaleSetCommand::RecordSinkEnded)),
+        (
+            "cancel_answer",
+            auto(ScaleSetCommand::RecordCancelAnswer {
+                job: key(1),
+                answer: CancelAnswer::Accepted,
+            }),
+        ),
+        (
+            "vanished_same",
+            auto(ScaleSetCommand::RecordScaleSetVanished {
+                github_id: ScaleSetId(7),
+            }),
+        ),
+        (
+            "recreated_new",
+            auto(ScaleSetCommand::RecordScaleSetRecreated {
+                github_id: ScaleSetId(9),
+            }),
+        ),
     ]
 }

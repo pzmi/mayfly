@@ -9,15 +9,19 @@ use mayfly_domain::{CommandId, Epoch, Millis, PoolName, Sample};
 
 use super::events::ScaleSetEvent;
 use super::state::{
-    EnsureScaleSet, JobFact, LossCause, MessageId, MessageItem, RecordMessage, ScaleSetCommand,
-    ScaleSetRejection, ScaleSetState, SessionId,
+    CancelAnswer, EnsureScaleSet, JobFact, LossCause, MessageId, MessageItem, RecordMessage,
+    ScaleSetCommand, ScaleSetRejection, ScaleSetState, SessionId,
 };
 use super::{ScaleSet, decide, evolve};
 use crate::aggregate::{DeterminismCase, Expect};
 use crate::attempt::RunnerRequestId;
 use crate::command::{Actor, Command};
-use crate::demand::{Capacity, EventName, Offer, Statistics, WireMode};
+use crate::demand::{
+    AssignedJob, Capacity, EventName, JobKey, Offer, RepositoryName, RunFacts, RunLookup,
+    Statistics, TrustPolicy, WireMode, WorkflowJobId, WorkflowRunId,
+};
 use crate::pool::TrustTier;
+use crate::registration::JobResult;
 use crate::registration::{RunnerId, ScaleSetId};
 
 type Step = Command<ScaleSetCommand>;
@@ -219,6 +223,89 @@ fn conflicted_four_times() -> Vec<Step> {
     )
 }
 
+const SCALE_SET_NAME: &str = "mayfly-linux";
+const REPOSITORY: &str = "octo-org/app";
+
+fn repository(name: &str) -> Option<RepositoryName> {
+    Some(RepositoryName(name.to_owned()))
+}
+
+fn policy(cancel_refused_runs: bool) -> ScaleSetCommand {
+    ScaleSetCommand::ApplyTrustPolicy(TrustPolicy {
+        scale_set_name: SCALE_SET_NAME.to_owned(),
+        allowed_repositories: [RepositoryName(REPOSITORY.to_owned())]
+            .into_iter()
+            .collect(),
+        allowed_events: TrustPolicy::default_events(),
+        cancel_refused_runs,
+    })
+}
+
+fn key(n: u64) -> JobKey {
+    JobKey {
+        job_id: WorkflowJobId(format!("job-{n}")),
+        run_id: WorkflowRunId(100 + n),
+    }
+}
+
+/// A direct assignment (github.com: `runnerRequestId` 0) of job `n`.
+fn assign(n: u64) -> MessageItem {
+    MessageItem::Fact(JobFact::Assigned {
+        request_id: RunnerRequestId(0),
+        job: Some(AssignedJob {
+            key: key(n),
+            repository: repository(REPOSITORY),
+            event_name: EventName::PullRequest,
+            labels: vec![SCALE_SET_NAME.to_owned()],
+        }),
+    })
+}
+
+fn lookup(n: u64, head: &str) -> ScaleSetCommand {
+    ScaleSetCommand::RecordRunLookup {
+        job: key(n),
+        lookup: RunLookup::Found(RunFacts {
+            repository: repository(REPOSITORY),
+            head_repository: repository(head),
+            event_name: EventName::PullRequest,
+        }),
+    }
+}
+
+/// github.com's flow: an open session and a trust policy, without or with the cancel option.
+fn direct(cancel_refused_runs: bool) -> Vec<Step> {
+    then(active(), [policy(cancel_refused_runs)])
+}
+
+/// Job 1 assigned, its run not looked up yet.
+fn pending(cancel_refused_runs: bool) -> Vec<Step> {
+    then(
+        direct(cancel_refused_runs),
+        [message(FIRST, 1, assigned(1), vec![assign(1)])],
+    )
+}
+
+/// Job 1 refused: its run is a fork's pull request.
+fn refused_fork(cancel_refused_runs: bool) -> Vec<Step> {
+    then(pending(cancel_refused_runs), [lookup(1, "fork/app")])
+}
+
+fn sink_up() -> Vec<Step> {
+    then(
+        refused_fork(false),
+        [ScaleSetCommand::StartSink { job: key(1) }],
+    )
+}
+
+fn vanished() -> Vec<Step> {
+    then(
+        deleted(),
+        [ScaleSetCommand::RecordScaleSetVanished {
+            github_id: ScaleSetId(7),
+        }],
+    )
+}
+
 fn at_epoch_two() -> Vec<Step> {
     let mut path = active();
     path.push(at(2, capacity(2, 2, 2, WireMode::Open)));
@@ -289,6 +376,12 @@ fn paths() -> Vec<Vec<Step>> {
         reopened_at_three(),
         conflicted_four_times(),
         at_epoch_two(),
+        direct(false),
+        pending(false),
+        refused_fork(false),
+        refused_fork(true),
+        sink_up(),
+        vanished(),
     ]
 }
 
@@ -334,9 +427,17 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
             message(FIRST, 2, assigned(0), vec![offer(6, EventName::Push)]),
         ),
         accepted(
-            "message_below_the_floor_degrades_the_session",
+            "first_message_below_the_floor_restarts_the_numbering",
             reopened_at_three(),
             message(OTHER, 1, assigned(1), vec![offer(7, EventName::Push)]),
+        ),
+        accepted(
+            "id_at_the_cursor_later_in_a_session_degrades_it",
+            then(
+                reopened_at_three(),
+                [message(OTHER, 4, assigned(0), vec![])],
+            ),
+            message(OTHER, 4, assigned(1), vec![offer(7, EventName::Push)]),
         ),
         accepted(
             "fifth_conflict_in_a_row_escalates",
@@ -346,7 +447,7 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
             },
         ),
         accepted(
-            "older_message_keeps_statistics",
+            "id_below_the_cursor_degrades_the_session",
             then(active(), [message(FIRST, 5, assigned(2), vec![])]),
             message(FIRST, 3, assigned(0), vec![]),
         ),
@@ -380,11 +481,13 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
                 vec![
                     MessageItem::Fact(JobFact::Assigned {
                         request_id: RunnerRequestId(1),
+                        job: None,
                     }),
                     MessageItem::Fact(JobFact::Started {
                         request_id: RunnerRequestId(1),
                         runner_id: Some(RunnerId(42)),
                         runner_name: None,
+                        job: None,
                     }),
                 ],
             ),
@@ -446,6 +549,83 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
             at(2, capacity(2, 1, 1, WireMode::Paused)),
             Expect::Accepted,
         ),
+        accepted("trust_policy_applied", active(), policy(false)),
+        accepted(
+            "same_trust_policy_records_nothing",
+            direct(false),
+            policy(false),
+        ),
+        accepted(
+            "direct_assignment_waits_for_its_lookup",
+            direct(false),
+            message(FIRST, 1, assigned(1), vec![assign(1)]),
+        ),
+        accepted(
+            "lookup_classifies_a_base_pull_request_trusted",
+            pending(false),
+            lookup(1, REPOSITORY),
+        ),
+        accepted(
+            "lookup_refuses_a_fork",
+            pending(false),
+            lookup(1, "fork/app"),
+        ),
+        accepted(
+            "failed_lookup_refuses",
+            pending(false),
+            ScaleSetCommand::RecordRunLookup {
+                job: key(1),
+                lookup: RunLookup::Failed,
+            },
+        ),
+        accepted(
+            "reassignment_is_classified_afresh",
+            refused_fork(false),
+            message(FIRST, 2, assigned(1), vec![assign(1)]),
+        ),
+        accepted(
+            "job_completed_releases_the_refusal",
+            refused_fork(false),
+            message(
+                FIRST,
+                2,
+                assigned(0),
+                vec![MessageItem::Fact(JobFact::Completed {
+                    request_id: RunnerRequestId(0),
+                    result: JobResult::Failed,
+                    runner_id: None,
+                    job: Some(key(1)),
+                })],
+            ),
+        ),
+        accepted(
+            "sink_started_for_a_refused_job",
+            refused_fork(false),
+            ScaleSetCommand::StartSink { job: key(1) },
+        ),
+        accepted("sink_ended", sink_up(), ScaleSetCommand::RecordSinkEnded),
+        accepted(
+            "cancel_answered",
+            refused_fork(true),
+            ScaleSetCommand::RecordCancelAnswer {
+                job: key(1),
+                answer: CancelAnswer::Accepted,
+            },
+        ),
+        accepted(
+            "scale_set_vanished",
+            deleted(),
+            ScaleSetCommand::RecordScaleSetVanished {
+                github_id: ScaleSetId(7),
+            },
+        ),
+        accepted(
+            "scale_set_recreated",
+            vanished(),
+            ScaleSetCommand::RecordScaleSetRecreated {
+                github_id: ScaleSetId(9),
+            },
+        ),
         // refused, one per code
         refused("stale_run", at_epoch_two(), ScaleSetCommand::StartClosing),
         refused("not_ensured", Vec::new(), ScaleSetCommand::BeginOpen),
@@ -491,6 +671,49 @@ pub(super) fn cases() -> Vec<DeterminismCase<ScaleSet>> {
             "not_degraded",
             active(),
             ScaleSetCommand::RecordSessionRecovered,
+        ),
+        refused(
+            "scale_set_vanished_is_not_ensured_anew",
+            vanished(),
+            ensure(7),
+        ),
+        refused(
+            "not_vanished",
+            ensured(),
+            ScaleSetCommand::RecordScaleSetRecreated {
+                github_id: ScaleSetId(9),
+            },
+        ),
+        refused("not_pending", direct(false), lookup(1, REPOSITORY)),
+        refused(
+            "vanished_while_a_session_is_live",
+            active(),
+            ScaleSetCommand::RecordScaleSetVanished {
+                github_id: ScaleSetId(7),
+            },
+        ),
+        refused(
+            "not_refused",
+            pending(false),
+            ScaleSetCommand::StartSink { job: key(1) },
+        ),
+        refused(
+            "sink_not_due_with_the_cancel_option",
+            refused_fork(true),
+            ScaleSetCommand::StartSink { job: key(1) },
+        ),
+        refused(
+            "no_sink",
+            refused_fork(false),
+            ScaleSetCommand::RecordSinkEnded,
+        ),
+        refused(
+            "cancel_not_due_without_the_option",
+            refused_fork(false),
+            ScaleSetCommand::RecordCancelAnswer {
+                job: key(1),
+                answer: CancelAnswer::Refused,
+            },
         ),
     ]
 }

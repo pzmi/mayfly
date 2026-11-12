@@ -350,6 +350,7 @@ impl<'s> World<'s> {
                     request_id: *request_id,
                     result: JobResult::Succeeded,
                     runner_id: None,
+                    job: None,
                 }));
             }
         }

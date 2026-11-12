@@ -7,8 +7,8 @@
 use mayfly_control_domain::attempt::RunnerRequestId;
 use mayfly_control_domain::demand::{DeclineReason, EventName, WireMode};
 use mayfly_control_domain::scaleset::{
-    DegradedCause, LossCause, MessageItem, MessageOrigin, PROTOCOL_DRIFT_THRESHOLD, Phase,
-    SESSION_CONFLICT_ESCALATION, ScaleSetCommand, ScaleSetEvent, ScaleSetState,
+    DegradedCause, LossCause, MessageId, MessageItem, MessageOrigin, PROTOCOL_DRIFT_THRESHOLD,
+    Phase, SESSION_CONFLICT_ESCALATION, ScaleSetCommand, ScaleSetEvent, ScaleSetState,
 };
 
 use super::support::{
@@ -151,14 +151,56 @@ fn should_count_no_drift_again_when_a_redelivered_message_carries_unknown_types(
     assert_eq!((after.drift, after.phase), (0, Phase::Active));
 }
 
-/// MED2 of the KER-06 review (A1 refuted): the second session's first message has an id below
-/// the cursor the first session left: the ids did not increase across sessions. Nothing it
-/// carries applies (statistics, offers) and the session is degraded for the operator; the next
-/// message at or below the floor keeps it so, never silently continuing.
+/// a1RefutationIsFlagged, the renumbered branch (A1 refuted, recovered: `formal/scaleset.qnt`'s
+/// `a1RestartIsRecoveredTest`): the second session's first message has an id below the floor
+/// the first session left. Redelivery is oldest first, so it cannot be one: GitHub restarted its
+/// numbering. `MessageIdsRestarted` is recorded for the operator, the message applies as new
+/// (statistics, offers) and the cursor and floor restart from it; the session goes on, and the
+/// next message of the new numbering applies too.
 #[test]
-fn should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor() {
+fn should_restart_the_numbering_when_a_new_session_delivers_an_id_below_the_floor() {
     // given: messages 1 and 3 recorded in the first session, so the second's floor is 3
     let state = reopened_after(vec![], &[message(FIRST, 3, Some(assigned(0)), vec![])], 0);
+    // when
+    let (restarted, events) = apply(
+        &state,
+        auto(message(SECOND, 1, Some(assigned(1)), vec![push(7)])),
+    )
+    .expect("recorded");
+    let (later, more) = apply(
+        &restarted,
+        auto(message(SECOND, 2, Some(assigned(1)), vec![push(8)])),
+    )
+    .expect("recorded");
+    // then
+    assert!(matches!(
+        events.first(),
+        Some(ScaleSetEvent::MessageIdsRestarted(r)) if r.message_id.0 == 1 && r.floor.0 == 3
+    ));
+    let m = recorded(&events);
+    assert_eq!(m.origin, MessageOrigin::Fresh);
+    assert!(m.statistics_applied);
+    assert_eq!(m.acquire, vec![RunnerRequestId(7)]);
+    assert_eq!(restarted.phase, Phase::Active);
+    assert!(restarted.renumbered);
+    assert_eq!(
+        (restarted.cursor.map(|c| c.0), restarted.session_floor),
+        (Some(1), None)
+    );
+    assert_eq!(recorded(&more).origin, MessageOrigin::Fresh);
+    assert_eq!(later.cursor.map(|c| c.0), Some(2));
+}
+
+/// a1RefutationIsFlagged, the degrading branch (`a1RefutedMidSessionDegradesTest`,
+/// `restartWithinASessionDegradesTest`): once the session recorded a message, an id at or below
+/// the cursor cannot start a numbering; it applies nothing and degrades the session, and the
+/// next one keeps it so. A reused id is never taken for a duplicate unless it is the cursor's
+/// (`ScaleSetState::is_duplicate`).
+#[test]
+fn should_degrade_the_session_when_an_id_at_or_below_the_cursor_comes_later_in_a_session() {
+    // given: the second session (floor 3) recorded message 4
+    let state = reopened_after(vec![], &[message(FIRST, 3, Some(assigned(0)), vec![])], 0);
+    let state = reach_from(state, [message(SECOND, 4, Some(assigned(0)), vec![])]);
     // when
     let (degraded, events) = apply(
         &state,
@@ -171,6 +213,11 @@ fn should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor
     )
     .expect("recorded");
     // then
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ScaleSetEvent::MessageIdsRestarted(_)))
+    );
     let m = recorded(&events);
     assert_eq!(m.origin, MessageOrigin::IdRegressed);
     assert!(m.acquire.is_empty() && !m.statistics_applied);
@@ -179,8 +226,11 @@ fn should_degrade_the_session_when_a_new_session_delivers_an_id_below_the_cursor
         Phase::Degraded(DegradedCause::MessageIdsRegressed)
     );
     assert_eq!((degraded.desired, degraded.reserved()), (0, ids(&[])));
+    assert_eq!(degraded.cursor.map(|c| c.0), Some(4));
+    assert!(!degraded.renumbered);
     assert_eq!(recorded(&later).origin, MessageOrigin::IdRegressed);
     assert_eq!(still.phase, degraded.phase);
+    assert!(state.is_duplicate(MessageId(4)) && !state.is_duplicate(MessageId(1)));
 }
 
 /// A6 (MED1 of the KER-06 review): message 2 was emitted before the restart, when nothing was
@@ -206,7 +256,8 @@ fn should_stay_within_deliverable_when_a_message_emitted_before_the_open_is_reco
     assert_eq!(m.declined[0].reason, DeclineReason::NoCapacity);
 }
 
-/// desiredFromLatestStatistics (A1): an older message's statistics never replace newer ones.
+/// desiredFromLatestStatistics (A1): an older message's statistics never replace newer ones;
+/// within a session such a message is a reused id and degrades it besides.
 #[test]
 fn should_keep_newer_statistics_when_an_older_message_is_recorded() {
     // given: message 5 said 2 assigned
@@ -218,11 +269,14 @@ fn should_keep_newer_statistics_when_an_older_message_is_recorded() {
     assert!(!recorded(&events).statistics_applied);
     assert_eq!(after.statistics.map(|s| s.total_assigned_jobs), Some(2));
     assert_eq!(after.desired, 2);
+    assert_eq!(
+        after.phase,
+        Phase::Degraded(DegradedCause::MessageIdsRegressed)
+    );
 }
 
-/// A message without statistics (an unknown envelope) moves the cursor but not the statistics'
-/// floor: an older message that carries statistics, still newer than the session's opening,
-/// applies them (found by the property test; its seed is kept in `tests/proptest-regressions`).
+/// A message without statistics (an unknown envelope) moves the cursor; the next message that
+/// carries statistics applies them.
 #[test]
 fn should_apply_statistics_when_only_a_newer_message_without_statistics_was_recorded() {
     // given: message 3 carried no statistics
@@ -232,10 +286,10 @@ fn should_apply_statistics_when_only_a_newer_message_without_statistics_was_reco
     );
     // when
     let (after, events) =
-        apply(&state, auto(message(FIRST, 1, Some(assigned(1)), vec![]))).expect("recorded");
+        apply(&state, auto(message(FIRST, 4, Some(assigned(1)), vec![]))).expect("recorded");
     // then
     assert!(recorded(&events).statistics_applied);
-    assert_eq!((after.desired, after.cursor.map(|c| c.0)), (1, Some(3)));
+    assert_eq!((after.desired, after.cursor.map(|c| c.0)), (1, Some(4)));
 }
 
 /// Plan §7.2 step 5: a session open recomputes desired from its initial statistics, without
