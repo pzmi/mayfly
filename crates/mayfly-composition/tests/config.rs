@@ -215,6 +215,37 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
 }
 
 #[test]
+fn should_read_runner_pins_per_platform_when_a_version_names_them() {
+    // given: one version pinned per platform, one with the first form (every platform)
+    let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+    let text = format!(
+        "{}\n[images]\nrepository = \"ghcr.io/example-org/runner\"\n[images.runners]\n\
+         \"2.330.0\" = {{ linux-arm64 = \"{a}\", osx-arm64 = \"{b}\" }}\n\"2.331.0\" = \"{c}\"\n",
+        minimal()
+    );
+    let unknown = format!(
+        "{}\n[images]\nrepository = \"ghcr.io/example-org/runner\"\n[images.runners]\n\
+         \"2.330.0\" = {{ windows-x64 = \"{a}\" }}\n",
+        minimal()
+    );
+
+    // when
+    let config = Config::parse(&text).unwrap();
+    let refused = errors_of(&unknown);
+
+    // then
+    let runners = &config.images.as_ref().unwrap().runners;
+    assert_eq!(runners["2.330.0"]["linux-arm64"], a);
+    assert_eq!(runners["2.330.0"]["osx-arm64"], b);
+    assert_eq!(runners["2.331.0"]["linux-arm64"], c);
+    assert_eq!(runners["2.331.0"]["osx-arm64"], c);
+    assert!(
+        refused.iter().any(|(field, _)| field.contains("runners")),
+        "{refused:?}"
+    );
+}
+
+#[test]
 fn should_map_the_capacity_policy_when_a_pool_is_planned() {
     // given
     let text = read("valid", "full.toml");

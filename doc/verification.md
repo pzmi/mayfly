@@ -54,7 +54,7 @@ points here.
 | **Fault lab** | `tools/faultlab` (§8) | the binaries, fake-tart, fake-github, signals | ≤ 5 min per scenario | weekly, release | a claim is about what clients observed under crashes and lost replies |
 | **Architecture** | `tools/xtask` + fixtures (fnd §3) | `cargo metadata`, `syn` | < 60 s | `architecture` | the rule is structural: edges, purity, naming, single append path |
 | **Mutation / fuzz** | `cargo xtask mutants-curated`, `mutation`, `fuzz` (§9, §10) | source patches, `cargo-mutants`, `cargo-fuzz` on the pinned nightly | per lane | nightly, weekly | the question is whether the tests can fail, or a parser survives hostile input |
-| **Hardware** | `hardware.yml`, gated test binaries (§5, §10) | real Tart in a dedicated `TART_HOME`, a disposable GitHub App and repository | owner's time | owner-gated (D14) | only real Virtualization.framework or the live scale-set service can answer |
+| **Hardware** | `cargo xtask hw01` from a terminal on the owner's Mac (`doc/hw01.md`; `hardware.yml` optional), gated test binaries (§5, §10) | real Tart in a throwaway `TART_HOME` the command creates, the real Keychain, a disposable GitHub App and repository | owner's time | owner-gated (D14, ADR 0015 as amended 2026-11-11) | only real Virtualization.framework, the Keychain or the live scale-set service can answer |
 
 Rules across levels:
 
@@ -588,7 +588,7 @@ triaged before the next ⛳ checkpoint.
 | **nightly** | schedule | fresh-seed conformance (more traces, longer), `mutants-curated`, `cargo-mutants` in-diff, fuzz per target (time-boxed) | < 3 h |
 | **weekly** | schedule | Apalache `formal-verify`, one job per model (owner, 2026-11-10); fault lab core then extended suite, `cargo-mutants` full (sharded), security over full history | < 6 h |
 | **release** | tag | full `check`, fault lab core, `mutants-curated`, `formal-verify`, `release-check` per target, SBOM | must be green on the tagged commit |
-| **hardware** (owner) | manual dispatch on the owner's Mac | VmProvider and GuestTransport contracts on real Tart, one-job smoke with a tiny Linux image, live scale-set contract and listener on a disposable repository | owner's time |
+| **hardware** (owner) | `cargo xtask hw01` run by the owner on their Mac | Tart CLI facts, VmProvider, SecretProvider (real Keychain) and ImageStore contracts on real Tart, the launcher in a booted image; later a one-job smoke and the live scale-set contract and listener on a disposable repository | owner's time |
 
 **Coverage floors** (`coverage-floor.toml`, measured by `cargo-llvm-cov` over every in-process
 suite):

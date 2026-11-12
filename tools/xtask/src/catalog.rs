@@ -56,7 +56,7 @@ pub const CATALOG: &[Check] = &[
     row(
         "cross-check",
         "static",
-        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
+        "cargo clippy --locked --workspace --all-targets --features mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
         "FND-04",
         true,
     ),
@@ -104,6 +104,13 @@ pub const CATALOG: &[Check] = &[
         "integration",
         "cargo xtask test --only real-tart --real-tart-home <DIR>",
         "DP-04",
+        false,
+    ),
+    row(
+        "hw01",
+        "hardware",
+        "cargo xtask hw01 [--macos] [--service-mode --service-user <USER>] [--report <FILE>] | cargo xtask hw01 --cleanup <RUN_DIR> (macOS only)",
+        "HW-01X",
         false,
     ),
     row(

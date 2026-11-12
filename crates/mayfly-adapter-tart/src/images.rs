@@ -93,10 +93,13 @@ pub struct ImageConfig {
     /// The OCI repository images are pulled from by digest (`ghcr.io/acme/runner-macos`):
     /// no tag, no digest, no scheme.
     pub repository: String,
-    /// The pinned runner packages: version (`X.Y.Z`) to the SHA-256 of its package (64 lowercase
-    /// hex digits), which the launcher checks before it installs. A version not here is never
-    /// installed.
-    pub runners: BTreeMap<String, String>,
+    /// The pinned runner packages: version (`X.Y.Z`), then the platform each package is built
+    /// for, to that package's SHA-256 (64 lowercase hex digits), which the launcher checks before
+    /// it installs. The runner ships one package per platform, so a version is pinned per
+    /// platform; the base's guest OS (from the image's `config.json`) selects the pin. A version,
+    /// or a platform of it, not here is never installed (HW-01X). Pinned by
+    /// `tests::should_pick_the_pin_of_the_image_guest_when_a_version_has_one_per_platform`.
+    pub runners: BTreeMap<String, BTreeMap<RunnerPlatform, String>>,
     /// This deployment's id, recorded on every base it makes.
     pub deployment_id: String,
     /// The repository's signature policy (the pools' strictest, composed by RT-02).
@@ -105,13 +108,81 @@ pub struct ImageConfig {
     pub deadlines: ImageDeadlines,
 }
 
+/// The platform a runner package is built for: the runner's own release names
+/// (`actions-runner-<platform>-<version>.tar.gz`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RunnerPlatform {
+    /// `linux-arm64`: a Linux guest on Apple silicon.
+    LinuxArm64,
+    /// `osx-arm64`: a macOS guest on Apple silicon.
+    OsxArm64,
+}
+
+impl RunnerPlatform {
+    /// The release's spelling (`linux-arm64`, `osx-arm64`), the config's key.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LinuxArm64 => "linux-arm64",
+            Self::OsxArm64 => "osx-arm64",
+        }
+    }
+
+    /// The platform spelled `text`, if it is one.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::LinuxArm64, Self::OsxArm64]
+            .into_iter()
+            .find(|p| p.as_str() == text)
+    }
+
+    /// `version → platform name → checksum` (the configuration's spelling) as the store's
+    /// pins; a name that is not a platform is dropped (the configuration refused it already).
+    /// Pinned by `tests::should_round_trip_each_platform_when_it_is_spelled_as_the_release_does`.
+    #[must_use]
+    pub fn pin_table(
+        named: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> BTreeMap<String, BTreeMap<Self, String>> {
+        named
+            .iter()
+            .map(|(version, pins)| {
+                let pins = pins
+                    .iter()
+                    .filter_map(|(name, sha)| Self::parse(name).map(|p| (p, sha.clone())))
+                    .collect();
+                (version.clone(), pins)
+            })
+            .collect()
+    }
+
+    /// The package a guest of `guest` runs (mayfly hosts are Apple silicon).
+    #[must_use]
+    pub const fn for_guest(guest: GuestOs) -> Self {
+        match guest {
+            GuestOs::Linux => Self::LinuxArm64,
+            GuestOs::Macos => Self::OsxArm64,
+        }
+    }
+}
+
+/// The guest OS Tart's `config.json` names (`"os": "darwin"` or `"linux"`).
+fn config_guest(raw: &[u8]) -> Option<GuestOs> {
+    let config: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    match config.get("os")?.as_str()? {
+        "darwin" => Some(GuestOs::Macos),
+        "linux" => Some(GuestOs::Linux),
+        _ => None,
+    }
+}
+
 /// A configuration the store refuses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// The repository is not a bare `host/path` (a tag, a digest, a scheme, an empty or dot
     /// component, or a character outside `[a-z0-9._-]` and the host's port).
     Repository,
-    /// A runner version is not `X.Y.Z` or its checksum is not 64 lowercase hex digits.
+    /// A runner version is not `X.Y.Z`, pins no platform, or a checksum is not 64 lowercase hex
+    /// digits.
     Runner(String),
     /// The deployment id is empty.
     Deployment,
@@ -168,8 +239,11 @@ impl ImageConfig {
         if !(host_ok && path_ok) || host.starts_with(['.', ':']) || host.contains("..") {
             return Err(ConfigError::Repository);
         }
-        for (version, sha) in &self.runners {
-            if version_numbers(version).is_none() || !is_sha256(sha) {
+        for (version, pins) in &self.runners {
+            if version_numbers(version).is_none()
+                || pins.is_empty()
+                || !pins.values().all(|sha| is_sha256(sha))
+            {
                 return Err(ConfigError::Runner(version.clone()));
             }
         }
@@ -655,7 +729,7 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
         if base_name(digest, runner_version).as_ref() != Some(base) {
             return Err(VmError::Definite);
         }
-        let sha256 = self
+        let pins = self
             .images
             .runners
             .get(runner_version)
@@ -700,6 +774,17 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
         if self.local_names().await?.contains(name) {
             return Err(VmError::Definite);
         }
+        // The image's guest selects the runner package: nothing is created without its pin.
+        let config = self.cache_dir(digest).join(verify::CONFIG_FILE);
+        let guest = blocking(move || std::fs::read(config).map_err(drop))
+            .await
+            .ok()
+            .and_then(|raw| config_guest(&raw))
+            .ok_or(VmError::Definite)?;
+        let sha256 = pins
+            .get(&RunnerPlatform::for_guest(guest))
+            .ok_or(VmError::Definite)?
+            .clone();
         let tart_version = self.tart.version().await.map_err(|_| VmError::Definite)?;
         let base_id = random_id().map_err(|_| VmError::Definite)?;
         let signature = record
@@ -844,7 +929,12 @@ mod tests {
             repository: repository.to_owned(),
             runners: runners
                 .iter()
-                .map(|(v, s)| ((*v).to_owned(), (*s).to_owned()))
+                .map(|(v, s)| {
+                    (
+                        (*v).to_owned(),
+                        BTreeMap::from([(RunnerPlatform::LinuxArm64, (*s).to_owned())]),
+                    )
+                })
                 .collect(),
             deployment_id: "deployment".to_owned(),
             signature: SignaturePolicy::DigestOnly,
@@ -854,6 +944,56 @@ mod tests {
                 halt: Duration::from_secs(1),
             },
         }
+    }
+
+    #[test]
+    fn should_round_trip_each_platform_when_it_is_spelled_as_the_release_does() {
+        // given
+        let named = BTreeMap::from([(
+            "2.330.0".to_owned(),
+            BTreeMap::from([
+                ("linux-arm64".to_owned(), "a".repeat(64)),
+                ("osx-arm64".to_owned(), "b".repeat(64)),
+                ("windows-x64".to_owned(), "c".repeat(64)),
+            ]),
+        )]);
+
+        // when
+        let pins = RunnerPlatform::pin_table(&named);
+
+        // then
+        for platform in [RunnerPlatform::LinuxArm64, RunnerPlatform::OsxArm64] {
+            assert_eq!(RunnerPlatform::parse(platform.as_str()), Some(platform));
+        }
+        assert_eq!(RunnerPlatform::parse("windows-x64"), None);
+        assert_eq!(
+            [GuestOs::Linux, GuestOs::Macos].map(RunnerPlatform::for_guest),
+            [RunnerPlatform::LinuxArm64, RunnerPlatform::OsxArm64]
+        );
+        assert_eq!(
+            pins["2.330.0"].keys().copied().collect::<Vec<_>>(),
+            [RunnerPlatform::LinuxArm64, RunnerPlatform::OsxArm64]
+        );
+    }
+
+    #[test]
+    fn should_name_the_guest_only_when_the_config_names_a_known_os() {
+        // given
+        let configs: [&[u8]; 4] = [
+            br#"{"os":"darwin"}"#,
+            br#"{"os":"linux"}"#,
+            br#"{"os":"plan9"}"#,
+            b"not json",
+        ];
+
+        // when
+        let guests = configs.map(config_guest);
+
+        // then
+        assert_eq!(
+            guests,
+            [Some(GuestOs::Macos), Some(GuestOs::Linux), None, None]
+        );
     }
 
     #[test]

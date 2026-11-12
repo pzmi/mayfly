@@ -23,12 +23,16 @@ fn target_installed(list: &str, target: &str) -> bool {
 /// The arguments of the `cross-check` stage: Clippy with warnings denied over every target of
 /// the workspace for [`DARWIN_TARGET`], so `#[cfg(target_os = "macos")]` code, which the Linux
 /// `clippy` stage never compiles, is linted too (a plain `cargo check` let its warnings
-/// through). Pinned by `should_lint_every_target_for_darwin_when_cross_check_is_built`.
+/// through). The hardware lane's gated tests (`real-tart`, `real-keychain`: macOS only, run by
+/// `cargo xtask hw01`) are linted with them, so they never rot unseen between owner runs. Pinned
+/// by `should_lint_every_target_for_darwin_when_cross_check_is_built`.
 const CROSS_CHECK_ARGS: &[&str] = &[
     "clippy",
     "--locked",
     "--workspace",
     "--all-targets",
+    "--features",
+    "mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain",
     "--target",
     DARWIN_TARGET,
     "--",
@@ -110,7 +114,7 @@ pub fn stages() -> Vec<Stage> {
         .collect();
     stages.push(Stage::in_process(
         "cross-check",
-        "cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
+        "cargo clippy --locked --workspace --all-targets --features mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain --target aarch64-apple-darwin -- -D warnings (after a rustup target preflight; the C sources of bundled SQLite and aws-lc not compiled)",
         run_cross_check,
     ));
     stages.push(Stage::in_process("docs", "cargo xtask adr index", run_docs));
@@ -798,7 +802,9 @@ jobs:
         // then
         assert_eq!(
             args,
-            "clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings"
+            "clippy --locked --workspace --all-targets --features \
+             mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain --target \
+             aarch64-apple-darwin -- -D warnings"
         );
         assert!(listed.is_some_and(|l| l.contains(&args)), "{listed:?}");
     }

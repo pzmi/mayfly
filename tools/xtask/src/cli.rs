@@ -99,6 +99,28 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = crate::conformance::GATE_STEPS, value_parser = clap::value_parser!(u32).range(1..))]
         steps: u32,
     },
+    /// The real-Tart checks, run by the owner from a terminal on a Mac with Tart 2.41.1 (HW-01X,
+    /// doc/hw01.md): a throwaway TART_HOME, images pinned by digest, a redacted JSON report.
+    /// Refuses to start off macOS.
+    Hw01 {
+        /// Also pull the pinned macOS image (tens of gigabytes) and run the macOS checks.
+        #[arg(long)]
+        macos: bool,
+        /// Run the launchd check: boot the Linux image under a temporary LaunchDaemon as
+        /// `--service-user` (one sudo prompt).
+        #[arg(long, requires = "service_user")]
+        service_mode: bool,
+        /// An existing, dedicated user the LaunchDaemon runs as (never created or deleted).
+        #[arg(long, value_name = "USER", requires = "service_mode")]
+        service_user: Option<String>,
+        /// Where to write the report (default: target/hw01-report.json).
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
+        /// Only clean up an earlier run's directory (printed at its start) after a crash or a
+        /// second Ctrl-C: deletes exactly what its record names, then the directory.
+        #[arg(long, value_name = "RUN_DIR", conflicts_with_all = ["macos", "service_mode", "service_user", "report"])]
+        cleanup: Option<PathBuf>,
+    },
     /// Install pinned dev tools.
     InstallTools {
         /// Tools to install; all when empty.
@@ -179,6 +201,7 @@ impl Command {
             Self::FormalTest => "formal-test",
             Self::FormalVerify { .. } => "formal-verify",
             Self::Conformance { .. } => "conformance",
+            Self::Hw01 { .. } => "hw01",
             Self::InstallTools { .. } => "install-tools",
             Self::Adr { .. } => "adr",
             Self::Land { .. } => "land",
@@ -280,6 +303,25 @@ mod tests {
             Command::FormalVerify { model: Some(m) } if m == "lifecycle"
         ));
         assert!(matches!(&parsed[1], Command::FormalVerify { model: None }));
+    }
+
+    #[test]
+    fn should_need_both_service_flags_when_hw01_service_mode_is_parsed() {
+        // given
+        let parse = |args: &[&str]| Cli::try_parse_from(["xtask", "hw01"].iter().chain(args));
+
+        // when
+        let alone = parse(&["--service-mode"]);
+        let user_alone = parse(&["--service-user", "runner"]);
+        let both = parse(&["--service-mode", "--service-user", "runner", "--macos"]);
+
+        // then
+        assert!(alone.is_err() && user_alone.is_err());
+        assert!(parse(&["--cleanup", "/tmp/x", "--macos"]).is_err());
+        assert!(matches!(
+            both.unwrap().command,
+            Command::Hw01 { macos: true, service_mode: true, service_user: Some(ref u), report: None, cleanup: None } if u == "runner"
+        ));
     }
 
     #[test]

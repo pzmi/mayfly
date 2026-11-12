@@ -35,7 +35,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [D11](adr/0012-independent-fault-lab-and-fakes.md) | The fault lab (`tools/faultlab`) imports **no** production crate: it drives the binaries, reads SQLite with its own SQL and fake-tart/fake-github state with its own parsers, and has its own checker (ver §8). `mayfly-fake-tart` and `mayfly-fake-github` likewise implement their wire behaviour independently. | Accepted (owner, 2026-11-09) |
 | [D12](adr/0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart is driven only through its CLI by argv. Guests are reached by `tart exec` where the image supports it, else the system `ssh` binary with a pinned per-image host key; no Rust SSH library in v0.x. | Accepted (owner, 2026-11-09) |
 | [D13](adr/0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly: `Secret<T>` with redacting `Debug`/`Display`, no `Serialize`; JIT configs live in memory and go to the guest launcher over stdin. A redaction test and the secret scan guard it. | Accepted (owner, 2026-11-09) |
-| [D14](adr/0015-owner-gated-real-world-lanes.md) | Real-world lanes (real Tart on macOS, live GitHub scale set) are owner-gated: a manual `hardware.yml` workflow on the owner's self-hosted Mac and a disposable GitHub repository/App. Agents deliver everything up to them. | Accepted (owner, 2026-11-09) |
+| [D14](adr/0015-owner-gated-real-world-lanes.md) | Real-world lanes (real Tart on macOS, live GitHub scale set) are owner-gated: the owner runs `cargo xtask hw01` from a terminal on their Mac (`hardware.yml` optional) and uses a disposable GitHub repository/App. Agents deliver everything up to them. | Accepted (owner, 2026-11-09); amended by the owner, 2026-11-11 |
 | [D15](adr/0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox: Linux, no Docker, no macOS, no Tart. Quint (Node) and Apalache (JVM) are dev-only tools pinned in `tools/versions.toml`; a missing tool fails closed (never a skipped-but-green check). Actions are pinned by commit SHA. | Accepted (owner, 2026-11-09) |
 | [ADR 0017](adr/0017-serde-derive-in-the-shared-kernel.md) | `mayfly-domain` depends on `serde` with `derive` and on no format crate; encoding stays in `mayfly-protocol`, the journal adapter and the golden-fixture harness. | Accepted (owner, 2026-11-09) |
 | [ADR 0018](adr/0018-event-codec-and-aggregate-registry.md) | Events implement `DomainEvent`; an aggregate's events form one `event_set!` enum with a codec and a registry, so every kind has its schema version and golden fixture. | Accepted (owner, 2026-11-09) |
@@ -1262,6 +1262,13 @@ their targets; it now walks a target's components too. The tart tests reach thei
 through a link (`support::LinkedDir`), so Linux CI catches a check that refuses one. Pinned by
 `tests/tart/images.rs::should_follow_only_trusted_links_when_checking_a_private_directory` and
 `tests/contract.rs::should_check_every_directory_a_trusted_link_leads_through_when_walking_to_a_secret`.
+As built (HW-01X): the runner packages are pinned per version and platform
+(`ImageConfig::runners`: version → `linux-arm64` / `osx-arm64` → SHA-256), because the runner
+ships one package per platform; the image's guest OS (its cached `config.json`) selects the pin
+before anything is created, and a platform with no pin is refused `Definite` (pinned by
+`tests/tart/images.rs::should_pick_the_pin_of_the_image_guest_when_a_version_has_one_per_platform`).
+An implementation detail of ADR 0087's pinned runner packages, not a new decision; no released
+config held the per-version shape.
 
 #### SIG-01 Image signature verification for pools that require it
 Cites: ADR 0087 decision 8, dm §9.3, ADR 0033. DP-07 records each source's signature policy
@@ -1794,8 +1801,12 @@ Tart (CLAUDE.md). `cargo xtask hw01 [--macos] [--service-mode --service-user <us
   implements only ADR 0082's `install-runner` and `verify`, for this test; not the product
   launcher) through `tart exec`, and pushes it with `tart push --insecure` to a loopback OCI
   registry the command serves itself on `127.0.0.1` (port 0) for the run; the gated contract
-  world beside `tests/tart/images.rs` (with `RegistryManifests` as its `ManifestSource`) then
-  pulls it by digest. If any step of that build fails, IC-01..IC-14 are reported `not_run` with
+  world beside `tests/tart/images.rs` (`tests/real_tart_images.rs`) then pulls it by digest. Its
+  `ManifestSource` reads the loopback registry's directory, because `RegistryManifests` speaks
+  HTTPS only; `RegistryManifests` is checked against the public registry instead
+  (`public-manifest-fetch`, the pinned Linux image). IC-14 (a macOS base beside a Linux one) runs
+  with `--macos`, which also pushes a macOS contract image, and both runner pins; without them it
+  is `not_run`. If any step of that build fails, IC-01..IC-14 are reported `not_run` with
   the failing step, never passed; a check that needs `--macos` or `--service-mode` without the
   flag is `not_run` too.
 - **It cleans up what it made, and only that.** Each VM, image, keychain, LaunchDaemon, process
@@ -1827,7 +1838,10 @@ Reworked by the owner's decision of 2026-11-11: no self-hosted runner. (owner) o
 checkout at the commit to check, runs `cargo xtask hw01` (with `--macos` for the macOS image
 checks, `--service-mode --service-user <user>` for the launchd check) and sends the report back.
 Agents turn the report into fixtures and fixes, each in its own task; a `fail` or `not_run` stays
-listed here until a later report passes it. `hardware.yml` is optional: should the owner register
+listed here until a later report passes it. Before the first run, (owner) confirms the runner pin
+of `tools/hw01/images.toml` (`[runners."2.338.2"]` with its `linux-arm64` and `osx-arm64` package
+checksums, computed from github.com's release downloads and not yet cross-checked) against the
+v2.338.2 release page. `hardware.yml` is optional: should the owner register
 a self-hosted runner later, it runs the same command and uploads the report. What the command
 confirms, by the task that asked for it:
 DEC-01: also verifies `tart set --random-mac` and MAC read-back, `tart exec -i`, the run lock and

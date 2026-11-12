@@ -216,7 +216,10 @@ mayfly-fake-tart = { rustix = ["default", "fs", "process"], serde = ["default", 
 # keys generated at run time by the rsa crate (another implementation than the provider);
 # base64url and serde for JWTs and bodies.
 mayfly-fake-github = { aws-lc-rs = ["default"], axum = ["http1", "tokio"], base64 = ["default"], rsa = ["default", "pkcs1v15"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["default", "rt", "net", "sync"] }
-xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], serde = ["default", "derive"], sha2 = ["default"], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
+# `cargo xtask hw01` (HW-01X): its JSON report and Tart's JSON through serde_json; the run lock's
+# holder (`F_GETLK`), the process-group kill of a child past its deadline and the throwaway home's
+# owner check through rustix; Ctrl-C and SIGTERM set a flag (signal-hook) so the run cleans up.
+xtask = { cargo_metadata = ["default"], clap = ["default", "derive"], proc-macro2 = ["span-locations"], rustix = ["default", "fs", "process"], serde = ["default", "derive"], serde_json = ["default"], sha2 = ["default"], signal-hook = [], syn = ["parsing", "full", "visit", "clone-impls"], tempfile = ["default"], toml = ["default"], yaml-rust2 = [] }
 
 [external.dev]
 mayfly-domain = { proptest = ["std"] }

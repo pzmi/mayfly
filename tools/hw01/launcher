@@ -1,0 +1,105 @@
+#!/bin/sh
+# The test launcher `cargo xtask hw01` installs at /usr/local/libexec/mayfly/launcher in a
+# throwaway clone of a pinned image, for the hardware checks only (HW-01X). It is not mayfly's
+# product launcher: it implements just two verbs of ADR 0082's and ADR 0087's contract.
+#
+#   launcher verify
+#       reads a nonce (one line) on stdin and prints one JSON line
+#       {"v":1,"nonce":"<nonce>","os":"linux"|"macos","uptime_ms":<n>,"mac":"<mac>"}
+#   launcher install-runner <version> <sha256>
+#       downloads actions-runner-<os>-arm64-<version>.tar.gz from the runner's GitHub release,
+#       refuses it unless its SHA-256 is <sha256>, unpacks it into $HOME/actions-runner, asks
+#       the runner for its version and prints {"v":1,"runner_version":"<that version>"}
+#
+# Arguments are checked before anything runs (exit 64); nothing reads the environment beyond
+# HOME and PATH; nothing is evaluated from input.
+set -eu
+
+usage() {
+  echo "launcher: usage: launcher [verify|install-runner <X.Y.Z> <sha256>]" >&2
+  exit 64
+}
+
+os_name() {
+  case "$(uname -s)" in
+    Linux) echo linux ;;
+    Darwin) echo macos ;;
+    *) echo "launcher: unsupported system" >&2; exit 1 ;;
+  esac
+}
+
+mac_address() {
+  if [ "$(uname -s)" = Darwin ]; then
+    ifconfig en0 | awk '/ether/ { print $2; exit }'
+  else
+    for dev in /sys/class/net/*; do
+      [ "$(basename "$dev")" = lo ] && continue
+      cat "$dev/address"
+      return
+    done
+  fi
+}
+
+uptime_ms() {
+  if [ "$(uname -s)" = Darwin ]; then
+    boot=$(sysctl -n kern.boottime | sed 's/.* sec = \([0-9]*\).*/\1/')
+    echo $(( ($(date +%s) - boot) * 1000 ))
+  else
+    awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime
+  fi
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+verify() {
+  IFS= read -r nonce || true
+  case "$nonce" in
+    ''|*[!0-9a-f]*) echo "launcher: the nonce must be lowercase hex" >&2; exit 64 ;;
+  esac
+  printf '{"v":1,"nonce":"%s","os":"%s","uptime_ms":%s,"mac":"%s"}\n' \
+    "$nonce" "$(os_name)" "$(uptime_ms)" "$(mac_address | tr 'A-F' 'a-f')"
+}
+
+install_runner() {
+  version=$1
+  sha=$2
+  case "$version" in
+    *[!0-9.]*|.*|*.|*..*|'') usage ;;
+  esac
+  case "$sha" in
+    *[!0-9a-f]*) usage ;;
+  esac
+  [ "${#sha}" -eq 64 ] || usage
+  case "$(os_name)" in
+    linux) pkg_os=linux ;;
+    macos) pkg_os=osx ;;
+  esac
+  package="actions-runner-${pkg_os}-arm64-${version}.tar.gz"
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+  curl -fsSL --proto '=https' --max-time 900 -o "$work/$package" \
+    "https://github.com/actions/runner/releases/download/v${version}/${package}"
+  actual=$(sha256_of "$work/$package")
+  if [ "$actual" != "$sha" ]; then
+    echo "launcher: the runner package does not match its pinned SHA-256" >&2
+    exit 1
+  fi
+  rm -rf "$HOME/actions-runner"
+  mkdir -p "$HOME/actions-runner"
+  tar -xzf "$work/$package" -C "$HOME/actions-runner"
+  installed=$("$HOME/actions-runner/bin/Runner.Listener" --version | tr -d '\r' | tail -n 1)
+  printf '{"v":1,"runner_version":"%s"}\n' "$installed"
+}
+
+[ "$#" -ge 1 ] || usage
+case "$1" in
+  verify) [ "$#" -eq 1 ] || usage; verify ;;
+  install-runner) [ "$#" -eq 3 ] || usage; install_runner "$2" "$3" ;;
+  *) usage ;;
+esac

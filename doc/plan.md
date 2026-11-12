@@ -655,7 +655,9 @@ Config (TOML, `schema_version = 1`): `state_dir`, `[github]` (organisation, App 
 installation id, `private_key` as a secret reference URI), `[host]` (operator reserves for
 memory and disk), `[[pools]]` (name, `tier = "trusted"`, image manifest, guest OS, cpu/memory,
 `min_prepared`, `max_prepared_age`, `max_running`, breaker N and W, optional daily runner refresh),
-`[provider]` (`tart` + `tart_home`). Validated on load; refused keys (`allow_untrusted_prs`, a
+`[provider]` (`tart` + `tart_home`), `[images.runners."X.Y.Z"]` (one SHA-256 per runner package
+platform, `linux-arm64` and `osx-arm64`; the base's guest OS selects it, HW-01X; read once RT-02
+wires the image store). Validated on load; refused keys (`allow_untrusted_prs`, a
 classic `mode`) are refused with a message, never ignored. Secrets only by reference (ADR 0033).
 Packaging and removal (owner, 2026-11-09, ADR 0044): mayfly is distributed and updated through
 Homebrew and never updates itself; `brew uninstall` removes the program; `mayfly uninstall

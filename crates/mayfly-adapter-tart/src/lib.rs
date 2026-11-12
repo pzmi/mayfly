@@ -44,7 +44,7 @@ pub use bases::BaseRecords;
 pub use config::{Deadlines, ShimProgram, TartConfig};
 pub use floor::{FloorFile, FloorUnreadable};
 pub use guest::{GuestConfig, GuestDeadlines, TartGuestTransport};
-pub use images::{ConfigError, ImageConfig, ImageDeadlines, TartImageStore};
+pub use images::{ConfigError, ImageConfig, ImageDeadlines, RunnerPlatform, TartImageStore};
 pub use oci::{FetchError, ManifestSource, RegistryManifests};
 pub use provider::{ProbeError, TartProvider};
 pub use shim::ShimReading;

@@ -19,6 +19,7 @@ mod conformance;
 mod coverage;
 mod formal;
 mod formal_verify;
+mod hw01;
 mod land;
 mod process;
 mod quick;
@@ -69,6 +70,18 @@ fn main() -> ExitCode {
             traces,
             steps,
         } => conformance::run(model.as_deref(), seed.as_deref(), *traces, *steps),
+        Command::Hw01 {
+            macos,
+            service_mode: _,
+            service_user,
+            report,
+            cleanup,
+        } => hw01::run(&hw01::Options {
+            macos: *macos,
+            service_user: service_user.clone(),
+            report: report.clone(),
+            cleanup: cleanup.clone(),
+        }),
         Command::InstallTools { tools } => tools::install(tools),
         Command::Adr { action } => match action {
             AdrAction::New {

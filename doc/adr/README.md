@@ -64,7 +64,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0012](0012-independent-fault-lab-and-fakes.md) | Independent fault lab and fakes | Accepted |
 | [0013](0013-tart-through-its-cli-by-argv-guests-by-tart-exec-or-ssh.md) | Tart through its CLI by argv; guests by tart exec or ssh | Accepted |
 | [0014](0014-secrets-are-never-persisted-by-mayfly.md) | Secrets are never persisted by mayfly | Accepted. Amended by 0033, 0034 |
-| [0015](0015-owner-gated-real-world-lanes.md) | Owner-gated real-world lanes | Accepted |
+| [0015](0015-owner-gated-real-world-lanes.md) | Owner-gated real-world lanes | Accepted. Amended 2026-11-11 |
 | [0016](0016-agent-sandbox-and-fail-closed-tools.md) | Agent sandbox and fail-closed tools | Accepted. Amended by 0035 |
 | [0017](0017-serde-derive-in-the-shared-kernel.md) | Serde derive in the shared kernel | Accepted |
 | [0018](0018-event-codec-and-aggregate-registry.md) | Event codec and aggregate registry | Accepted. Amended 2026-11-09 |

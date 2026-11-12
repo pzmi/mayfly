@@ -69,9 +69,13 @@ pub struct Config {
 pub struct ImagesConfig {
     /// `host/path`, no scheme, tag or digest (`ghcr.io/acme/runner-macos`).
     pub repository: String,
-    /// Pinned runner packages: version `X.Y.Z` to the SHA-256 of its package, 64 lowercase hex
-    /// digits; a version not listed is never installed.
-    pub runners: BTreeMap<String, String>,
+    /// Pinned runner packages: version `X.Y.Z`, then the platform of each package
+    /// ([`RUNNER_PLATFORMS`]), to its SHA-256, 64 lowercase hex digits; a version or platform not
+    /// listed is never installed. `"X.Y.Z" = "<sha>"` (the first form) pins that checksum for
+    /// every platform, as it always meant; `"X.Y.Z" = { linux-arm64 = "<sha>", osx-arm64 =
+    /// "<sha>" }` pins each package (HW-01X: the runner ships one per platform, and the base's
+    /// guest OS selects the pin). Pinned by `tests/config.rs::should_read_runner_pins_per_platform_when_a_version_names_them`.
+    pub runners: BTreeMap<String, BTreeMap<String, String>>,
     /// Hosts besides the registry's own a token realm may be on (lowercase host names).
     pub realm_hosts: Vec<String>,
 }
@@ -989,6 +993,33 @@ fn runner_version_ok(text: &str) -> bool {
         })
 }
 
+/// The runner package platforms a pin may name (the runner's release names).
+pub const RUNNER_PLATFORMS: [&str; 2] = ["linux-arm64", "osx-arm64"];
+
+/// One `[images.runners]` entry: a checksum for every platform, or a table of them.
+fn runner_pins(value: &Value) -> Option<BTreeMap<String, String>> {
+    match value {
+        Value::String(sha) if sha256_ok(sha) => Some(
+            RUNNER_PLATFORMS
+                .iter()
+                .map(|p| ((*p).to_owned(), sha.clone()))
+                .collect(),
+        ),
+        Value::Table(table) if !table.is_empty() => table
+            .iter()
+            .map(|(platform, sha)| match sha {
+                Value::String(sha)
+                    if RUNNER_PLATFORMS.contains(&platform.as_str()) && sha256_ok(sha) =>
+                {
+                    Some((platform.clone(), sha.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
 fn sha256_ok(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -1025,10 +1056,10 @@ fn read_images(reader: &mut Reader) -> Option<ImagesConfig> {
         Some(Value::Table(table)) => {
             let mut runners = BTreeMap::new();
             let mut ok = true;
-            for (version, sha) in table {
-                match sha {
-                    Value::String(sha) if runner_version_ok(&version) && sha256_ok(&sha) => {
-                        runners.insert(version, sha);
+            for (version, pins) in table {
+                match runner_pins(&pins) {
+                    Some(pins) if runner_version_ok(&version) => {
+                        runners.insert(version, pins);
                     }
                     _ => {
                         ok = false;

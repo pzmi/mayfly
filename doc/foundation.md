@@ -739,7 +739,7 @@ boundaries), not as an object model.
 | `codeql.yml` | push to `main`, pull request, weekly | CodeQL for Rust and Actions | FND-04 |
 | `scorecard.yml` | push to `main`, weekly | OpenSSF Scorecard, SARIF upload | FND-04 |
 | `release.yml` | tag `v*`, dispatch | build, SBOM, checksums, provenance, draft release | OPS-03 |
-| `hardware.yml` | manual dispatch only, self-hosted Mac | real Tart contract and one-job smoke; live GitHub lane | HW-01, HW-02 |
+| `hardware.yml` (optional) | manual dispatch only, self-hosted Mac, if the owner ever registers one | the same `cargo xtask hw01`, uploading its report; live GitHub lane | HW-01, HW-02 |
 | `.github/dependabot.yml` | weekly | cargo, github-actions, npm (`formal/`), grouped minor+patch | FND-04 |
 
 ### 7.2 The gate in CI
@@ -749,8 +749,10 @@ boundaries), not as an object model.
    fmt-check, clippy, docs); `tests` (unit, integration, doctests); `security` (deny, secrets,
    workflows, action-pins); `coverage` (`coverage`, `changed-lines`, full history); `macos` (native build and tests on arm64 with
    `RUSTFLAGS=-D warnings`, `test --only platform-tests`); `cross` (`check --only cross-check`:
-   `cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D
-   warnings` from Linux, so macOS-only code is linted, not just compiled). Later tasks add
+   `cargo clippy --locked --workspace --all-targets --features
+   mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain --target
+   aarch64-apple-darwin -- -D warnings` from Linux, so macOS-only code, the hardware lane's
+   gated tests included, is linted, not just compiled). Later tasks add
    `e2e` and `conformance` with their stages.
 2. **One aggregate job, `required`**, runs `if: always()`, needs every other job of `ci.yml`, and
    fails unless every result is `success` (skipped and cancelled fail).
@@ -790,9 +792,11 @@ boundaries), not as an object model.
 - CodeQL, Scorecard, Dependabot as in 7.1.
 - Releases (OPS-03): `SHA256SUMS`, build-provenance attestation, CycloneDX SBOM, third-party
   notices; signing and notarisation are an owner follow-up.
-- **Owner-gated hardware lane** (D14): `hardware.yml` runs only on manual dispatch on the
-  owner's self-hosted Mac with a dedicated `TART_HOME`, never on pull requests and never from a
-  fork. Agents write it; the owner registers the runner and dispatches it.
+- **Owner-gated hardware lane** (D14, ADR 0015 as amended 2026-11-11): the owner runs `cargo
+  xtask hw01` from a terminal on their Mac (`doc/hw01.md`), in a throwaway `TART_HOME` it
+  creates, and sends back its redacted report; never on pull requests, never from a fork, never
+  by an agent. `hardware.yml` is optional: should the owner register a self-hosted runner, it
+  runs the same command on manual dispatch and uploads the report.
 
 ---
 

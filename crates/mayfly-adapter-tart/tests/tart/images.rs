@@ -21,8 +21,8 @@ use mayfly_adapter_tart::verify::{
     UNCOMPRESSED_SIZE, UnsafeLayout, sha256_hex,
 };
 use mayfly_adapter_tart::{
-    ConfigError, FetchError, ImageConfig, ImageDeadlines, ManifestSource, TartImageStore,
-    TartProvider,
+    ConfigError, FetchError, ImageConfig, ImageDeadlines, ManifestSource, RunnerPlatform,
+    TartImageStore, TartProvider,
 };
 use mayfly_data::{BaseName, GuestOs, ImageStore, VmError, VmProvider};
 use mayfly_domain::{ImageDigest, OwnedVmName};
@@ -33,10 +33,27 @@ use serde_json::{Value, json};
 
 use crate::support::{Fake, LinkedDir};
 
+/// The pinned checksum of [`RUNNER`]'s linux-arm64 package (synthetic); [`RUNNER_SHA256`] is
+/// its osx-arm64 one.
+const LINUX_RUNNER_SHA256: &str =
+    "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b";
+
+/// [`RUNNER`] pinned for both platforms.
+fn both_platforms() -> BTreeMap<RunnerPlatform, String> {
+    BTreeMap::from([
+        (RunnerPlatform::OsxArm64, RUNNER_SHA256.to_owned()),
+        (RunnerPlatform::LinuxArm64, LINUX_RUNNER_SHA256.to_owned()),
+    ])
+}
+
 fn image_config() -> ImageConfig {
+    image_config_with(both_platforms())
+}
+
+fn image_config_with(pins: BTreeMap<RunnerPlatform, String>) -> ImageConfig {
     ImageConfig {
         repository: REPOSITORY.to_owned(),
-        runners: BTreeMap::from([(RUNNER.to_owned(), RUNNER_SHA256.to_owned())]),
+        runners: BTreeMap::from([(RUNNER.to_owned(), pins)]),
         deployment_id: "deployment-under-test".to_owned(),
         signature: mayfly_adapter_tart::bases::SignaturePolicy::DigestOnly,
         deadlines: ImageDeadlines {
@@ -113,8 +130,13 @@ pub struct ImageTartWorld {
 
 impl ImageTartWorld {
     pub fn new() -> Self {
+        Self::pinned(both_platforms())
+    }
+
+    /// A world whose store pins [`RUNNER`] for `pins` only.
+    fn pinned(pins: BTreeMap<RunnerPlatform, String>) -> Self {
         let fake = Fake::new();
-        let (store, provider) = Self::build(&fake);
+        let (store, provider) = Self::build_with(&fake, image_config_with(pins));
         Self {
             fake,
             store,
@@ -123,9 +145,13 @@ impl ImageTartWorld {
     }
 
     fn build(fake: &Fake) -> (Store, TartProvider) {
+        Self::build_with(fake, image_config())
+    }
+
+    fn build_with(fake: &Fake, images: ImageConfig) -> (Store, TartProvider) {
         let records = fake.records();
         let source = RegistryDir { home: fake.home() };
-        let store = TartImageStore::new(fake.config(), image_config(), records.clone(), source)
+        let store = TartImageStore::new(fake.config(), images, records.clone(), source)
             .expect("a valid image configuration");
         let provider = TartProvider::new(fake.config(), records);
         (store, provider)
@@ -698,6 +724,42 @@ fn should_clone_set_its_mac_boot_once_install_and_stop_when_materialising() {
         !world.fake.shims().join(name).exists(),
         "the base's shim directory is removed"
     );
+}
+
+#[test]
+fn should_pick_the_pin_of_the_image_guest_when_a_version_has_one_per_platform() {
+    // given: a Linux image, a store pinning both packages, and one pinning only osx-arm64
+    let world = ImageTartWorld::new();
+    let digest = world.publish(b"{\"image\":\"linux pin\"}", GuestOs::Linux);
+    let base = base_name(&digest, RUNNER).expect("a base name");
+    let runtime = ImageTartWorld::runtime();
+    runtime.block_on(world.store.pull(&digest)).expect("pull");
+    let mac_only = ImageTartWorld::pinned(BTreeMap::from([(
+        RunnerPlatform::OsxArm64,
+        RUNNER_SHA256.to_owned(),
+    )]));
+    let other = mac_only.publish(b"{\"image\":\"linux pin\"}", GuestOs::Linux);
+    runtime.block_on(mac_only.store.pull(&other)).expect("pull");
+
+    // when
+    let made = runtime.block_on(world.store.materialise(&digest, &base, RUNNER));
+    let refused = runtime.block_on(mac_only.store.materialise(&other, &base, RUNNER));
+
+    // then
+    assert_eq!(made, Ok(()));
+    let installs: Vec<Vec<String>> = world
+        .invocations()
+        .into_iter()
+        .filter(|args| args.get(3).map(String::as_str) == Some("install-runner"))
+        .collect();
+    assert_eq!(installs.len(), 1);
+    assert_eq!(installs[0][5], LINUX_RUNNER_SHA256);
+    let entry = world.entry(base.as_str()).expect("an entry");
+    assert_eq!(entry.runner_sha256, LINUX_RUNNER_SHA256);
+    assert_eq!(refused, Err(VmError::Definite));
+    assert_eq!(mac_only.exists(base.as_str()), None, "nothing created");
+    assert!(mac_only.entry(base.as_str()).is_none());
+    assert!(mac_only.installs(&base).is_empty());
 }
 
 #[test]

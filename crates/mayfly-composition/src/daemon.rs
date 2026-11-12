@@ -79,8 +79,8 @@ use mayfly_adapter_sqlite::{OpenError, SqliteJournal, SqliteLedger, SqliteOption
 use mayfly_adapter_tart::bases::SignaturePolicy;
 use mayfly_adapter_tart::{
     BaseRecords, Deadlines, FloorFile, FloorUnreadable, GuestConfig, GuestDeadlines, ImageConfig,
-    ImageDeadlines, RegistryManifests, ShimProgram, TartConfig, TartGuestTransport, TartImageStore,
-    TartProvider,
+    ImageDeadlines, RegistryManifests, RunnerPlatform, ShimProgram, TartConfig, TartGuestTransport,
+    TartImageStore, TartProvider,
 };
 use mayfly_control::delivery::{
     DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, SinkConfig,
@@ -583,7 +583,7 @@ async fn data_plane(
         tart.clone(),
         ImageConfig {
             repository: images.repository.clone(),
-            runners: images.runners.clone(),
+            runners: RunnerPlatform::pin_table(&images.runners),
             deployment_id: host.to_string(),
             signature: SignaturePolicy::DigestOnly,
             deadlines: ImageDeadlines {

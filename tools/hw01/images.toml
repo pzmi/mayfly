@@ -1,0 +1,48 @@
+# What `cargo xtask hw01` (HW-01X, doc/hw01.md) pulls and downloads, and nothing else.
+#
+# Every image is pinned by digest: `repository` is a bare `host/path` and `digest` a
+# `sha256:<64 hex>`; a tag (`:latest`, `:24.04`) anywhere is refused before anything runs. The
+# digests below were read from the registry's API (`GET /v2/<path>/manifests/<tag>` with an
+# anonymous pull token; the served bytes hash to the digest) on 2026-11-12. `size_bytes` is the sum
+# of the manifest's layer sizes: what one pull downloads.
+#
+# A value of "owner-fills-in" is a pin nobody has verified yet: the checks that need it are
+# reported `not_run` with that reason, never run against a guess.
+
+schema = 1
+
+# Always pulled: an arm64 Linux image with the Tart guest agent (`tart exec`).
+[images.linux]
+repository = "ghcr.io/cirruslabs/ubuntu"
+digest = "sha256:97166c84ea5f102be33d2959f70e83861a36bd749f1715ab669d93e6c9f31476"
+size_bytes = 3058088661
+reason = "Ubuntu 24.04 arm64 with the Tart guest agent: small enough to pull on every run; the VmProvider contract's base, the run lock, tart exec and the test launcher's install-runner."
+
+# Pulled only with `--macos` (tens of gigabytes).
+[images.macos]
+repository = "ghcr.io/cirruslabs/macos-sequoia-base"
+digest = "sha256:8386ef670c04b38e57bd0e97fe2cde6bc0598e1bcfba0212ecba1814e659a6b1"
+size_bytes = 25411969700
+reason = "macOS 15 arm64 base with the Tart guest agent: --random-serial, the hypervisor's VM limit and install-runner in a macOS guest."
+
+# The runner release the test launcher's `install-runner` downloads inside the guest:
+# https://github.com/actions/runner/releases/download/v<version>/actions-runner-<platform>-<version>.tar.gz
+# (GitHub redirects the download to its release-assets host). The runner ships one package per
+# platform, so a version is pinned per platform, as the image store pins it (`ImageConfig::runners`,
+# `[images.runners."X.Y.Z"]`).
+# These checksums were computed on 2026-11-12 by downloading each
+# `actions-runner-<platform>-2.338.2.tar.gz` from github.com's release downloads over HTTPS; they
+# are NOT yet cross-checked against the published release notes: owner to confirm against the
+# v2.338.2 release page.
+[runners."2.338.2"]
+linux-arm64 = "670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945"
+osx-arm64 = "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388"
+
+# Every network destination of a run. Nothing else leaves the Mac: the loopback registry the
+# command serves itself listens on 127.0.0.1 only.
+[network]
+hosts = [
+  "ghcr.io (anonymous pulls of the images above)",
+  "pkg-containers.githubusercontent.com (ghcr.io's blob storage, by redirect)",
+  "github.com and release-assets.githubusercontent.com (the runner package, from inside the guest)",
+]

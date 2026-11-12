@@ -11,6 +11,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# The generic `SecretProvider` contract on the real Keychain (`tests/real_keychain.rs`, macOS
+# only), run by `cargo xtask hw01` against a disposable keychain it creates (HW-01X).
+real-keychain = []
+
 [dependencies]
 mayfly-control = { version = "0.1.0", path = "../mayfly-control" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
