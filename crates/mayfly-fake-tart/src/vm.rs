@@ -73,6 +73,14 @@ pub(crate) struct VmRecord {
     /// its source's.
     #[serde(default)]
     pub installed_runner: Option<String>,
+    /// An OCI entry pulled by its own digest: Tart's `markExplicitlyPulled`, which keeps it from
+    /// the cache's garbage collection when no link names it.
+    #[serde(default)]
+    pub explicitly_pulled: bool,
+    /// `raw` (`None`) or `asif` (`create --disk-format asif`); a clone carries its source's.
+    /// Tart cannot read a running VM's ASIF capacity, so `get` and `list` print `Disk` null.
+    #[serde(default)]
+    pub disk_format: Option<String>,
 }
 
 /// How many guest launches a record keeps.
@@ -98,6 +106,8 @@ impl VmRecord {
             guest_launches: Vec::new(),
             runner: None,
             installed_runner: None,
+            explicitly_pulled: false,
+            disk_format: None,
         }
     }
 
@@ -107,6 +117,13 @@ impl VmRecord {
         self.run
             .as_ref()
             .is_some_and(|run| run.pid.is_none_or(|pid| pid_alive(pid, run.pid_start)))
+    }
+
+    /// The `Disk` Tart prints: `None` (`null`) for a running ASIF disk, whose capacity Tart
+    /// cannot read while the VM holds it open (`Commands/Get.swift`, `List.swift`).
+    pub fn printed_disk(&self) -> Option<u64> {
+        let asif = self.disk_format.as_deref() == Some("asif");
+        (!(asif && self.running())).then_some(self.disk_gb)
     }
 
     /// `running` or `stopped`, Tart's `State` field (`suspended` is not modelled).

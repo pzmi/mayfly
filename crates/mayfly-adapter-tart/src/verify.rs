@@ -2,10 +2,13 @@
 //! the files Tart materialised against their descriptors, the per-chunk digests of a disk, a VM
 //! directory's fingerprint, and the private directories the daemon runs with.
 //!
-//! Tart 2.28.0 names a pulled entry by the hash of whatever manifest it was served, writes the
-//! cached `manifest.json` re-serialized and checks no blob on a fresh pull, so nothing here reads
-//! the cached manifest: the layout comes from the raw manifest fetched independently and checked
-//! against the digest ([`crate::oci`]), and every file is checked against it.
+//! Tart (2.41.1, `VMStorageOCI.pull`) names a pulled entry by the hash of whatever manifest it
+//! was served and never compares it with the digest it was asked for, caches that manifest as
+//! served (2.28.0 re-serialized it), and checks no config, NVRAM or compressed blob on a fresh
+//! pull (`VMDirectory+OCI.swift`; `DiskV2` checks a chunk's uncompressed digest only when it
+//! resumes). So nothing here reads the cached manifest: the layout comes from the raw manifest
+//! fetched independently and checked against the digest ([`crate::oci`]), and every file is
+//! checked against it.
 //!
 //! Pinned by the tests below and `tests/tart/images.rs` (the fault cases).
 
@@ -120,7 +123,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Reads the layout of a raw manifest: an OCI image manifest with exactly one config and one
 /// NVRAM layer, at least one disk-v2 chunk, each chunk with its uncompressed size and digest,
-/// and no other layer. Pinned by `tests::should_refuse_a_manifest_when_its_layout_is_not_disk_v2`.
+/// and no other layer, in Tart's order: the config first, the chunks, the NVRAM last (Tart
+/// 2.41.1's `OCIManifest.tartDiskRepresentation` refuses any other order before it pulls).
+/// Pinned by `tests::should_refuse_a_manifest_when_its_layout_is_not_disk_v2`.
 ///
 /// # Errors
 /// [`Refusal`].
@@ -157,7 +162,15 @@ pub fn layout(raw: &[u8]) -> Result<Layout, Refusal> {
             other => return Err(Refusal::UnsupportedLayer(other.to_owned())),
         }
     }
-    if config.len() != 1 || nvram.len() != 1 || chunks.is_empty() {
+    let ordered = manifest
+        .layers
+        .first()
+        .is_some_and(|l| l.media_type == CONFIG_LAYER)
+        && manifest
+            .layers
+            .last()
+            .is_some_and(|l| l.media_type == NVRAM_LAYER);
+    if config.len() != 1 || nvram.len() != 1 || chunks.is_empty() || !ordered {
         return Err(Refusal::Layers);
     }
     let total = chunks
@@ -551,27 +564,32 @@ mod tests {
         let chunk = Some((4, b.as_str()));
         let good = manifest(&[
             (CONFIG_LAYER, None),
-            (NVRAM_LAYER, None),
             (DISK_V2_LAYER, chunk),
+            (NVRAM_LAYER, None),
         ]);
         let v1 = manifest(&[
             (CONFIG_LAYER, None),
-            (NVRAM_LAYER, None),
             ("application/vnd.cirruslabs.tart.disk.v1", None),
+            (NVRAM_LAYER, None),
         ]);
         let asif = manifest(&[
             (CONFIG_LAYER, None),
-            (NVRAM_LAYER, None),
             (DISK_V2_LAYER, chunk),
             ("application/vnd.cirruslabs.tart.disk.asif.overlay.v1", None),
+            (NVRAM_LAYER, None),
         ]);
         let unannotated = manifest(&[
             (CONFIG_LAYER, None),
-            (NVRAM_LAYER, None),
             (DISK_V2_LAYER, None),
+            (NVRAM_LAYER, None),
         ]);
         let two_configs = manifest(&[
             (CONFIG_LAYER, None),
+            (CONFIG_LAYER, None),
+            (DISK_V2_LAYER, chunk),
+            (NVRAM_LAYER, None),
+        ]);
+        let nvram_before_disk = manifest(&[
             (CONFIG_LAYER, None),
             (NVRAM_LAYER, None),
             (DISK_V2_LAYER, chunk),
@@ -584,6 +602,7 @@ mod tests {
             layout(&asif).map(|l| l.chunks.len()),
             layout(&unannotated).map(|l| l.chunks.len()),
             layout(&two_configs).map(|l| l.chunks.len()),
+            layout(&nvram_before_disk).map(|l| l.chunks.len()),
             layout(b"{}").map(|l| l.chunks.len()),
         ];
 
@@ -599,6 +618,7 @@ mod tests {
                     "application/vnd.cirruslabs.tart.disk.asif.overlay.v1".to_owned()
                 )),
                 Err(Refusal::Annotations),
+                Err(Refusal::Layers),
                 Err(Refusal::Layers),
                 Err(Refusal::Unparseable),
             ]

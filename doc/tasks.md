@@ -1238,7 +1238,7 @@ each state written before its step, with crash recovery by observation; `TartPro
 clones only from Ready after revalidation (VP-17), and eviction protects mayfly's own clones only
 (no Tart lineage), and never deletes a Quarantined base. Every image is verified from its raw
 manifest fetched by digest over HTTPS with a size cap,
-never the cached copy Tart 2.28.0 re-serializes: the layout (disk v2 only), config and NVRAM
+never Tart's cached copy (re-serialized by 2.28.0, as served by 2.41.1, unchecked by both): the layout (disk v2 only), config and NVRAM
 against their descriptors, every disk chunk against its uncompressed digest, on the cache and
 again on the fresh clone before its first boot; one retry, then refused. Signature policy is
 recorded per source and `required` refused until SIG-01. `list` names only Ready bases that pass
@@ -1626,6 +1626,38 @@ ADR 0087 assumed of 2.28.0 (the re-serialized cached manifest, unchecked blobs, 
 requested digest).
 Accept: both versions' fixtures parse; the VmProvider, GuestTransport and ImageStore contracts green
 over fake-tart in 2.41.1 mode; HW-01X's command gains the 2.41.1 confirmations.
+Accept changed (TART-01): "both versions' fixtures parse" became "the 2.41.1 fixtures parse and
+the 2.28.0 `get` shape is refused", since only 2.41.1 is supported (a version update needs no
+ADR, owner 2026-11-11).
+As built (TART-01): 2.41.1 only, since 2.28.0 cannot work: its `get` prints no `MACAddress` (no
+instance id, ADR 0026), its `exec` aborts (`try! Term.GetSize()`) when stdout is not a terminal,
+as under the process runner, and its `clone` silently replaces an existing VM (no
+`--overwrite`). The licence changed with the release: 2.28.0 is under the Fair Source License
+0.9, 2.41.1 under FSL-1.1-ALv2 (plan §1.3); mayfly only runs Tart as a separate program. So only
+the 2.41.1 fixtures parse (derived from its source, `tests/fixtures/tart-2.41.1/README.md`) and the
+2.28.0 `get` shape is pinned as refused (`parse::tests::should_refuse_tart_2_28_0_when_its_get_prints_no_mac`).
+Units: `Disk` is whole decimal GB rounded down, `null` whenever Tart's read of the size fails
+(for one, a running VM's ASIF disk); the ceiling is the larger of `(Disk + 1) × 10⁹` and `Disk`
+GiB. Because an unknown disk closes disk admission host-wide (ADR 0052), `clone_vm` reads each
+new clone while it is stopped and records its ceiling in the base registry (`clone_disks`, an
+optional field, with the instance id it was read for); the inventory uses it only when Tart
+prints `null` and the VM still has that instance id, else the disk stays unknown; an older build
+ignores the field (pinned by `tests/tart/calls.rs::should_count_the_disk_recorded_at_clone_time_when_tart_prints_none`).
+A macOS job clone gets `tart set --random-mac --random-serial` (a new machine identifier; the
+flag exists in arm64 builds only), a base `--random-mac` only, since its config must stay the
+image's but for the MAC (pinned by `tests/tart/calls.rs::should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning`).
+2.41.1 caches a pulled manifest as served (2.28.0 re-serialized it); it is still never compared
+with the requested digest, so the image store still never reads it (pinned by
+`tests/tart/images.rs::should_never_read_the_cached_manifest_when_verifying_an_image`). Tart
+refuses disk v1 and a manifest out of order, and `verify::layout` now requires that order too;
+`tart set --mac` (2.41.0) makes the MAC weaker evidence still; a linked digest is listed
+`<repo>:<digest>` and `tart delete` of the link also collects its entry; 2.41.1 creates
+`cache/content/` under `TART_HOME`. `TRACEPARENT`, `TRACESTATE`, `OTEL_*` and `SENTRY_DSN` never
+reach Tart (foundation §3, child environment); the hypervisor limit is matched on Tart's own
+wording. fake-tart emulates 2.41.1 only: served manifest bytes cached, the layout checked as Tart
+does, a linked digest listed `<repo>:<digest>` and collected after its last link is deleted,
+`set --mac` and `--random-serial`, short-only `exec -i`/`-t`, bare `RuntimeError` messages, an
+ASIF disk printed `null` while it runs; its known gaps are listed in `fail.rs`.
 
 #### DEP-01 Dependency and tool refresh
 Cites: fnd §2, §7, §9; `deny.toml`; `tools/versions.toml`. `cargo update` within semver and the
@@ -1717,21 +1749,40 @@ DP-04: the command runs `cargo xtask test --only real-tart --real-tart-home <DIR
 `mfb-contract`), which runs VP-01..VP-10 and VP-13..VP-15 (VP-11, VP-12 and VP-16 need injected
 faults or an environment log: fake-tart only). It also confirms what the adapter assumed and the
 fixtures in `crates/mayfly-adapter-tart/tests/fixtures/tart-<version>/` pin: the `--version`
-string, the `list`/`get` JSON shapes, `Memory` in MiB and `Disk` in GiB (counted 1024³), exit 2
+string, the `list`/`get` JSON shapes, `Memory` in MiB and `Disk` in whole decimal GB rounded down (TART-01), exit 2
 with "does not exist", the hypervisor-limit wording of `tart run`, `tart set --memory` before a
 run, and that `tart run` under the shim keeps its VM when the daemon is killed.
 DP-07: `tests/real_tart.rs` also runs VP-17 (the world records `mfb-contract` as owned and
 `Ready` with its fingerprint). The `ImageStore` contract (IC-01..IC-14) on real Tart needs a
 registry holding a mayfly image with the launcher's `install-runner`: HW-01X builds that image and
 the gated world beside `tests/tart/images.rs`, or reports the contract `not_run`. HW-01 confirms
-what ADR 0087 assumes on Tart 2.28.0: `tart pull <repo>@sha256:…` and the OCI listing's `Name` for
-it; the cache layout (`cache/OCIs/<repo>/<digest>/` with `config.json`, `nvram.bin`, `disk.img`, the
+what ADR 0087 assumes, on Tart 2.41.1 (TART-01's note): `tart pull <repo>@sha256:…` and the OCI listing's `Name` for
+it (`<repo>@<digest>` for an entry, `<repo>:<digest>` for a link); the cache layout (`cache/OCIs/<repo>/<digest>/` with `config.json`, `nvram.bin`, `disk.img`, the
 entry named by the served manifest's hash, and the link from a requested digest to it: absolute or
 relative, and whether `tart list`/`tart delete` know the linked entry by its digest); that `tart clone <repo>@<digest>` does not reach the
 registry once cached and leaves the base's files' change times alone; `tart exec` in a booted base
 and the launcher's `install-runner`, on a macOS image and on an arm64 Linux image (for example a
 Cirrus Ubuntu image with the Tart guest agent); and, for service mode, whether Tart runs VMs under a
 launchd daemon of a dedicated user without a GUI session.
+TART-01: everything above on Tart 2.41.1, capturing the fixtures of
+`tests/fixtures/tart-2.41.1/` (derived from the source until then), and in particular: `tart
+--version` prints `2.41.1`; `get --format json` prints `MACAddress`, `Memory` in MiB and `Disk`
+in whole decimal GB rounded down, `null` when the read fails (for one, a running VM's ASIF
+disk); `list --format json`
+prints `Disk` the same way and lists local VMs, then OCI entries, each sorted by name; `tart
+run` prints "The number of VMs exceeds the system limit (other running VMs: …)" and exits 1 at
+the hypervisor's limit; `tart exec -i` works with stdout and stderr redirected to files and
+passes the guest's exit code; `tart clone` onto an existing name exits 64 without
+`--overwrite`; `tart stop` and `tart delete` exit 2 with "does not exist" for a missing VM, `stop`
+exits 2 "is not running" for a stopped one, `delete` exits 1 "is running" for a running one; the
+run lock is still a POSIX write lock on `vms/<vm>/config.json` held by the `tart run` process;
+`tart set --random-serial` (arm64 builds only) gives a macOS clone a new `ecid` in its `config.json`, the guest
+boots, keeps its MAC and runs its runner; `tart pull` writes the served manifest's bytes to
+`manifest.json`, refuses disk v1 and a manifest out of order, links a requested digest with an
+absolute symlink, and `tart delete` of that link also removes the entry it named; `tart clone`
+and `tart get` change the VM directory's access time only, never its files' change times; with
+`TART_NO_AUTO_PRUNE` set, neither `clone` nor `pull` deletes a cache entry; `TART_HOME` gains
+`cache/content/` on a pull or a delete.
 
 #### GH-00 (owner) Live remainder of the scale-set spec, folded into HW-02
 Cites: `doc/github-scaleset.md` §12 (the HW-02 remainder GH-00R leaves), dm §9.1, ADRs 0045,

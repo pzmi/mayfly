@@ -189,7 +189,7 @@ fn should_print_the_overridden_version_when_a_rule_sets_one() {
     // then
     assert_eq!(
         (first.stdout().as_str(), second.stdout().as_str()),
-        ("9.9.9\n", "2.28.0\n")
+        ("9.9.9\n", "2.41.1\n")
     );
 }
 

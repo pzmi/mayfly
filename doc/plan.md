@@ -518,7 +518,8 @@ overlapped anyway is discarded, never applied or reported (`mayfly-data::gate`).
 ### 8.2 Tart adapter
 
 argv only (never `sh -c`); version handshake and capability probe (an unsupported version closes
-admission); `tart list --format json` parsed against version-pinned fixtures; every call has a
+admission; Tart 2.41.1 is the supported release, TART-01); `tart list --format json` parsed
+against version-pinned fixtures; every call has a
 deadline, its own process group, bounded captured output and redaction; an ambiguous result is
 re-inspected. `TART_NO_AUTO_PRUNE` is set on every call. Dedicated `TART_HOME` per deployment,
 `0700`, owned by the service user, carrying the deployment marker with the epoch floor (ADR 0026).
@@ -529,7 +530,8 @@ re-inspected. `TART_NO_AUTO_PRUNE` is set on every call. Dedicated `TART_HOME` p
   re-adopts them from the journal, `tart list`, the shim locks and `exit.json`. A VM is stopped
   only with `tart stop`, never by a signal.
 - **Clones** come only from local image bases (`mfb-<digest12>…`, ADR 0039), followed by `tart
-  set --random-mac`; the MAC read back is the provider instance id (ADR 0026).
+  set --random-mac` (with `--random-serial` for a macOS guest, so no two run with one serial); the MAC read back is the
+  provider instance id (ADR 0026).
 - **Softnet** is supported (ADR 0032); its privilege model is NET-01's ADR, and the daemon stays
   non-root. Softnet isolates; it is not an egress allowlist.
 

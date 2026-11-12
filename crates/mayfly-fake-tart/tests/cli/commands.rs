@@ -88,7 +88,7 @@ fn should_print_the_bare_version_when_asked() {
     let ran = fake.tart(&["--version"]);
 
     // then
-    assert_eq!((ran.code(), ran.stdout().as_str()), (Some(0), "2.28.0\n"));
+    assert_eq!((ran.code(), ran.stdout().as_str()), (Some(0), "2.41.1\n"));
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn should_print_the_pinned_list_shape_when_listing_json() {
         "<time>",
         iso8601,
     );
-    let pinned = fixture(include_str!("../fixtures/tart-list-2.28.0.json"));
+    let pinned = fixture(include_str!("../fixtures/tart-list-2.41.1.json"));
     assert_eq!(ran.code(), Some(0));
     assert_eq!(actual, pinned);
 }
@@ -148,7 +148,7 @@ fn should_print_the_pinned_get_shape_when_getting_json() {
         "<mac>",
         mac,
     );
-    let pinned = fixture(include_str!("../fixtures/tart-get-2.28.0.json"));
+    let pinned = fixture(include_str!("../fixtures/tart-get-2.41.1.json"));
     assert_eq!(ran.code(), Some(0));
     assert_eq!(actual, pinned);
 }
@@ -337,7 +337,7 @@ fn should_keep_a_detached_vm_running_when_run_has_returned() {
     assert!(ip.stdout().starts_with("192.168.64."), "{}", ip.stdout());
     assert_eq!(
         (delete.code(), delete.stderr().as_str()),
-        (Some(1), "Error: VM \"vm1\" is running\n")
+        (Some(1), "VM \"vm1\" is running\n")
     );
     assert_eq!(stop.code(), Some(0));
     assert_eq!(fake.vm("vm1").unwrap()["run"], Value::Null);
@@ -778,7 +778,8 @@ fn sha(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Seeds `blobs` and a manifest naming them as config, nvram and two disk chunks; returns the
+/// Seeds `blobs` (config, nvram and two disk chunks) and a manifest naming them in Tart's order
+/// (config, the chunks with their uncompressed size and digest, NVRAM last); returns the
 /// manifest's bytes.
 fn seed_image(
     fake: &Fake,
@@ -788,21 +789,27 @@ fn seed_image(
 ) -> Vec<u8> {
     let dir = fake.home().join("registry");
     std::fs::create_dir_all(dir.join("blobs")).expect("registry");
-    let media = [
-        "application/vnd.cirruslabs.tart.config.v1",
-        "application/vnd.cirruslabs.tart.nvram.v1",
-        "application/vnd.cirruslabs.tart.disk.v2",
-        "application/vnd.cirruslabs.tart.disk.v2",
+    let [config, nvram, first, second] = blobs;
+    let layer = |media: &str, bytes: &[u8], chunk: bool| {
+        let digest = format!("sha256:{}", sha(bytes));
+        std::fs::write(dir.join("blobs").join(encode(&digest)), bytes).expect("blob");
+        let mut layer =
+            serde_json::json!({"mediaType": media, "digest": digest, "size": bytes.len()});
+        if chunk {
+            layer["annotations"] = serde_json::json!({
+                "org.cirruslabs.tart.uncompressed-size": bytes.len().to_string(),
+                "org.cirruslabs.tart.uncompressed-content-digest": digest,
+            });
+        }
+        layer
+    };
+    let disk = "application/vnd.cirruslabs.tart.disk.v2";
+    let layers = vec![
+        layer("application/vnd.cirruslabs.tart.config.v1", config, false),
+        layer(disk, first, true),
+        layer(disk, second, true),
+        layer("application/vnd.cirruslabs.tart.nvram.v1", nvram, false),
     ];
-    let layers: Vec<serde_json::Value> = media
-        .iter()
-        .zip(blobs)
-        .map(|(m, b)| {
-            let digest = format!("sha256:{}", sha(b));
-            std::fs::write(dir.join("blobs").join(encode(&digest)), b).expect("blob");
-            serde_json::json!({"mediaType": m, "digest": digest, "size": b.len()})
-        })
-        .collect();
     let manifest = serde_json::to_vec(&serde_json::json!({"schemaVersion": 2, "layers": layers}))
         .expect("manifest");
     let served = manifest_for.map_or_else(|| manifest.clone(), <[u8]>::to_vec);
@@ -841,11 +848,7 @@ fn should_lay_out_the_image_named_by_the_served_manifest_hash_when_pulling() {
         .join(&digest);
     assert!(!entry.is_symlink(), "served what was asked: no link");
     let cached = std::fs::read(entry.join("manifest.json")).expect("cached");
-    assert_ne!(cached, probe, "the cached manifest is re-serialized");
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&cached).expect("json"),
-        serde_json::from_slice::<serde_json::Value>(&probe).expect("json")
-    );
+    assert_eq!(cached, probe, "2.41.1 caches the manifest as served");
     assert_eq!(
         std::fs::read(entry.join("disk.img")).expect("disk"),
         b"chunk-1chunk-2"
@@ -888,14 +891,15 @@ fn should_link_the_asked_digest_to_another_entry_when_the_registry_serves_anothe
     assert!(target.is_absolute(), "{}", target.display());
     assert_eq!(target, link.with_file_name(&own));
     let listed = fake.tart(&["list", "--source", "oci", "-q"]).stdout();
-    assert!(
-        listed.contains(&format!("ghcr.io/acme/img@{own}")),
-        "{listed}"
+    assert_eq!(
+        listed,
+        format!("ghcr.io/acme/img:{asked}\nghcr.io/acme/img@{own}\n"),
+        "a link is listed with `:`, an entry with `@`"
     );
 }
 
 #[test]
-fn should_remove_the_cached_entry_when_an_oci_entry_is_deleted() {
+fn should_collect_the_linked_entry_when_its_last_link_is_deleted() {
     // given
     let fake = Fake::new();
     let reference = "ghcr.io/acme/img:1";
@@ -908,22 +912,146 @@ fn should_remove_the_cached_entry_when_an_oci_entry_is_deleted() {
         .home()
         .join("cache/OCIs/ghcr.io/acme/img")
         .join(format!("sha256:{}", sha(&manifest)));
+    let before = fake.tart(&["list", "--source", "oci", "-q"]).stdout();
 
     // when
     let tag_deleted = fake.tart(&["delete", reference]);
-    let after_tag = fake.tart(&["list", "--source", "oci", "-q"]).stdout();
     let own_deleted = fake.tart(&["delete", &own]);
 
-    // then
-    assert_eq!((tag_deleted.code(), own_deleted.code()), (Some(0), Some(0)));
+    // then: Tart's `gc` removes an entry no link names that was not pulled by its own digest
+    assert_eq!(before, format!("{reference}\n{own}\n"));
+    assert_eq!((tag_deleted.code(), own_deleted.code()), (Some(0), Some(2)));
+    assert!(own_deleted.stderr().contains("does not exist"));
     assert!(!cached.exists() && !cached.is_symlink());
-    assert_eq!(
-        after_tag,
-        format!("{own}\n"),
-        "the linked entry is an image of its own"
-    );
     assert!(!entry.exists());
     assert_eq!(fake.tart(&["list", "--source", "oci", "-q"]).stdout(), "");
+}
+
+#[test]
+fn should_keep_an_entry_pulled_by_its_own_digest_when_a_tag_to_it_is_deleted() {
+    // given
+    let fake = Fake::new();
+    let blobs: [&[u8]; 4] = [b"{}", b"n", b"d", b"e"];
+    let probe = seed_image(&fake, "ghcr.io/acme/img:1", blobs, None);
+    let own = format!("ghcr.io/acme/img@sha256:{}", sha(&probe));
+    seed_image(&fake, &own, blobs, None);
+    assert_eq!(fake.tart(&["pull", &own]).code(), Some(0));
+    assert_eq!(fake.tart(&["pull", "ghcr.io/acme/img:1"]).code(), Some(0));
+
+    // when
+    let tag_deleted = fake.tart(&["delete", "ghcr.io/acme/img:1"]);
+
+    // then
+    assert_eq!(tag_deleted.code(), Some(0));
+    assert_eq!(
+        fake.tart(&["list", "--source", "oci", "-q"]).stdout(),
+        format!("{own}\n")
+    );
+}
+
+#[test]
+fn should_refuse_a_pull_when_the_layout_is_not_what_tart_accepts() {
+    // given: disk v1 and a manifest whose NVRAM precedes its disk, both refused by 2.41.1
+    let fake = Fake::new();
+    let dir = fake.home().join("registry");
+    std::fs::create_dir_all(&dir).expect("registry");
+    let manifest = |media: [&str; 3]| {
+        let layers: Vec<Value> = media
+            .iter()
+            .map(|m| json!({"mediaType": m, "digest": format!("sha256:{}", "0".repeat(64)), "size": 1}))
+            .collect();
+        serde_json::to_vec(&json!({"schemaVersion": 2, "layers": layers})).expect("manifest")
+    };
+    let config = "application/vnd.cirruslabs.tart.config.v1";
+    let nvram = "application/vnd.cirruslabs.tart.nvram.v1";
+    std::fs::write(
+        dir.join(encode("ghcr.io/acme/img:v1")),
+        manifest([config, "application/vnd.cirruslabs.tart.disk.v1", nvram]),
+    )
+    .expect("v1");
+    std::fs::write(
+        dir.join(encode("ghcr.io/acme/img:order")),
+        manifest([config, nvram, "application/vnd.cirruslabs.tart.disk.v2"]),
+    )
+    .expect("order");
+
+    // when
+    let v1 = fake.tart(&["pull", "ghcr.io/acme/img:v1"]);
+    let order = fake.tart(&["pull", "ghcr.io/acme/img:order"]);
+
+    // then
+    assert_eq!((v1.code(), order.code()), (Some(1), Some(1)));
+    assert!(v1.stderr().contains("disk.v2 base"), "{}", v1.stderr());
+    assert!(order.stderr().contains("ordered"), "{}", order.stderr());
+    assert_eq!(fake.tart(&["list", "--source", "oci", "-q"]).stdout(), "");
+}
+
+#[test]
+fn should_set_the_given_mac_and_a_macos_serial_when_set_is_given_mac_and_random_serial() {
+    // given
+    let fake = Fake::new();
+    fake.with_vm("vm1");
+    assert_eq!(fake.tart(&["create", "lin", "--linux"]).code(), Some(0));
+    let config = |vm: &str| -> Value {
+        serde_json::from_slice(
+            &std::fs::read(fake.home().join("vms").join(vm).join("config.json")).expect("config"),
+        )
+        .expect("json")
+    };
+    let (mac_ecid, linux_before) = (config("vm1")["ecid"].clone(), config("lin"));
+
+    // when
+    let mac = fake.tart(&[
+        "set",
+        "vm1",
+        "--mac",
+        "02:AA:00:00:00:01",
+        "--random-serial",
+    ]);
+    let linux = fake.tart(&["set", "lin", "--random-serial"]);
+    let both = fake.tart(&["set", "vm1", "--mac", "02:aa:00:00:00:02", "--random-mac"]);
+
+    // then
+    assert_eq!(
+        (mac.code(), linux.code(), both.code()),
+        (Some(0), Some(0), Some(64))
+    );
+    let got: Value = serde_json::from_str(&fake.tart(&["get", "vm1", "--format", "json"]).stdout())
+        .expect("get");
+    assert_eq!(got["MACAddress"], "02:aa:00:00:00:01");
+    assert!(mac_ecid.is_string());
+    assert_ne!(config("vm1")["ecid"], mac_ecid);
+    assert_eq!(config("lin"), linux_before, "a Linux VM has no serial");
+}
+
+#[test]
+fn should_print_a_null_disk_when_a_vm_with_an_asif_disk_runs() {
+    // given
+    let fake = Fake::new();
+    fake.detached();
+    assert_eq!(
+        fake.tart(&["create", "base", "--disk-format", "asif"])
+            .code(),
+        Some(0)
+    );
+    assert_eq!(fake.tart(&["clone", "base", "vm1"]).code(), Some(0));
+    let disk = || -> Value {
+        serde_json::from_str::<Value>(&fake.tart(&["get", "vm1", "--format", "json"]).stdout())
+            .expect("get")["Disk"]
+            .clone()
+    };
+    let stopped = disk();
+
+    // when
+    assert_eq!(fake.tart(&["run", "vm1"]).code(), Some(0));
+    let running = disk();
+    let listed: Value =
+        serde_json::from_str(&fake.tart(&["list", "--format", "json"]).stdout()).expect("list");
+
+    // then
+    assert_eq!((stopped, running), (json!(50), Value::Null));
+    assert_eq!(listed[1]["Disk"], Value::Null);
+    assert_eq!(fake.tart(&["stop", "vm1"]).code(), Some(0));
 }
 
 #[test]

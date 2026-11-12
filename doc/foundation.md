@@ -215,6 +215,9 @@ tool-only crates and test code are exempt.
 held, a child is built with a cleared environment plus an explicit allowlist, so no child
 inherits the daemon's environment or an `env:` secret in it. The checker counts, per file of
 production code, `std::process`/`tokio::process` `Command::new` against `.env_clear()` calls.
+No allowlist ever admits `TRACEPARENT`, `TRACESTATE`, `OTEL_*` or `SENTRY_DSN`: with them Tart
+exports a trace of each command, argv included (ADR 0036; pinned by `mayfly-adapter-tart`'s
+`config::tests::should_never_pass_tracing_variables_when_the_daemon_has_them`).
 
 **Application crates** (`mayfly-control`, `mayfly-data`) may use `tokio` with the `sync`
 feature, `tokio-util` (cancellation, task tracking), `tracing` and `thiserror`. They reach time

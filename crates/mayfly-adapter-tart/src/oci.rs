@@ -1,8 +1,10 @@
 //! The raw manifest of an image, fetched by digest independently of Tart (ADR 0087).
 //!
-//! Tart 2.28.0 never compares the manifest it is served with the digest it was asked for, and
-//! re-serializes the copy it caches, so the image store fetches the manifest's exact bytes itself
-//! and checks them against the digest before it trusts any layout. [`ManifestSource`] is the
+//! Tart never compares the manifest it is served with the digest it was asked for (2.41.1's
+//! `VMStorageOCI.pull` names the entry by the served bytes' hash), so its cached copy proves
+//! nothing about the digest, whether re-serialized (2.28.0) or as served (2.41.1); the image
+//! store fetches the manifest's exact bytes itself and checks them against the digest before it
+//! trusts any layout. [`ManifestSource`] is the
 //! seam: [`RegistryManifests`] over HTTPS in production; the tests' source reads the fake
 //! registry.
 //!

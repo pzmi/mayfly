@@ -15,6 +15,11 @@ pub const TART_HOME: &str = "TART_HOME";
 /// The variables a child may receive besides `TART_HOME` and [`NO_AUTO_PRUNE`] (ADR 0058 rule
 /// 2): the names composition may pass in [`TartConfig::environment`], with values it read from
 /// the daemon's environment less every `env:` secret. A name outside this list is dropped.
+/// Never `TRACEPARENT`, `TRACESTATE`, an `OTEL_*` name or `SENTRY_DSN`: with `TRACEPARENT` set,
+/// Tart 2.41.1 exports an OpenTelemetry trace of each command, its full argv included, to
+/// `OTEL_EXPORTER_OTLP_*` or the exporter's default endpoint (`OTel.swift`, `Root.swift`), as
+/// 2.28.0 did to Sentry with `SENTRY_DSN` (ADR 0036). Pinned by
+/// `tests::should_never_pass_tracing_variables_when_the_daemon_has_them`.
 pub const ALLOWED_VARIABLES: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
 
 /// Instrumentation a child may also receive, in a coverage build only (`cfg(coverage)`, set by
@@ -178,5 +183,49 @@ mod tests {
                 .iter()
                 .all(|(_, value)| value.to_string_lossy() != "ghs_secret")
         );
+    }
+
+    #[test]
+    fn should_never_pass_tracing_variables_when_the_daemon_has_them() {
+        // given
+        let tracing = [
+            "TRACEPARENT",
+            "TRACESTATE",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "SENTRY_DSN",
+        ];
+        let given = config(
+            tracing
+                .iter()
+                .map(|name| ((*name).into(), "00-trace".into()))
+                .collect(),
+        );
+
+        // when
+        let environment = given.child_environment();
+
+        // then
+        assert!(
+            tracing
+                .iter()
+                .all(|name| !allowed(std::ffi::OsStr::new(name)))
+        );
+        assert!(
+            ALLOWED_VARIABLES
+                .iter()
+                .chain(INSTRUMENTATION_VARIABLES)
+                .all(|name| {
+                    !name.starts_with("OTEL_")
+                        && !name.starts_with("TRACE")
+                        && *name != "SENTRY_DSN"
+                })
+        );
+        let names: Vec<String> = environment
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["TART_HOME", "TART_NO_AUTO_PRUNE"]);
     }
 }

@@ -13,10 +13,12 @@
 //!   final fingerprint, the same MAC); a base that fails is quarantined, any other local `mfb-*`
 //!   VM is refused `Definite`. The clone's name is recorded under its base as an unresolved
 //!   intent before the clone (a reference that blocks eviction), never `--overwrite`; then
-//!   `tart set --random-mac` and the MAC read back, which must differ from the base's: that MAC
-//!   is the instance id (ADR 0026), recorded against the intent. A clone whose new MAC cannot be
-//!   confirmed answers `Ambiguous` and its intent stays: the VM may exist without a proven
-//!   identity.
+//!   `tart set --random-mac` (with `--random-serial` for a macOS base: each macOS clone
+//!   gets its own machine identifier) and the MAC read back, which must differ from the
+//!   base's: that MAC is the instance id (ADR 0026), recorded against the intent (pinned by
+//!   `tests/tart/calls.rs::should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning`).
+//!   A clone whose new MAC cannot be confirmed answers `Ambiguous` and its intent stays: the VM
+//!   may exist without a proven identity.
 //! - **start**: refused when Tart lists the VM running; then `tart set --memory` and the shim
 //!   (ADR 0037). It returns once the shim is settled: `Ok` when the shim recorded this run and
 //!   Tart lists the VM running while the shim holds its lock; `Definite` (or `HypervisorLimit`)
@@ -37,13 +39,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mayfly_data::{
-    Ambiguity, BaseName, Inventory, InventoryGap, OwnershipProof, RunOptions, Shim, VmError,
-    VmObservation, VmProvider,
+    Ambiguity, BaseName, GuestOs, Inventory, InventoryGap, OwnershipProof, RunOptions, Shim,
+    VmError, VmObservation, VmProvider,
 };
 use mayfly_domain::{Millis, OwnedVmName, ProviderInstanceId};
 use tokio::time::Instant;
 
-use crate::bases::BaseRecords;
+use crate::bases::{BaseRecords, CloneDisk};
 use crate::config::TartConfig;
 use crate::parse::{self, VmInfo};
 use crate::process::launch::Shims;
@@ -213,6 +215,11 @@ impl TartProvider {
         format!("{}-{}-{n}", std::process::id(), shim::now_ms())
     }
 
+    /// One listed VM as `tart get` describes it. A disk Tart cannot read now (`Disk` null, as
+    /// for a running VM's ASIF disk) is the one recorded when this same incarnation was cloned
+    /// ([`crate::bases::Record::clone_disk`]); with none recorded it stays unknown (ADR 0052,
+    /// TART-01). Pinned by
+    /// `tests/tart/calls.rs::should_count_the_disk_recorded_at_clone_time_when_tart_prints_none`.
     async fn describe(&self, name: String) -> Result<VmObservation, InventoryGap> {
         match self.tart.get(&name).await {
             Ok(Some(info)) => Ok(VmObservation {
@@ -220,7 +227,12 @@ impl TartProvider {
                 running: info.running,
                 guest: info.guest(),
                 memory_bytes: info.memory_bytes(),
-                disk_bytes: info.disk_bytes(),
+                disk_bytes: info.disk_bytes().or_else(|| {
+                    self.bases
+                        .read()
+                        .ok()?
+                        .clone_disk(&name, &info.instance_text())
+                }),
                 name,
             }),
             // Listed a moment ago and gone now: the listing is not a snapshot any more.
@@ -432,10 +444,12 @@ impl VmProvider for TartProvider {
             .clone(base.as_str(), &name)
             .await
             .map_err(|err| effect_failed(&err))?;
-        self.tart
-            .set_random_mac(&name)
-            .await
-            .map_err(|err| after_effect(&err))?;
+        let identity = if base_info.guest() == Some(GuestOs::Macos) {
+            self.tart.set_random_mac_and_serial(&name).await
+        } else {
+            self.tart.set_random_mac(&name).await
+        };
+        identity.map_err(|err| after_effect(&err))?;
         let info = match self.tart.get(&name).await {
             Ok(Some(info)) => info,
             Ok(None) => return Err(VmError::Ambiguous(Ambiguity::ProcessLost)),
@@ -446,12 +460,24 @@ impl VmProvider for TartProvider {
         }
         let id = ProviderInstanceId::new(&info.instance_text())
             .map_err(|_| VmError::Ambiguous(Ambiguity::ProcessLost))?;
-        // Unrecorded, the intent stays and keeps blocking eviction: the safe side.
+        // Unrecorded, the intent stays and keeps blocking eviction: the safe side. The disk is
+        // read now, stopped, because a running VM's disk may not be readable later (TART-01).
+        let disk = info.disk_bytes();
         let _resolved = self.bases.update(|record| {
             if let Some(entry) = record.bases.get_mut(base.as_str()) {
                 entry
                     .clones
                     .insert(name.clone(), Some(id.as_str().to_owned()));
+                match disk {
+                    Some(disk_bytes) => entry.clone_disks.insert(
+                        name.clone(),
+                        CloneDisk {
+                            instance_id: id.as_str().to_owned(),
+                            disk_bytes,
+                        },
+                    ),
+                    None => entry.clone_disks.remove(&name),
+                };
             }
         });
         Ok(id)

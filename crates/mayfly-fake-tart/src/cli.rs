@@ -2,9 +2,10 @@
 //!
 //! Hand-written because the fake must reject exactly the flags real Tart rejects: an adapter that
 //! passes a flag Tart does not have fails here as it would there. Flag names come from the
-//! `@Option`/`@Flag` declarations in Tart's `Sources/tart/Commands/*.swift` (public repository,
-//! `main` branch, read 2026-11-09). Flags that only matter to a real hypervisor are accepted and
-//! ignored.
+//! `@Option`/`@Flag` declarations in Tart's `Sources/tart/Commands/*.swift` at the `2.41.1`
+//! release tag (github.com/openai/tart, read 2026-11-11; swift-argument-parser turns `randomMAC`
+//! into `--random-mac`). Flags that only matter to a real hypervisor are accepted and ignored.
+//! `exec`'s `-i` and `-t` are short only (`name: [.customShort("i")]`).
 
 use crate::fail::Fail;
 
@@ -21,6 +22,8 @@ pub(crate) enum Command {
     Version,
     Create {
         name: String,
+        linux: bool,
+        asif: bool,
     },
     Pull {
         reference: String,
@@ -53,6 +56,8 @@ pub(crate) enum Command {
     Set {
         name: String,
         random_mac: bool,
+        random_serial: bool,
+        mac: Option<String>,
         cpu: Option<u64>,
         memory: Option<u64>,
         disk_size: Option<u64>,
@@ -90,7 +95,7 @@ impl Command {
     pub fn targets(&self) -> Vec<&str> {
         match self {
             Self::Version | Self::List { .. } => Vec::new(),
-            Self::Create { name }
+            Self::Create { name, .. }
             | Self::Clone { name, .. }
             | Self::Run { name }
             | Self::Ip { name, .. }
@@ -113,9 +118,12 @@ impl Command {
 }
 
 struct Flag {
+    /// The long name, also the key [`Parsed::has`] and [`Parsed::value`] look it up by.
     long: &'static str,
     short: Option<char>,
     takes_value: bool,
+    /// Only the short form is accepted: Tart declares no long name for it.
+    short_only: bool,
 }
 
 const fn switch(long: &'static str) -> Flag {
@@ -123,6 +131,7 @@ const fn switch(long: &'static str) -> Flag {
         long,
         short: None,
         takes_value: false,
+        short_only: false,
     }
 }
 
@@ -131,6 +140,7 @@ const fn option(long: &'static str) -> Flag {
         long,
         short: None,
         takes_value: true,
+        short_only: false,
     }
 }
 
@@ -183,6 +193,7 @@ const LIST_FLAGS: &[Flag] = &[
         long: "--quiet",
         short: Some('q'),
         takes_value: false,
+        short_only: false,
     },
 ];
 const GET_FLAGS: &[Flag] = &[option("--format")];
@@ -190,6 +201,7 @@ const STOP_FLAGS: &[Flag] = &[Flag {
     long: "--timeout",
     short: Some('t'),
     takes_value: true,
+    short_only: false,
 }];
 const SET_FLAGS: &[Flag] = &[
     switch("--random-mac"),
@@ -199,12 +211,14 @@ const SET_FLAGS: &[Flag] = &[
     option("--cpu"),
     option("--memory"),
     option("--display"),
+    option("--mac"),
     option("--disk"),
     option("--disk-size"),
 ];
 const CREATE_FLAGS: &[Flag] = &[
     switch("--linux"),
     option("--disk-size"),
+    option("--disk-format"),
     option("--from-ipsw"),
 ];
 const PULL_FLAGS: &[Flag] = &[
@@ -217,11 +231,13 @@ const EXEC_FLAGS: &[Flag] = &[
         long: "--interactive",
         short: Some('i'),
         takes_value: false,
+        short_only: true,
     },
     Flag {
         long: "--tty",
         short: Some('t'),
         takes_value: false,
+        short_only: true,
     },
 ];
 const NO_FLAGS: &[Flag] = &[];
@@ -281,7 +297,7 @@ fn parse(args: &[String], flags: &'static [Flag], command_follows: bool) -> Resu
         let flag = flags
             .iter()
             .find(|f| {
-                f.long == name
+                (f.long == name && !f.short_only)
                     || f.short
                         .is_some_and(|s| name.len() == 2 && name == format!("-{s}"))
             })
@@ -342,6 +358,20 @@ fn format_of(parsed: &Parsed) -> Result<Format, Fail> {
     }
 }
 
+/// Whether `text` is six colon-separated hex octets with the multicast bit clear, what
+/// `Set.swift` accepts for `--mac` (`VZMACAddress(string:)` and `isUnicastAddress`).
+fn unicast_mac(text: &str) -> bool {
+    let octets: Vec<Option<u8>> = text
+        .split(':')
+        .map(|part| {
+            (part.len() == 2)
+                .then(|| u8::from_str_radix(part, 16).ok())
+                .flatten()
+        })
+        .collect();
+    octets.len() == 6 && octets.iter().all(Option::is_some) && octets[0].is_some_and(|o| o & 1 == 0)
+}
+
 /// Parses everything after `argv[0]`.
 pub(crate) fn parse_command(args: &[String]) -> Result<Command, Fail> {
     let Some((first, rest)) = args.split_first() else {
@@ -352,8 +382,19 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, Fail> {
         "create" => {
             let p = parse(rest, CREATE_FLAGS, false)?;
             exactly(&p, 1, "name")?;
+            let asif = match p.value("--disk-format") {
+                None | Some("raw") => false,
+                Some("asif") => true,
+                Some(other) => {
+                    return Err(Fail::validation(&format!(
+                        "The value '{other}' is invalid for '--disk-format'"
+                    )));
+                }
+            };
             Ok(Command::Create {
                 name: p.positionals[0].clone(),
+                linux: p.has("--linux"),
+                asif,
             })
         }
         "pull" => {
@@ -441,9 +482,22 @@ pub(crate) fn parse_command(args: &[String]) -> Result<Command, Fail> {
             let optional = |long: &str| -> Result<Option<u64>, Fail> {
                 p.value(long).map(|_| number(&p, long, 0)).transpose()
             };
+            let mac = p.value("--mac").map(str::to_owned);
+            if p.has("--random-mac") && mac.is_some() {
+                return Err(Fail::validation(
+                    "--random-mac and --mac are mutually exclusive",
+                ));
+            }
+            if let Some(text) = mac.as_deref().filter(|text| !unicast_mac(text)) {
+                return Err(Fail::validation(&format!(
+                    "'{text}' is not a valid unicast MAC address"
+                )));
+            }
             Ok(Command::Set {
                 name: p.positionals[0].clone(),
                 random_mac: p.has("--random-mac"),
+                random_serial: p.has("--random-serial"),
+                mac,
                 cpu: optional("--cpu")?,
                 memory: optional("--memory")?,
                 disk_size: optional("--disk-size")?,
@@ -495,6 +549,8 @@ mod tests {
                 vec!["create", "base", "--linux"],
                 Command::Create {
                     name: "base".into(),
+                    linux: true,
+                    asif: false,
                 },
             ),
             (
@@ -545,12 +601,33 @@ mod tests {
                 },
             ),
             (
-                vec!["set", "vm1", "--random-mac", "--memory", "4096"],
+                vec![
+                    "set",
+                    "vm1",
+                    "--random-mac",
+                    "--random-serial",
+                    "--memory",
+                    "4096",
+                ],
                 Command::Set {
                     name: "vm1".into(),
                     random_mac: true,
+                    random_serial: true,
+                    mac: None,
                     cpu: None,
                     memory: Some(4096),
+                    disk_size: None,
+                },
+            ),
+            (
+                vec!["set", "vm1", "--mac", "02:00:00:00:00:01"],
+                Command::Set {
+                    name: "vm1".into(),
+                    random_mac: false,
+                    random_serial: false,
+                    mac: Some("02:00:00:00:00:01".into()),
+                    cpu: None,
+                    memory: None,
                     disk_size: None,
                 },
             ),
@@ -620,8 +697,14 @@ mod tests {
             vec!["set"],
             vec!["set", "vm1", "--memory", "lots"],
             vec!["set", "vm1", "--bogus"],
+            vec!["set", "vm1", "--mac", "02:00:00:00:00:01", "--random-mac"],
+            vec!["set", "vm1", "--mac", "03:00:00:00:00:01"],
+            vec!["set", "vm1", "--mac", "02:00:00:00:00"],
+            vec!["set", "vm1", "--mac", "zz:00:00:00:00:01"],
             vec!["exec", "vm1"],
             vec!["exec"],
+            vec!["exec", "--interactive", "vm1", "launcher"],
+            vec!["exec", "--tty", "vm1", "launcher"],
         ];
 
         for input in bad {

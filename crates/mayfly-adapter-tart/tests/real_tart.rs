@@ -154,7 +154,7 @@ impl ProviderWorld for RealTart {
             deployment_id: "hardware-lane".to_owned(),
             source_ref: format!("registry.example/seed@{}", ImageDigest::sample()),
             source_digest: ImageDigest::sample(),
-            tart_version: "2.28.0".to_owned(),
+            tart_version: "2.41.1".to_owned(),
             runner_version: "2.330.0".to_owned(),
             runner_sha256: "5a".repeat(32),
             build_recipe_version: RECIPE_VERSION,
@@ -168,6 +168,7 @@ impl ProviderWorld for RealTart {
                 result: SignatureResult::NotChecked,
             },
             clones: BTreeMap::new(),
+            clone_disks: BTreeMap::new(),
         };
         self.records
             .update(|record| record.bases.insert(base.to_string(), entry))

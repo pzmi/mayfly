@@ -8,15 +8,16 @@
 //!
 //! # Surface
 //!
-//! `--version`, `clone <src> <name> [--overwrite]`, `set <name> [--random-mac] [--memory N] ...`,
-//! `run <name> [--no-graphics ...]`,
-//! `ip <name> [--wait N]`, `list [--format json] [--source local|oci] [-q]`, `get <name> [--format
-//! json]`, `stop <name> [-t N]`, `delete <name>...`, `exec [-i] <name> [--] <argv>`, plus two
-//! seeding commands real Tart also has: `create <name>` (an empty local VM, the base to clone) and
-//! `pull <ref>` (an OCI-cache entry, source `OCI`; never reaches a network: with a registry the lab
-//! seeded under `TART_HOME/registry/` it serves only the references it holds and writes their
-//! manifests into the OCI cache, see `home`). Flags real Tart does not have are refused with exit
-//! 64.
+//! The fake emulates Tart 2.41.1 (the only release mayfly supports, TART-01): `--version`,
+//! `clone <src> <name> [--overwrite]`, `set <name> [--random-mac | --mac <mac>] [--random-serial]
+//! [--memory N] ...`, `run <name> [--no-graphics ...]`, `ip <name> [--wait N]`, `list [--format
+//! json] [--source local|oci] [-q]`, `get <name> [--format json]`, `stop <name> [-t N]`,
+//! `delete <name>...`, `exec [-i] [-t] <name> [--] <argv>`, plus two seeding commands real Tart
+//! also has: `create <name> [--linux]` (an empty local VM, the base to clone) and `pull <ref>` (an
+//! OCI-cache entry, source `OCI`; never reaches a network: with a registry the lab seeded under
+//! `TART_HOME/registry/` it serves only the references it holds, checks their layout as Tart does
+//! and writes them into the OCI cache, see `home`). Flags real Tart does not have are refused
+//! with exit 64.
 //!
 //! # State and safety
 //!

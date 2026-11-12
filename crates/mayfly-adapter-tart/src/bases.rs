@@ -143,6 +143,35 @@ pub struct BaseEntry {
     /// is an unresolved intent. Each blocks eviction until Tart no longer lists it.
     #[serde(default)]
     pub clones: BTreeMap<String, Option<String>>,
+    /// The disk ceiling Tart printed for each job clone right after it was made, while it was
+    /// stopped, by name and with the instance id it was read for (TART-01): the inventory's
+    /// value when a later `tart get` cannot read the disk (`Disk` null) for that same
+    /// incarnation.
+    #[serde(default)]
+    pub clone_disks: BTreeMap<String, CloneDisk>,
+}
+
+/// A job clone's disk ceiling as read when it was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneDisk {
+    /// The instance id (MAC) of the incarnation it was read for.
+    pub instance_id: String,
+    /// The ceiling, in bytes.
+    pub disk_bytes: u64,
+}
+
+impl Record {
+    /// The disk ceiling recorded for the clone `name` when it was made, if `instance_id` is
+    /// still the incarnation it was read for. Pinned by
+    /// `tests/tart/calls.rs::should_count_the_disk_recorded_at_clone_time_when_tart_prints_none`.
+    #[must_use]
+    pub fn clone_disk(&self, name: &str, instance_id: &str) -> Option<u64> {
+        self.bases
+            .values()
+            .filter_map(|entry| entry.clone_disks.get(name))
+            .find(|disk| disk.instance_id == instance_id)
+            .map(|disk| disk.disk_bytes)
+    }
 }
 
 /// One verified image in Tart's OCI cache.
@@ -346,7 +375,7 @@ mod tests {
             deployment_id: "deployment".to_owned(),
             source_ref: format!("registry.example/a@{}", ImageDigest::sample()),
             source_digest: ImageDigest::sample(),
-            tart_version: "2.28.0".to_owned(),
+            tart_version: "2.41.1".to_owned(),
             runner_version: "2.330.0".to_owned(),
             runner_sha256: "5a".repeat(32),
             build_recipe_version: RECIPE_VERSION,
@@ -360,6 +389,7 @@ mod tests {
                 result: SignatureResult::NotChecked,
             },
             clones: BTreeMap::from([("mf-a".to_owned(), None)]),
+            clone_disks: BTreeMap::new(),
         }
     }
 

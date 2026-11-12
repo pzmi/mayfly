@@ -4,12 +4,14 @@
 //! - **pull**: by digest only (`<repository>@<digest>`, built from an [`ImageDigest`], which no
 //!   tag parses as). One pull per digest at a time (single flight). Before Tart runs, the raw
 //!   manifest is fetched independently ([`ManifestSource`]) and its exact bytes are checked
-//!   against the digest; its layout must be Tart's disk v2 (disk v1, ASIF and unknown layers are
-//!   refused, [`verify::layout`]). After `tart pull`, the cache entry (a directory, never a
-//!   symlink: Tart 2.28.0 links a requested digest to whatever manifest it was served) must hold
-//!   `config.json` and `nvram.bin` matching their descriptors and a `disk.img` whose every chunk
-//!   hashes to its uncompressed digest. The cached `manifest.json` is never read: Tart rewrites
-//!   it. A failed check deletes the entry and pulls once more, then refuses `Definite`.
+//!   against the digest; its layout must be Tart's disk v2 in Tart's order (disk v1, ASIF and
+//!   unknown layers are refused, [`verify::layout`]). After `tart pull`, the cache entry (a
+//!   directory, never a symlink: Tart links a requested digest to the entry of whatever manifest
+//!   it was served, with an absolute link) must hold `config.json` and `nvram.bin` matching their
+//!   descriptors and a `disk.img` whose every chunk hashes to its uncompressed digest. The cached
+//!   `manifest.json` is never read: it is whatever Tart was served (pinned by
+//!   `tests/tart/images.rs::should_never_read_the_cached_manifest_when_verifying_an_image`). A
+//!   failed check deletes the entry and pulls once more, then refuses `Definite`.
 //!   Compressed blobs are not re-checked (their content is, through the uncompressed digests).
 //! - **materialise**: the base's name must be the one the digest and runner version give, the
 //!   runner must have a pinned checksum, the image must be verified and unchanged, and Tart must
@@ -330,7 +332,8 @@ impl<M: ManifestSource> TartImageStore<M> {
     }
 
     /// Deletes the cache entry of `digest` that failed its check, and, when Tart linked it to
-    /// the entry of another manifest (2.28.0's `link` after a registry served another one),
+    /// the entry of another manifest (Tart's `VMStorageOCI.link` after a registry served another
+    /// one),
     /// that entry too, by its own reference: nothing unverified stays in the cache.
     async fn discard_entry(&self, digest: &ImageDigest) {
         let entry = self.cache_dir(digest);
@@ -370,7 +373,10 @@ impl<M: ManifestSource> TartImageStore<M> {
             .ok_or(VmError::Ambiguous(Ambiguity::ProcessLost))
     }
 
-    /// After `tart clone`: the base's own MAC and file identity, recorded as `Customizing`.
+    /// After `tart clone`: the base's own MAC and file identity, recorded as `Customizing`. Never
+    /// `--random-serial`: the clone's config must stay the image's in every field but the MAC
+    /// ([`verify::check_image`]); the job clones get their own serial
+    /// (`tart set --random-serial`, arm64 builds only; `provider`).
     async fn prove(&self, name: &str) -> Result<(), VmError> {
         self.tart
             .set_random_mac(name)
@@ -717,6 +723,7 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
             final_fingerprint: None,
             signature,
             clones: BTreeMap::new(),
+            clone_disks: BTreeMap::new(),
         };
         self.bases
             .update(|record| record.bases.insert(name.to_owned(), entry))
@@ -804,6 +811,7 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
         let pruned = self.bases.update(|record| {
             if let Some(entry) = record.bases.get_mut(name) {
                 entry.clones.retain(|clone, _| live.contains(clone));
+                entry.clone_disks.retain(|clone, _| live.contains(clone));
                 if live.is_empty() {
                     entry.state = BaseState::Retiring;
                 }

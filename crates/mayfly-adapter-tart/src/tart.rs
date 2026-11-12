@@ -217,8 +217,9 @@ impl TartCli {
         }
     }
 
-    /// `tart clone <base> <name>`, never `--overwrite`: cloning onto an existing name is
-    /// refused, as the port requires.
+    /// `tart clone <base> <name>`, never `--overwrite`: Tart 2.41.1 refuses a name that exists
+    /// (exit 64), as the port requires (2.28.0 replaced it). Pinned over fake-tart by
+    /// `tests/tart/contract.rs::should_refuse_definite_when_cloning_onto_an_existing_name`.
     ///
     /// # Errors
     /// [`CallError`].
@@ -235,6 +236,23 @@ impl TartCli {
     pub async fn set_random_mac(&self, name: &str) -> Result<(), CallError> {
         self.call(
             args(&["set", name, "--random-mac"]),
+            self.config.deadlines.set,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// `tart set <name> --random-mac --random-serial`: a macOS clone's own MAC (ADR 0026) and
+    /// its own machine identifier, so no two running guests share a serial number.
+    /// Tart's `Commands/Set.swift` draws a new `VZMacMachineIdentifier` for a macOS platform
+    /// and ignores the flag for any other; the flag exists in arm64 builds only
+    /// (`#if arch(arm64)`), the only hosts mayfly targets (ADR 0003).
+    ///
+    /// # Errors
+    /// [`CallError`].
+    pub async fn set_random_mac_and_serial(&self, name: &str) -> Result<(), CallError> {
+        self.call(
+            args(&["set", name, "--random-mac", "--random-serial"]),
             self.config.deadlines.set,
         )
         .await

@@ -4,17 +4,20 @@
 //! `run`, `ip --wait`, `stop`'s grace period, an `exec` job) happens after the lock is released,
 //! so one hung invocation never blocks the others.
 //!
-//! Output shapes follow Tart's sources (public repository, `main` branch, read 2026-11-09):
-//! `Commands/List.swift` (`Source`, `Name`, `Disk`, `Size`, `Accessed`, `Running`, `State`),
-//! `Commands/Get.swift` (`OS`, `CPU`, `Memory`, `Disk`, `DiskFormat`, `Size`, `Display`,
-//! `MACAddress`, `Running`, `State`), `Commands/IP.swift`, `Commands/Stop.swift`,
-//! `Commands/Delete.swift`, `Commands/Clone.swift`, `Commands/Set.swift`. **Unknown, marked as such:** how
-//! `HumanReadableByteCount` encodes `Disk` and `Size` (the fake prints whole gigabytes as numbers
-//! in `list`, and `Size` as a three-decimal string in `get`, which is what `Get.swift`'s closure
-//! formats), the pretty-printing whitespace (Foundation's differs from serde_json's), and the
-//! `--version` string of any real release (the fake prints [`DEFAULT_VERSION`], which is not
-//! captured from a binary). `tart get` shows a MAC address and no creation time; the creation time
-//! in a VM record is the fake's own and is never printed by a Tart-shaped command.
+//! Output shapes follow Tart's sources at the `2.41.1` release tag (github.com/openai/tart, read
+//! 2026-11-11): `Commands/List.swift` (`Source`, `Name`, `Disk`, `Size`, `Accessed`, `Running`,
+//! `State`), `Commands/Get.swift` (`OS`, `CPU`, `Memory`, `Disk`, `DiskFormat`, `Size`,
+//! `Display`, `MACAddress`, `Running`, `State`), `Commands/IP.swift`, `Commands/Stop.swift`,
+//! `Commands/Delete.swift`, `Commands/Clone.swift`, `Commands/Set.swift`, `Commands/Pull.swift`
+//! with `VMStorageOCI.swift`. `HumanReadableByteCount` encodes `Disk` and `Size` as the closure
+//! each command gives it: whole decimal gigabytes as numbers in `list`, `Disk` likewise and
+//! `Size` as a three-decimal string in `get` (`Disk` is `null` whenever Tart's read of the size
+//! fails; the fake prints `null` for a running VM with an ASIF disk, the case the source names). **Unknown, marked as
+//! such:** the pretty-printing whitespace and key order (Foundation's differ from serde_json's).
+//! `--version` prints [`DEFAULT_VERSION`], the release the fake emulates (`CI.swift` prints the
+//! release tag); it is derived from the source, not captured from a binary. `tart get` shows a
+//! MAC address and no creation time; the creation time in a VM record is the fake's own and is
+//! never printed by a Tart-shaped command.
 //!
 //! Pinned by: `tests/cli/commands.rs` (one test per command) and `tests/fixtures/*.json` through
 //! `tests/cli/commands.rs::should_print_the_pinned_list_shape_when_listing_json`.
@@ -37,8 +40,9 @@ use crate::vm::{
 };
 use crate::wait::pause;
 
-/// The version `--version` prints unless a fault rule overrides it.
-pub(crate) const DEFAULT_VERSION: &str = "2.28.0";
+/// The version `--version` prints unless a fault rule overrides it: the release the fake
+/// emulates.
+pub(crate) const DEFAULT_VERSION: &str = "2.41.1";
 
 /// What a command still has to wait for after its effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +115,7 @@ pub(crate) fn execute(command: &Command, ctx: &mut Ctx<'_>) -> Result<Done, Fail
                 .and_then(|r| r.version.as_deref())
                 .unwrap_or(DEFAULT_VERSION)
         ))),
-        Command::Create { name } => create(ctx, name),
+        Command::Create { name, linux, asif } => create(ctx, name, *linux, *asif),
         Command::Pull { reference } => pull(ctx, reference),
         Command::Clone {
             source,
@@ -130,10 +134,21 @@ pub(crate) fn execute(command: &Command, ctx: &mut Ctx<'_>) -> Result<Done, Fail
         Command::Set {
             name,
             random_mac,
+            random_serial,
+            mac,
             cpu,
             memory,
             disk_size,
-        } => set(ctx, name, *random_mac, (*cpu, *memory, *disk_size)),
+        } => set(
+            ctx,
+            name,
+            Identity {
+                random_mac: *random_mac,
+                random_serial: *random_serial,
+                mac: mac.as_deref(),
+            },
+            (*cpu, *memory, *disk_size),
+        ),
         Command::Delete { names } => delete(ctx, names),
         Command::Exec {
             name,
@@ -164,24 +179,35 @@ fn octet(counter: u64) -> u8 {
     u8::try_from(2 + counter % 250).unwrap_or(2)
 }
 
-fn create(ctx: &Ctx<'_>, name: &str) -> Result<Done, Fail> {
+fn create(ctx: &Ctx<'_>, name: &str, linux: bool, asif: bool) -> Result<Done, Fail> {
     let _lock = ctx.home.lock()?;
     if ctx.home.read_vm(name)?.is_some() {
-        return Err(Fail::generic(
+        return Err(Fail::runtime(
             "VM directory is already initialized, preventing overwrite",
         ));
     }
     let counter = next_counter(ctx.home)?;
-    let vm = VmRecord::new(
+    let mut vm = VmRecord::new(
         name,
         Source::Local,
         pseudo_mac(name, counter),
         octet(counter),
         now_ms(),
     );
+    if linux {
+        "linux".clone_into(&mut vm.os);
+    }
+    vm.disk_format = asif.then(|| "asif".to_owned());
     ctx.home.write_vm(&vm)?;
+    // A macOS platform carries its machine identifier (`ecid`), which `set --random-serial`
+    // replaces; a Linux one has none.
+    let platform = if linux {
+        String::new()
+    } else {
+        format!(r#","ecid":"{}""#, serial(name, counter))
+    };
     let config = format!(
-        r#"{{"version":1,"os":"{}","arch":"arm64","macAddress":"{}"}}"#,
+        r#"{{"version":1,"os":"{}","arch":"arm64","macAddress":"{}"{platform}}}"#,
         vm.os, vm.mac
     );
     let disk: Vec<u8> = name.bytes().cycle().take(4096).collect();
@@ -197,21 +223,34 @@ fn create(ctx: &Ctx<'_>, name: &str) -> Result<Done, Fail> {
     Ok(Done::quiet())
 }
 
+/// A synthetic machine identifier, distinct per allocation counter.
+fn serial(name: &str, counter: u64) -> String {
+    format!(
+        "fake-ecid-{}",
+        &hex(Sha256::digest(format!("{name}:{counter}")).as_ref())[..16]
+    )
+}
+
 /// `pull`: an OCI-cache entry named by the remote name. With a seeded registry (`home`) it serves
 /// only a reference the registry holds, as a registry answers an unknown manifest, and lays the
-/// image out as Tart 2.28.0 does: the entry is named by the hash of the manifest it was served,
-/// never compared with the digest asked for, its `manifest.json` is re-serialized, and no blob is
-/// checked against its descriptor (`VMStorageOCI.pull`, `Registry.pullBlob`). Verifying is the
-/// caller's job (domain-model §9.3). Without a registry it pulls anything, an image with no files.
+/// image out as Tart 2.41.1 does: the manifest's layout is checked as
+/// `OCIManifest.tartDiskRepresentation` checks it, the entry is named by the hash of the manifest
+/// it was served, never compared with the digest asked for, its `manifest.json` holds the bytes
+/// served, and no blob is checked against its descriptor (`VMStorageOCI.pull`,
+/// `VMDirectory+OCI.swift`, `Registry.pullBlob`). Verifying is the caller's job (domain-model
+/// §9.3). An entry pulled by its own digest is marked explicitly pulled. Without a registry it
+/// pulls anything, an image with no files.
 fn pull(ctx: &Ctx<'_>, reference: &str) -> Result<Done, Fail> {
     let _lock = ctx.home.lock()?;
     let mut os = None;
+    let mut own_digest = false;
     if ctx.home.registry_seeded() {
         let manifest = ctx.home.registry_manifest(reference)?.ok_or_else(|| {
             Fail::generic(&format!("failed to pull {reference}: manifest unknown"))
         })?;
         let (served_os, served_name) = lay_out(ctx.home, reference, &manifest)?;
         os = Some(served_os.clone());
+        own_digest = served_name.is_none() && reference.contains('@');
         // The entry the asked name links to is an image of its own, listed by its digest.
         if let Some(served_name) = served_name
             && ctx.home.read_vm(&served_name)?.is_none()
@@ -228,23 +267,83 @@ fn pull(ctx: &Ctx<'_>, reference: &str) -> Result<Done, Fail> {
             ctx.home.write_vm(&vm)?;
         }
     }
-    if ctx.home.read_vm(reference)?.is_none() {
-        let counter = next_counter(ctx.home)?;
-        let mut vm = VmRecord::new(
-            reference,
-            Source::Oci,
-            pseudo_mac(reference, counter),
-            octet(counter),
-            now_ms(),
-        );
-        if let Some(os) = os {
-            vm.os = os;
+    let mut vm = match ctx.home.read_vm(reference)? {
+        Some(vm) => vm,
+        None => {
+            let counter = next_counter(ctx.home)?;
+            let mut vm = VmRecord::new(
+                reference,
+                Source::Oci,
+                pseudo_mac(reference, counter),
+                octet(counter),
+                now_ms(),
+            );
+            if let Some(os) = os {
+                vm.os = os;
+            }
+            ctx.effect("image_pulled", reference)?;
+            vm
         }
-        ctx.home.write_vm(&vm)?;
-        ctx.effect("image_pulled", reference)?;
-    }
+    };
+    vm.explicitly_pulled |= own_digest;
+    ctx.home.write_vm(&vm)?;
     Ok(Done::quiet())
 }
+
+/// Tart 2.41.1's check of a manifest's layout before it pulls (`OCIManifest.
+/// tartDiskRepresentation`, `VMDirectory+OCI.swift`): exactly one config and one NVRAM layer,
+/// the config first and the NVRAM last, disk-v2 chunks between them, each with its uncompressed
+/// size and digest. A stacked image (ASIF overlays) is real Tart's, not the fake's.
+fn check_layout(reference: &str, layers: &[serde_json::Value]) -> Result<(), Fail> {
+    let media =
+        |layer: &serde_json::Value| layer["mediaType"].as_str().unwrap_or_default().to_owned();
+    let count = |kind: &str| layers.iter().filter(|l| media(l) == kind).count();
+    if count(CONFIG_MEDIA) != 1 {
+        return Err(Fail::generic(
+            "manifest must contain exactly one Tart config descriptor",
+        ));
+    }
+    if count(NVRAM_MEDIA) != 1 {
+        return Err(Fail::generic(
+            "manifest must contain exactly one NVRAM descriptor",
+        ));
+    }
+    let ordered = layers.first().is_some_and(|l| media(l) == CONFIG_MEDIA)
+        && layers.last().is_some_and(|l| media(l) == NVRAM_MEDIA);
+    if !ordered {
+        return Err(Fail::generic(
+            "descriptors must be ordered as config, disk chunks, then NVRAM",
+        ));
+    }
+    let disk = &layers[1..layers.len() - 1];
+    if disk.is_empty() {
+        return Err(Fail::generic("manifest has no disk chunks"));
+    }
+    if media(&disk[0]) != DISK_V2_MEDIA {
+        return Err(Fail::generic("disk chunks must start with a disk.v2 base"));
+    }
+    if let Some(other) = disk.iter().map(media).find(|m| m != DISK_V2_MEDIA) {
+        return Err(Fail::fake(&format!(
+            "{reference}: {other} layers (stacked images) are not modelled"
+        )));
+    }
+    let annotated = disk.iter().all(|l| {
+        l["annotations"][UNCOMPRESSED_SIZE].is_string()
+            && l["annotations"][UNCOMPRESSED_DIGEST].is_string()
+    });
+    if !annotated {
+        return Err(Fail::generic(
+            "disk chunks need uncompressed size and content digest",
+        ));
+    }
+    Ok(())
+}
+
+const CONFIG_MEDIA: &str = "application/vnd.cirruslabs.tart.config.v1";
+const NVRAM_MEDIA: &str = "application/vnd.cirruslabs.tart.nvram.v1";
+const DISK_V2_MEDIA: &str = "application/vnd.cirruslabs.tart.disk.v2";
+const UNCOMPRESSED_SIZE: &str = "org.cirruslabs.tart.uncompressed-size";
+const UNCOMPRESSED_DIGEST: &str = "org.cirruslabs.tart.uncompressed-content-digest";
 
 /// Writes a served manifest's image into the OCI cache; returns the guest OS its config names
 /// (`darwin` when it names none) and, when the asked name is only a link to it, the entry's own
@@ -256,10 +355,12 @@ fn lay_out(
 ) -> Result<(String, Option<String>), Fail> {
     let parsed: serde_json::Value = serde_json::from_slice(manifest)
         .map_err(|_| Fail::generic(&format!("failed to pull {reference}: manifest unparseable")))?;
+    let layers = parsed["layers"].as_array().cloned().unwrap_or_default();
+    check_layout(reference, &layers)?;
     let mut config = Vec::new();
     let mut nvram = Vec::new();
     let mut disk = Vec::new();
-    for layer in parsed["layers"].as_array().into_iter().flatten() {
+    for layer in &layers {
         let digest = layer["digest"].as_str().unwrap_or_default();
         let blob = home.registry_blob(digest)?.ok_or_else(|| {
             Fail::generic(&format!(
@@ -267,11 +368,11 @@ fn lay_out(
             ))
         })?;
         let media = layer["mediaType"].as_str().unwrap_or_default();
-        if media.ends_with(".config.v1") {
+        if media == CONFIG_MEDIA {
             config = blob;
-        } else if media.ends_with(".nvram.v1") {
+        } else if media == NVRAM_MEDIA {
             nvram = blob;
-        } else if media.contains(".disk.") {
+        } else {
             disk.extend_from_slice(&blob);
         }
     }
@@ -279,13 +380,11 @@ fn lay_out(
         .ok()
         .and_then(|c| c["os"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "darwin".to_owned());
-    let reserialized = serde_json::to_vec_pretty(&parsed)
-        .map_err(|e| Fail::fake(&format!("cannot encode a manifest: {e}")))?;
     let served = format!("sha256:{}", hex(Sha256::digest(manifest).as_ref()));
     home.write_oci_entry(
         reference,
         &served,
-        &reserialized,
+        manifest,
         &[(CONFIG, config), (NVRAM, nvram), (DISK, disk)],
     )?;
     let repository = reference
@@ -340,6 +439,7 @@ fn clone_vm(ctx: &Ctx<'_>, source: &str, name: &str, overwrite: bool) -> Result<
     ctx.home.set_config_mac(name, &vm.mac)?;
     vm.os.clone_from(&src.os);
     vm.installed_runner.clone_from(&src.installed_runner);
+    vm.disk_format.clone_from(&src.disk_format);
     (vm.cpu, vm.memory_mb, vm.disk_gb) = (src.cpu, src.memory_mb, src.disk_gb);
     ctx.home.write_vm(&vm)?;
     ctx.effect("vm_cloned", name)?;
@@ -387,7 +487,7 @@ fn ip(ctx: &Ctx<'_>, name: &str, wait: u64) -> Result<Done, Fail> {
                 local_vm(ctx.home, name).is_ok_and(|v| v.running())
             }));
     if !found {
-        return Err(Fail::generic("no IP address found, is your VM running?"));
+        return Err(Fail::runtime("no IP address found, is your VM running?"));
     }
     let vm = local_vm(ctx.home, name)?;
     Ok(Done::out(format!("{}\n", vm.ip())))
@@ -398,7 +498,7 @@ fn ip(ctx: &Ctx<'_>, name: &str, wait: u64) -> Result<Done, Fail> {
 struct ListEntry {
     source: &'static str,
     name: String,
-    disk: u64,
+    disk: Option<u64>,
     size: u64,
     accessed: String,
     running: bool,
@@ -406,7 +506,7 @@ struct ListEntry {
 }
 
 #[derive(Serialize)]
-struct GetInfo {
+struct GetInfo<'a> {
     #[serde(rename = "OS")]
     os: String,
     #[serde(rename = "CPU")]
@@ -414,9 +514,9 @@ struct GetInfo {
     #[serde(rename = "Memory")]
     memory: u64,
     #[serde(rename = "Disk")]
-    disk: u64,
+    disk: Option<u64>,
     #[serde(rename = "DiskFormat")]
-    disk_format: &'static str,
+    disk_format: &'a str,
     #[serde(rename = "Size")]
     size: String,
     #[serde(rename = "Display")]
@@ -431,6 +531,11 @@ struct GetInfo {
 
 const SIZE_GB: u64 = 25;
 
+/// `HumanReadableByteCount`'s text for an unread size is `-`.
+fn text_disk(disk: Option<u64>) -> String {
+    disk.map_or_else(|| "-".to_owned(), |gb| gb.to_string())
+}
+
 fn json<T: Serialize>(value: &T) -> Result<String, Fail> {
     serde_json::to_string_pretty(value)
         .map(|text| text + "\n")
@@ -444,10 +549,17 @@ fn list(ctx: &Ctx<'_>, format: Format, source: Option<&str>, quiet: bool) -> Res
         Some(_) => vm.source == Source::Oci,
         None => true,
     });
-    vms.sort_by(|a, b| (a.source == Source::Oci, &a.name).cmp(&(b.source == Source::Oci, &b.name)));
+    let listed = |vm: &VmRecord| {
+        if vm.source == Source::Oci {
+            ctx.home.oci_listed_name(&vm.name)
+        } else {
+            vm.name.clone()
+        }
+    };
+    vms.sort_by_cached_key(|vm| (vm.source == Source::Oci, listed(vm)));
     if quiet {
         return Ok(Done::out(
-            vms.iter().map(|vm| format!("{}\n", vm.name)).collect(),
+            vms.iter().map(|vm| format!("{}\n", listed(vm))).collect(),
         ));
     }
     let entries: Vec<ListEntry> = vms
@@ -458,8 +570,8 @@ fn list(ctx: &Ctx<'_>, format: Format, source: Option<&str>, quiet: bool) -> Res
             } else {
                 "OCI"
             },
-            name: vm.name.clone(),
-            disk: vm.disk_gb,
+            name: listed(vm),
+            disk: vm.printed_disk(),
             size: SIZE_GB,
             accessed: iso8601(vm.accessed_ms),
             running: vm.running(),
@@ -476,7 +588,12 @@ fn list(ctx: &Ctx<'_>, format: Format, source: Option<&str>, quiet: bool) -> Res
             for e in &entries {
                 out.push_str(&format!(
                     "{}  {}  {}  {}  {}  {}\n",
-                    e.source, e.name, e.disk, e.size, e.accessed, e.state
+                    e.source,
+                    e.name,
+                    text_disk(e.disk),
+                    e.size,
+                    e.accessed,
+                    e.state
                 ));
             }
             Ok(Done::out(out))
@@ -490,8 +607,8 @@ fn get(ctx: &Ctx<'_>, name: &str, format: Format) -> Result<Done, Fail> {
         os: vm.os.clone(),
         cpu: vm.cpu,
         memory: vm.memory_mb,
-        disk: vm.disk_gb,
-        disk_format: "raw",
+        disk: vm.printed_disk(),
+        disk_format: vm.disk_format.as_deref().unwrap_or("raw"),
         size: format!("{SIZE_GB}.000"),
         display: "1024x768",
         mac_address: vm.mac.clone(),
@@ -505,7 +622,7 @@ fn get(ctx: &Ctx<'_>, name: &str, format: Format) -> Result<Done, Fail> {
             info.os,
             info.cpu,
             info.memory,
-            info.disk,
+            text_disk(info.disk),
             info.disk_format,
             info.size,
             info.display,
@@ -546,13 +663,22 @@ fn stop(ctx: &Ctx<'_>, name: &str, timeout: u64) -> Result<Done, Fail> {
     Ok(Done::quiet())
 }
 
+/// What `set` does to a VM's identity: its MAC and, for macOS, its machine identifier.
+pub(crate) struct Identity<'a> {
+    pub random_mac: bool,
+    pub random_serial: bool,
+    pub mac: Option<&'a str>,
+}
+
 /// `set`: changes what the next boot gets (`Set.swift`); a running VM keeps its current run.
 /// `--random-mac` draws a new MAC from the allocation counter, so it differs from every MAC the
-/// home has handed out; `--disk-size` may only grow the disk, as in Tart.
+/// home has handed out; `--mac` sets the one given (2.41.0 on, so a MAC is anyone's to copy);
+/// `--random-serial` gives a macOS VM a new machine identifier (`ecid`) and leaves any other
+/// alone; `--disk-size` may only grow the disk, as in Tart.
 fn set(
     ctx: &Ctx<'_>,
     name: &str,
-    random_mac: bool,
+    identity: Identity<'_>,
     (cpu, memory, disk_size): (Option<u64>, Option<u64>, Option<u64>),
 ) -> Result<Done, Fail> {
     let _lock = ctx.home.lock()?;
@@ -564,9 +690,17 @@ fn set(
             "the new disk size must be larger than the current one",
         ));
     }
-    if random_mac {
+    if let Some(mac) = identity.mac {
+        mac.to_ascii_lowercase().clone_into(&mut vm.mac);
+        ctx.home.set_config_mac(name, &vm.mac)?;
+    }
+    if identity.random_mac {
         vm.mac = pseudo_mac(name, next_counter(ctx.home)?);
         ctx.home.set_config_mac(name, &vm.mac)?;
+    }
+    if identity.random_serial && vm.os == "darwin" {
+        let ecid = serial(name, next_counter(ctx.home)?);
+        ctx.home.set_config_field(name, "ecid", &ecid)?;
     }
     vm.cpu = cpu.unwrap_or(vm.cpu);
     vm.memory_mb = memory.unwrap_or(vm.memory_mb);
@@ -576,6 +710,9 @@ fn set(
     Ok(Done::quiet())
 }
 
+/// `delete`: a local VM, or an OCI entry by any name `pull` gave it. Deleting an OCI name removes
+/// its link or directory, then collects what Tart's `VMStorageOCI.gc` collects: links whose
+/// entry is gone, and entries no link names that were not pulled by their own digest.
 fn delete(ctx: &Ctx<'_>, names: &[String]) -> Result<Done, Fail> {
     for name in names {
         let _lock = ctx.home.lock()?;
@@ -589,10 +726,41 @@ fn delete(ctx: &Ctx<'_>, names: &[String]) -> Result<Done, Fail> {
         ctx.home.remove_vm(name)?;
         if vm.source == Source::Oci {
             ctx.home.remove_oci(name)?;
+            collect_oci(ctx)?;
         }
         ctx.effect("vm_deleted", name)?;
     }
     Ok(Done::quiet())
+}
+
+fn collect_oci(ctx: &Ctx<'_>) -> Result<(), Fail> {
+    let entries: Vec<VmRecord> = ctx
+        .home
+        .list_vms()?
+        .into_iter()
+        .filter(|vm| vm.source == Source::Oci && ctx.home.oci_dir(&vm.name).is_some())
+        .collect();
+    let linked: Vec<std::path::PathBuf> = entries
+        .iter()
+        .filter(|vm| ctx.home.oci_is_link(&vm.name))
+        .filter_map(|vm| ctx.home.oci_target(&vm.name))
+        .collect();
+    for vm in &entries {
+        let collect = if ctx.home.oci_is_link(&vm.name) {
+            ctx.home.oci_target(&vm.name).is_none()
+        } else {
+            !vm.explicitly_pulled
+                && ctx
+                    .home
+                    .oci_target(&vm.name)
+                    .is_some_and(|dir| !linked.contains(&dir))
+        };
+        if collect {
+            ctx.home.remove_vm(&vm.name)?;
+            ctx.home.remove_oci(&vm.name)?;
+        }
+    }
+    Ok(())
 }
 
 /// `exec`: an emulated guest. With `-i` it reads stdin to the end, keeping only its length and

@@ -98,7 +98,7 @@ pub fn ready_entry(home: &Path, name: &str, mac: &str) -> BaseEntry {
         deployment_id: "deployment".to_owned(),
         source_ref: format!("registry.example/seed@{}", ImageDigest::sample()),
         source_digest: ImageDigest::sample(),
-        tart_version: "2.28.0".to_owned(),
+        tart_version: "2.41.1".to_owned(),
         runner_version: "2.330.0".to_owned(),
         runner_sha256: "5a".repeat(32),
         build_recipe_version: RECIPE_VERSION,
@@ -112,6 +112,7 @@ pub fn ready_entry(home: &Path, name: &str, mac: &str) -> BaseEntry {
             result: SignatureResult::NotChecked,
         },
         clones: BTreeMap::new(),
+        clone_disks: BTreeMap::new(),
     }
 }
 
@@ -170,10 +171,22 @@ impl Fake {
     /// file identity and fingerprint it has now (what the image store records once it built
     /// one).
     pub fn seed_base(&self, name: &str) {
-        assert!(
-            self.tart(&["create", name]).status.success(),
-            "create the base"
-        );
+        self.seed_base_from(&["create", name]);
+    }
+
+    /// [`Fake::seed_base`] with an ASIF disk, whose capacity Tart cannot read while it runs.
+    pub fn seed_asif_base(&self, name: &str) {
+        self.seed_base_from(&["create", name, "--disk-format", "asif"]);
+    }
+
+    /// [`Fake::seed_base`] with a Linux guest.
+    pub fn seed_linux_base(&self, name: &str) {
+        self.seed_base_from(&["create", name, "--linux"]);
+    }
+
+    fn seed_base_from(&self, create: &[&str]) {
+        let name = create[1];
+        assert!(self.tart(create).status.success(), "create the base");
         let entry = ready_entry(&self.home(), name, &self.mac(name));
         self.records()
             .update(|record| record.bases.insert(name.to_owned(), entry))

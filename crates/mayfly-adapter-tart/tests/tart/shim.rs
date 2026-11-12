@@ -188,7 +188,7 @@ fn should_answer_hypervisor_limit_when_tart_run_reports_the_vm_limit() {
     let fake = Fake::new();
     fake.seed_base(base().as_str());
     fake.faults(
-        "[[rule]]\ncommand = \"run\"\naction = \"fail_before_effect\"\nexit_code = 1\nstderr = \"Error: The number of virtual machines exceeds the limit. The maximum supported number of active virtual machines has been reached.\"\n",
+        "[[rule]]\ncommand = \"run\"\naction = \"fail_before_effect\"\nexit_code = 1\nstderr = \"The number of VMs exceeds the system limit (other running VMs: mf-other)\"\n",
     );
     let provider = fake.provider();
     let runtime = runtime();

@@ -1,7 +1,7 @@
 //! What the adapter promises about every `tart` call, read from the fake's invocation log: the
 //! environment (`TART_HOME` and `TART_NO_AUTO_PRUNE` on every call, plan §8.2), argv shapes
-//! (clone never `--overwrite`, clone only from a local base then `set --random-mac`), and the
-//! version probe.
+//! (clone never `--overwrite`, clone only from a local base then `set --random-mac`, with
+//! `--random-serial` for a macOS base), and the version probe.
 
 use mayfly_adapter_tart::{ProbeError, TartProvider};
 use mayfly_data::{Inventory, InventoryGap, VmProvider};
@@ -85,41 +85,53 @@ fn should_set_tart_home_and_no_auto_prune_on_every_call_when_the_adapter_runs_ta
 
 #[test]
 fn should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning() {
-    // given
-    let fake = Fake::new();
-    fake.seed_base(base().as_str());
-    let seeding = fake.events("invoke").len();
-    let provider = fake.provider();
+    for linux in [false, true] {
+        // given
+        let fake = Fake::new();
+        if linux {
+            fake.seed_linux_base(base().as_str());
+        } else {
+            fake.seed_base(base().as_str());
+        }
+        let seeding = fake.events("invoke").len();
+        let provider = fake.provider();
 
-    // when
-    let id = runtime()
-        .block_on(provider.clone_vm(&base(), &vm(1)))
-        .expect("clone");
+        // when
+        let id = runtime()
+            .block_on(provider.clone_vm(&base(), &vm(1)))
+            .expect("clone");
 
-    // then
-    let calls: Vec<Vec<String>> = fake
-        .events("invoke")
-        .iter()
-        .skip(seeding)
-        .map(argv)
-        .collect();
-    let name = vm(1).to_string();
-    assert_eq!(
-        calls,
-        vec![
-            vec!["get", base().as_str(), "--format", "json"],
-            vec!["clone", base().as_str(), name.as_str()],
-            vec!["set", name.as_str(), "--random-mac"],
-            vec!["get", name.as_str(), "--format", "json"],
-        ]
-        .into_iter()
-        .map(|args| args.into_iter().map(str::to_owned).collect::<Vec<_>>())
-        .collect::<Vec<_>>()
-    );
-    let info: Value =
-        serde_json::from_slice(&fake.tart(&["get", &name, "--format", "json"]).stdout)
-            .expect("get json");
-    assert_eq!(info["MACAddress"].as_str(), Some(id.as_str()));
+        // then: a macOS clone also gets its own serial; a Linux one has none
+        let calls: Vec<Vec<String>> = fake
+            .events("invoke")
+            .iter()
+            .skip(seeding)
+            .map(argv)
+            .collect();
+        let name = vm(1).to_string();
+        let set = if linux {
+            vec!["set", name.as_str(), "--random-mac"]
+        } else {
+            vec!["set", name.as_str(), "--random-mac", "--random-serial"]
+        };
+        assert_eq!(
+            calls,
+            vec![
+                vec!["get", base().as_str(), "--format", "json"],
+                vec!["clone", base().as_str(), name.as_str()],
+                set,
+                vec!["get", name.as_str(), "--format", "json"],
+            ]
+            .into_iter()
+            .map(|args| args.into_iter().map(str::to_owned).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+            "linux: {linux}"
+        );
+        let info: Value =
+            serde_json::from_slice(&fake.tart(&["get", &name, "--format", "json"]).stdout)
+                .expect("get json");
+        assert_eq!(info["MACAddress"].as_str(), Some(id.as_str()));
+    }
 }
 
 #[test]
@@ -174,10 +186,57 @@ fn should_accept_the_pinned_version_and_refuse_another_when_probing() {
     // when
     fake.faults("[[rule]]\ncommand = \"--version\"\nversion = \"9.9.9\"\n");
     let other = runtime.block_on(provider.probe());
+    fake.faults("[[rule]]\ncommand = \"--version\"\nversion = \"2.28.0\"\n");
+    let older = runtime.block_on(provider.probe());
 
     // then
-    assert_eq!(pinned, Ok("2.28.0".to_owned()));
+    assert_eq!(pinned, Ok("2.41.1".to_owned()));
     assert_eq!(other, Err(ProbeError::Unsupported("9.9.9".to_owned())));
+    assert_eq!(older, Err(ProbeError::Unsupported("2.28.0".to_owned())));
+}
+
+#[test]
+fn should_count_the_disk_recorded_at_clone_time_when_tart_prints_none() {
+    // given: two running clones of a base whose ASIF disk Tart cannot read while they run;
+    // the second's MAC was changed behind the adapter's back after it was cloned
+    let fake = Fake::new();
+    fake.seed_asif_base(base().as_str());
+    let provider = fake.provider();
+    let options = mayfly_data::RunOptions {
+        resources: mayfly_domain::Resources::new(START_MEMORY, 0),
+    };
+    let (first, second) = (vm(1).to_string(), vm(2).to_string());
+    runtime().block_on(async {
+        provider.clone_vm(&base(), &vm(1)).await.expect("clone");
+        provider.clone_vm(&base(), &vm(2)).await.expect("clone");
+    });
+    assert!(
+        fake.tart(&["set", &second, "--random-mac"])
+            .status
+            .success()
+    );
+    runtime().block_on(async {
+        provider.start(&vm(1), &options).await.expect("start");
+        provider.start(&vm(2), &options).await.expect("start");
+    });
+    let printed: Value =
+        serde_json::from_slice(&fake.tart(&["get", &first, "--format", "json"]).stdout)
+            .expect("get json");
+
+    // when
+    let inventory = runtime().block_on(provider.inventory());
+
+    // then: the recorded ceiling for the incarnation it was read for, unknown for another
+    assert_eq!(printed["Disk"], Value::Null);
+    let Inventory::Complete { vms } = inventory else {
+        panic!("a complete inventory: {inventory:?}");
+    };
+    let disk = |name: &str| vms.iter().find(|v| v.name == name).map(|v| v.disk_bytes);
+    assert_eq!(disk(&first), Some(Some(50 * (1 << 30))));
+    assert_eq!(disk(&second), Some(None));
+    for name in [&first, &second] {
+        assert!(fake.tart(&["stop", name]).status.success(), "stop {name}");
+    }
 }
 
 fn started(fake: &Fake) -> (TartProvider, mayfly_domain::ProviderInstanceId) {

@@ -1,6 +1,6 @@
 //! The `ImageStore` contract (`mayfly_testkit_data::image_contract`) run against
 //! `TartImageStore` over the fake `tart` binary, one test per case, and the fault cases of ADR
-//! 0087: wrong and re-serialized manifests, corrupt layers and chunks, unsupported layouts,
+//! 0087: wrong manifests, a cached manifest never read, corrupt layers and chunks, unsupported layouts,
 //! foreign and look-alike VMs, a crash at each build state, a base modified after it was
 //! verified, concurrent clone and evict, incomplete listings, unrecorded clone lineage, an
 //! unsafe directory layout and a lost or corrupt registry.
@@ -171,15 +171,15 @@ impl ImageTartWorld {
                 bytes.to_vec()
             }
         };
+        // Tart's order: the config, the disk chunks, the NVRAM last.
         let mut layers = Vec::new();
-        for (media, bytes, part) in [
-            (CONFIG_LAYER, &config, Damage::Config),
-            (NVRAM_LAYER, &nvram, Damage::Nvram),
-        ] {
+        let whole = |media: &str, bytes: &[u8], part: Damage| {
             let digest = format!("sha256:{}", sha256_hex(bytes));
             blob(&digest, &served(part, bytes));
-            layers.push(json!({"mediaType": media, "digest": digest, "size": bytes.len()}));
-        }
+            json!({"mediaType": media, "digest": digest, "size": bytes.len()})
+        };
+        layers.push(whole(CONFIG_LAYER, &config, Damage::Config));
+        let nvram_layer = whole(NVRAM_LAYER, &nvram, Damage::Nvram);
         let disk_media = if damage == Damage::DiskV1 {
             "application/vnd.cirruslabs.tart.disk.v1"
         } else {
@@ -201,6 +201,7 @@ impl ImageTartWorld {
                 },
             }));
         }
+        layers.push(nvram_layer);
         let manifest = serde_json::to_vec(&json!({
             "schemaVersion": 2, "mediaType": MANIFEST_V1,
             "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
@@ -548,22 +549,18 @@ fn should_refuse_without_running_tart_when_the_registry_serves_another_manifest(
 }
 
 #[test]
-fn should_verify_against_the_raw_manifest_when_tart_caches_it_reserialized() {
-    // given
+fn should_never_read_the_cached_manifest_when_verifying_an_image() {
+    // given: Tart 2.41.1 caches the manifest as served (2.28.0 re-serialized it); neither copy
+    // is checked against the digest, so the store must not depend on it
     let world = ImageTartWorld::new();
-    let digest = world.publish_image(b"reserialized", GuestOs::Macos, Damage::None, None);
+    let digest = world.publish_image(b"cached", GuestOs::Macos, Damage::None, None);
     let raw = std::fs::read(
         world
             .registry()
             .join(encoded(&format!("{REPOSITORY}@{digest}"))),
     )
     .expect("raw");
-
-    // when
-    let pulled = ImageTartWorld::runtime().block_on(world.store.pull(&digest));
-
-    // then
-    assert_eq!(pulled, Ok(()));
+    let runtime = ImageTartWorld::runtime();
     let cached = world
         .fake
         .home()
@@ -571,7 +568,20 @@ fn should_verify_against_the_raw_manifest_when_tart_caches_it_reserialized() {
         .join(REPOSITORY)
         .join(digest.as_str())
         .join("manifest.json");
-    assert_ne!(std::fs::read(cached).expect("cached"), raw);
+
+    // when
+    let pulled = runtime.block_on(world.store.pull(&digest));
+    let as_served = std::fs::read(&cached).expect("cached");
+    std::fs::write(&cached, b"{\"schemaVersion\": 2, \"layers\": []}").expect("rewrite");
+    let listing = runtime.block_on(world.store.list()).expect("a listing");
+
+    // then
+    assert_eq!(pulled, Ok(()));
+    assert_eq!(as_served, raw, "2.41.1 caches the bytes it was served");
+    assert!(
+        listing.images.contains(&digest),
+        "the cached copy is not read"
+    );
 }
 
 #[test]
@@ -679,7 +689,7 @@ fn should_clone_set_its_mac_boot_once_install_and_stop_when_materialising() {
     assert_eq!(entry.state, BaseState::Ready);
     assert_eq!(entry.source_digest, digest);
     assert_eq!(entry.runner_sha256, RUNNER_SHA256);
-    assert_eq!(entry.tart_version, "2.28.0");
+    assert_eq!(entry.tart_version, "2.41.1");
     assert_eq!(entry.deployment_id, "deployment-under-test");
     assert_eq!(entry.base_id.len(), 32);
     assert_ne!(Some(entry.base_id.clone()), entry.vm_mac);
@@ -1280,7 +1290,7 @@ fn should_stop_delete_and_rebuild_when_a_crash_left_the_base_booted() {
 #[test]
 fn should_delete_both_entries_when_tart_links_the_digest_to_another_manifest() {
     // given: the store is served A's manifest for A's digest, Tart is then served B's; Tart
-    // 2.28.0 names its entry by B's hash and links A's digest to it
+    // names its entry by B's hash and links A's digest to it (`VMStorageOCI.pull`)
     let world = ImageTartWorld::new();
     let a = world.publish_image(b"honest", GuestOs::Macos, Damage::None, None);
     let b = world.publish_image(b"swapped", GuestOs::Macos, Damage::None, None);

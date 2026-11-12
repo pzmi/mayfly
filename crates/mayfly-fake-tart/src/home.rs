@@ -20,14 +20,17 @@
 //!                        (`<repo>@sha256:<hex>` or `<repo>:<tag>`, name encoded), served by `pull`
 //!   registry/blobs/<digest>  the blobs its layers name (encoded), served as they are
 //!   cache/OCIs/<repo>/sha256:<hash of the manifest served>/
-//!                        what `pull` lays out, as Tart 2.28.0 does (`VMStorageOCI.pull`): the
-//!                        directory is named by the hash of the manifest it was served, never
-//!                        compared with the digest asked for; another requested name (a digest or
-//!                        a tag) is an absolute symlink to it, listed as an image of its own
-//!                        by its digest (the link form is for HW-01 to confirm); `manifest.json` is written RE-SERIALIZED
-//!                        (`manifest.toJSON()`), so its bytes are not the registry's; `config.json`,
-//!                        `nvram.bin` and `disk.img` are the layers' blobs (disk chunks concatenated
-//!                        in manifest order; the fake stores chunks uncompressed)
+//!                        what `pull` lays out, as Tart 2.41.1 does (`VMStorageOCI.pull`, `link`,
+//!                        `list`, `gc`): the directory is named by the hash of the manifest it was
+//!                        served, never compared with the digest asked for; another requested name
+//!                        (a digest or a tag) is an absolute symlink to it (`createSymbolicLink(at:
+//!                        withDestinationURL:)` with an absolute URL), listed `<repo>:<name>`
+//!                        (`list` joins a symlink's parts with `:`, a directory's with `@`);
+//!                        `manifest.json` holds the bytes served (2.28.0 re-serialized them);
+//!                        `config.json`, `nvram.bin` and `disk.img` are the layers' blobs (disk
+//!                        chunks concatenated in manifest order; the fake stores chunks
+//!                        uncompressed); deleting a name removes its link or directory, then any
+//!                        directory no link names that was not pulled by its own digest
 //! ```
 //!
 //! Every write is a temp file in the same directory, `sync_all`, then `rename`, so a reader (the
@@ -246,7 +249,7 @@ impl Home {
         }
     }
 
-    /// Lays out a pulled image the way Tart 2.28.0 does (see the module docs): the directory is
+    /// Lays out a pulled image the way Tart 2.41.1 does (see the module docs): the directory is
     /// named by `served`'s hash, `reference`'s own name links to it when it differs.
     pub fn write_oci_entry(
         &self,
@@ -305,15 +308,43 @@ impl Home {
 
     /// Sets `macAddress` in a VM's `config.json`, as `tart set` and a cloned MAC rewrite it.
     pub fn set_config_mac(&self, name: &str, mac: &str) -> Result<(), Fail> {
+        self.set_config_field(name, "macAddress", mac)
+    }
+
+    /// Sets one field of a VM's `config.json` (`tart set` saves the whole file anew).
+    pub fn set_config_field(&self, name: &str, key: &str, value: &str) -> Result<(), Fail> {
         let path = self.vm_dir(name).join(CONFIG);
         let mut config: serde_json::Map<String, serde_json::Value> = fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        config.insert("macAddress".to_owned(), serde_json::Value::from(mac));
+        config.insert(key.to_owned(), serde_json::Value::from(value));
         let bytes = serde_json::to_vec(&config)
             .map_err(|e| Fail::fake(&format!("cannot encode a config: {e}")))?;
         write_atomic(&path, &bytes)
+    }
+
+    /// Whether `reference`'s OCI cache entry is a link to another entry.
+    pub fn oci_is_link(&self, reference: &str) -> bool {
+        self.oci_dir(reference)
+            .and_then(|dir| fs::symlink_metadata(dir).ok())
+            .is_some_and(|meta| meta.file_type().is_symlink())
+    }
+
+    /// The directory `reference`'s entry is, or links to; `None` for a broken or missing one.
+    pub fn oci_target(&self, reference: &str) -> Option<PathBuf> {
+        fs::canonicalize(self.oci_dir(reference)?).ok()
+    }
+
+    /// The name `tart list` prints for an OCI entry: `<repo>:<name>` for a link, the reference
+    /// as it is for a directory (`VMStorageOCI.list`).
+    pub fn oci_listed_name(&self, reference: &str) -> String {
+        match split_reference(reference) {
+            Some((repository, version)) if self.oci_is_link(reference) => {
+                format!("{repository}:{version}")
+            }
+            _ => reference.to_owned(),
+        }
     }
 
     /// Removes `reference`'s OCI cache directory, if it has one.
