@@ -15,6 +15,32 @@ pub enum Operation {
     RegistrationToken,
     /// The runner-registration exchange for the admin token (spec §1 step 4).
     AdminExchange,
+    /// A runner group by name (spec §2).
+    RunnerGroup,
+    /// A scale set by name or id (spec §2).
+    ScaleSetRead,
+    /// A scale set create (spec §2).
+    ScaleSetCreate,
+    /// A session create (spec §3.1).
+    SessionCreate,
+    /// A session refresh (spec §3.1).
+    SessionRefresh,
+    /// A session delete (spec §3.1).
+    SessionDelete,
+    /// The long poll (spec §4.1).
+    Poll,
+    /// A message ack (spec §4.4).
+    Ack,
+    /// An acquire (GHES, spec §6.1).
+    AcquireJobs,
+    /// The acquirable jobs (GHES, spec §6.1).
+    AcquirableJobs,
+    /// A JIT config (spec §6.3).
+    JitConfig,
+    /// A runner by id or by name (spec §2).
+    RunnerRead,
+    /// A runner removal (spec §7).
+    RunnerRemove,
 }
 
 impl Operation {
@@ -25,6 +51,19 @@ impl Operation {
             Self::InstallationToken => "installation_token",
             Self::RegistrationToken => "registration_token",
             Self::AdminExchange => "admin_exchange",
+            Self::RunnerGroup => "runner_group",
+            Self::ScaleSetRead => "scale_set_read",
+            Self::ScaleSetCreate => "scale_set_create",
+            Self::SessionCreate => "session_create",
+            Self::SessionRefresh => "session_refresh",
+            Self::SessionDelete => "session_delete",
+            Self::Poll => "poll",
+            Self::Ack => "ack",
+            Self::AcquireJobs => "acquire_jobs",
+            Self::AcquirableJobs => "acquirable_jobs",
+            Self::JitConfig => "jit_config",
+            Self::RunnerRead => "runner_read",
+            Self::RunnerRemove => "runner_remove",
         }
     }
 }

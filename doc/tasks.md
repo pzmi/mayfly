@@ -1130,6 +1130,12 @@ the stop (`quarantineDuringPendingRetirementBusyTest`). Accept adds: a component
 quarantined VM's idle runner is deregistered and the VM then stopped, and one in which a busy
 answer keeps it running.
 
+Note (GH-03): `RunnerRegistry` reads by id and lists by exact name only; the reaper's listing of
+every runner of the scale set (to report unrecognised ones) needs a list call this port does not
+have yet (`GET {svc}/_apis/distributedtask/pools/0/agents` without `agentName`, spec §2): add it
+here with its contract case. `RunnerInfo::online` is the runner's `status`, apart from `busy`
+(client-assumed shape); `FakeScaleSetApi::set_runner_online` scripts it.
+
 Note (GH-00R): a removal answering 204 means the runner is gone, not that mayfly removed it
 (GitHub's 2022 design record: 204 also for an absent runner), so the outcome is recorded as
 gone; busy is told by `typeName` (400 or 409). Ghost runners (spec §6.3): a runner whose own job
@@ -1736,6 +1742,23 @@ its statistics, list `acquirablejobs` and hand them to the domain as offers (spe
 cases add: session expired on refresh, 200 with empty body, 204 for an absent runner, a busy
 runner at 400, direct assignment with request id 0. The listener's duplicate check follows
 KER-06G: a receipt counts as a duplicate only for the cursor's id.
+Note (GH-03, as built): the ports are `mayfly_control::github` (`ScaleSetApi`, `RunnerRegistry`,
+their values and the failure classes, decided by `typeName` before status); no earlier card
+defined them. The adapter's `ScaleSetClient` holds each session's queue URL and token (never
+crossing the port; the session id does), refreshes on 401 once for racing callers, drops a session
+whose refresh answers expired, passes every queue URL through `credential_base_problem`, sends
+`api-version` in every service call's query and the query to the fake in process, and decodes
+messages through its own ACL (`wire.rs`: arrival order, unknown types as `MessageItem::Unknown`,
+bounded strings). A session's refreshes are serialised per scale set. A 404 reads as the scale set
+gone only on a session create or a scale-set read; on a session delete it is done, on a refresh the
+session is lost. A create answering an unusable session deletes it at once (best effort) and
+returns drift. The contract is `mayfly_testkit::contracts::scaleset` (SS-01..SS-13,
+RR-01..RR-04) over `FakeScaleSetApi`/`FakeRunnerRegistry`, the adapter over fake-github (both
+flows) and the adapter over the synthetic recordings in
+`crates/mayfly-adapter-github/tests/fixtures/github-scaleset/` (one per case, replayed strictly);
+`NoCursorApi`, `RetryAfterIgnoringApi` and `NameGuessingRegistry` fail SS-04, SS-06 and RR-02.
+Left to later cards: the GH-02H host suffix and HTTP/2 health, the run lookup and cancel (GH-10),
+the listener (GH-04). The live run is HW-02's (owner, pending).
 
 #### GH-04 Listener use case
 Cites: plan §7.2, KER-06, `doc/github-scaleset.md` §3, §5, §6, §9 (ADR 0048). Poll → record
@@ -1762,6 +1785,12 @@ Note (GH-00R): on github.com there is no acquire: the record step classifies eac
 session re-creates) is a metric and an operator alarm, never a reason to delete the scale set.
 Component tests add: an assigned untrusted job refused and acked, no runner started while it is
 assigned; a restarted numbering recorded and the session kept; a 404 on create re-ensures.
+Note (GH-03 review): `PolledMessage::statistics` is `None` when the envelope lacked any of the
+seven counts; record such a message without statistics (an older count is never replaced by
+none) and count it as protocol drift, as an unknown type is. A `ProtocolDrift` from
+`create_session` journals no session: the client deletes the session GitHub made, best effort
+(the error's detail says whether that went through). When that delete fails, the session may still
+block the next create: the 409 handling of A3 applies as for any conflict.
 
 #### GH-02H GitHub transport hardening
 Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:

@@ -4,6 +4,25 @@
 # matrices, intents, recordings) is regenerated only deliberately: its line is updated in the
 # same commit, whose body names the fixture and why. A new fixture adds its line (the checker
 # prints it). Format: `sha256sum` (`<64 lowercase hex>  <path>`).
+a59a33818932b63efeabf0c0bc0e923b9db6b55d937d90268221f87959c6c1d9  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ensure.json
+353e18dd306ee4d306e0548cc215cb6a558aaf32ba5d80e2841c5e188767efb9  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/open.json
+76c096db6f53f46db69f2183c61b7263ae7d4a4cc41403ea7335398944e5a4dd  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-01.json
+dfcf7e7d09c7fb7829dcfaab25662144b1ea5f5e53a571395443f9e883258043  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-02.json
+171b4327715cbcf9b854bcc15a6890fd6042b22a6cb3f33eba4231c18d074eca  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-03.json
+c54fb8a2ff0d45dfc67a9fb47986d4295875b34cca5ecd395c465f15f4db1da7  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-04.json
+81bcdb1865b8cc0a1e9df23ccc118018f21265b46d1520621ba8400443d2b68b  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-01.json
+f3daf2a54f4b942422cdd1b1907738913578a132926cb865ffadb61a013e5569  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-02.json
+e72349c2270a87f64f6828066a6eee3e37dbe1bcf1affab1ed5cf1b4d1d5de88  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-03.json
+62c591690515851ef0c972523ed7b80df7d79c03c2bddf428457a57a427af642  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-04.json
+245ab2600c3c3abf44dd6f73962a6a79abcd55477c9679ccf92c5d0e2232517e  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-05.json
+b667d6abd8410283f57e996fdec4040305fac868c5b10bcca2855aece77c4962  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-06.json
+26c1a06d7579f9250ec88e5d4b89500d9775755ecf83429367e2ed2f19e80abb  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-07.json
+5e9c83562754528fc92a26c2d574ef040b40a17ad7079b36b2a78d4dbf9e9a4e  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-08.json
+85f6ec55604009d2bb4ff8865312536874f661794687dc0161c70a6f1ddf5027  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-09.json
+f7cdff7beb894a009dbe205797a17df28ad93ea6992d44c7ddc9d9381595a829  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-10.json
+0e32ccee504888ce5f46048628558cd1688d096141c05d8a42e12db2de36a2f4  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-11.json
+94d877ed12fb5eb19d2b93d1b0265c1bf553b5325d0b1525104238617dcfa0ae  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-12.json
+afba20d07f1c6f5e65dce714cdd961dbb8f9da4e03f492ce51952bf23e9d5063  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-13.json
 3760a42b56c887bf4f2c2c7c10a2f48af2a97fa6ed835132c5c81e22f38dfda2  crates/mayfly-adapter-sqlite/tests/fixtures/schema-0001.sql
 2f8f92d8de1fba3eff3ce34ed4781e7aaf58e8ee46ae4540c3051fbba8a8833a  crates/mayfly-composition/tests/fixtures/config/invalid/capacity_policy_invalid.errors.txt
 64485f4dd449e6e6323251c9b4123e6b97e576d4a2c3904b839c0dbc6c7c09e4  crates/mayfly-composition/tests/fixtures/config/invalid/capacity_policy_invalid.toml

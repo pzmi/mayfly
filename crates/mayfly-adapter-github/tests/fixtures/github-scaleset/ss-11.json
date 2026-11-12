@@ -1,0 +1,105 @@
+{
+  "fixture": "SS-11",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a73.1: a scale set deleted as dormant (404, client-assumed, HW-02 item 9); its session's delete is done",
+  "include": [
+    "open"
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 404,
+        "json": {
+          "message": "The runner scale set was not found."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/sessions",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "ownerName": "contract-host/contract-pool"
+        }
+      },
+      "response": {
+        "status": 404,
+        "json": {
+          "message": "The runner scale set was not found."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "DELETE",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/sessions/00000000-0000-4000-8000-000000000001",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 404,
+        "json": {
+          "message": "The runner scale set was not found."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnergroups/",
+        "query": {
+          "groupName": "Default",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 1,
+          "value": [
+            {
+              "id": 1,
+              "name": "Default",
+              "isDefault": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets",
+        "query": {
+          "runnerGroupId": "1",
+          "name": "mayfly-contract",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 0,
+          "value": []
+        }
+      }
+    }
+  ]
+}

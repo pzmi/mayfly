@@ -1,0 +1,197 @@
+{
+  "fixture": "SS-09",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a76.3: JIT; 409 AgentExistsException; 429 ConfigureTooManyRunnersException (\u00a78)",
+  "include": [
+    "ensure"
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-a",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "runner": {
+            "id": 21,
+            "name": "mf-contract-a",
+            "runnerScaleSetId": 3,
+            "status": "offline",
+            "busy": false
+          },
+          "encodedJITConfig": "<token-9>"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-a",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 409,
+        "json": {
+          "typeName": "AgentExistsException",
+          "message": "A runner with the name mf-contract-a already exists."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-b",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "1"
+        },
+        "json": {
+          "typeName": "ConfigureTooManyRunnersException",
+          "message": "Too many runners are being configured."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-b",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "1"
+        },
+        "json": {
+          "typeName": "ConfigureTooManyRunnersException",
+          "message": "Too many runners are being configured."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-b",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "1"
+        },
+        "json": {
+          "typeName": "ConfigureTooManyRunnersException",
+          "message": "Too many runners are being configured."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-b",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "1"
+        },
+        "json": {
+          "typeName": "ConfigureTooManyRunnersException",
+          "message": "Too many runners are being configured."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-b",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "1"
+        },
+        "json": {
+          "typeName": "ConfigureTooManyRunnersException",
+          "message": "Too many runners are being configured."
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/distributedtask/pools/0/agents",
+        "query": {
+          "agentName": "mf-contract-b",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 0,
+          "value": []
+        }
+      }
+    }
+  ]
+}

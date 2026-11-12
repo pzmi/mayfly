@@ -6,7 +6,7 @@ use std::time::Duration;
 use mayfly_control::store::{Clock, Rng};
 use mayfly_domain::{Deadline, Millis};
 
-use crate::error::{ErrorKind, GitHubError, redacted_endpoint};
+use crate::error::{ErrorClass, ErrorKind, GitHubError, redacted_endpoint};
 use crate::http::{HttpRequest, HttpResponse, Transport};
 use crate::metrics::{Operation, RequestMetrics, StatusClass};
 use crate::retry::{
@@ -65,6 +65,11 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
         &self.metrics
     }
 
+    /// The policy calls run under.
+    pub const fn policy(&self) -> CallPolicy {
+        self.policy
+    }
+
     /// The clock calls read.
     pub const fn clock(&self) -> &C {
         &self.clock
@@ -103,6 +108,24 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
         deadline: Deadline,
         build: impl Fn() -> HttpRequest,
     ) -> Result<HttpResponse, GitHubError> {
+        self.call_bounded(op, phase, deadline, self.policy.attempt_timeout, build)
+            .await
+    }
+
+    /// As [`Self::call_until`], with each attempt bounded by `attempt_timeout` instead of the
+    /// policy's: the long poll holds about 50 s and is bounded at two minutes an attempt (spec
+    /// §4.1).
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub async fn call_bounded(
+        &self,
+        op: Operation,
+        phase: Phase,
+        deadline: Deadline,
+        attempt_timeout: Millis,
+        build: impl Fn() -> HttpRequest,
+    ) -> Result<HttpResponse, GitHubError> {
         let mut attempts = 0;
         loop {
             let request = build();
@@ -111,7 +134,7 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
             if deadline.is_expired(now) {
                 return Err(fail(op, ErrorKind::DeadlineExceeded { endpoint, attempts }));
             }
-            let budget = deadline.remaining(now).min(self.policy.attempt_timeout);
+            let budget = deadline.remaining(now).min(attempt_timeout);
             attempts += 1;
             let sent = tokio::time::timeout(
                 Duration::from_millis(budget.get()),
@@ -140,6 +163,7 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
                         endpoint,
                         status: response.status,
                         rate_limit: verdict.rate_limit,
+                        class: ErrorClass::of_body(&response.body),
                         attempts,
                     };
                     if !verdict.retryable {

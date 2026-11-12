@@ -1,0 +1,142 @@
+{
+  "fixture": "SS-04",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a74.1, \u00a74.3, \u00a74.4: direct assignment (runnerRequestId 0), redelivery until delete, lastMessageId",
+  "include": [
+    "open"
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {},
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "1",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "messageId": 100000001,
+          "messageType": "RunnerScaleSetJobMessages",
+          "body": "[{\"messageType\": \"JobAssigned\", \"runnerRequestId\": 0, \"repositoryName\": \"app\", \"ownerName\": \"acme\", \"jobId\": \"41\", \"jobWorkflowRef\": \"acme/app/.github/workflows/ci.yml@refs/heads/main\", \"jobDisplayName\": \"build\", \"workflowRunId\": 7, \"eventName\": \"push\", \"requestLabels\": [\"mayfly-contract\"], \"queueTime\": \"2026-11-10T12:00:00Z\", \"scaleSetAssignTime\": \"2026-11-10T12:00:01Z\", \"runnerAssignTime\": \"0001-01-01T00:00:00Z\", \"finishTime\": \"0001-01-01T00:00:00Z\"}]",
+          "statistics": {
+            "totalAvailableJobs": 0,
+            "totalAcquiredJobs": 0,
+            "totalAssignedJobs": 1,
+            "totalRunningJobs": 0,
+            "totalRegisteredRunners": 0,
+            "totalBusyRunners": 0,
+            "totalIdleRunners": 0
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {},
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "1",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "messageId": 100000001,
+          "messageType": "RunnerScaleSetJobMessages",
+          "body": "[{\"messageType\": \"JobAssigned\", \"runnerRequestId\": 0, \"repositoryName\": \"app\", \"ownerName\": \"acme\", \"jobId\": \"41\", \"jobWorkflowRef\": \"acme/app/.github/workflows/ci.yml@refs/heads/main\", \"jobDisplayName\": \"build\", \"workflowRunId\": 7, \"eventName\": \"push\", \"requestLabels\": [\"mayfly-contract\"], \"queueTime\": \"2026-11-10T12:00:00Z\", \"scaleSetAssignTime\": \"2026-11-10T12:00:01Z\", \"runnerAssignTime\": \"0001-01-01T00:00:00Z\", \"finishTime\": \"0001-01-01T00:00:00Z\"}]",
+          "statistics": {
+            "totalAvailableJobs": 0,
+            "totalAcquiredJobs": 0,
+            "totalAssignedJobs": 1,
+            "totalRunningJobs": 0,
+            "totalRegisteredRunners": 0,
+            "totalBusyRunners": 0,
+            "totalIdleRunners": 0
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {
+          "lastMessageId": "100000001"
+        },
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "2",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "messageId": 100000002,
+          "messageType": "RunnerScaleSetJobMessages",
+          "body": "[{\"messageType\": \"JobAssigned\", \"runnerRequestId\": 0, \"repositoryName\": \"app\", \"ownerName\": \"acme\", \"jobId\": \"42\", \"jobWorkflowRef\": \"acme/app/.github/workflows/ci.yml@refs/heads/main\", \"jobDisplayName\": \"build\", \"workflowRunId\": 7, \"eventName\": \"push\", \"requestLabels\": [\"mayfly-contract\"], \"queueTime\": \"2026-11-10T12:00:00Z\", \"scaleSetAssignTime\": \"2026-11-10T12:00:01Z\", \"runnerAssignTime\": \"0001-01-01T00:00:00Z\", \"finishTime\": \"0001-01-01T00:00:00Z\"}]",
+          "statistics": {
+            "totalAvailableJobs": 0,
+            "totalAcquiredJobs": 0,
+            "totalAssignedJobs": 2,
+            "totalRunningJobs": 0,
+            "totalRegisteredRunners": 0,
+            "totalBusyRunners": 0,
+            "totalIdleRunners": 0
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "DELETE",
+        "url": "https://broker.example/q/3/messages/100000001",
+        "query": {},
+        "auth": "token-1"
+      },
+      "response": {
+        "status": 204,
+        "text": ""
+      }
+    },
+    {
+      "request": {
+        "method": "DELETE",
+        "url": "https://broker.example/q/3/messages/100000002",
+        "query": {},
+        "auth": "token-1"
+      },
+      "response": {
+        "status": 204,
+        "text": ""
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {
+          "lastMessageId": "100000002"
+        },
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "2",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 202,
+        "text": ""
+      }
+    }
+  ]
+}

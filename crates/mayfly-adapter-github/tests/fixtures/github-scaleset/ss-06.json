@@ -1,0 +1,48 @@
+{
+  "fixture": "SS-06",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a78: a 429 with Retry-After is waited out",
+  "include": [
+    "open"
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {},
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "0",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "retry-after": "7"
+        },
+        "json": {
+          "message": "slow down"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://broker.example/q/3/messages",
+        "query": {},
+        "auth": "token-1",
+        "headers": {
+          "x-scalesetmaxcapacity": "0",
+          "accept": "application/json; api-version=6.0-preview"
+        }
+      },
+      "response": {
+        "status": 202,
+        "text": ""
+      }
+    }
+  ]
+}

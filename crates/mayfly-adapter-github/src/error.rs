@@ -40,6 +40,8 @@ pub enum ErrorKind {
         status: u16,
         /// Set when it was a rate limit (spec §8).
         rate_limit: Option<RateLimit>,
+        /// The error class its body's `typeName` names, if any (spec §2).
+        class: Option<ErrorClass>,
         /// Attempts made.
         attempts: u32,
     },
@@ -85,9 +87,13 @@ impl fmt::Display for GitHubError {
                 endpoint,
                 status,
                 rate_limit,
+                class,
                 attempts,
             } => {
                 write!(f, "{endpoint} answered {status}")?;
+                if let Some(class) = class {
+                    write!(f, " ({})", class.as_str())?;
+                }
                 if rate_limit.is_some() {
                     f.write_str(" (rate limited)")?;
                 }
@@ -118,6 +124,77 @@ impl fmt::Display for GitHubError {
 }
 
 impl std::error::Error for GitHubError {}
+
+/// The error classes mayfly tells apart, read from an error body's `typeName`, **never from the
+/// status** (spec §2: the service has answered one class with different statuses). The match is
+/// "contains", as the spec's table states it; any other `typeName` is [`ErrorClass::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// `RunnerScaleSetSessionConflictException`: a session lives (spec §3.1).
+    SessionConflict,
+    /// `RunnerScaleSetSessionExpiredException`: the session is gone (spec §3.1).
+    SessionExpired,
+    /// `AgentNotFoundException`: the runner is gone (spec §7).
+    AgentNotFound,
+    /// `AgentExistsException`: the JIT name is taken (spec §6.3).
+    AgentExists,
+    /// `JobStillRunningException`: the runner is busy (spec §7).
+    JobStillRunning,
+    /// `ConfigureTooManyRunnersException`: JIT minting is throttled (spec §8).
+    TooManyRunners,
+    /// A `typeName` of no class above.
+    Other,
+}
+
+impl ErrorClass {
+    /// The class of an error body, `None` when it carries no `typeName` (a plain-text body, a
+    /// message only). A UTF-8 byte-order mark is trimmed first (spec §2).
+    ///
+    /// Pinned by: `error::tests::should_classify_by_type_name_when_the_status_differs`.
+    #[must_use]
+    pub fn of_body(body: &[u8]) -> Option<Self> {
+        let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let name = value.get("typeName")?.as_str()?;
+        Some(Self::of_type_name(name))
+    }
+
+    /// The class `type_name` names.
+    #[must_use]
+    pub fn of_type_name(type_name: &str) -> Self {
+        [
+            (
+                "RunnerScaleSetSessionConflictException",
+                Self::SessionConflict,
+            ),
+            (
+                "RunnerScaleSetSessionExpiredException",
+                Self::SessionExpired,
+            ),
+            ("AgentNotFoundException", Self::AgentNotFound),
+            ("AgentExistsException", Self::AgentExists),
+            ("JobStillRunningException", Self::JobStillRunning),
+            ("ConfigureTooManyRunnersException", Self::TooManyRunners),
+        ]
+        .into_iter()
+        .find(|(name, _)| type_name.contains(name))
+        .map_or(Self::Other, |(_, class)| class)
+    }
+
+    /// A fixed name for error text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionConflict => "session conflict",
+            Self::SessionExpired => "session expired",
+            Self::AgentNotFound => "runner not found",
+            Self::AgentExists => "runner name taken",
+            Self::JobStillRunning => "runner busy",
+            Self::TooManyRunners => "too many runners",
+            Self::Other => "other class",
+        }
+    }
+}
 
 /// `url` as error text: scheme, host, port and path only, never the query (a token or id may
 /// sit there), the fragment or user info. Pinned by
@@ -174,12 +251,21 @@ mod tests {
                     kind: RateLimitKind::Unspecified,
                     reset_at: None,
                 }),
+                class: None,
                 attempts: 5,
             },
             ErrorKind::Status {
                 endpoint: endpoint.clone(),
                 status: 404,
                 rate_limit: None,
+                class: None,
+                attempts: 1,
+            },
+            ErrorKind::Status {
+                endpoint: endpoint.clone(),
+                status: 409,
+                rate_limit: None,
+                class: Some(ErrorClass::AgentExists),
                 attempts: 1,
             },
             ErrorKind::Transport {
@@ -220,10 +306,41 @@ mod tests {
                 "github admin_exchange failed: the admin token carries no exp claim",
                 "github admin_exchange failed: https://api.github.com/actions/runner-registration answered 429 (rate limited) after 5 attempt(s)",
                 "github admin_exchange failed: https://api.github.com/actions/runner-registration answered 404 after 1 attempt(s)",
+                "github admin_exchange failed: https://api.github.com/actions/runner-registration answered 409 (runner name taken) after 1 attempt(s)",
                 "github admin_exchange failed: https://api.github.com/actions/runner-registration: no connection could be made after 2 attempt(s)",
                 "github admin_exchange failed: https://api.github.com/actions/runner-registration: deadline exceeded after 3 attempt(s)",
                 "github admin_exchange failed: https://api.github.com/actions/runner-registration: the answer lacks a usable `token`",
                 "github admin_exchange failed: the admin token expires in 30000 ms, within the 60 s refresh margin",
+            ]
+        );
+    }
+
+    #[test]
+    fn should_classify_by_type_name_when_the_status_differs() {
+        // given: the busy class at 400 and 409, a full name, a BOM, a message only, plain text
+        let bodies: [&[u8]; 6] = [
+            br#"{"typeName":"JobStillRunningException","message":"busy"}"#,
+            br#"{"typeName":"GitHub.Actions.Runtime.WebApi.RunnerScaleSetSessionConflictException","message":"x"}"#,
+            b"\xEF\xBB\xBF{\"typeName\":\"RunnerScaleSetSessionExpiredException\"}",
+            br#"{"typeName":"SomethingElseException"}"#,
+            br#"{"message":"fault injected"}"#,
+            b"capacity",
+        ];
+
+        // when
+        let classes: Vec<Option<ErrorClass>> =
+            bodies.iter().map(|b| ErrorClass::of_body(b)).collect();
+
+        // then
+        assert_eq!(
+            classes,
+            [
+                Some(ErrorClass::JobStillRunning),
+                Some(ErrorClass::SessionConflict),
+                Some(ErrorClass::SessionExpired),
+                Some(ErrorClass::Other),
+                None,
+                None,
             ]
         );
     }

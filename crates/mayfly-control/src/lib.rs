@@ -26,8 +26,11 @@
 //!   data plane and observation, acked only after they commit.
 //! - [`recovery`]: the startup use case (P1) and the application of a recovery plan (P20).
 //! - [`secrets`]: the `SecretProvider` port, its refusals and the `doctor` check (ADR 0033).
+//! - [`github`]: the `ScaleSetApi` and `RunnerRegistry` ports (plan §7.2, §7.3), their value
+//!   types and failure classes (GH-03).
 
 pub mod delivery;
+pub mod github;
 mod ids;
 pub mod inbox;
 pub mod journal;

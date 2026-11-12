@@ -243,6 +243,11 @@ states are plan §7.2's `Unconfigured → Ensured → Opening → Active ⇄ Bac
   exists"; mayfly deletes the session id it journaled (if any) and retries with backoff starting
   near 30 s, and never steals a session it has no record of; five 409s in a row are escalated to
   the operator (`SessionConflictEscalated`), and the retries go on.
+  **An unusable create answer** (no statistics or token, or a queue URL a token could leak
+  through, section 1) names a session mayfly cannot use: once its `sessionId` decodes, the client
+  deletes that session at once, best effort, and reports protocol drift; nothing is journaled
+  (GH-03). This keeps A3: the answer is mayfly's record of that session. If the delete fails, the
+  session can still block the next create, and the 409 rule above applies.
 - **Refresh.** On 401 from poll, ack or acquire, the session is refreshed with a PATCH and the
   call retried once; a refresh is skipped when another caller already replaced the expired
   session, so concurrent expiries refresh once [scaleset: session_client.go, GetMessage,
@@ -252,7 +257,7 @@ states are plan §7.2's `Unconfigured → Ensured → Opening → Active ⇄ Bac
   never refreshing again (the model's `sessionEnds` then `sessionLoss`; GH-03). How long a
   session lives is [open: HW-02, item 5]. Whether a refresh returns a new `messageQueueUrl` is
   [open: HW-02, item 5]; mayfly uses whatever the refresh returns, and the new URL passes the
-  same host rule (section 1).
+  same host rule (section 1); a refresh answering a URL that fails it loses the session (GH-03).
 - **Delete.** On orderly shutdown, drain completion or re-open: DELETE answers 204
   [scaleset: session_client.go, deleteMessageSession]; a delete of an expired session answers
   the expired exception [server-observed: ARC #4285], which mayfly reads as "already gone". Pause,

@@ -1,0 +1,66 @@
+{
+  "fixture": "RR-03",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a77: 204 also for an absent runner (maintainer-stated)",
+  "include": [
+    "ensure"
+  ],
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mf-contract-r3",
+          "workFolder": "_work"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "runner": {
+            "id": 21,
+            "name": "mf-contract-r3",
+            "runnerScaleSetId": 3,
+            "status": "offline",
+            "busy": false
+          },
+          "encodedJITConfig": "<token-9>"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "DELETE",
+        "url": "https://pipelines.example/svc/_apis/distributedtask/pools/0/agents/21",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 204,
+        "text": ""
+      }
+    },
+    {
+      "request": {
+        "method": "DELETE",
+        "url": "https://pipelines.example/svc/_apis/distributedtask/pools/0/agents/21",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 204,
+        "text": ""
+      }
+    }
+  ]
+}

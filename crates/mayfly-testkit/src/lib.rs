@@ -14,7 +14,10 @@
 //! - [`clock`]: `FakeClock`, `SeededRng` and `RecordingNotifier`, fakes for `AggregateStore`'s
 //!   ports (ver §3.2, §3.3).
 //! - [`secrets`]: `MemorySecretProvider`, the in-memory `SecretProvider` (ver §7.1).
-//! - [`contracts`]: the port contract suites: the journal's, the delivery ledger's and the secret providers' (ver §5).
+//! - [`github`]: `FakeScaleSetApi` and `FakeRunnerRegistry`, the GitHub ports in memory, and
+//!   their deliberately broken variants (ver §5, §7.1).
+//! - [`contracts`]: the port contract suites: the journal's, the delivery ledger's, the secret
+//!   providers' and the GitHub ports' (ver §5).
 //! - [`attempts`]: attempts in a real `AggregateStore` and fixed directive details, for the
 //!   saga's and the directive relay's component tests.
 //! - [`fleet`]: hosts, pools and scale sets in a real `AggregateStore`, a world that plays the
@@ -37,6 +40,7 @@ pub mod contracts;
 pub mod delivery;
 pub mod determinism;
 pub mod fleet;
+pub mod github;
 pub mod golden;
 pub mod journal;
 mod projections;

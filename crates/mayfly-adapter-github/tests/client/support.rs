@@ -53,7 +53,10 @@ impl Transport for InProcess {
             .0
             .handle(FakeRequest {
                 method: request.method.as_str().to_owned(),
-                path: request.url.path().to_owned(),
+                path: match request.url.query() {
+                    Some(query) => format!("{}?{query}", request.url.path()),
+                    None => request.url.path().to_owned(),
+                },
                 headers,
                 body: request.body.unwrap_or_default(),
             })

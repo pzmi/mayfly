@@ -162,6 +162,12 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> AppAuth<T, C, R, P> {
         })
     }
 
+    /// The client every call of this installation goes through (the Scale Set client's too).
+    #[must_use]
+    pub const fn client(&self) -> &ApiClient<T, C, R> {
+        &self.client
+    }
+
     /// The request counters (`mayfly_github_requests_total`).
     #[must_use]
     pub fn metrics(&self) -> &Arc<RequestMetrics> {

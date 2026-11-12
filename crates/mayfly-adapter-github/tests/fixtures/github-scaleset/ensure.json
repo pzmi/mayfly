@@ -1,0 +1,128 @@
+{
+  "fixture": "ENSURE",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a72 (runner group, scale set by name, create), \u00a73.1 Ensure",
+  "include": [],
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnergroups/",
+        "query": {
+          "groupName": "Default",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 1,
+          "value": [
+            {
+              "id": 1,
+              "name": "Default",
+              "isDefault": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets",
+        "query": {
+          "runnerGroupId": "1",
+          "name": "mayfly-contract",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 0,
+          "value": []
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnergroups/",
+        "query": {
+          "groupName": "Default",
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin"
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "count": 1,
+          "value": [
+            {
+              "id": 1,
+              "name": "Default",
+              "isDefault": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://pipelines.example/svc/_apis/runtime/runnerscalesets",
+        "query": {
+          "api-version": "6.0-preview"
+        },
+        "auth": "admin",
+        "json": {
+          "name": "mayfly-contract",
+          "runnerGroupId": 1,
+          "labels": [
+            {
+              "type": "System",
+              "name": "mayfly-contract"
+            }
+          ],
+          "RunnerSetting": {
+            "disableUpdate": true
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "id": 3,
+          "name": "mayfly-contract",
+          "runnerGroupId": 1,
+          "runnerGroupName": "Default",
+          "labels": [
+            {
+              "type": "System",
+              "name": "mayfly-contract"
+            }
+          ],
+          "RunnerSetting": {
+            "disableUpdate": true
+          },
+          "createdOn": "0001-01-01T00:00:00Z",
+          "runnerJitConfigUrl": "https://pipelines.example/svc/_apis/runtime/runnerscalesets/3/generatejitconfig",
+          "statistics": {
+            "totalAvailableJobs": 0,
+            "totalAcquiredJobs": 0,
+            "totalAssignedJobs": 0,
+            "totalRunningJobs": 0,
+            "totalRegisteredRunners": 0,
+            "totalBusyRunners": 0,
+            "totalIdleRunners": 0
+          }
+        }
+      }
+    }
+  ]
+}
