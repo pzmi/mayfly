@@ -54,7 +54,7 @@
 //! (`attempt_not_adopted`), its lease keeps its slot, so nothing is admitted in its place,
 //! recovery completes and admission reopens with it listed in [`Recovered::held`], and
 //! [`Startup::resume_held`] classifies it again on every later inventory, adopting it and
-//! resuming its cleanup once GitHub shows the runner neither online nor busy (pinned by
+//! resuming its cleanup once GitHub reports the runner offline or gone (pinned by
 //! `tests/store/recovery.rs::should_suspend_the_cleanup_when_a_deleting_vm_runs_a_busy_runner` and
 //! `should_resume_a_held_cleanup_when_github_reports_the_runner_offline`; the divergence is
 //! recorded in `doc/formal-models.md`).
@@ -290,8 +290,10 @@ pub struct Startup<'s, J, C, R, N> {
     store: &'s AggregateStore<J, C, R, N>,
     sessions: HostSessions,
     config: StartupConfig,
-    /// What the run's passes did so far: a pass that waits keeps its adoptions and counts for
-    /// the one that completes.
+    /// What the run's passes did so far: a pass that waits, or fails midway, keeps its adoptions
+    /// and counts for the one that completes (pinned by
+    /// `tests/store/recovery.rs::should_count_every_pass_when_recovery_completes_after_waiting`
+    /// and `should_keep_the_counts_of_a_pass_when_it_fails_midway`).
     progress: Mutex<Recovered>,
 }
 
@@ -493,8 +495,12 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
         }
         let epoch = run.epoch;
         let mut recovered = self.lock().clone();
-        self.pass(inventory, &decisions, epoch, saga, &mut recovered)
-            .await?;
+        let passed = self
+            .pass(inventory, &decisions, epoch, saga, &mut recovered)
+            .await;
+        // what the pass did before it failed counts too: its adoptions are not repeated
+        *self.lock() = recovered.clone();
+        passed?;
         for (vm, class) in &names {
             if matches!(unrecorded_decision(trust, *class, vm), Decision::Report)
                 && !recovered.reported.contains(&vm.name)
@@ -539,11 +545,14 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
     }
 
     /// A later inventory of the run, for the attempts recovery left held: each attempt of the
-    /// host not adopted under the run is classified again, and one that is no longer held (its
-    /// runner GitHub shows neither online nor busy) is adopted and its cleanup resumes, as
-    /// recovery would have done. Returns the attempts still held; nothing in safe mode or on an
-    /// incomplete inventory. RT-02 calls it on every inventory while any is held. Pinned by
-    /// `tests/store/recovery.rs::should_resume_a_held_cleanup_when_github_reports_the_runner_offline`.
+    /// host not adopted under the run is classified again, and one that is no longer held
+    /// (GitHub reports its runner offline or gone) is adopted and its cleanup resumes, as
+    /// recovery would have done. A runner GitHub cannot be read for (`unreachable`, or no view
+    /// given) is read as busy: a failed read never releases a held delete. Returns the attempts
+    /// still held; nothing in safe mode or on an incomplete inventory. RT-02 calls it on every
+    /// inventory while any is held. Pinned by
+    /// `tests/store/recovery.rs::should_resume_a_held_cleanup_when_github_reports_the_runner_offline`
+    /// and `should_keep_the_cleanup_held_when_github_cannot_be_read`.
     ///
     /// # Errors
     /// [`StartupError`]: a store fault, or [`StartupError::NotAnInventory`].
@@ -579,7 +588,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
                         subject: Subject::Attempt(record_of(&state)),
                     },
                     &provider_view(&state, vms),
-                    github.get(&id).copied().unwrap_or(GithubView::Unreachable),
+                    match github.get(&id).copied() {
+                        None | Some(GithubView::Unreachable) => GithubView::Busy,
+                        Some(view) => view,
+                    },
                 );
                 (id, state, decision)
             })

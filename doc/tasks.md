@@ -1042,7 +1042,8 @@ an adoption (the relay would send the pending delete again; `Quarantine` is refu
 directive is in flight), so the attempt is left unadopted: the sink holds its delete, its lease
 keeps its slot, recovery completes and reopens admission with it in `Recovered::held`, and
 `Startup::resume_held` classifies it again on every later inventory (RT-02 calls it) until GitHub
-shows the runner neither online nor busy. The divergence is recorded in `doc/formal-models.md`;
+reports the runner offline or gone (an unreadable GitHub keeps it held, CP-04H). The divergence
+is recorded in `doc/formal-models.md`;
 CP-04C closes it model first. A pass that waits keeps its counts for the one that completes. A
 plan's quarantine adopts first, after checking purely that the quarantine would be accepted on
 the adopted state. A shared
@@ -1078,7 +1079,8 @@ adoption reads a directive in flight as `Unknown` (as `recovery.qnt` already ass
 relay's sink respect; then the aggregate, its matrix, goldens and determinism cases, and start-up
 adopting a held attempt with its cleanup held, as the model does.
 Accept: the model's scenarios pass with a negative control (a hold the sink ignores sends the
-delete); a held attempt is adopted and no delete is sent until the hold is released; the
+delete); a held attempt is adopted and no delete is sent until the hold is released, which
+happens only once GitHub reports the runner offline or gone (an unreadable GitHub keeps it); the
 divergence note in `doc/formal-models.md` is removed.
 
 #### CP-05 Registration manager and reaper

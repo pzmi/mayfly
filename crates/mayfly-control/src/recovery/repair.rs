@@ -88,6 +88,8 @@ pub enum Applied {
     Failed {
         /// The action.
         index: u32,
+        /// The attempt's refusal, by its code; `None` for a command accepted with no event.
+        refused: Option<&'static str>,
     },
     /// The action at `index` has no attempt command (`report`, `ignore`).
     NoCommand {
@@ -217,6 +219,12 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Repair<'s, J, C, R, N> 
                 }
                 other => other?,
             };
+            let refused = match &outcome {
+                Outcome::Refused { rejection, .. } => {
+                    Some(mayfly_control_domain::Rejection::code(rejection))
+                }
+                Outcome::Accepted { .. } => None,
+            };
             let (outcome, write) = match outcome {
                 Outcome::Accepted { appended, .. } => {
                     let own = attempt_stream(action.attempt_id);
@@ -250,7 +258,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Repair<'s, J, C, R, N> 
             )
             .await?;
             if outcome == ActionOutcome::Failed {
-                return Ok(Applied::Failed { index });
+                return Ok(Applied::Failed { index, refused });
             }
         }
     }
@@ -421,7 +429,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Repair<'s, J, C, R, N> 
 
     /// Whether the quarantine would be refused once the attempt is adopted (a directive in
     /// flight, `directive_pending`), decided purely on the state the adoption would leave, so a
-    /// refusal leaves the attempt as it was rather than adopted under a failed plan. Not asked
+    /// refusal leaves the attempt as it was rather than adopted under a failed plan. An adoption
+    /// that would itself be refused (a terminal attempt) is that refusal; only `already_current`
+    /// (adopted under the run before) goes on to the quarantine (pinned by
+    /// `tests/store/repair.rs::should_fail_with_the_adoptions_refusal_when_the_attempt_cannot_be_adopted`). Not asked
     /// once the quarantine has a receipt: a resumed application is answered by it. Pinned by
     /// `tests/store/repair.rs::should_leave_the_attempt_unadopted_when_its_quarantine_would_be_refused`.
     async fn refused_after_adoption(
@@ -450,7 +461,8 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Repair<'s, J, C, R, N> 
         let adopt_id = self.id(plan_id, &[b"adopt", &index.to_be_bytes()]);
         let adopted = match Attempt::decide(&state, self.command(adopt_id, adopt.clone())) {
             Ok(events) => events.iter().fold(state.clone(), Attempt::evolve),
-            Err(_) => state,
+            Err(AttemptRejection::AlreadyCurrent) => state,
+            Err(rejection) => return Ok(Some(rejection)),
         };
         Ok(Attempt::decide(&adopted, self.command(act_id, quarantine.clone())).err())
     }

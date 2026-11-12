@@ -786,8 +786,10 @@ adoption (adopting lets the relay's sink send the pending delete again, and `Qua
 refused while a directive is in flight), so start-up leaves a held attempt **unadopted**: the
 sink holds its delete (`attempt_not_adopted`), its lease keeps its slot, recovery completes and
 reopens admission with the attempt reported held, and every later inventory classifies it again
-(`Startup::resume_held`), adopting it and resuming its cleanup once GitHub shows its runner
-neither online nor busy (`crates/mayfly-control/tests/store/recovery.rs::should_resume_a_held_cleanup_when_github_reports_the_runner_offline`).
+(`Startup::resume_held`), adopting it and resuming its cleanup once GitHub reports the runner
+offline or gone; a runner GitHub cannot be read for stays held
+(`crates/mayfly-control/tests/store/recovery.rs::should_resume_a_held_cleanup_when_github_reports_the_runner_offline`,
+`should_keep_the_cleanup_held_when_github_cannot_be_read`).
 CP-04C closes the gap model first.
 
 ### registration

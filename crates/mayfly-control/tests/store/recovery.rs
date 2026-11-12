@@ -1174,3 +1174,82 @@ fn should_say_what_stopped_start_up_when_each_error_is_displayed() {
     assert!(shown[4].contains("host0"));
     assert!(shown[5].contains("no_run"));
 }
+
+#[test]
+fn should_keep_the_cleanup_held_when_github_cannot_be_read() {
+    // given a cleanup held at recovery
+    let kit = kit();
+    kit.previous_run();
+    kit.drive(1, path::deleting(1));
+    let _ = kit.open(1);
+    let startup = kit.startup(false);
+    let saga = AttemptSaga::new(&kit.store, kit.sessions.clone(), SagaConfig::default());
+    let listing = |id| inventory(id, RUN, vec![listed(1, instance(), true)]);
+    let busy = BTreeMap::from([(attempt(1), GithubView::Busy)]);
+    let _ =
+        block_on(startup.recover(&listing(0x2), &busy, &saga)).unwrap_or_else(|e| panic!("{e}"));
+
+    // when GitHub cannot be read, or gives no view of the runner
+    let unreachable = BTreeMap::from([(attempt(1), GithubView::Unreachable)]);
+    let unread = block_on(startup.resume_held(&listing(0x3), &unreachable, &saga))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let missing = block_on(startup.resume_held(&listing(0x4), &BTreeMap::new(), &saga))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    // then a failed read never releases the held delete
+    assert_eq!(unread, vec![attempt(1)]);
+    assert_eq!(missing, vec![attempt(1)]);
+    assert_eq!(kit.state(1).epoch, BEFORE, "still unadopted");
+    assert!(!deletes_again(&kit));
+}
+
+#[test]
+fn should_keep_the_counts_of_a_pass_when_it_fails_midway() {
+    // given a pass that adopts both attempts and then fails on attempt 1's retirement
+    let kit = kit();
+    kit.previous_run();
+    kit.drive(1, path::listening(1));
+    kit.drive(2, path::prepared(2));
+    let _ = kit.open(1);
+    let journal = kit.journal.clone();
+    let memory = kit.memory.clone();
+    let first = crate::recovery_kit::stream(&format!("attempt-{}", attempt(1)));
+    let again = first.clone();
+    kit.journal
+        .before_next_append(crate::scripted::BeforeAppend::appending(first, move || {
+            journal.before_next_append(crate::scripted::BeforeAppend::appending(
+                again,
+                move || {
+                    assert!(memory.inject(
+                        mayfly_testkit::contracts::journal::InjectedFault::StorageBeforeCommit
+                    ));
+                },
+            ));
+        }));
+    let startup = kit.startup(false);
+    let saga = AttemptSaga::new(&kit.store, kit.sessions.clone(), SagaConfig::default());
+    let views = BTreeMap::from([
+        (attempt(1), GithubView::Absent),
+        (attempt(2), GithubView::NotRegistered),
+    ]);
+    let listing = |id| {
+        inventory(
+            id,
+            RUN,
+            vec![listed(1, instance(), true), listed(2, instance(), true)],
+        )
+    };
+    let failed = block_on(startup.recover(&listing(0x2), &views, &saga));
+    assert!(failed.is_err(), "{failed:?}");
+
+    // when the next pass completes
+    let second =
+        block_on(startup.recover(&listing(0x3), &views, &saga)).unwrap_or_else(|e| panic!("{e}"));
+
+    // then the first pass's adoptions count
+    let Recovery::Completed(recovered) = second else {
+        panic!("not completed: {second:?}");
+    };
+    assert_eq!(recovered.counts.adopted, 2);
+    assert_eq!(recovered.counts.retired, 1);
+}

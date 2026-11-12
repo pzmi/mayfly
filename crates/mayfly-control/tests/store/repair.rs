@@ -450,7 +450,13 @@ fn should_record_the_failure_when_the_attempt_refuses_on_an_unmoved_world() {
     let applied = apply(&kit, opened.epoch);
 
     // then
-    assert_eq!(applied, Applied::Failed { index: 0 });
+    assert_eq!(
+        applied,
+        Applied::Failed {
+            index: 0,
+            refused: Some("already_current"),
+        }
+    );
     assert_eq!(plan_state(&kit).phase, PlanPhase::Failed);
 }
 
@@ -502,7 +508,13 @@ fn should_leave_the_attempt_unadopted_when_its_quarantine_would_be_refused() {
     let applied = apply(&kit, epoch);
 
     // then the plan failed there and the attempt was not adopted under it
-    assert_eq!(applied, Applied::Failed { index: 1 });
+    assert_eq!(
+        applied,
+        Applied::Failed {
+            index: 1,
+            refused: Some("directive_pending"),
+        }
+    );
     assert!(adopted(&kit, 1));
     assert!(!adopted(&kit, 2), "no adoption left behind a failed plan");
 }
@@ -542,4 +554,32 @@ fn should_complete_the_quarantine_when_the_application_resumes_between_its_two_u
         .filter(|e| matches!(e, AttemptEvent::AttemptAdopted(_)))
         .count();
     assert_eq!(adoptions, 1);
+}
+
+#[test]
+fn should_fail_with_the_adoptions_refusal_when_the_attempt_cannot_be_adopted() {
+    // given a quarantine of an attempt whose VM was found lost (terminal)
+    let mut lost = path::prepared(2);
+    lost.push(path::observe(2, 9, Fact::VmAbsent));
+    let (kit, epoch) = approved_on(
+        lost,
+        &[
+            ActionKind::Adopt,
+            ActionKind::Quarantine(QuarantineReason::OwnershipDoubt),
+        ],
+    );
+    assert_eq!(kit.state(2).phase, Phase::Lost);
+
+    // when
+    let applied = apply(&kit, epoch);
+
+    // then the adoption's own refusal stops the plan, not one decided on the unadopted state
+    assert_eq!(
+        applied,
+        Applied::Failed {
+            index: 1,
+            refused: Some("terminal"),
+        }
+    );
+    assert!(!adopted(&kit, 2));
 }
