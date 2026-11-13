@@ -23,10 +23,12 @@
 //!    journal: a read with no effect, ADR 0091 decision 4), and every inventory goes to
 //!    [`Startup::recover`] (the same `Startup` for every pass of the run, CP-04) until it
 //!    completes, which opens admission, or reports safe mode.
-//! 7. Then the durable consumers catch up, each with its own worker (`catch_up` per consumer,
-//!    ES-05): the attempt saga, the directive relay and the placement relay; once all caught
-//!    up, one ready line is reported ([`Ready`]); the saga's deadline timer, the reconciler and
-//!    the image placement manager start.
+//! 7. Once recovery completes, the saga's deadline timer, the reconciler and the image
+//!    placement manager start, and the durable consumers catch up, each with its own worker
+//!    (`catch_up` per consumer, ES-05): the attempt saga, the directive relay and the placement
+//!    relay; then one complete pass of the terms policy (P4, CP-08) applies each pool's terms
+//!    to this host; once all of that succeeded, one ready line is reported ([`Ready`]), and the
+//!    terms policy's own loop starts.
 //!
 //! While the run lasts: every observation goes through the inbox (P8); every later inventory
 //! also goes to [`Startup::resume_held`] while an attempt's cleanup is held (CP-04); each
@@ -63,9 +65,10 @@
 //! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
 //! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
 //! placement manager places every pool's pin on this host and [`Placements`] follows its
-//! passes; but nothing in `mayflyd` registers, verifies or pins an image yet (OPS-02's manifest
-//! and pin), and no policy applies a pool's terms to the host (P4, CP-08), so no pool is
-//! admissible under `mayflyd` until both land. The operator socket
+//! passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once the
+//! pool is active, pinned and its pin's breaker not tripped; but nothing in `mayflyd` registers,
+//! verifies or pins an image yet (OPS-02's manifest and pin), so no pool is open under
+//! `mayflyd` until OPS-02 lands. The operator socket
 //! (RT-03), logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
 //! (OPS-05) and split roles (LNK-01) are separate tasks.
 
@@ -100,6 +103,7 @@ use mayfly_control::recovery::{
 use mayfly_control::saga::{AttemptSaga, SagaConfig};
 use mayfly_control::sessions::HostSessions;
 use mayfly_control::store::{AggregateStore, Clock as _, Outcome, SaveError, SaveRequest};
+use mayfly_control::terms::{TermsConfig, TermsPolicy};
 use mayfly_control_domain::attempt::GuestOs as DomainOs;
 use mayfly_control_domain::operations::hostrun::{HostRun, HostRunCommand, SafeModeReason};
 use mayfly_control_domain::pool::{ConfigurePool, Pool, PoolCommand, PoolConfig, TrustTier};
@@ -141,6 +145,10 @@ pub const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
 /// once a turn, never in a busy loop.
 const TIMER_FLOOR: Duration = Duration::from_millis(100);
 
+/// The least time between two passes of the terms policy (P4): a kick on a busy host stream
+/// waits this long rather than start a pass per commit.
+const TERMS_FLOOR: Duration = Duration::from_secs(1);
+
 /// How long the data plane waits between two inventories while nothing asks.
 const OBSERVE_EVERY: Millis = Millis::new(30_000);
 
@@ -173,8 +181,8 @@ pub struct Options {
     pub env: PlatformEnv,
 }
 
-/// The ready report of a run: recovery completed (or safe mode reported), and every consumer
-/// caught up once.
+/// The ready report of a run: recovery completed (or safe mode reported), every consumer
+/// caught up once, and the terms policy (P4) passed once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ready {
     /// The host.
@@ -188,8 +196,15 @@ pub struct Ready {
 impl std::fmt::Display for Ready {
     /// The ready line: `mayflyd ready host=<id> epoch=<n> mode=<normal|safe>`. Its promise:
     /// start-up recovery of this run has finished (admission opened, or safe mode reported) and
-    /// every durable consumer has caught up once (its first `catch_up` returned). Pinned by
-    /// `tests/daemon.rs::should_converge_on_the_same_inventory_when_the_daemon_is_killed_and_restarted`.
+    /// every durable consumer has caught up once (its first `catch_up` returned), and then one
+    /// pass of the terms policy completed (CP-08, `TermsReport::complete`): every pool was read
+    /// and every pool's terms due on this host were applied at the pool's revision as that pass
+    /// last read it, or refused by `Host` (an older revision than it holds, for one); in safe
+    /// mode that pass applies nothing and is complete whatever it could not read. A store fault
+    /// that persists keeps the line back, as it does a consumer's first catch-up.
+    /// Pinned by
+    /// `tests/daemon.rs::should_converge_on_the_same_inventory_when_the_daemon_is_killed_and_restarted`
+    /// and `tests/daemon.rs::should_apply_the_pools_terms_to_its_host_when_the_pool_is_pinned`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mode = match self.mode {
             Mode::Normal => "normal",
@@ -663,6 +678,33 @@ where
     }
 }
 
+/// One pass of the terms policy's loop (P4, CP-08) when one is due, then how long the loop may
+/// wait for a kick before the next falls due: between a second and [`COARSE`]. An incomplete or
+/// failed pass is reported; the next pass reads again. Pinned by
+/// `tests::should_pass_and_wait_until_due_when_the_terms_loop_runs` and
+/// `tests::should_wait_for_the_next_pass_when_a_terms_pass_is_incomplete`.
+async fn terms_pass<J, C, R, N, P>(terms: &TermsPolicy<'_, J, C, R, N, P>) -> Duration
+where
+    J: mayfly_control::journal::Journal,
+    C: mayfly_control::store::Clock,
+    R: mayfly_control::store::Rng,
+    N: mayfly_control::store::StoreNotifier,
+    P: mayfly_control::projection::ProjectionStore,
+{
+    match terms.tick().await {
+        Ok(Some(report)) if !report.complete() => {
+            tracing::warn!(
+                failed = report.failed.len(),
+                unread = report.unread.len(),
+                "terms_pass_incomplete"
+            );
+        }
+        Ok(_) => {}
+        Err(_) => tracing::warn!("terms_pass_failed"),
+    }
+    Duration::from_millis(terms.until_due().get()).clamp(Duration::from_secs(1), COARSE)
+}
+
 /// Everything a run borrows.
 struct Daemon<'a> {
     config: &'a Config,
@@ -1037,10 +1079,20 @@ impl Daemon<'_> {
             },
             self.notifier.reconciler.clone(),
         );
+        let terms = TermsPolicy::new(
+            &self.store,
+            &self.journal,
+            TermsConfig::new(epoch),
+            self.notifier.terms.clone(),
+        );
         reconciler.set_safe_mode(mode == Mode::Safe);
         manager.set_safe_mode(mode == Mode::Safe);
+        terms.set_safe_mode(mode == Mode::Safe);
         let run = Shutdown::new();
         let (recovered_tx, recovered) = watch::channel(None::<Mode>);
+        // set once the ready line is out: the terms policy's loop starts only then, so its
+        // passes never race the ready line's own pass on the host stream
+        let (readied_tx, readied) = watch::channel(false);
         let inbox = Inbox::new(&self.store, self.host.clone(), epoch).with_placements(index);
         let empty = BTreeMap::new();
 
@@ -1064,6 +1116,7 @@ impl Daemon<'_> {
             let empty = &empty;
             let reconciler = &reconciler;
             let manager = &manager;
+            let terms = &terms;
             async move {
                 let mut done = false;
                 let mut held = false;
@@ -1101,6 +1154,7 @@ impl Daemon<'_> {
                                 done = true;
                                 reconciler.set_safe_mode(true);
                                 manager.set_safe_mode(true);
+                                terms.set_safe_mode(true);
                                 let _ = recovered_tx.send(Some(Mode::Safe));
                             }
                             Err(error) => {
@@ -1129,6 +1183,7 @@ impl Daemon<'_> {
             let (saga, relay, placement_relay) = (&saga, &relay, &placement_relay);
             let (saga_worker, relay_worker, placement_worker) =
                 (&saga_worker, &relay_worker, &placement_worker);
+            let terms = &terms;
             async move {
                 tokio::select! {
                     () = cancel.cancelled() => return,
@@ -1151,7 +1206,20 @@ impl Daemon<'_> {
                     }
                     saga_ok && relay_ok && placement_ok
                 };
-                if !until_caught_up(catch_up, tokio::time::sleep, &mut cancel).await {
+                // the ready line's promise: every consumer caught up once and, after them, one
+                // terms pass (P4) over the recovered journal
+                let first = {
+                    let catch_up = &catch_up;
+                    move || async move {
+                        let caught_up = catch_up().await;
+                        let applied = terms.run_pass().await.is_ok_and(|r| r.complete());
+                        if !applied {
+                            tracing::warn!("terms_pass_failed");
+                        }
+                        caught_up && applied
+                    }
+                };
+                if !until_caught_up(first, tokio::time::sleep, &mut cancel).await {
                     return;
                 }
                 let mode = (*recovered.borrow()).unwrap_or(Mode::Safe);
@@ -1160,6 +1228,7 @@ impl Daemon<'_> {
                     epoch,
                     mode,
                 });
+                let _ = readied_tx.send(true);
                 let mut coarse = tokio::time::Instant::now() + COARSE;
                 loop {
                     tokio::select! {
@@ -1289,16 +1358,47 @@ impl Daemon<'_> {
             }
         };
 
+        // P4 (CP-08): the terms policy's passes, on its kicks and its interval, from the ready
+        // line on (the ready line's own pass is the first): each pool's terms applied on this
+        // host at the pool's terms revision, so the reconciler can reserve. The host stream moves
+        // with every reservation and report, so a pass waits at least `TERMS_FLOOR` after the
+        // last before a kick starts another.
+        let apply_terms = {
+            let mut cancel = run.signal();
+            let mut readied = readied;
+            let terms = &terms;
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = readied.wait_for(|r| *r) => {}
+                }
+                loop {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = tokio::time::sleep(TERMS_FLOOR) => {}
+                    }
+                    let wait = terms_pass(terms).await;
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = self.notifier.terms.wait() => {}
+                        () = tokio::time::sleep(wait) => {}
+                    }
+                }
+            }
+        };
+
         let unknown = {
             let mut cancel = run.signal();
             let reconciler = &reconciler;
             let manager = &manager;
+            let terms = &terms;
             async move {
                 tokio::select! {
                     () = cancel.cancelled() => {}
                     () = self.notifier.unknown_kind() => {
                         reconciler.set_safe_mode(true);
                         manager.set_safe_mode(true);
+                        terms.set_safe_mode(true);
                         if enter_safe_mode(
                             &self.store,
                             sessions,
@@ -1316,8 +1416,15 @@ impl Daemon<'_> {
             }
         };
 
-        let ((), ended, (), (), (), (), ()) = tokio::join!(
-            forward, observe, consume, timeouts, reconcile, place, unknown
+        let ((), ended, (), (), (), (), (), ()) = tokio::join!(
+            forward,
+            observe,
+            consume,
+            timeouts,
+            reconcile,
+            place,
+            apply_terms,
+            unknown
         );
         if matches!(ended, Ok(RunEnd::Shutdown)) {
             self.end_run(epoch).await;
@@ -1409,7 +1516,77 @@ pub fn serve(options: Options) -> Result<(), DaemonError> {
 mod tests {
     use std::cell::{Cell, RefCell};
 
+    use mayfly_control::delivery::Kicks;
+    use mayfly_control_domain::host::Host;
+    use mayfly_domain::PoolName;
+    use mayfly_testkit::contracts::journal::InjectedFault;
+    use mayfly_testkit::fleet::{EPOCH, PoolSpec, T0, World, report, store};
+    use mayfly_testkit::journal::MemoryJournal;
+
     use super::*;
+
+    /// A fleet with one host and one pool, both terms already applied by the kit, then the
+    /// pool paused without them: terms due on the host.
+    fn paused(journal: &MemoryJournal) -> mayfly_testkit::fleet::FleetStore {
+        let fleet = store(journal, &mayfly_testkit::clock::FakeClock::at(T0));
+        {
+            let mut world = World::new(&fleet);
+            world.register_host("h1", report(64, 0, 8));
+            world.configure_pool(PoolSpec {
+                name: PoolName::new("lin").unwrap_or_else(|e| panic!("{e}")),
+                os: DomainOs::Linux,
+                memory_gib: 4,
+                max_running: 2,
+                min_prepared: 0,
+                breaker: 3,
+            });
+            let paused = world.command::<Pool>("lin", Actor::Startup, PoolCommand::PausePool);
+            assert_eq!(paused, Ok(()));
+        }
+        fleet
+    }
+
+    fn open_on(fleet: &mayfly_testkit::fleet::FleetStore) -> Option<bool> {
+        let lin = PoolName::new("lin").unwrap_or_else(|e| panic!("{e}"));
+        mayfly_testkit::block_on(fleet.load::<Host>("h1"))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .pool_terms
+            .get(&lin)
+            .map(|t| t.open)
+    }
+
+    #[test]
+    fn should_pass_and_wait_until_due_when_the_terms_loop_runs() {
+        // given: the pause's terms due on the host
+        let journal = MemoryJournal::new();
+        let fleet = paused(&journal);
+        let terms = TermsPolicy::new(&fleet, &journal, TermsConfig::new(EPOCH), Kicks::new(8));
+        let before = open_on(&fleet);
+
+        // when
+        let wait = runtime().block_on(terms_pass(&terms));
+
+        // then: applied, and the next pass is an interval away
+        assert_eq!(before, Some(true));
+        assert_eq!(open_on(&fleet), Some(false));
+        assert_eq!(wait, COARSE);
+    }
+
+    #[test]
+    fn should_wait_for_the_next_pass_when_a_terms_pass_is_incomplete() {
+        // given: the store fails the terms' save
+        let journal = MemoryJournal::new();
+        let fleet = paused(&journal);
+        let terms = TermsPolicy::new(&fleet, &journal, TermsConfig::new(EPOCH), Kicks::new(8));
+        assert!(journal.inject(InjectedFault::StorageBeforeCommit));
+
+        // when
+        let wait = runtime().block_on(terms_pass(&terms));
+
+        // then: nothing applied; the loop waits for a kick or the interval
+        assert_eq!(open_on(&fleet), Some(true));
+        assert_eq!(wait, COARSE);
+    }
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()

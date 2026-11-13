@@ -28,6 +28,8 @@
 //! - [`secrets`]: the `SecretProvider` port, its refusals and the `doctor` check (ADR 0033).
 //! - [`github`]: the `ScaleSetApi` and `RunnerRegistry` ports (plan §7.2, §7.3), their value
 //!   types and failure classes (GH-03).
+//! - [`terms`]: the terms policy (P4): each pool's terms applied on every host, at the pool's
+//!   terms revision, by a level-triggered pass (CP-08).
 
 pub mod delivery;
 pub mod github;
@@ -44,3 +46,4 @@ pub mod secrets;
 pub mod sessions;
 pub mod start;
 pub mod store;
+pub mod terms;

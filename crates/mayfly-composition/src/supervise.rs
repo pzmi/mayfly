@@ -108,6 +108,8 @@ pub struct Notifier {
     pub placement: Kicks,
     /// The placement relay's worker (CP-07).
     pub placement_relay: Kicks,
+    /// The terms policy, P4 (CP-08).
+    pub terms: Kicks,
     unknown: Arc<(AtomicBool, Notify)>,
 }
 
@@ -131,6 +133,7 @@ impl Notifier {
             reconciler: Kicks::new(KICK_CAPACITY),
             placement: Kicks::new(KICK_CAPACITY),
             placement_relay: Kicks::new(KICK_CAPACITY),
+            terms: Kicks::new(KICK_CAPACITY),
             unknown: Arc::new((AtomicBool::new(false), Notify::new())),
         }
     }
@@ -162,6 +165,7 @@ impl StoreNotifier for Notifier {
         self.reconciler.committed(commit);
         self.placement.committed(commit);
         self.placement_relay.committed(commit);
+        self.terms.committed(commit);
     }
 
     fn unknown_kind(&self, _stream: &StreamId, _kind: &StoredKind) {
@@ -257,7 +261,11 @@ mod tests {
         assert_eq!(notifier.relay.take(), std::slice::from_ref(&stream));
         assert_eq!(notifier.reconciler.take(), std::slice::from_ref(&stream));
         assert_eq!(notifier.placement.take(), std::slice::from_ref(&stream));
-        assert_eq!(notifier.placement_relay.take(), [stream]);
+        assert_eq!(
+            notifier.placement_relay.take(),
+            std::slice::from_ref(&stream)
+        );
+        assert_eq!(notifier.terms.take(), [stream]);
     }
 
     #[test]

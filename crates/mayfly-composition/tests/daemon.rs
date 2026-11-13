@@ -4,6 +4,10 @@
 //! documented ready line (`mayfly_composition::daemon::Ready`), read from its stdout through a
 //! channel with a bound, and reads the journal and the fake's state once the daemon exited.
 //!
+//! The terms policy (P4, CP-08) is pinned here as far as `mayflyd` can take it before OPS-02
+//! pins images and VER-09 serves one to pull: a pool pinned through the store is open on its
+//! host after the next run's ready line.
+//!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least).
 
@@ -19,11 +23,14 @@ use mayfly_composition::daemon::{DaemonError, Options, Ready, child_environment,
 use mayfly_composition::paths::{self, Places, PlatformEnv};
 use mayfly_composition::supervise::{SessionCut, Shutdown};
 use mayfly_control::journal::Journal as _;
-use mayfly_control::store::{AggregateStore, NoNotifier, decode_event, stream_of};
-use mayfly_control_domain::ControlAggregates;
+use mayfly_control::store::{
+    AggregateStore, NoNotifier, Outcome, SaveRequest, decode_event, stream_of,
+};
+use mayfly_control_domain::host::{Host, HostEvent};
 use mayfly_control_domain::operations::hostrun::{HostRun, HostRunEvent, RunPhase};
-use mayfly_control_domain::pool::Pool;
-use mayfly_domain::{Epoch, Millis};
+use mayfly_control_domain::pool::{Pool, PoolCommand, terms};
+use mayfly_control_domain::{Actor, Command as DomainCommand, ControlAggregates};
+use mayfly_domain::{CommandId, Epoch, EventId, ImageDigest, Millis, Sample};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use serde_json::Value;
@@ -673,4 +680,85 @@ fn should_start_and_report_each_sizing_source_when_no_sizing_key_is_configured()
         report.contains("vm_slots=") && report.contains("source=measured"),
         "{report}"
     );
+}
+
+/// The terms of pool `lin` that host `host` applied, in order, as `(revision, open)`.
+fn applied_terms(journal: &SqliteJournal, host: &str) -> Vec<(u64, bool)> {
+    let stream = stream_of::<Host>(host).expect("the host's stream");
+    block_on(journal.read_stream(&stream, None, None))
+        .expect("the host's events")
+        .iter()
+        .filter_map(
+            |e| match decode_event::<HostEvent>(e).expect("a host event") {
+                HostEvent::PoolTermsApplied(t) if t.pool.as_str() == POOL => {
+                    Some((t.revision, t.open))
+                }
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+#[test]
+fn should_apply_the_pools_terms_to_its_host_when_the_pool_is_pinned() {
+    // given: a first run configures the pool (no image pinned: its terms are closed), then,
+    // with the daemon stopped, the pool is pinned through the store as OPS-02's pin use case
+    // will (its manifest read and verification are OPS-02's; the image is not registered here,
+    // so the placement manager places nothing and no pull is attempted: a real materialisation
+    // under mayflyd is VER-09's)
+    let world = World::new(true);
+    let first = world.start();
+    let epoch = first.ready();
+    assert_eq!(first.terminate(), Some(0));
+    let host = std::fs::read_to_string(world.state().join("host-id")).expect("the host id");
+    let host = host.trim_end().to_owned();
+    let stored = SqliteJournal::open(
+        &world.state().join("journal.db"),
+        SqliteOptions::new(Millis::new(1)),
+    )
+    .expect("the journal");
+    let before = applied_terms(&stored, &host);
+    let store = AggregateStore::new::<ControlAggregates>(
+        stored.clone(),
+        FakeClock::at(Millis::new(1)),
+        SeededRng::new(1),
+        NoNotifier,
+    )
+    .expect("a store")
+    .with_projections(mayfly_control::projection::control().expect("the projections"));
+    let pin = DomainCommand::new(
+        CommandId::from_u128(0x0915),
+        Millis::new(1),
+        epoch,
+        Actor::Operator { uid: 501 },
+        PoolCommand::PinImage {
+            digest: ImageDigest::sample(),
+            verified_ref: Some(EventId::from_u128(0x0915)),
+        },
+    );
+    let pinned = block_on(store.execute::<Pool>(SaveRequest::new(POOL, pin))).expect("the pin");
+    assert!(matches!(pinned, Outcome::Accepted { .. }), "{pinned:?}");
+    drop(store);
+    drop(stored);
+
+    // when: the next run's ready line (its promise includes one terms pass)
+    let second = world.start();
+    second.ready();
+    let exit = second.terminate();
+
+    // then: closed before the pin; open after it, at the pool's current terms revision
+    assert_eq!(exit, Some(0));
+    let (_, pool, _) = journal(&world);
+    let stored = SqliteJournal::open(
+        &world.state().join("journal.db"),
+        SqliteOptions::new(Millis::new(1)),
+    )
+    .expect("the journal");
+    let after = applied_terms(&stored, &host);
+    let current = terms(&pool).expect("the pool's terms");
+    assert!(current.open, "a configured, active, pinned pool is open");
+    assert_eq!(before.len(), 1, "{before:?}");
+    assert!(!before[0].1, "closed before the pin: {before:?}");
+    assert_eq!(after.last(), Some(&(current.revision, true)), "{after:?}");
+    assert_eq!(after.first(), before.first(), "{after:?}");
 }

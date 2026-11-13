@@ -748,7 +748,11 @@ module scheduling_machine {
       { ...g, drainedWithLeases: g.drainedWithLeases or ATTEMPTS.exists(a => live(leases.get(a))) }),
   }
 
-  /// `ApplyPoolTerms` (policy P4): the pool's current terms, refused unless newer.
+  /// `ApplyPoolTerms` (policy P4): the pool's current terms, refused unless newer. One atomic
+  /// step is faithful to the Rust pass (CP-08, `mayfly_control::terms`): it reads the pool
+  /// stream, and saves `ApplyPoolTerms` on the host stream with a read of the pool stream at the
+  /// revision it read, so terms a newer pool event has superseded are refused at the commit and
+  /// what the host applies is always the pool's terms as they are at that commit.
   action applyTerms(pool: str): bool = {
     val p = pools.get(pool)
     all {
@@ -1618,6 +1622,30 @@ module scheduling {
       .expect(not(terms.get(LINUX).open) and not(canReserve(host, leases, terms, 1, LINUX)))
       .then(resetBreaker(LINUX)).then(applyTerms(LINUX))
       .expect(canReserve(host, leases, terms, 1, LINUX) and allInvariants)
+  }
+
+  // P4 (CP-08): every change that bumps the pool's terms revision reaches the host as the
+  // pool's current terms; until it does the host keeps the terms it held, and once applied the
+  // same revision is not applied again (`Host` refuses a revision that is not newer).
+  run termsFollowEveryBumpTest = {
+    initWith(0, 0).then(ready)
+      .then(pausePool(LINUX))
+      .expect(terms.get(LINUX).open and terms.get(LINUX).rev < pools.get(LINUX).rev)
+      .then(applyTerms(LINUX))
+      .expect(not(terms.get(LINUX).open) and terms.get(LINUX).rev == pools.get(LINUX).rev)
+      // the same revision again is not newer (`applyTerms`'s guard, `Host`'s `stale_terms`),
+      // stated on the guard: `.then(applyTerms(LINUX).fail())` stops the TypeScript evaluator
+      // the `formal-test` stage runs with QNT502 ("Variable pools not set")
+      .expect(not(pools.get(LINUX).rev > terms.get(LINUX).rev))
+      .then(resumePool(LINUX)).then(applyTerms(LINUX))
+      .expect(terms.get(LINUX).open and terms.get(LINUX).rev == pools.get(LINUX).rev)
+      .then(repin(LINUX)).then(applyTerms(LINUX))
+      .expect(terms.get(LINUX).open and terms.get(LINUX).rev == pools.get(LINUX).rev)
+      .then(countFailure(LINUX)).then(countFailure(LINUX)).then(applyTerms(LINUX))
+      .expect(not(terms.get(LINUX).open) and not(canReserve(host, leases, terms, 1, LINUX)))
+      .then(resetBreaker(LINUX)).then(applyTerms(LINUX))
+      .expect(terms.get(LINUX).open and terms.get(LINUX).rev == pools.get(LINUX).rev)
+      .expect(allInvariants)
   }
 
   // A paused pool's scale set is told only its live runners; the gate closed admits nothing.

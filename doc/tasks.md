@@ -211,7 +211,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-06 | Breaker, quarantine and Unknown-escalation policies | KER-10, CP-03 | sonnet | |
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | |
 | CP-08 | Terms policy P4: a pool's terms applied on every host | CP-07, RT-02 | sonnet | |
-| DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07 | opus | |
+| DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07, VER-09 | opus | |
 | DP-01 | Data-plane executor and observer, resource ledger, fake provider | KER-08 | opus | |
 | DP-02 | In-process link transport and link contract suite | KER-02 | sonnet | |
 | DP-03 | `mayfly-fake-tart` binary with fault knobs (landed) | FND-02 | sonnet | |
@@ -250,6 +250,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | VER-06 | Fuzz targets and nightly fuzz lane | DP-04, GH-03, RT-01 | sonnet | |
 | VER-07 | Apalache invariant verification lane | KER-07, KER-06, KER-09 | sonnet | |
 | VER-08 | Conformance driver for the image store model | VER-01, DP-07 | opus | |
+| VER-09 | Local OCI registry for daemon tests | CP-08 | sonnet | |
 | SEC-01 | Threat model and secret-handling audit | RT-04, DP-05 | opus | |
 | OPS-01 | launchd service and foreground mode, install/uninstall, real `doctor` checks | RT-03 | sonnet | |
 | OPS-02 | Image manifest, `mayfly image verify`, digest pinning | RT-01 | sonnet | |
@@ -1264,6 +1265,8 @@ scheduling model's placement, whichever the resolution's safety rests on, with a
 Accept: over fake-tart, `mayflyd` restarted mid-pull resolves the placement from the listing
 without a new directive, and the pool becomes admissible once the base is `Ready`; a listed base
 that is not `Ready` resolves nothing; a 1.4 session is written without the listing.
+Note (CP-08): the `mayflyd` part of this Accept needs a registry `mayflyd` can pull from, which
+VER-09 builds; until then nothing serves `mayflyd` an image.
 
 #### CP-08 Terms policy P4
 Cites: dm P4, §6.2, §6.3; ADR 0024. Issue `ApplyPoolTerms` (`pool::terms`) to every host serving
@@ -1272,9 +1275,50 @@ a breaker trip or reset), keyed `(pool, revision)`, retried with backoff; an old
 refused by `Host`, and no gap can open admission. Today only the fleet test kit applies terms
 (`World::apply_terms`), so under `mayflyd` `Host` refuses every reservation.
 Accept: component tests on fakes (each terms-bumping event reaches every host, a stale revision is
-refused, a closed breaker closes the terms there); `mayflyd` over fake-tart opens a pool on its host
-once the pool is pinned (pinned through the store in the test until OPS-02) and its base is
-materialised (CP-07).
+refused, a tripped breaker closes the terms there); `mayflyd` over fake-tart applies the pool's
+terms to its host: closed while the pool has no pin, and, once the pool is pinned (through the store
+in the test until OPS-02), `PoolTermsApplied` at the pool's current terms revision, open. *Amended
+at intake (2026-11-12): the Accept first asked for the pool opened once its base is materialised
+under `mayflyd`; no test can serve `mayflyd` an image to pull yet (its pull fetches the manifest
+over HTTPS), so that part is VER-09's.*
+Note (CP-08, as built): model first, `formal/scheduling.qnt`'s `applyTerms` already was P4 as one
+atomic step (the pool's current terms, only at a newer revision); its documentation now says why
+one step is faithful, and the scenario `termsFollowEveryBumpTest` drives pause, resume, repin, a
+trip and a reset through it (each applied at the pool's revision, never the same revision twice).
+P4 is `mayfly_control::terms::TermsPolicy`, a level-triggered pass like P5 and P17 rather than a
+durable consumer of pool events (domain-model §7's P4 row says so): it reads each pool's stream
+for its terms (`pool::terms`, the authoritative `terms_revision`) and the `hosts` projection for the
+revision each registered host applied, and saves `ApplyPoolTerms` where a host lags, under a
+command id derived from the pool, the revision and the host, on the host stream with a read of the
+pool stream at the revision it read, under the store's revision retry (a conflict on either
+stream reads the pool again and saves at its revision then). So a host registered after the pool's last event gets its
+terms (`tests/store/terms.rs::should_apply_the_current_terms_when_a_host_registers_after_the_pool_changed`),
+terms a newer pool event superseded are refused at the commit and never applied, the retry
+applying the newer ones (`should_apply_nothing_superseded_when_the_pool_moves_between_the_read_and_the_save`),
+a host stream that moves meanwhile costs a retry, not the pass
+(`should_apply_the_terms_in_the_same_pass_when_the_host_moves_between_the_read_and_the_save`), an older revision is
+refused by `Host` (`should_refuse_a_stale_revision_when_the_host_holds_a_newer_one`), each bump
+(configure, pin, pause, resume, reconfigure, trip, reset, drain) reaches both hosts
+(`should_apply_every_bump_on_every_host_when_the_pool_changes`), a trip closes the terms and a
+reservation under them is refused `terms_closed`
+(`should_close_the_terms_on_every_host_when_the_breaker_of_the_pin_trips`), a repeated pass applies
+nothing (`should_apply_nothing_twice_when_a_pass_is_repeated`), two passes racing record the terms
+once, the later answered by the receipt
+(`should_record_the_terms_once_when_two_passes_apply_the_same_terms`), and in safe mode a pass applies
+nothing, as the reconciler and the placement manager decide nothing new
+(`should_apply_nothing_when_the_policy_is_in_safe_mode`). What a pass leaves
+undecided (retries spent, a store fault, a pool unread) it reports (`TermsReport::complete`), and
+the next pass, on a kick on a pool or host stream (at least a second after the last pass) or the
+one-minute interval, reads again. In safe mode a pass applies nothing and is complete whatever it could not read (a pool stream
+ending in a kind this build does not decode is what raises safe mode mid-run;
+`should_complete_in_safe_mode_when_a_pool_stream_holds_an_unknown_kind`). In `mayflyd` the ready
+line's promise now includes one complete terms pass after the consumers' first catch-up (retried
+with their backoff until complete, so a store fault that persists in normal mode holds the ready
+line back, as it does a consumer's catch-up), and
+the policy's own loop, on its kicks (`Notifier::terms`), starts only after the ready line, so the
+two never race on the host stream
+(`tests/daemon.rs::should_apply_the_pools_terms_to_its_host_when_the_pool_is_pinned`).
+"Opens and reserves after a real materialisation under `mayflyd`" is VER-09's.
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,
@@ -1519,7 +1563,7 @@ recovery (none is passed: every runner reads `unreachable` and a held cleanup st
 CP-05), the secrets provider built (`UriSecretProvider::from_process`) but read by no client yet
 (GH-02), the `LaunchStore` shared with the guest transport and filled by no link end yet (CP-05,
 ADR 0082), `Placements` filled by CP-07 (until then a clone is held `image_base_unknown`), P4's
-pool terms on the host (CP-08; no pool is open before an image is pinned), `crash_loop` (OPS-05), the
+pool terms on the host (CP-08, built; no pool is open before an image is pinned, OPS-02), `crash_loop` (OPS-05), the
 operator socket (RT-03), logging's subscriber (RT-04), Ctrl-C's terminal mode (RT-05), and per-OS
 stop graces (a fixed 30 s).
 
@@ -1998,6 +2042,18 @@ writers as direct `tart` calls), comparing the registry entry's state and identi
 of the base and the listed clones after each step.
 Accept: seeded traces replay clean; a negative control (an eviction that ignores intents) diverges
 at its first step.
+
+#### VER-09 Local OCI registry for daemon tests
+Cites: ver §2; ADRs 0039, 0087; CP-07, CP-08. `mayflyd`'s pull fetches the image's manifest over
+HTTPS from the configured repository (`RegistryManifests`, HTTPS only, the operating system's
+trust roots), so no process-level test can place an image yet. A test-only HTTPS registry
+(dependencies justified at this task) serving a manifest and its blobs by digest, its CA passed to
+`mayflyd` through the test's environment, the same manifest and blobs seeded in fake-tart's
+registry so its pull and the data plane's verification agree, and the runner pins of `[images]
+runners` with the fake guest's install.
+Accept: `mayflyd` over fake-tart, the pool pinned through the store (until OPS-02), materialises the
+pin's base on its host and the reconciler reserves for the pool there. DP-08's `mayflyd` test and
+E2E-01's walking skeleton need it too.
 
 #### SEC-01 Threat model and secret audit
 Cites: plan §13. `doc/security.md` (assets, actors, boundaries, mitigations with tests),
