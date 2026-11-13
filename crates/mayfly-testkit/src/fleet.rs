@@ -12,7 +12,10 @@
 //! I24), nothing admitted on a draining host (I08), acquisition within the deliverable (I23),
 //! nothing admitted while the gate or the pool's terms are closed (I26), nothing admitted for a
 //! tripped breaker (I27), nothing reserved on a host held by a data-plane refusal until a newer
-//! report, no VM without its lease (a slot released under a live VM: I33's precondition), and,
+//! report, no VM without its lease (a slot released under a live VM: I33's precondition), no
+//! grant (P9, CP-09) beyond a pool's shortfall or the room `demand::runner_may_start` leaves
+//! beside its idle runners, and only of a Prepared attempt (racing passes and a lagging read
+//! included: the grant's save reads what the pass read), and,
 //! while the reconciler reads the journal's own rows, the `Host` never refuses a reservation
 //! the pass planned for capacity: the plan and the report agree.
 //!
@@ -742,8 +745,8 @@ impl<'s> World<'s> {
         }
     }
 
-    /// A job took the prepared attempt and finished (the activation and job policies, folded
-    /// into one retirement).
+    /// A job took the prepared or activating attempt and finished (the activation and job
+    /// policies, folded into one retirement).
     pub fn consume(&mut self, attempt: AttemptId) {
         let _ = self.command::<Attempt>(
             &attempt.to_string(),
@@ -924,6 +927,8 @@ pub struct Simulation {
     pub acquired: u32,
     /// Clones the data plane refused `insufficient_resources`.
     pub refusals: u32,
+    /// Prepared attempts the passes granted and activated (P9).
+    pub activated: u32,
 }
 
 /// What the checker keeps between steps.
@@ -932,6 +937,8 @@ struct Snapshot {
     hosts: BTreeMap<HostId, HostState>,
     pools: BTreeMap<PoolName, PoolState>,
     scale_sets: BTreeMap<PoolName, ScaleSetState>,
+    /// The phase of every leased attempt that started, and whether its retirement is requested.
+    attempts: BTreeMap<AttemptId, (Phase, bool)>,
 }
 
 fn snapshot(world: &World<'_>) -> Snapshot {
@@ -950,6 +957,14 @@ fn snapshot(world: &World<'_>) -> Snapshot {
             .pools
             .iter()
             .map(|p| (p.name.clone(), world.scale_set(&p.name)))
+            .collect(),
+        attempts: world
+            .leased_attempts()
+            .into_iter()
+            .map(|(_, a)| {
+                let state = world.attempt(a);
+                (a, (state.phase, state.retirement_requested.is_some()))
+            })
             .collect(),
     }
 }
@@ -1120,6 +1135,7 @@ fn check(
             }
         }
     }
+    check_grants(step, before, after, out);
     for (pool, scale_set) in &after.scale_sets {
         let capacity = scale_set.capacity;
         if capacity.reported_max > capacity.deliverable {
@@ -1152,6 +1168,83 @@ fn check(
     }
 }
 
+/// P9 (CP-09): the leases granted in one step, per pool, are within the shortfall the step
+/// started from (`totalAssignedJobs` beyond the granted, listening and busy runners) and the
+/// room `runner_may_start` left beside the idle ones (granted or listening), and each was the
+/// lease of a Prepared attempt. Counted from the aggregates, not from the pass's own reading.
+fn check_grants(step: usize, before: &Snapshot, after: &Snapshot, out: &mut Vec<String>) {
+    let mut granted: BTreeMap<&PoolName, u32> = BTreeMap::new();
+    let mut idle: BTreeMap<&PoolName, u32> = BTreeMap::new();
+    let mut busy: BTreeMap<&PoolName, u32> = BTreeMap::new();
+    for host in before.hosts.values() {
+        let draining = !matches!(host.gate.drain, Drain::Open);
+        for (attempt, lease) in &host.leases {
+            if !matches!(lease.phase, LeasePhase::Activated) {
+                continue;
+            }
+            let Some((phase, retiring)) = before.attempts.get(attempt) else {
+                continue;
+            };
+            match phase {
+                Phase::Busy => *busy.entry(&lease.pool).or_default() += 1,
+                _ if *retiring => {}
+                Phase::Listening if draining => {}
+                Phase::Reserved
+                | Phase::Cloning
+                | Phase::Booting
+                | Phase::Verifying
+                | Phase::Prepared
+                | Phase::Activating
+                | Phase::Listening
+                | Phase::Backoff { .. } => *idle.entry(&lease.pool).or_default() += 1,
+                Phase::NotStarted
+                | Phase::Finished
+                | Phase::Retiring
+                | Phase::Deleting
+                | Phase::Deleted
+                | Phase::Lost
+                | Phase::Quarantined { .. }
+                | Phase::Closed => {}
+            }
+        }
+    }
+    for (host_id, host) in &after.hosts {
+        let prior = before.hosts.get(host_id);
+        for (attempt, lease) in &host.leases {
+            let was_reserved = prior
+                .and_then(|p| p.leases.get(attempt))
+                .is_some_and(|l| matches!(l.phase, LeasePhase::Reserved));
+            if !(was_reserved && matches!(lease.phase, LeasePhase::Activated)) {
+                continue;
+            }
+            *granted.entry(&lease.pool).or_default() += 1;
+            if !matches!(before.attempts.get(attempt), Some((Phase::Prepared, false))) {
+                out.push(format!(
+                    "step {step}: P9 granted {attempt} that was not Prepared"
+                ));
+            }
+        }
+    }
+    for (pool, n) in granted {
+        let Some(scale_set) = before.scale_sets.get(pool) else {
+            out.push(format!(
+                "step {step}: P9 granted for {pool} with no scale set"
+            ));
+            continue;
+        };
+        let idle_now = idle.get(pool).copied().unwrap_or(0);
+        let runners = idle_now.saturating_add(busy.get(pool).copied().unwrap_or(0));
+        let assigned = scale_set.statistics.map_or(0, |s| s.total_assigned_jobs);
+        let shortfall = assigned.saturating_sub(runners);
+        let room = scale_set.waiting().saturating_sub(idle_now);
+        if n > shortfall || n > room {
+            out.push(format!(
+                "step {step}: P9 granted {n} for {pool} beyond shortfall {shortfall} or room {room}"
+            ));
+        }
+    }
+}
+
 /// The pass's own checks: while it reads the journal's own rows, the `Host` agreed with every
 /// reservation planned (the plan never allocates beyond the report it read) and each scale set
 /// with its capacity input (behind the journal, a stale revision is refused, which is the
@@ -1178,6 +1271,7 @@ fn check_pass(
             }
             PassCommand::ReserveSlot { .. }
             | PassCommand::ApplyCapacity { .. }
+            | PassCommand::Activate { .. }
             | PassCommand::Retire { .. }
             | PassCommand::ReleaseSlot { .. }
             | PassCommand::CompleteHostDrain { .. }
@@ -1218,6 +1312,7 @@ fn check_pass(
             }
             PassCommand::ApplyCapacity { .. }
             | PassCommand::ReserveSlot { .. }
+            | PassCommand::Activate { .. }
             | PassCommand::CompleteHostDrain { .. }
             | PassCommand::CompletePoolDrain { .. } => {}
         }
@@ -1400,7 +1495,9 @@ pub fn simulate_with(seed: u64, steps: usize, options: SimOptions) -> Simulation
                 let leased = world.leased_attempts();
                 let prepared: Vec<_> = leased
                     .into_iter()
-                    .filter(|(_, a)| world.attempt(*a).phase == Phase::Prepared)
+                    .filter(|(_, a)| {
+                        matches!(world.attempt(*a).phase, Phase::Prepared | Phase::Activating)
+                    })
                     .collect();
                 if !prepared.is_empty() {
                     let (_, attempt) = prepared[pick(prepared.len())];
@@ -1526,6 +1623,7 @@ pub fn simulate_with(seed: u64, steps: usize, options: SimOptions) -> Simulation
                     PassCommand::Retire { .. } => sim.retired += 1,
                     PassCommand::ReleaseSlot { .. } => sim.released += 1,
                     PassCommand::ApplyCapacity { .. } => sim.capacities += 1,
+                    PassCommand::Activate { .. } => sim.activated += 1,
                     PassCommand::CompleteHostDrain { .. }
                     | PassCommand::CompletePoolDrain { .. } => {}
                 }

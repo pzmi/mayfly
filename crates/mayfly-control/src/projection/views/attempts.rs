@@ -80,6 +80,12 @@ pub struct AttemptRow {
     /// (CP-03F). Absent from rows written before version 4, read as none.
     #[serde(default)]
     pub retirement_requested: Option<RetireReason>,
+    /// When the attempt became Prepared (its `AttemptPrepared`'s `recorded_at`), while it is:
+    /// the reconciler grants the oldest prepared attempt first (P9, CP-09). A preference, not an
+    /// order the journal relies on (ADR 0020). Absent from rows written before version 5, read
+    /// as none.
+    #[serde(default)]
+    pub prepared_at: Option<Millis>,
     /// The stream revision this row is the fold of.
     pub revision: u64,
     /// When that event was recorded (display only).
@@ -93,8 +99,9 @@ pub struct Attempts;
 impl ProjectionSpec for Attempts {
     const NAME: &'static str = "attempts";
     /// 2: the row's `desync` (DEC-07); 3: `refused` and `vm_gone` (CP-03); 4:
-    /// `capacity_refused_at` and `retirement_requested` (CP-03F); compatible additions.
-    const VERSION: u32 = 4;
+    /// `capacity_refused_at` and `retirement_requested` (CP-03F); 5: `prepared_at` (CP-09);
+    /// compatible additions.
+    const VERSION: u32 = 5;
     const SUBSCRIBES: &'static [EventKind] = <AttemptEvent as EventSet>::KINDS;
     type Source = Attempt;
     type Row = AttemptRow;
@@ -111,6 +118,7 @@ impl ProjectionSpec for Attempts {
                 row.refused = refused(before, event);
                 row.vm_gone = vm_gone(before, after.phase);
                 row.capacity_refused_at = capacity_refused_at(before, event, at);
+                row.prepared_at = prepared_at(before, event, after.phase, at);
                 row
             })
             .map(|row| (String::new(), row))
@@ -145,6 +153,40 @@ fn capacity_refused_at(
             ..
         }) => Some(at.revision.get()),
         _ => before.and_then(|row| row.capacity_refused_at),
+    }
+}
+
+/// When the attempt became Prepared: set by `AttemptPrepared`, carried while it stays Prepared,
+/// cleared once it leaves. Pinned by
+/// `tests/store/activation.rs::should_show_when_the_attempt_became_prepared_while_it_is`.
+fn prepared_at(
+    before: Option<&AttemptRow>,
+    event: &AttemptEvent,
+    phase: Phase,
+    at: EventMeta,
+) -> Option<Millis> {
+    match (phase, event) {
+        (Phase::Prepared, AttemptEvent::AttemptPrepared(..)) => Some(at.recorded_at),
+        (Phase::Prepared, _) => before.and_then(|row| row.prepared_at),
+        (
+            Phase::NotStarted
+            | Phase::Reserved
+            | Phase::Cloning
+            | Phase::Booting
+            | Phase::Verifying
+            | Phase::Activating
+            | Phase::Listening
+            | Phase::Busy
+            | Phase::Finished
+            | Phase::Retiring
+            | Phase::Deleting
+            | Phase::Deleted
+            | Phase::Lost
+            | Phase::Backoff { .. }
+            | Phase::Quarantined { .. }
+            | Phase::Closed,
+            _,
+        ) => None,
     }
 }
 
@@ -235,6 +277,7 @@ fn attempt_row(state: &AttemptState, at: EventMeta) -> Option<AttemptRow> {
         vm_gone: None,
         capacity_refused_at: None,
         retirement_requested: state.retirement_requested,
+        prepared_at: None,
         revision: at.revision.get(),
         updated_at: at.recorded_at,
     })

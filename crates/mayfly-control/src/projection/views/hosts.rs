@@ -103,6 +103,16 @@ pub struct ScaleSetRow {
     pub assigned: Option<u32>,
     /// The capacity input it holds.
     pub capacity: Capacity,
+    /// Jobs it classified trusted that wait for a runner (`ScaleSetState::waiting`, ADR 0090):
+    /// what the reconciler's grant is gated on (`demand::runner_may_start`, CP-09). Absent from
+    /// rows written by version 1, read as none: no grant. Pinned by
+    /// `tests/store/activation.rs::should_show_the_trusted_jobs_waiting_on_the_scale_sets_row_when_a_job_is_acquired`.
+    #[serde(default)]
+    pub waiting: u32,
+    /// Its session is active (`ScaleSetState::plans_offers`). Absent from rows written by
+    /// version 1, read as not active: no grant.
+    #[serde(default)]
+    pub active: bool,
     /// The stream revision this row is the fold of.
     pub revision: u64,
 }
@@ -113,7 +123,8 @@ pub struct ScaleSets;
 
 impl ProjectionSpec for ScaleSets {
     const NAME: &'static str = "scale_sets";
-    const VERSION: u32 = 1;
+    /// 2: `waiting` and `active` (CP-09); compatible additions.
+    const VERSION: u32 = 2;
     const SUBSCRIBES: &'static [EventKind] = <ScaleSetEvent as EventSet>::KINDS;
     type Source = ScaleSet;
     type Row = ScaleSetRow;
@@ -129,6 +140,8 @@ impl ProjectionSpec for ScaleSets {
             phase: phase_code(after.phase).to_owned(),
             assigned: after.statistics.map(|s| s.total_assigned_jobs),
             capacity: after.capacity,
+            waiting: after.waiting(),
+            active: after.plans_offers(),
             revision: at.revision.get(),
         };
         sync_rows(rows, [(String::new(), row)].into_iter().collect())

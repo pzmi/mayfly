@@ -97,9 +97,18 @@ module scheduling_machine {
   /// waiting for new VMs. Both are fixed at `init`: the properties are stated for a fixed demand.
   /// `pins` and `bases` are the image placement the pass reads (CP-07): each pool's pinned image
   /// (1 or 2) and, per pool, the images whose base is materialised on this host.
+  /// `jobs` is what bounds the reconciler's grants per pool (CP-09, P9): the jobs a runner may
+  /// start for, the fewer of the pool's shortfall and the room `demand::runner_may_start` leaves
+  /// (classified-trusted jobs waiting beyond the idle runners, while the pool is open and its
+  /// session active; `formal/scaleset.qnt`'s `vmMayStart`). Chosen at `init`; it only falls
+  /// (`jobLeaves`: a job leaves the scale set between a pass's read and its save), the
+  /// scale-set model owning how it rises. The Rust pass recomputes the bound at every pass from
+  /// its read and saves the grant with that read's revisions, so the guard here is read at the
+  /// commit. One host: a grant on another host moves that host's stream, which the Rust grant
+  /// reads too (`tests/store/activation.rs::should_grant_no_second_attempt_when_a_racing_pass_on_another_host_read_before_the_first_grant`).
   type Host = {
     report: Report, gateClosed: bool, drain: str, policy: str -> str, waiting: str -> int,
-    pins: str -> int, bases: str -> Set[int],
+    pins: str -> int, bases: str -> Set[int], jobs: str -> int,
   }
 
   type Terms = { rev: int, open: bool }
@@ -147,6 +156,8 @@ module scheduling_machine {
     staleApplied: bool,
     // a reservation for a pool whose breaker was tripped at the terms the host holds
     trippedAdmitted: bool,
+    // a grant that left its pool with more granted leases than jobs at the commit (CP-09)
+    grantedBeyondDemand: bool,
   }
 
   var host: Host
@@ -446,16 +457,25 @@ module scheduling_machine {
   pure val ALL_EXACT: str -> str = POOLS.mapBy(_ => EXACT)
   pure val NO_WAITING: str -> int = POOLS.mapBy(_ => 0)
 
+  /// Every pool with `MAX_RUNNING` jobs a runner may start for: grants bounded by its terms only.
+  pure val ALL_JOBS: str -> int = POOLS.mapBy(_ => MAX_RUNNING)
+
   action initWith(foreignMem: int, foreignMacos: int): bool =
     initFull(foreignMem, foreignMacos, ALL_EXACT, NO_WAITING)
 
   /// `init` with each pool's capacity policy and the jobs it is told are waiting (DEC-06).
   action initFull(
     foreignMem: int, foreignMacos: int, policy: str -> str, waiting: str -> int,
+  ): bool = initJobs(foreignMem, foreignMacos, policy, waiting, ALL_JOBS)
+
+  /// `initFull` with the jobs each pool's runners may start for (CP-09).
+  action initJobs(
+    foreignMem: int, foreignMacos: int, policy: str -> str, waiting: str -> int,
+    jobs: str -> int,
   ): bool = all {
     host' = {
       report: NO_REPORT, gateClosed: false, drain: NO_DRAIN, policy: policy, waiting: waiting,
-      pins: POOLS.mapBy(_ => 1), bases: POOLS.mapBy(_ => Set()),
+      pins: POOLS.mapBy(_ => 1), bases: POOLS.mapBy(_ => Set()), jobs: jobs,
     },
     leases' = ATTEMPTS.mapBy(_ =>
       { phase: FREE, slot: NO_SLOT, gen: 0, pool: LINUX, running: false, started: false, img: 0 }),
@@ -474,6 +494,7 @@ module scheduling_machine {
       quarantineReleasedEarly: false, autoDeleteQuarantined: false, createdUnleased: false,
       staleApplied: false,
       trippedAdmitted: false,
+      grantedBeyondDemand: false,
     },
   }
 
@@ -484,9 +505,12 @@ module scheduling_machine {
     nondet macosPolicy = Set(EXACT, DEMAND).oneOf()
     nondet linuxWaiting = 0.to(MAX_RUNNING).oneOf()
     nondet macosWaiting = 0.to(MAX_RUNNING).oneOf()
-    initFull(fm, fmac,
+    nondet linuxJobs = 0.to(MAX_RUNNING).oneOf()
+    nondet macosJobs = 0.to(MAX_RUNNING).oneOf()
+    initJobs(fm, fmac,
       Map(LINUX -> linuxPolicy, MACOS -> macosPolicy),
-      Map(LINUX -> linuxWaiting, MACOS -> macosWaiting))
+      Map(LINUX -> linuxWaiting, MACOS -> macosWaiting),
+      Map(LINUX -> linuxJobs, MACOS -> macosJobs))
   }
 
   // ---- the data plane ----------------------------------------------------------------------
@@ -637,19 +661,56 @@ module scheduling_machine {
     }
   }
 
+  /// The leases of `pool` granted: runners (activating, listening or busy) as the pass counts
+  /// them, whatever their attempt has recorded since the grant.
+  pure def activatedOf(ls: int -> Lease, pool: str): int =
+    countOf(ls, pool, l => l.phase == ACTIVATED)
+
+  /// Whether the reconciler's pass may grant `a` (CP-09, P9): its attempt started (the pass
+  /// grants a Prepared attempt only; preparation itself is `lifecycle`'s) and its pool has a job
+  /// no granted lease serves (`jobs`). The pass saves the grant with the host stream at the
+  /// revision it read and reads of every other host stream, the attempt stream, the pool stream
+  /// and the scale-set stream at theirs (ADR 0041), so a grant that commits in between (a racing pass) refuses
+  /// the unit: one atomic step here, the guard read at the commit
+  /// (`racingGrantKeepsTheBoundTest`; its negative control `grantOnStaleReadViolatesTest`).
+  def canGrant(ls: int -> Lease, a: int): bool = and {
+    ls.get(a).phase == RESERVED,
+    ls.get(a).started,
+    activatedOf(ls, ls.get(a).pool) < host.jobs.get(ls.get(a).pool),
+  }
+
+  /// The ghost after granting `a`: a grant beyond the pool's jobs at the commit, or while the
+  /// gate, the drain or the terms were closed.
+  def grantGhost(a: int): Ghost = {
+    val l = leases.get(a)
+    val after = leases.set(a, { ...l, phase: ACTIVATED })
+    { ...g,
+      grantedClosed: g.grantedClosed or not(gateOpen(host)) or not(terms.get(l.pool).open),
+      afterDrain: g.afterDrain or host.drain != NO_DRAIN,
+      grantedBeyondDemand: g.grantedBeyondDemand
+        or activatedOf(after, l.pool) > host.jobs.get(l.pool) }
+  }
+
   /// `GrantActivation`: only with the gate and the pool's terms open (I26), never after drain
-  /// start (I08).
+  /// start (I08); planned by the pass within its pool's jobs (`canGrant`, CP-09).
   action grant(a: int): bool = {
     val l = leases.get(a)
     all {
-      l.phase == RESERVED,
+      canGrant(leases, a),
       gateOpen(host),
       terms.get(l.pool).open,
-      commit("command", host, leases.set(a, { ...l, phase: ACTIVATED }),
-        { ...g,
-          grantedClosed: g.grantedClosed or not(gateOpen(host)) or not(terms.get(l.pool).open),
-          afterDrain: g.afterDrain or host.drain != NO_DRAIN }),
+      commit("command", host, leases.set(a, { ...l, phase: ACTIVATED }), grantGhost(a)),
     }
+  }
+
+  /// A job leaves `pool`'s scale set (it started on a runner, completed or was cancelled): one
+  /// fewer job a new runner may start for (CP-09). The world, between a pass's read and its save.
+  action jobLeaves(pool: str): bool = all {
+    host.jobs.get(pool) > 0,
+    host' = { ...host, jobs: host.jobs.set(pool, host.jobs.get(pool) - 1) },
+    leases' = leases, slotGen' = slotGen, terms' = terms, pools' = pools, dp' = dp, vms' = vms,
+    created' = created, sent' = sent,
+    g' = { ...g, lastKind: "world" },
   }
 
   /// `QuarantineLease{vm_running}`: the lease keeps its slot and resources; a stopped VM's lease
@@ -894,6 +955,7 @@ module scheduling_machine {
       materialise(pool),
       repin(pool),
       evict(pool, img),
+      jobLeaves(pool),
     }
   }
 
@@ -911,6 +973,7 @@ module scheduling_machine {
       reserve(a, pool),
       startAttempt(a),
       grant(a),
+      jobLeaves(pool),
       dpCreate(a),
       foreignChanges,
       quarantine(a),
@@ -993,6 +1056,12 @@ module scheduling_machine {
   /// (or never held), so a slot is never reserved again under a live VM.
   val noVmWithoutLease = not(g.createdUnleased)
 
+  /// grantsWithinDemand (CP-09, P9): no grant leaves its pool with more granted leases than
+  /// jobs a runner may start for (the fewer of its shortfall and `runner_may_start`'s room) at
+  /// its commit, racing passes and jobs leaving included. Checked at each grant: a job that
+  /// leaves afterwards (it started on that runner) lowers `jobs` below the leases granted for it.
+  val grantsWithinDemand = not(g.grantedBeyondDemand)
+
   /// noStartWhileCapacityUnknown: the data plane never starts a VM while the memory it needs
   /// is not known; nothing unknown is assumed (ADR 0052).
   val noStartWhileCapacityUnknown = not(g.dpStartedUnknown)
@@ -1059,6 +1128,7 @@ module scheduling_machine {
     i24CarveOutsFitTheHost,
     i26NoAdmissionWhileClosed,
     noGrantWhileClosed,
+    grantsWithinDemand,
     i27BreakerBounded,
     i28QuarantineNeverAutoDeleted,
     i33DataPlaneNeverOvercommits,
@@ -1254,6 +1324,7 @@ module scheduling {
           report: { ...NO_REPORT, id: 1 }, gateClosed: not(t._4), drain: NO_DRAIN,
           policy: POOLS.mapBy(_ => t._2), waiting: POOLS.mapBy(_ => t._3),
           pins: POOLS.mapBy(_ => 1), bases: POOLS.mapBy(_ => if (t._6) Set(1) else Set()),
+          jobs: ALL_JOBS,
         }
         val ts = POOLS.mapBy(_ => { rev: 0, open: t._5 })
         shapeOf(h, ls, ts, t._1) == shapeOfCounts(countsOf(h, ls, ts, t._1))
@@ -1727,6 +1798,79 @@ module scheduling {
       .then(releaseOnStaleRead(1))
       .then(dpCreate(1))
       .expect(not(noVmWithoutLease))
+  }
+
+  /// One Linux job a runner may start for, none for macOS (CP-09).
+  pure val ONE_LINUX_JOB: str -> int = Map(LINUX -> 1, MACOS -> 0)
+
+  // CP-09 (P9): two prepared attempts and one job: the pass grants one, and a second pass (or
+  // a racing one, whose save reads the host stream the first grant moved) grants nothing more;
+  // a pool with no job is granted nothing, its attempts stay prepared.
+  run racingGrantKeepsTheBoundTest = {
+    initJobs(0, 0, ALL_EXACT, NO_WAITING, ONE_LINUX_JOB).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1))
+      .then(reserve(2, LINUX)).then(startAttempt(2))
+      .then(reserve(3, MACOS)).then(startAttempt(3))
+      .expect(canGrant(leases, 1) and canGrant(leases, 2) and not(canGrant(leases, 3)))
+      .then(grant(1))
+      .expect(leases.get(1).phase == ACTIVATED and not(canGrant(leases, 2)))
+      .expect(grantsWithinDemand and allInvariants)
+  }
+
+  // CP-09: a reservation not yet started (P2) is never granted, whatever the jobs.
+  run grantOnlyAStartedAttemptTest = {
+    initJobs(0, 0, ALL_EXACT, NO_WAITING, ONE_LINUX_JOB).then(ready)
+      .then(reserve(1, LINUX))
+      .expect(not(canGrant(leases, 1)))
+      .then(startAttempt(1))
+      .expect(canGrant(leases, 1))
+  }
+
+  /// The negative control of `racingGrantKeepsTheBoundTest`: a grant decided on a pass's read
+  /// alone (one that read the pool before another pass's grant committed, saved without the
+  /// read of the host stream).
+  action grantOnStaleRead(a: int): bool = {
+    val l = leases.get(a)
+    all {
+      l.phase == RESERVED,
+      l.started,
+      gateOpen(host),
+      terms.get(l.pool).open,
+      commit("command", host, leases.set(a, { ...l, phase: ACTIVATED }), grantGhost(a)),
+    }
+  }
+
+  // Without the read, two passes that both read one job and two prepared attempts grant both:
+  // `grantsWithinDemand` fails, so the read is needed.
+  run grantOnStaleReadViolatesTest = {
+    initJobs(0, 0, ALL_EXACT, NO_WAITING, ONE_LINUX_JOB).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1))
+      .then(reserve(2, LINUX)).then(startAttempt(2))
+      .then(grant(1))
+      .then(grantOnStaleRead(2))
+      .expect(not(grantsWithinDemand))
+  }
+
+  // CP-09: the job leaves the scale set after a pass read it and before its grant: the grant,
+  // saved with the scale-set stream at the read's revision, is refused (not enabled here), and
+  // the attempt stays prepared.
+  run jobLeavingBeforeTheGrantKeepsTheBoundTest = {
+    initJobs(0, 0, ALL_EXACT, NO_WAITING, ONE_LINUX_JOB).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1))
+      .expect(canGrant(leases, 1))
+      .then(jobLeaves(LINUX))
+      .expect(not(canGrant(leases, 1)) and leases.get(1).phase == RESERVED and allInvariants)
+  }
+
+  // The negative control: a grant decided on the scale set as the pass read it (the read not
+  // carried to the save, or a head moved past a foreign event without noticing it) grants for
+  // a job that has left: `grantsWithinDemand` fails.
+  run grantOnStaleScaleSetReadViolatesTest = {
+    initJobs(0, 0, ALL_EXACT, NO_WAITING, ONE_LINUX_JOB).then(ready)
+      .then(reserve(1, LINUX)).then(startAttempt(1))
+      .then(jobLeaves(LINUX))
+      .then(grantOnStaleRead(1))
+      .expect(not(grantsWithinDemand))
   }
 
   // CP-07 (P17): a pool whose pin has no base on the host is carved nothing, told only its live

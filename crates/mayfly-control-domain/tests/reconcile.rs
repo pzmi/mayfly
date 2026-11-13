@@ -83,6 +83,8 @@ fn linux(name: &str, assigned: Option<u32>) -> PoolView {
         scale_set: Some(ScaleSetView {
             assigned,
             capacity: Capacity::NONE,
+            waiting: 0,
+            active: true,
         }),
     }
 }
@@ -97,6 +99,7 @@ fn lease(n: u128, pool_name: &str, stage: RunnerStage) -> LeaseView {
         image: Some(ImageDigest::sample()),
         refusal: None,
         retiring: false,
+        prepared_at: None,
     }
 }
 
@@ -183,6 +186,8 @@ fn should_carve_a_demand_pool_only_for_assigned_jobs_when_it_precedes_a_busy_poo
     mac.scale_set = Some(ScaleSetView {
         assigned: Some(1),
         capacity: Capacity::NONE,
+        waiting: 0,
+        active: true,
     });
     let busy = plan_pass(&inputs(vec![h], vec![mac, lin]));
 
@@ -630,6 +635,174 @@ fn should_plan_nothing_more_when_a_pass_is_repeated_on_its_own_result() {
     assert!(second.commands.is_empty(), "{:?}", second.commands);
 }
 
+fn activated(commands: &[PassCommand]) -> Vec<u128> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::Activate { attempt_id, .. } => Some(attempt_id.as_u128()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A prepared lease of `pool_name` that became Prepared at `at` (minutes).
+fn prepared(n: u128, pool_name: &str, at: u64) -> LeaseView {
+    let mut l = lease(n, pool_name, RunnerStage::Prepared);
+    l.prepared_at = Some(Millis::new(at * MINUTE));
+    l
+}
+
+/// `linux("lin", assigned)` whose scale set knows `waiting` classified-trusted jobs.
+fn trusted(assigned: u32, waiting: u32) -> PoolView {
+    let mut p = linux("lin", Some(assigned));
+    p.scale_set = p.scale_set.map(|s| ScaleSetView { waiting, ..s });
+    p
+}
+
+#[test]
+fn should_grant_within_the_shortfall_and_the_trusted_room_when_attempts_are_prepared() {
+    // given: 3 jobs assigned, 1 listening runner (idle), 3 prepared VMs, the newest first
+    let mut h = host("h1", &[("lin", 10)]);
+    h.leases = vec![
+        lease(1, "lin", RunnerStage::Listening),
+        prepared(5, "lin", 3),
+        prepared(4, "lin", 2),
+        prepared(3, "lin", 1),
+    ];
+
+    // when: two trusted jobs wait (room for one beside the idle runner), then five
+    let narrow = plan_pass(&inputs(vec![h.clone()], vec![trusted(3, 2)]));
+    let wide = plan_pass(&inputs(vec![h], vec![trusted(3, 5)]));
+
+    // then: the room bounds the first, the shortfall (3 - 1) the second; the oldest first
+    assert_eq!(activated(&narrow.commands), vec![3]);
+    assert_eq!(activated(&wide.commands), vec![3, 4]);
+    assert!(retired(&wide.commands).is_empty());
+}
+
+#[test]
+fn should_grant_nothing_when_no_runner_may_start() {
+    // given: two jobs assigned and two prepared VMs
+    let mut h = host("h1", &[("lin", 10)]);
+    h.leases = vec![prepared(1, "lin", 1), prepared(2, "lin", 2)];
+    let no_trusted = trusted(2, 0);
+    let mut inactive = trusted(2, 2);
+    inactive.scale_set = inactive
+        .scale_set
+        .map(|s| ScaleSetView { active: false, ..s });
+    let mut held = trusted(2, 2);
+    held.scale_set = held.scale_set.map(|s| ScaleSetView {
+        capacity: Capacity {
+            mode: WireMode::Paused,
+            ..s.capacity
+        },
+        ..s
+    });
+    let mut paused = trusted(2, 2);
+    paused.mode = PoolMode::Paused;
+    let mut no_scale_set = trusted(2, 2);
+    no_scale_set.scale_set = None;
+    let mut safe = inputs(vec![h.clone()], vec![trusted(2, 2)]);
+    safe.safe_mode = true;
+    let mut draining = h.clone();
+    draining.draining = true;
+    let mut closed = h.clone();
+    closed.admission_open = false;
+    let mut terms_closed = h.clone();
+    if let Some(t) = terms_closed.terms.get_mut(&pool("lin")) {
+        t.open = false;
+    }
+
+    // when
+    let passes = [
+        plan_pass(&inputs(vec![h.clone()], vec![no_trusted])),
+        plan_pass(&inputs(vec![h.clone()], vec![inactive])),
+        plan_pass(&inputs(vec![h.clone()], vec![held])),
+        plan_pass(&inputs(vec![h.clone()], vec![paused])),
+        plan_pass(&inputs(vec![h], vec![no_scale_set])),
+        plan_pass(&safe),
+        plan_pass(&inputs(vec![draining], vec![trusted(2, 2)])),
+        plan_pass(&inputs(vec![closed], vec![trusted(2, 2)])),
+        plan_pass(&inputs(vec![terms_closed], vec![trusted(2, 2)])),
+    ];
+
+    // then: no trusted job, no active session, a held or paused pool, no scale set, safe mode,
+    // a draining or closed host, the pool's terms closed there: nothing granted
+    for pass in &passes {
+        assert!(activated(&pass.commands).is_empty(), "{:?}", pass.commands);
+    }
+}
+
+#[test]
+fn should_activate_a_granted_lease_again_and_count_it_as_a_runner_when_its_activation_did_not_begin()
+ {
+    // given: one job, its lease granted but its attempt still Prepared, and a prepared VM
+    let mut h = host("h1", &[("lin", 10)]);
+    h.leases = vec![lease(1, "lin", RunnerStage::Granted), prepared(2, "lin", 1)];
+    let mut state = inputs(vec![h], vec![trusted(1, 1)]);
+    state
+        .memory
+        .surplus_since
+        .insert(pool("lin"), Millis::new(0));
+
+    // when
+    let pass = plan_pass(&state);
+
+    // then: the granted one is activated again; it serves the job, so nothing else is granted
+    let need = pass.needs.get(&pool("lin")).copied().unwrap_or_default();
+    assert_eq!(activated(&pass.commands), vec![1]);
+    assert_eq!((need.runners.activating, need.shortfall), (1, 0));
+    assert!(!retired(&pass.commands).iter().any(|(n, _)| *n == 1));
+}
+
+#[test]
+fn should_retire_a_granted_attempt_rather_than_activate_it_when_its_scope_drains() {
+    // given: a lease granted but not yet activated, on a draining host, and in a draining pool
+    let mut draining = host("h1", &[("lin", 10)]);
+    draining.draining = true;
+    draining.leases = vec![lease(1, "lin", RunnerStage::Granted)];
+    let mut open = host("h1", &[("lin", 10)]);
+    open.leases = vec![lease(1, "lin", RunnerStage::Granted)];
+    let mut pool_draining = trusted(1, 1);
+    pool_draining.mode = PoolMode::Draining;
+
+    // when
+    let host_drain = plan_pass(&inputs(vec![draining], vec![trusted(1, 1)]));
+    let pool_drain = plan_pass(&inputs(vec![open], vec![pool_draining]));
+
+    // then
+    for pass in [&host_drain, &pool_drain] {
+        assert!(activated(&pass.commands).is_empty(), "{:?}", pass.commands);
+        assert_eq!(retired(&pass.commands), vec![(1, RetireReason::Drain)]);
+    }
+}
+
+#[test]
+fn should_retire_no_attempt_it_grants_when_a_surplus_has_lasted() {
+    // given: one trusted job, two prepared VMs and three preparing (a surplus by the count),
+    // the surplus seen long ago
+    let mut h = host("h1", &[("lin", 10)]);
+    h.leases = vec![
+        prepared(1, "lin", 1),
+        prepared(2, "lin", 2),
+        lease(3, "lin", RunnerStage::Preparing),
+        lease(4, "lin", RunnerStage::Preparing),
+        lease(5, "lin", RunnerStage::Preparing),
+    ];
+    let mut state = inputs(vec![h], vec![trusted(1, 1)]);
+    state
+        .memory
+        .surplus_since
+        .insert(pool("lin"), Millis::new(0));
+
+    // when
+    let pass = plan_pass(&state);
+
+    // then: the oldest is granted and never also retired
+    assert_eq!(activated(&pass.commands), vec![1]);
+    assert!(!retired(&pass.commands).iter().any(|(n, _)| *n == 1));
+}
+
 fn generated() -> impl Strategy<Value = (PassInputs, u64)> {
     let lease_strategy = (
         1_u128..40,
@@ -646,7 +819,7 @@ fn generated() -> impl Strategy<Value = (PassInputs, u64)> {
     );
     (
         proptest::collection::vec(host_strategy, 1..4),
-        proptest::collection::vec((0_u32..6, 0_u32..2, any::<bool>()), 3),
+        proptest::collection::vec((0_u32..6, 0_u32..2, any::<bool>(), 0_u32..5), 3),
         any::<u64>(),
     )
         .prop_map(|(hosts, pools, seed)| {
@@ -654,6 +827,7 @@ fn generated() -> impl Strategy<Value = (PassInputs, u64)> {
                 RunnerStage::NotStarted,
                 RunnerStage::Preparing,
                 RunnerStage::Prepared,
+                RunnerStage::Granted,
                 RunnerStage::Activating,
                 RunnerStage::Listening,
                 RunnerStage::Busy,
@@ -685,9 +859,10 @@ fn generated() -> impl Strategy<Value = (PassInputs, u64)> {
             let pools = pools
                 .into_iter()
                 .zip(names)
-                .map(|((assigned, min_prepared, on_demand), name)| {
+                .map(|((assigned, min_prepared, on_demand, waiting), name)| {
                     let mut p = linux(name, Some(assigned));
                     p.min_prepared = min_prepared;
+                    p.scale_set = p.scale_set.map(|s| ScaleSetView { waiting, ..s });
                     if on_demand {
                         p.policy = demand;
                     }
@@ -732,6 +907,55 @@ proptest! {
         // then
         prop_assert_eq!(&once, &twice);
         prop_assert_eq!(&once, &other);
+    }
+
+    #[test]
+    fn should_grant_within_the_shortfall_and_the_trusted_room_when_inputs_are_random((inputs, _seed) in generated()) {
+        // given: random hosts, leases (granted ones included) and pools with trusted jobs
+
+        // when
+        let pass = plan_pass(&inputs);
+
+        // then: per pool, the fresh grants (of Prepared leases) are within the shortfall and
+        // the room beside the idle runners; a granted lease is activated again; nothing granted
+        // is retired in the same pass
+        let leases: BTreeMap<u128, (&str, RunnerStage, bool)> = inputs
+            .hosts
+            .iter()
+            .flat_map(|h| h.leases.iter().map(move |l| (h, l)))
+            .map(|(h, l)| (l.attempt_id.as_u128(), (l.pool.as_str(), l.stage, h.draining)))
+            .collect();
+        let granted = activated(&pass.commands);
+        let retired_now: Vec<u128> = retired(&pass.commands).into_iter().map(|(n, _)| n).collect();
+        for pool_view in &inputs.pools {
+            let name = pool_view.pool.as_str();
+            let need = pass.needs.get(&pool_view.pool).copied().unwrap_or_default();
+            let fresh = granted
+                .iter()
+                .filter(|n| {
+                    leases
+                        .get(n)
+                        .is_some_and(|(p, stage, _)| *p == name && *stage == RunnerStage::Prepared)
+                })
+                .count();
+            let fresh = u32::try_from(fresh).unwrap_or(u32::MAX);
+            let waiting = pool_view.scale_set.map_or(0, |s| s.waiting);
+            let idle = need.runners.activating + need.runners.listening;
+            let room = waiting.saturating_sub(idle).min(need.shortfall);
+            prop_assert!(fresh <= room, "{name}: {fresh} > {room}");
+        }
+        for (n, (_, stage, _)) in &leases {
+            if *stage == RunnerStage::Granted {
+                prop_assert!(granted.contains(n), "granted {n} not activated");
+            }
+        }
+        for n in &granted {
+            prop_assert!(!retired_now.contains(n), "{n} granted and retired");
+            let planned = leases.get(n).is_some_and(|(_, stage, draining)| {
+                *stage == RunnerStage::Granted || (*stage == RunnerStage::Prepared && !draining)
+            });
+            prop_assert!(planned, "{n} activated from another stage");
+        }
     }
 
     #[test]

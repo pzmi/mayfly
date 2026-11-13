@@ -4,8 +4,10 @@
 //! over the link, and the attempt saga; the inline projections, their rebuild and queries; and
 //! the start of an attempt (P2), the image catalog's pin (OPS-02), the observation inbox (P8),
 //! startup recovery (P1) and the application of a recovery plan (P20); the terms policy (P4); and
-//! the registration manager and the reaper (P9 to P14 but P12, CP-05).
+//! the registration manager and the reaper (P9 to P14 but P12, CP-05); the reconciler's
+//! activation grant (P9, CP-09).
 
+mod activation;
 mod attempts;
 mod codec;
 mod counter;

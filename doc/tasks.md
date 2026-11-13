@@ -213,6 +213,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | |
 | CP-08 | Terms policy P4: a pool's terms applied on every host | CP-07, RT-02 | sonnet | |
 | CP-09 | Activation grant: P9's `GrantActivation` and `BeginActivation` from the reconciler | CP-05, CP-03, KER-06G | opus | |
+| CP-10 | Start reserved leases: P2's driver in the reconciler pass | CP-03, CP-07, CP-09, VER-09 | opus | |
 | DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07, VER-09 | opus | |
 | DP-01 | Data-plane executor and observer, resource ledger, fake provider | KER-08 | opus | |
 | DP-02 | In-process link transport and link contract suite | KER-02 | sonnet | |
@@ -228,10 +229,11 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-02 | Composition: wiring, supervision tree, startup, `mayflyd` | CP-04, DP-02, DP-04, DP-06, ES-05, RT-01, SEC-02 | opus | |
 | RT-03 | Operator socket API and `mayfly` CLI | RT-02 | sonnet | |
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
-| RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05, RT-07 | opus | |
+| RT-05a | Terminal mode: escalating Ctrl-C, a graceful stop of idle and Prepared VMs | RT-02, CP-10 | opus | |
+| RT-05b | Terminal mode over real jobs: deregistration on stop and the Busy wait | RT-05a, GH-04, GH-08, GH-10, RT-07, LNK-02 | opus | |
 | RT-06 | Measured host sizing | RT-02, DP-06, DP-07 | opus | |
 | RT-07 | `mayflyd`'s GitHub wiring: the client, the registration manager and the reaper | CP-05, GH-04, RT-02 | sonnet | |
-| E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09 | opus | ⛳ |
+| E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09, CP-10 | opus | ⛳ |
 | GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
 | GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02, DEC-03 | sonnet | |
@@ -1455,6 +1457,71 @@ reservation.
 Accept: component tests: a prepared attempt with demand is granted and activated once, never
 while `runner_may_start` is false nor beyond the shortfall; a racing pass grants no second
 attempt for the same demand; the registration manager (CP-05) then mints for it.
+Note (CP-09, as built): model first, `formal/scheduling.qnt`'s `grant` is bounded by
+`host.jobs` (the jobs a runner may start for, chosen by `init`, lowered by the world's
+`jobLeaves`) and granted only for a started lease (`canGrant`), with the invariant
+`grantsWithinDemand` (no grant beyond the jobs at its commit), the scenarios
+`racingGrantKeepsTheBoundTest`, `grantOnlyAStartedAttemptTest` and
+`jobLeavingBeforeTheGrantKeepsTheBoundTest`, and the negative controls
+`grantOnStaleReadViolatesTest` and `grantOnStaleScaleSetReadViolatesTest`; the model has one
+host (a second host's grant is covered by the Rust reads below). The pure pass plans `PassCommand::Activate`
+(`reconcile::activations`): per pool the oldest prepared attempts of its pin (the attempts
+projection's new `prepared_at`, v5) on a host whose gate and the pool's terms are open, as many
+as the fewest of the shortfall and the room `demand::runner_may_start` leaves beside the idle
+runners (the `scale_sets` projection's new `waiting` and `active`, v2), never in safe mode;
+granted attempts are never retired as surplus. A lease the host shows granted whose attempt is
+still Prepared is `RunnerStage::Granted`: counted as an activating runner and activated again by
+the next pass (a granted lease whose attempt backs off from activation counts as activating
+too). The driver saves `GrantActivation` under `reconciler::grant_command_id(attempt)` with the
+host stream expected where the pass read it and reads of every other host stream, the attempt,
+the pool and its scale set; the pass's own commits move those revisions only when they follow
+them directly, and a unit of the pass that appended past a foreign write leaves that stream
+unknown, so a later grant on it is not decided (`Heads`, review of CP-09). Then
+`BeginActivation{grant_ref}` with a read of the host stream; a grant recorded before is
+answered by its receipt, which names its `LeaseActivated`. Tests:
+`crates/mayfly-control-domain/tests/reconcile.rs` (`should_grant_*`, a property over random
+inputs), `crates/mayfly-control/tests/store/activation.rs` (once, none without a trusted job,
+the shortfall, a racing pass on the same host and on another
+(`should_grant_no_second_attempt_when_a_racing_pass_on_another_host_read_before_the_first_grant`),
+a job leaving the scale set before the pass's own capacity write
+(`should_grant_nothing_when_a_job_leaves_the_scale_set_before_the_pass_applies_its_capacity`),
+a host closing after the read, a lost activation, the mint, the projections), and the fleet
+simulation's new P9 check, behind the journal too. The grant also reads the attempt streams of
+the pool's granted runners the read showed retiring, so a job bound to one after the read
+(its retirement withdrawn, so it counts again) refuses the grant
+(`should_grant_nothing_when_a_retiring_runner_binds_a_job_after_the_read`); any other change of
+another attempt only makes a read count more runners. A `Granted` attempt in a drained scope
+(its host or pool draining) is retired `drain` rather than activated
+(`crates/mayfly-control-domain/tests/reconcile.rs::should_retire_a_granted_attempt_rather_than_activate_it_when_its_scope_drains`).
+Deferred, unreachable today: a `Granted` attempt that cannot begin its activation (its lease
+granted under another id than the reconciler's, which no code does) is planned again each pass
+and refused `already_activated`; a grace that retires it could reuse an existing reason
+(`Surplus`). Left open: a
+grant follows a preparation by up to the reconciler's interval (a minute) unless a host, pool,
+scale-set or placement stream kicks a pass first (attempt streams do not), CP-10's item (1); and
+under `mayflyd` nothing grants yet, since nothing drives P2's `start_attempt` there (CP-10) and
+nothing records a trusted or acquired job (GH-04, GH-10, GH-08).
+
+#### CP-10 Start reserved leases: P2's driver
+Cites: dm P2, P5, P17; CP-03 and CP-03F (start grace, `attempt_never_started`), CP-07's note
+(`start::Started::NotPlaced`), CP-09's note; `formal/scheduling.qnt` (`startAttempt`,
+`releaseUnstarted`). Found at CP-09's intake (2026-11-13): nothing in `mayflyd` calls
+`mayfly_control::start::start_attempt` (only tests and the fleet kit), so every reservation is
+released `attempt_never_started` after the start grace and no attempt reaches Prepared. The
+reconciler pass calls `start_attempt` for each `NotStarted` lease (the retry budget from the
+pool's configuration); `Started::NotPlaced` waits for a placement kick (never a release or a hot
+retry), and the start grace still releases a lease that never starts. Also on this card:
+(1) **grant latency**: a Prepared VM waits up to the reconciler's interval (a minute) for its
+grant, since attempt-stream kicks do not trigger a pass; kick a pass on an attempt's
+`AttemptPrepared` specifically, leaving the rule pinned by
+`tests/store/reconciler.rs::should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked`
+(attempt kicks in general trigger nothing) in place, or justify the latency on the record;
+(2) **surplus while a job waits** (CP-03): a pool's surplus counts preparing VMs as spare
+(`reconcile::need_of`), so after the hysteresis prepared VMs can be retired `Surplus` while a job
+waits for them; decide the rule and fix it here, with a test.
+Accept: a component test that a reserved lease is started by the next pass and a `NotPlaced` one
+is started once its placement materialises; a Linux daemon test under `mayflyd` over fake-tart
+with VER-09's registry in which an attempt reaches Prepared; tests for (1) and (2).
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,
@@ -1744,7 +1811,7 @@ no metrics port yet, so DEC-07 adds none.
 Note (RT-02, ADR 0091 decision 5): log files, if any, default to `~/Library/Logs/mayfly` on
 macOS and `$XDG_STATE_HOME/mayfly/logs` on Linux (`mayfly_composition::paths`); RT-02 writes none.
 
-#### RT-05 Terminal mode: a clean stop on Ctrl-C
+#### RT-05 Terminal mode: a clean stop on Ctrl-C (split into RT-05a and RT-05b)
 Cites: plan §10 (P23 drain, P24 shutdown), §11; ADR 0031; ADR 0087 decision 1. The owner runs
 `mayflyd` from a terminal as their own user (the primary deployment) and stops it with Ctrl-C.
 P24 leaves VMs running under their shims for a service restart; in terminal mode Ctrl-C means
@@ -1756,6 +1823,33 @@ is the run mode's, decided by the owner (an amendment to ADR 0031).
 Accept: integration test over fake-tart and fake-github: Ctrl-C with an idle, a Prepared and a Busy
 attempt ends with no runner registered, no `mf-*` VM left and the bases untouched; a second Ctrl-C
 during the wait stops at once and leaves what remains recorded for the next start.
+
+Split (owner, 2026-11-12; recorded at CP-09, 2026-11-13): the card above is the record of the
+need; its work is RT-05a and RT-05b below, which replace its Accept.
+
+#### RT-05a Terminal mode: escalating Ctrl-C
+Cites: as RT-05; ADR 0031 (a dated owner amendment, 2026-11-12: written here, model first).
+Deps: RT-02, CP-10. Ctrl-C escalates: the **first** SIGINT is a graceful stop: close admission and
+stop acquiring, retire idle and Prepared attempts and stop and delete their VMs with their
+ownership proof (never a base or a foreign VM), and wait for Busy attempts up to `[shutdown]
+busy_wait` (default 30 min); the **second** prints a warning that the next one forces the stop;
+the **third** is exactly SIGTERM, P24: VMs left under their shims, the unsettled state recorded
+within the 25 s loop bound and 5 s of runtime shutdown, for the next start to adopt. The
+lifecycle and recovery models gain the graceful stop before the Rust code.
+Accept: a Linux daemon test over fake-tart: the first Ctrl-C with an idle and a Prepared attempt
+ends with no `mf-*` VM left, the bases untouched and the state-dir lock released; the second
+prints the warning; the third during a wait behaves as SIGTERM and leaves what remains recorded
+for the next start; a `busy_wait` that runs out takes the same P24 path (VMs left under their
+shims, the unsettled state recorded).
+
+#### RT-05b Terminal mode over real jobs: deregistration and the Busy wait
+Cites: as RT-05; dm P11, P12. Deps: RT-05a, GH-04, GH-08, GH-10, RT-07, LNK-02. The graceful stop
+deregisters each Listening runner before its VM stops (P11; a busy answer keeps it running), and
+the Busy wait follows real jobs to their end.
+Accept: an e2e test over fake-tart and fake-github: Ctrl-C with an idle, a Prepared and a Busy
+attempt ends with no runner registered, no `mf-*` VM left and the bases untouched once the job
+ends; during the wait the second Ctrl-C warns and the third forces the stop, leaving what
+remains recorded.
 
 #### RT-06 Measured host sizing
 Cites: ADR 0052 (amended 2026-11-12), ADR 0024, ADR 0087, plan §9, §11. The owner (2026-11-12):
@@ -2101,6 +2195,11 @@ public allowed repository behind a group that does not admit public repositories
 `reason`, `run_id`, from the lookup's command), and the reconciler starts and mints a runner only
 while `ScaleSetState::runner_may_start(idle)` holds (a test for each); the pool's settings reach
 the stream as `ApplyTrustPolicy`.
+Note (CP-09): the reconciler's half is built: its grant reads `runner_may_start` from the
+`scale_sets` projection's `waiting` and `active`
+(`crates/mayfly-control/tests/store/activation.rs::should_grant_nothing_when_no_runner_may_start`),
+and the registration manager mints only for an attempt the grant activated; what is left here
+is recording the lookups and acquisitions under `mayflyd` that make `waiting` non-zero.
 
 #### GH-09 (Withdrawn) Operator release of a refusal
 Withdrawn by GH-00S (owner, 2026-11-12, ADR 0090 amended): refused jobs hold nothing any more

@@ -48,6 +48,23 @@
 //!   it times a surplus by the passes, never by the instants in between.
 //!   An attempt whose retirement is already requested (`LeaseView::retiring`) is neither
 //!   retired again nor counted as a runner or a prepared VM.
+//! - `Activate` (P9, CP-09): the pool's prepared attempts of its current pin, the oldest first,
+//!   are granted (`Host`'s `GrantActivation`) and their activation begun (`Attempt`'s
+//!   `BeginActivation`), as many as the fewest of: the shortfall (`totalAssignedJobs` beyond
+//!   the activating, listening and busy runners), the prepared attempts, and the room
+//!   [`demand::runner_may_start`] leaves (a classified-trusted job waiting beyond the idle
+//!   runners, the pool open and its scale set's session active: ADR 0090). A pool with no
+//!   scale set, or whose scale set knows of no such job, is granted nothing, and its attempts
+//!   stay prepared (pinned by
+//!   `tests/reconcile.rs::should_grant_within_the_shortfall_and_the_trusted_room_when_attempts_are_prepared`,
+//!   `should_grant_nothing_when_no_runner_may_start`). A lease the host shows granted whose
+//!   attempt is still Prepared ([`RunnerStage::Granted`]: the grant committed, its
+//!   `BeginActivation` not) counts as an activating runner and is planned `Activate` again,
+//!   needing no new demand; the driver finds the grant by its receipt. The driver saves each
+//!   grant with reads of what the pass read (the host streams, the pool, the attempt, the scale
+//!   set), so a pass whose read another pass's grant or a job leaving made stale grants nothing
+//!   (`formal/scheduling.qnt`'s `canGrant`, `jobLeaves`, `grantsWithinDemand`; the driver's
+//!   module docs name its tests and its limits).
 //! - Cleanup: `ReleaseSlot` for a lease whose attempt's VM is gone (`vm_deleted`,
 //!   `attempt_lost`) or that no `AttemptStarted` followed within [`Settings::start_grace`]
 //!   (`attempt_never_started`, P2's failure path), and `CompleteHostDrain` /
@@ -76,7 +93,9 @@
 //!
 //! The pass composes actions `formal/scheduling.qnt` already models: a reservation within
 //! `planOf`'s carve (`reserve`, `carveOutAdmissible`), a release on evidence (`release`),
-//! `completeDrain`; its retirement of a Prepared attempt is `formal/lifecycle.qnt`'s retirement.
+//! `completeDrain`, a grant within the pool's jobs (`grant`, `canGrant`, CP-09); its retirement
+//! of a Prepared attempt is `formal/lifecycle.qnt`'s retirement, and its `BeginActivation` that
+//! model's `beginActivation`.
 //! The hysteresis and the start grace are timing choices: they delay, and never add, a command.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,6 +151,10 @@ pub enum RunnerStage {
     Preparing,
     /// Prepared: booted, verified, unregistered (ADR 0028).
     Prepared,
+    /// Prepared, with its lease granted by the host (`LeaseActivated`) and no
+    /// `ActivationStarted` yet (CP-09): counted as an activating runner, never retired as a
+    /// prepared VM, and activated by the next pass.
+    Granted,
     /// Activating.
     Activating,
     /// Listening.
@@ -166,6 +189,8 @@ pub struct LeaseView {
     pub refusal: Option<u64>,
     /// Its attempt's retirement is already requested: not retired again, not counted.
     pub retiring: bool,
+    /// When its attempt became Prepared, while it is: the pass grants the oldest first (P9).
+    pub prepared_at: Option<Millis>,
 }
 
 /// A pool's terms as applied on a host.
@@ -218,6 +243,10 @@ pub struct ScaleSetView {
     pub assigned: Option<u32>,
     /// The capacity input it holds.
     pub capacity: Capacity,
+    /// Jobs it classified trusted that wait for a runner (`ScaleSetState::waiting`, ADR 0090).
+    pub waiting: u32,
+    /// Its session is active (`ScaleSetState::plans_offers`).
+    pub active: bool,
 }
 
 /// One pool as the pass reads it (no `PartialEq`: a function pointer compares by address).
@@ -293,6 +322,14 @@ pub enum PassCommand {
         resources: Resources,
         /// The terms revision the plan read.
         terms_revision: u64,
+    },
+    /// P9: `GrantActivation` on the host for the lease of a prepared attempt, then
+    /// `BeginActivation` on the attempt with the grant's event (CP-09).
+    Activate {
+        /// The host holding the lease.
+        host_id: HostId,
+        /// The attempt.
+        attempt_id: AttemptId,
     },
     /// `RequestRetirement` on the attempt.
     Retire {
@@ -590,12 +627,27 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
         commands.extend(reservations);
     } else {
         let (releases, completions) = cleanup(&hosts, &pools, now, inputs.settings, &mut memory);
+        let activations = activations(&hosts, &pool_of, &needs);
+        let granted: BTreeSet<AttemptId> = activations
+            .iter()
+            .filter_map(|c| match c {
+                PassCommand::Activate { attempt_id, .. } => Some(*attempt_id),
+                PassCommand::ApplyCapacity { .. }
+                | PassCommand::ReserveSlot { .. }
+                | PassCommand::Retire { .. }
+                | PassCommand::ReleaseSlot { .. }
+                | PassCommand::CompleteHostDrain { .. }
+                | PassCommand::CompletePoolDrain { .. } => None,
+            })
+            .collect();
         commands.extend(releases);
         commands.extend(reservations);
+        commands.extend(activations);
         commands.extend(retirements(
             &hosts,
             &pool_of,
             &needs,
+            &granted,
             now,
             inputs.settings,
             &mut memory,
@@ -644,12 +696,16 @@ const fn counted_stage(host: &HostView, lease: &LeaseView) -> RunnerStage {
         RunnerStage::NotStarted
         | RunnerStage::Preparing
         | RunnerStage::Prepared
+        | RunnerStage::Granted
         | RunnerStage::Listening
             if host.draining =>
         {
             RunnerStage::Ending
         }
-        RunnerStage::Prepared | RunnerStage::Listening | RunnerStage::Activating
+        RunnerStage::Prepared
+        | RunnerStage::Granted
+        | RunnerStage::Listening
+        | RunnerStage::Activating
             if lease.retiring =>
         {
             RunnerStage::Ending
@@ -657,7 +713,7 @@ const fn counted_stage(host: &HostView, lease: &LeaseView) -> RunnerStage {
         RunnerStage::NotStarted => RunnerStage::NotStarted,
         RunnerStage::Preparing => RunnerStage::Preparing,
         RunnerStage::Prepared => RunnerStage::Prepared,
-        RunnerStage::Activating => RunnerStage::Activating,
+        RunnerStage::Activating | RunnerStage::Granted => RunnerStage::Activating,
         RunnerStage::Listening => RunnerStage::Listening,
         RunnerStage::Busy => RunnerStage::Busy,
         RunnerStage::Ending => RunnerStage::Ending,
@@ -692,7 +748,9 @@ fn needs_of(hosts: &[HostView], pools: &[&PoolView], safe: bool) -> BTreeMap<Poo
                     tally.prepared_current = tally.prepared_current.saturating_add(1);
                 }
             }
-            RunnerStage::Activating => tally.activating = tally.activating.saturating_add(1),
+            RunnerStage::Activating | RunnerStage::Granted => {
+                tally.activating = tally.activating.saturating_add(1);
+            }
             RunnerStage::Listening => tally.listening = tally.listening.saturating_add(1),
             RunnerStage::Busy => tally.busy = tally.busy.saturating_add(1),
             RunnerStage::Ending | RunnerStage::Gone(..) | RunnerStage::Quarantined => {}
@@ -707,12 +765,14 @@ fn needs_of(hosts: &[HostView], pools: &[&PoolView], safe: bool) -> BTreeMap<Poo
         .collect()
 }
 
-/// Retirements: the drained scope, images no longer pinned, and a surplus that lasted the
-/// hysteresis. Never a quarantined lease, never a busy runner.
+/// Retirements: the drained scope (a granted attempt whose activation did not begin included,
+/// CP-09), images no longer pinned, and a surplus that lasted the hysteresis. Never a
+/// quarantined lease, never a busy runner.
 fn retirements(
     hosts: &[HostView],
     pool_of: &BTreeMap<&PoolName, &PoolView>,
     needs: &BTreeMap<PoolName, PoolNeed>,
+    granted: &BTreeSet<AttemptId>,
     now: Millis,
     settings: Settings,
     memory: &mut PassMemory,
@@ -724,13 +784,15 @@ fn retirements(
             let Some(pool) = pool_of.get(&lease.pool) else {
                 continue;
             };
-            if lease.quarantined || lease.retiring {
+            if lease.quarantined || lease.retiring || granted.contains(&lease.attempt_id) {
                 continue;
             }
             let in_drain = host.draining || drains(pool.mode);
             let current = current_image(pool, lease.image.as_ref());
             let reason = match lease.stage {
-                RunnerStage::Prepared if in_drain => Some(RetireReason::Drain),
+                RunnerStage::Prepared | RunnerStage::Granted if in_drain => {
+                    Some(RetireReason::Drain)
+                }
                 RunnerStage::Prepared if !current => Some(RetireReason::ImageReplaced),
                 RunnerStage::Listening if in_drain => Some(RetireReason::Drain),
                 RunnerStage::Prepared => {
@@ -742,6 +804,7 @@ fn retirements(
                 }
                 RunnerStage::NotStarted
                 | RunnerStage::Preparing
+                | RunnerStage::Granted
                 | RunnerStage::Activating
                 | RunnerStage::Listening
                 | RunnerStage::Busy
@@ -780,6 +843,115 @@ fn retirements(
     out
 }
 
+/// How many more runners [`demand::runner_may_start`] lets the pool start beside its `idle`
+/// ones: none without a scale set (ADR 0090: a runner starts only for a job its scale set
+/// classified trusted). The pool's own mode closes it as its wire mode would (a paused or
+/// draining pool starts nothing even before its scale set holds the new input).
+fn trusted_room(pool: &PoolView, need: &PoolNeed) -> u32 {
+    let Some(scale_set) = pool.scale_set else {
+        return 0;
+    };
+    let mode = match scale_set.capacity.mode {
+        WireMode::Open => wire_mode(pool.mode, false),
+        held @ (WireMode::Paused | WireMode::Draining | WireMode::SafeMode) => held,
+    };
+    let idle = need
+        .runners
+        .activating
+        .saturating_add(need.runners.listening);
+    let mut room: u32 = 0;
+    while room < need.shortfall
+        && demand::runner_may_start(&demand::RunnerGate {
+            mode,
+            active: scale_set.active,
+            waiting: scale_set.waiting,
+            idle: idle.saturating_add(room),
+        })
+    {
+        room = room.saturating_add(1);
+    }
+    room
+}
+
+/// Whether `host` would grant a lease of `pool` now, as `Host` decides it (I08, I26): its gate
+/// open (no drain, no closing cause) and the pool's terms open there, and the pool admitting.
+/// The pass plans no grant the host would refuse; a grant the host refuses after all (its
+/// read was behind) leaves the attempt Prepared for the next pass.
+fn grantable(host: &HostView, pool: &PoolView) -> bool {
+    !host.draining
+        && host.admission_open
+        && host.terms.get(&pool.pool).is_some_and(|t| t.open)
+        && admits(pool.mode)
+}
+
+/// A prepared attempt a pass may grant: when it became Prepared, the attempt, its host.
+type Candidate<'h> = (Option<Millis>, AttemptId, &'h HostId);
+
+/// P9 (CP-09): every granted lease whose attempt has not begun its activation, then per pool
+/// the oldest prepared attempts of its current pin on a host that would grant them
+/// ([`grantable`]), within the shortfall and the room [`trusted_room`] leaves. Never for a
+/// retiring, quarantined or replaced-image attempt.
+fn activations(
+    hosts: &[HostView],
+    pool_of: &BTreeMap<&PoolName, &PoolView>,
+    needs: &BTreeMap<PoolName, PoolNeed>,
+) -> Vec<PassCommand> {
+    let mut resumed = Vec::new();
+    let mut candidates: BTreeMap<&PoolName, Vec<Candidate<'_>>> = BTreeMap::new();
+    for host in hosts {
+        for lease in &host.leases {
+            let Some(pool) = pool_of.get(&lease.pool) else {
+                continue;
+            };
+            if lease.quarantined || lease.retiring {
+                continue;
+            }
+            match lease.stage {
+                // a granted attempt in a drained scope is retired instead (`retirements`)
+                RunnerStage::Granted if host.draining || drains(pool.mode) => {}
+                RunnerStage::Granted => resumed.push(PassCommand::Activate {
+                    host_id: host.host_id.clone(),
+                    attempt_id: lease.attempt_id,
+                }),
+                RunnerStage::Prepared
+                    if grantable(host, pool) && current_image(pool, lease.image.as_ref()) =>
+                {
+                    candidates.entry(&pool.pool).or_default().push((
+                        lease.prepared_at,
+                        lease.attempt_id,
+                        &host.host_id,
+                    ));
+                }
+                RunnerStage::NotStarted
+                | RunnerStage::Preparing
+                | RunnerStage::Prepared
+                | RunnerStage::Activating
+                | RunnerStage::Listening
+                | RunnerStage::Busy
+                | RunnerStage::Ending
+                | RunnerStage::Gone(..)
+                | RunnerStage::Quarantined => {}
+            }
+        }
+    }
+    let mut out = resumed;
+    for (pool, mut prepared) in candidates {
+        let (Some(view), Some(need)) = (pool_of.get(pool), needs.get(pool)) else {
+            continue;
+        };
+        // the oldest first; an instant not known sorts last, then by attempt id
+        prepared.sort_by_key(|(at, attempt, _)| (at.is_none(), *at, *attempt));
+        let take = usize::try_from(trusted_room(view, need)).unwrap_or(usize::MAX);
+        for (_, attempt_id, host_id) in prepared.into_iter().take(take) {
+            out.push(PassCommand::Activate {
+                host_id: host_id.clone(),
+                attempt_id,
+            });
+        }
+    }
+    out
+}
+
 /// Cleanup: releases on evidence and of reservations never started, then drain completions.
 fn cleanup(
     hosts: &[HostView],
@@ -806,6 +978,7 @@ fn cleanup(
                 }
                 RunnerStage::Preparing
                 | RunnerStage::Prepared
+                | RunnerStage::Granted
                 | RunnerStage::Activating
                 | RunnerStage::Listening
                 | RunnerStage::Busy
