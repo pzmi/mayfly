@@ -3,7 +3,8 @@
 //! `Secret<T>` formats as `<redacted>` under both `Debug` and `Display`, so a secret inside any
 //! type that derives `Debug` (an error, a config, a provider) prints redacted too. It has no
 //! `Serialize`, no `Clone` and no `PartialEq` (`ARCH-secret-serialize` keeps every type that
-//! holds one from serialising it); the only way to the value is [`Secret::expose`], named so a
+//! holds one from serialising it; `tests/secret.rs` fails to compile if the wrapper ever
+//! implements `Serialize`); the only way to the value is [`Secret::expose`], named so a
 //! reviewer sees each place a secret leaves its wrapper. Pinned by `tests/secret.rs`.
 //!
 //! Dropping a `Secret` frees its memory without wiping it: a crash dump or swapped page may

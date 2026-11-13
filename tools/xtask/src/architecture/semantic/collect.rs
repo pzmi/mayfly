@@ -16,9 +16,9 @@ use super::rules_events;
 use super::{
     AttributeUse, Context, Declaration, Facts, HiddenItem, INCLUDE_FAMILY, ImplDecl, IncludeKind,
     IncludeUse, METAVARIABLE_ATTRIBUTE, MacroFacts, MethodCall, MutParam, RefKind, Reference,
-    SerdeAttr, Site, TestFn, TypeDecl, Unit, effective_metas, foreign_message, include_path,
-    is_doc_hidden, is_include, is_test_attribute, is_test_only, non_literal, outside_package,
-    relative,
+    SerdeAttr, Site, TestFn, TypeAlias, TypeDecl, TypeRef, Unit, effective_metas, foreign_message,
+    include_path, is_doc_hidden, is_include, is_test_attribute, is_test_only, non_literal,
+    outside_package, relative,
 };
 
 /// Where a target is: the workspace root, its package's directory, and whether it is the
@@ -30,6 +30,9 @@ pub struct Target<'a> {
     pub package_dir: &'a Path,
     /// Whether the target is a library.
     pub library: bool,
+    /// What a `crate::` path of this target stands for in a declaration's item path: a
+    /// library's crate name, or a key no path can spell for any other target.
+    pub key: &'a str,
 }
 
 /// Collects the facts of one target into `facts`; returns its module scopes, which
@@ -60,6 +63,7 @@ pub fn collect_target(
         }
         let mut collector = Collector {
             root,
+            key: target.key,
             scopes: &scopes,
             module: unit.module.clone(),
             file: unit.file.clone(),
@@ -101,6 +105,26 @@ fn type_last(ty: &syn::Type) -> String {
         syn::Type::Group(g) => type_last(&g.elem),
         _ => String::new(),
     }
+}
+
+/// Every path inside a syntax node: generic arguments, bounds, defaults, `dyn` and `impl`
+/// traits and function pointer types included.
+#[derive(Default)]
+struct PathsIn(Vec<Written>);
+
+impl<'ast> Visit<'ast> for PathsIn {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.0.push(Written::from_syn(path));
+        visit::visit_path(self, path);
+    }
+}
+
+/// The names of the type parameters `generics` declares.
+fn type_params(generics: &syn::Generics) -> BTreeSet<String> {
+    generics
+        .type_params()
+        .map(|p| paths::name(&p.ident))
+        .collect()
 }
 
 /// Every identifier in a type, generic arguments included.
@@ -253,6 +277,8 @@ impl<'ast> Visit<'ast> for Binder<'_> {
 /// Pass two: references and `unsafe` sites.
 struct Collector<'a> {
     root: &'a Path,
+    /// The target's key, for item paths ([`Target::key`]).
+    key: &'a str,
     scopes: &'a Scopes,
     module: Vec<String>,
     file: PathBuf,
@@ -549,24 +575,82 @@ impl Collector<'_> {
         }
     }
 
-    /// Records a struct or enum with its derives and field identifiers.
+    /// Records a struct or enum with its derives, field identifiers and the paths its fields
+    /// and generics name.
     fn type_decl(
         &mut self,
         attrs: &[Attribute],
         ident: &syn::Ident,
-        fields: BTreeSet<String>,
+        (fields, refs): (BTreeSet<String>, Vec<TypeRef>),
         is_enum: bool,
     ) {
         let site = self.site(ident.span().start().line);
         self.facts.types.push(TypeDecl {
             site,
             name: paths::name(ident),
+            path: self.item_path(ident),
             derives: derives(attrs),
             fields,
+            refs,
             try_from: rules_events::container_try_from(attrs),
             is_enum,
             converted: rules_events::converted(attrs),
         });
+    }
+
+    /// The item path of `ident` declared in this module: the target's key, the module and
+    /// the name, as a [`TypeRef`] candidate into this target spells it.
+    fn item_path(&self, ident: &syn::Ident) -> Vec<String> {
+        let mut path = vec![self.key.to_owned()];
+        path.extend(self.module.iter().cloned());
+        path.push(paths::name(ident));
+        path
+    }
+
+    /// Each of `paths` with its candidates from this module, a `crate::` candidate keyed by
+    /// the target. A lone name in `generics` is a type parameter of the item, not an item.
+    fn type_refs(&self, paths: Vec<Written>, generics: &BTreeSet<String>) -> Vec<TypeRef> {
+        let parameter = |p: &Written| match p.segments.as_slice() {
+            [only] => !p.absolute && generics.contains(only),
+            _ => false,
+        };
+        paths
+            .into_iter()
+            .filter(|p| !parameter(p))
+            .filter_map(|p| {
+                let last = p.segments.last()?.clone();
+                let resolved = self
+                    .scopes
+                    .resolve(&self.module, &p)
+                    .into_iter()
+                    .map(|mut candidate| {
+                        if let Some(first) = candidate.first_mut()
+                            && *first == "crate"
+                        {
+                            self.key.clone_into(first);
+                        }
+                        candidate
+                    })
+                    .collect();
+                Some(TypeRef { last, resolved })
+            })
+            .collect()
+    }
+
+    /// The identifiers and the [`TypeRef`]s of `types` and `generics`.
+    fn declared_types<'t>(
+        &self,
+        types: impl Iterator<Item = &'t syn::Type>,
+        generics: &syn::Generics,
+    ) -> (BTreeSet<String>, Vec<TypeRef>) {
+        let mut idents = BTreeSet::new();
+        let mut found = PathsIn::default();
+        for ty in types {
+            idents.extend(type_idents(ty));
+            found.visit_type(ty);
+        }
+        found.visit_generics(generics);
+        (idents, self.type_refs(found.0, &type_params(generics)))
     }
 
     /// Records `ident` as a hidden item when `attrs` hold `#[doc(hidden)]`.
@@ -1093,23 +1177,20 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.hidden(&item.attrs, &item.ident);
-        let fields = item
-            .fields
-            .iter()
-            .flat_map(|f| type_idents(&f.ty))
-            .collect();
+        let fields = self.declared_types(item.fields.iter().map(|f| &f.ty), &item.generics);
         self.type_decl(&item.attrs, &item.ident, fields, false);
         visit::visit_item_struct(self, item);
     }
 
     fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
         self.hidden(&item.attrs, &item.ident);
-        let fields = item
-            .variants
-            .iter()
-            .flat_map(|v| v.fields.iter())
-            .flat_map(|f| type_idents(&f.ty))
-            .collect();
+        let fields = self.declared_types(
+            item.variants
+                .iter()
+                .flat_map(|v| v.fields.iter())
+                .map(|f| &f.ty),
+            &item.generics,
+        );
         self.type_decl(&item.attrs, &item.ident, fields, true);
         visit::visit_item_enum(self, item);
     }
@@ -1131,6 +1212,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
         self.hidden(&item.attrs, &item.ident);
+        let (_, refs) = self.declared_types(std::iter::once(item.ty.as_ref()), &item.generics);
+        let site = self.site(item.ident.span().start().line);
+        self.facts.aliases.push(TypeAlias {
+            site,
+            path: self.item_path(&item.ident),
+            refs,
+        });
         visit::visit_item_type(self, item);
     }
 
@@ -1186,11 +1274,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let self_name = type_last(&item.self_ty);
             registry = (trait_name.as_str(), self_name.as_str()) == REGISTRY_IMPL;
             let site = self.site(last.ident.span().start().line);
+            let mut found = PathsIn::default();
+            found.visit_type(&item.self_ty);
+            let self_refs = self.type_refs(found.0, &type_params(&item.generics));
             self.facts.impls.push(ImplDecl {
                 site,
                 trait_name,
                 self_name,
-                self_idents: type_idents(&item.self_ty),
+                self_refs,
             });
         }
         let self_ty = match item.self_ty.as_ref() {

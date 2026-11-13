@@ -4,7 +4,8 @@
 //! non-zero with a diagnostic line that names the rule and path in its `expected.txt`.
 //!
 //! `expected.txt` holds `rule: <id>`, `at: <path substring>` and optional
-//! `contains: <message substring>` lines; one diagnostic line must satisfy all of them.
+//! `contains: <message substring>` lines; one diagnostic line must satisfy all of them. An
+//! `absent: <substring>` line says that no diagnostic line may contain it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,11 +64,13 @@ fn cases() -> Vec<String> {
 /// Whether one line of `output` is a diagnostic satisfying `expected`.
 fn matches(output: &str, expected: &str) -> Result<bool, String> {
     let (mut rule, mut at, mut contains, mut only) = (None, None, Vec::new(), false);
+    let mut absent = Vec::new();
     for line in expected.lines().filter(|l| !l.trim().is_empty()) {
         match line.split_once(':').map(|(k, v)| (k.trim(), v.trim())) {
             Some(("rule", v)) => rule = Some(v),
             Some(("at", v)) => at = Some(v),
             Some(("contains", v)) => contains.push(v),
+            Some(("absent", v)) => absent.push(v),
             Some(("only", v)) => only = v == "true",
             _ => return Err(format!("bad expected.txt line: {line}")),
         }
@@ -79,6 +82,14 @@ fn matches(output: &str, expected: &str) -> Result<bool, String> {
         && output
             .lines()
             .any(|line| line.starts_with("ARCH-") && !line.starts_with(&prefix))
+    {
+        return Ok(false);
+    }
+    // A diagnostic line is the rendered diagnostic (`rule: message (at path)`), the same text
+    // `Expected::allows` searches in-process, so `absent` means the same in both harnesses.
+    if output
+        .lines()
+        .any(|line| line.starts_with("ARCH-") && absent.iter().any(|a| line.contains(a)))
     {
         return Ok(false);
     }
@@ -203,6 +214,21 @@ fn should_reject_line_when_rule_matches_but_path_differs() {
 
     // then
     assert!(!matched);
+}
+
+#[test]
+fn should_reject_output_when_a_line_contains_an_absent_substring() {
+    // given
+    let output = "ARCH-unknown-crate: crate `x` (at crates/x/Cargo.toml)\nARCH-unknown-crate: crate `y` (at crates/y/Cargo.toml)\n";
+    let expected = "rule: ARCH-unknown-crate\nat: crates/x\nabsent: crates/y\n";
+
+    // when
+    let with_lookalike = matches(output, expected).unwrap();
+    let alone = matches(output.lines().next().unwrap(), expected).unwrap();
+
+    // then
+    assert!(!with_lookalike);
+    assert!(alone);
 }
 
 #[test]

@@ -4,9 +4,11 @@
 //!
 //! `expected.txt` holds `key: value` lines: `rule:` (required, a rule id), `at:` (required, a
 //! substring of the diagnostic's path), any number of `contains:` (substrings of the
-//! message) and an optional `only: true`. One diagnostic must satisfy all of them; other
-//! diagnostics may also appear unless `only` is set, which requires every diagnostic to be
-//! of the expected rule.
+//! message), an optional `only: true` and any number of `absent:` (substrings no
+//! diagnostic line may contain). One diagnostic must satisfy `rule`, `at` and `contains`;
+//! other diagnostics may also appear unless `only` is set, which requires every diagnostic to
+//! be of the expected rule, and none may contain an `absent` substring (a fixture's way to
+//! say that a lookalike next to the violation is not reported).
 
 use std::fs;
 use std::path::Path;
@@ -27,12 +29,15 @@ pub struct Expected {
     pub contains: Vec<String>,
     /// Every diagnostic must be of `rule`.
     pub only: bool,
+    /// Substrings no rendered diagnostic (`rule: message (at path)`) may contain.
+    pub absent: Vec<String>,
 }
 
 impl Expected {
     /// Parses `expected.txt`.
     pub fn parse(text: &str) -> Result<Self, String> {
         let (mut rule, mut at, mut contains, mut only) = (None, None, Vec::new(), false);
+        let mut absent = Vec::new();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line
                 .split_once(':')
@@ -42,6 +47,7 @@ impl Expected {
                 "rule" => rule = Some(value),
                 "at" => at = Some(value),
                 "contains" => contains.push(value),
+                "absent" => absent.push(value),
                 "only" => {
                     only = match value.as_str() {
                         "true" => true,
@@ -57,6 +63,7 @@ impl Expected {
             at: at.ok_or("missing `at:`")?,
             contains,
             only,
+            absent,
         })
     }
 
@@ -65,6 +72,16 @@ impl Expected {
         diagnostic.rule.id() == self.rule
             && diagnostic.at.contains(&self.at)
             && self.contains.iter().all(|c| diagnostic.message.contains(c))
+    }
+
+    /// Whether `diagnostics` are acceptable beside the match: of `rule` only when `only` is
+    /// set, and none containing an `absent` substring.
+    pub fn allows(&self, diagnostics: &[Diagnostic]) -> bool {
+        diagnostics.iter().all(|d| {
+            let line = d.to_string();
+            (!self.only || d.rule.id() == self.rule)
+                && !self.absent.iter().any(|a| line.contains(a.as_str()))
+        })
     }
 }
 
@@ -151,12 +168,9 @@ fn verify_case(case: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot read expected.txt: {e}"))?;
     let expected = Expected::parse(&text).map_err(|e| format!("expected.txt: {e}"))?;
     let outcome = check(&case.join("Cargo.toml"));
-    let extra = expected.only
-        && outcome
-            .diagnostics
-            .iter()
-            .any(|d| d.rule.id() != expected.rule);
-    if !extra && outcome.diagnostics.iter().any(|d| expected.matches(d)) {
+    if expected.allows(&outcome.diagnostics)
+        && outcome.diagnostics.iter().any(|d| expected.matches(d))
+    {
         return Ok(());
     }
     let got: Vec<String> = outcome
@@ -165,10 +179,15 @@ fn verify_case(case: &Path) -> Result<(), String> {
         .map(ToString::to_string)
         .collect();
     Err(format!(
-        "expected `{}`{} at `{}`, got: {}",
+        "expected `{}`{} at `{}`{}, got: {}",
         expected.rule,
         if expected.only { " only" } else { "" },
         expected.at,
+        if expected.absent.is_empty() {
+            String::new()
+        } else {
+            format!(" and nothing containing {:?}", expected.absent)
+        },
         if got.is_empty() {
             "no diagnostics".to_owned()
         } else {
@@ -222,6 +241,29 @@ mod tests {
         // then
         assert!(parsed_only);
         assert!(bad.unwrap_err().contains("true or false"));
+    }
+
+    #[test]
+    fn should_refuse_diagnostics_when_one_contains_an_absent_substring() {
+        // given
+        let expected = Expected::parse(
+            "rule: ARCH-unknown-crate\nat: crates/x\nabsent: crates/y\nabsent: `z`\n",
+        )
+        .unwrap();
+        let wanted = Diagnostic::new(Rule::UnknownCrate, "crate `x`", "crates/x/Cargo.toml");
+        let lookalike = Diagnostic::new(Rule::UnknownCrate, "crate `y`", "crates/y/Cargo.toml");
+        let named = Diagnostic::new(Rule::NotAMember, "crate `z`", "crates/w/Cargo.toml");
+
+        // when
+        let alone = expected.allows(std::slice::from_ref(&wanted));
+        let beside_lookalike = expected.allows(&[wanted.clone(), lookalike]);
+        let beside_named = expected.allows(&[wanted, named]);
+
+        // then
+        assert_eq!(expected.absent, ["crates/y", "`z`"]);
+        assert!(alone);
+        assert!(!beside_lookalike);
+        assert!(!beside_named);
     }
 
     #[test]

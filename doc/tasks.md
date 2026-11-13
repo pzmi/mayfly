@@ -396,6 +396,15 @@ generic parameter bound to a holder and `dyn` of a holder as holders; consider a
 assertion in `mayfly-domain` that `Secret<T>` is not `Serialize`, beside the syntactic rule.
 Accept: a negative fixture where a same-named, secret-free type in another crate is not flagged
 while the real holder is; fixtures for an alias and a generic holder; the rule's own tests.
+Landed: holders keyed by item path (the target's crate name, module and name; a non-library
+target by a key no path spells), field, generic and alias paths resolved through the scopes and
+workspace re-exports; built from production structs, enums and aliases only, test code
+unchecked (it cannot serialise the wrapper); `Secret` itself still matched by last segment,
+and a path no scope resolves fails closed against holders' simple names.
+Fixtures `secret-holder-same-name-elsewhere` (with the new `absent:` expectation key),
+`secret-holder-through-alias`, `secret-holder-generic-default`; a compile-time assertion in
+`mayfly-domain`'s `tests/secret.rs` that `Secret<T>` is not `Serialize` (no new dependency).
+CP-05's renamed test types keep their names.
 
 #### ARCH-04 Architecture rules behind the event shape tracer; KER-03G leftovers
 Cites: ADR 0018 (amended 2026-11-09, ARCH-04), fnd §3.3. The tracer passes, by design, what serde

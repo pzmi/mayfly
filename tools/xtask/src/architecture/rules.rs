@@ -181,8 +181,8 @@ rules! {
         "Production code of a production crate spawns a detached task or thread (tokio::spawn, spawn_blocking, spawn_local, std::thread::spawn) outside the listed supervision, writer, transport and process modules.",
         ["detached-spawn-in-control"];
     SecretSerialize => "ARCH-secret-serialize", "ARCH-01",
-        "Production code derives or implements Serialize for Secret or a type that contains it, derives Debug on Secret, or implements Debug/Display for Secret outside the file that defines it.",
-        ["secret-container-serializes", "secret-derives-debug"];
+        "Production code derives or implements Serialize for Secret or a type that contains it (a production type or alias whose fields, generic arguments, bounds, defaults or trait objects name Secret or another such type, matched by item path, not simple name), derives Debug on Secret, or implements Debug/Display for Secret outside the file that defines it.",
+        ["secret-container-serializes", "secret-derives-debug", "secret-holder-generic-default", "secret-holder-same-name-elsewhere", "secret-holder-through-alias"];
     AggregateRegistered => "ARCH-aggregate-registered", "ARCH-01",
         "An `impl Aggregate for X` in mayfly-control-domain production code has no visitor.visit::<X>() in ControlAggregates::accept, so the golden and determinism harnesses would skip it.",
         ["unregistered-aggregate"];

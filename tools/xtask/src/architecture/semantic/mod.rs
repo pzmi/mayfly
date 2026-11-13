@@ -205,6 +205,8 @@ pub struct Facts {
     pub statics: Vec<(Site, bool)>,
     /// Structs and enums.
     pub types: Vec<TypeDecl>,
+    /// Type aliases (`type A = ..;`), with the paths their target names (`ARCH-secret-serialize`).
+    pub aliases: Vec<TypeAlias>,
     /// Trait impls.
     pub impls: Vec<ImplDecl>,
     /// The types `ControlAggregates::accept` visits (`visitor.visit::<X>()`), by last segment.
@@ -341,8 +343,14 @@ pub struct TypeDecl {
     pub name: String,
     /// The last segment of every derived trait, through `cfg_attr` too.
     pub derives: Vec<String>,
+    /// Its item path: the target's key (a library's crate name, as other crates write it),
+    /// its module and its name.
+    pub path: Vec<String>,
     /// Every identifier in its field types.
     pub fields: BTreeSet<String>,
+    /// Every path in its field types, generic arguments, bounds and defaults included, with
+    /// its candidates (its own type parameters left out).
+    pub refs: Vec<TypeRef>,
     /// The source type of a container `#[serde(try_from = "..")]`, as written.
     pub try_from: Option<String>,
     /// Whether it is an enum.
@@ -361,8 +369,31 @@ pub struct ImplDecl {
     pub trait_name: String,
     /// The last segment of the self type's path (empty when it is not a path).
     pub self_name: String,
-    /// Every identifier in the self type.
-    pub self_idents: BTreeSet<String>,
+    /// Every path in the self type, generic arguments included, with its candidates (the
+    /// impl's own type parameters left out).
+    pub self_refs: Vec<TypeRef>,
+}
+
+/// A path named inside a type, with the item paths it may stand for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeRef {
+    /// Its last segment as written.
+    pub last: String,
+    /// Candidate item paths: one into the same target starts with the target's key (as in
+    /// [`TypeDecl::path`]), any other with the crate it names; re-exports of workspace
+    /// libraries are followed ([`follow_candidates`]).
+    pub resolved: Vec<Vec<String>>,
+}
+
+/// A type alias (`type A = ..;`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeAlias {
+    /// Where its name is.
+    pub site: Site,
+    /// Its item path, as [`TypeDecl::path`].
+    pub path: Vec<String>,
+    /// Every path in its target type and generics, with its candidates.
+    pub refs: Vec<TypeRef>,
 }
 
 /// An item marked `#[doc(hidden)]`: a function, a method, a type or a constant.
@@ -432,6 +463,7 @@ pub fn check(
     }
     for facts in &mut every {
         follow_reexports(&libraries, &mut facts.references);
+        follow_type_refs(&libraries, facts);
     }
     for facts in &every {
         for (at, problem) in &facts.problems {
@@ -599,40 +631,61 @@ const MAX_REEXPORT_HOPS: usize = 8;
 /// rule can only find more. Pinned by `should_follow_reexports_when_another_crate_names_them`.
 fn follow_reexports(libraries: &Libraries, references: &mut [Reference]) {
     for reference in references {
-        let mut frontier = reference.resolved.clone();
-        for _ in 0..MAX_REEXPORT_HOPS {
-            let mut next = Vec::new();
-            for candidate in &frontier {
-                let Some((first, rest)) = candidate.split_first() else {
-                    continue;
-                };
-                let Some(scopes) = libraries.get(first) else {
-                    continue;
-                };
-                let mut segments = vec!["crate".to_owned()];
-                segments.extend_from_slice(rest);
-                let path = paths::Written {
-                    absolute: false,
-                    segments,
-                };
-                for mut found in scopes.resolve(&[], &path) {
-                    let local = found.first().is_some_and(|f| f == "crate");
-                    if local {
-                        first.clone_into(&mut found[0]);
-                    }
-                    if !reference.resolved.contains(&found) {
-                        reference.resolved.push(found.clone());
-                        if !local {
-                            next.push(found);
-                        }
+        follow_candidates(libraries, &mut reference.resolved);
+    }
+}
+
+/// [`follow_reexports`] for the paths named inside types, aliases and impl self types, so
+/// a holder another crate re-exports or aliases is found under its declared path
+/// (`ARCH-secret-serialize`).
+fn follow_type_refs(libraries: &Libraries, facts: &mut Facts) {
+    let refs = facts
+        .types
+        .iter_mut()
+        .flat_map(|t| &mut t.refs)
+        .chain(facts.aliases.iter_mut().flat_map(|a| &mut a.refs))
+        .chain(facts.impls.iter_mut().flat_map(|i| &mut i.self_refs));
+    for type_ref in refs {
+        follow_candidates(libraries, &mut type_ref.resolved);
+    }
+}
+
+/// Adds to `resolved` every candidate its workspace-crate candidates re-export, as
+/// [`follow_reexports`] describes.
+fn follow_candidates(libraries: &Libraries, resolved: &mut Vec<Vec<String>>) {
+    let mut frontier = resolved.clone();
+    for _ in 0..MAX_REEXPORT_HOPS {
+        let mut next = Vec::new();
+        for candidate in &frontier {
+            let Some((first, rest)) = candidate.split_first() else {
+                continue;
+            };
+            let Some(scopes) = libraries.get(first) else {
+                continue;
+            };
+            let mut segments = vec!["crate".to_owned()];
+            segments.extend_from_slice(rest);
+            let path = paths::Written {
+                absolute: false,
+                segments,
+            };
+            for mut found in scopes.resolve(&[], &path) {
+                let local = found.first().is_some_and(|f| f == "crate");
+                if local {
+                    first.clone_into(&mut found[0]);
+                }
+                if !resolved.contains(&found) {
+                    resolved.push(found.clone());
+                    if !local {
+                        next.push(found);
                     }
                 }
             }
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
         }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
     }
 }
 
@@ -676,14 +729,25 @@ fn collect_package(root: &Path, package: &Package) -> (Facts, Option<(String, pa
                 continue;
             }
         };
+        let crate_name = target.name.replace('-', "_");
+        // A library's items are keyed by the name other crates write; any other target's by
+        // a key no path can spell, so a binary's or test's `crate::World` is never another
+        // target's `World` (pinned by
+        // `should_report_only_the_library_holder_when_a_binary_declares_a_same_named_type`).
+        let key = if is_library {
+            crate_name.clone()
+        } else {
+            format!("{} (target {})", package.name, target.name)
+        };
         let place = collect::Target {
             root,
             package_dir: &package_dir,
             library: is_library,
+            key: &key,
         };
         let scopes = collect::collect_target(&place, &units, renames.clone(), &mut facts);
         if is_library {
-            library = Some((target.name.replace('-', "_"), scopes));
+            library = Some((crate_name, scopes));
         }
     }
     (facts, library)
@@ -1165,6 +1229,63 @@ pub mod testing {
     /// The facts of a library package named `package` whose files (relative to the package
     /// directory, the first being the root `src/lib.rs`) hold `files`.
     pub fn facts_for(package: &str, files: &[(&str, &str)]) -> Facts {
+        library_for(package, files).0
+    }
+
+    /// The facts of several library packages, each given as its name and the text of its
+    /// `src/lib.rs`, with every path into another of them followed through its re-exports,
+    /// as [`check`] does.
+    pub fn workspace(packages: &[(&str, &str)]) -> Vec<Facts> {
+        let mut libraries = Libraries::new();
+        let mut every = Vec::new();
+        for &(package, lib) in packages {
+            let (facts, scopes) = library_for(package, &[("src/lib.rs", lib)]);
+            libraries.insert(package.replace('-', "_"), scopes);
+            every.push(facts);
+        }
+        for facts in &mut every {
+            follow_reexports(&libraries, &mut facts.references);
+            follow_type_refs(&libraries, facts);
+        }
+        every
+    }
+
+    /// The facts of a package named `package` with a library (`src/lib.rs` holding `lib`)
+    /// and a binary (`src/main.rs` holding `bin`), keyed as [`check`] keys them.
+    pub fn package_with_binary(package: &str, lib: &str, bin: &str) -> Facts {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let package_dir = root.join("crates").join(package);
+        let mut facts = Facts {
+            package: package.to_owned(),
+            dir: format!("crates/{package}"),
+            ..Facts::default()
+        };
+        let library = package.replace('-', "_");
+        let binary = format!("{package} (target {package})");
+        for (rel, text, key, is_library) in [
+            ("src/lib.rs", lib, &library, true),
+            ("src/main.rs", bin, &binary, false),
+        ] {
+            let path = package_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, text).unwrap();
+            let mut loader = Loader::new(root, &package_dir);
+            loader.load_file(&path, Vec::new(), path.parent().unwrap(), false, 0, None);
+            facts.sources.extend(loader.texts.clone());
+            let place = collect::Target {
+                root,
+                package_dir: &package_dir,
+                library: is_library,
+                key,
+            };
+            collect::collect_target(&place, &loader.units, BTreeMap::new(), &mut facts);
+        }
+        facts
+    }
+
+    /// [`facts_for`], with the library's scopes.
+    fn library_for(package: &str, files: &[(&str, &str)]) -> (Facts, paths::Scopes) {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         let package_dir = root.join("crates").join(package);
@@ -1184,13 +1305,15 @@ pub mod testing {
             sources: loader.texts.clone(),
             ..Facts::default()
         };
+        let key = package.replace('-', "_");
         let place = collect::Target {
             root,
             package_dir: &package_dir,
             library: true,
+            key: &key,
         };
-        collect::collect_target(&place, &loader.units, BTreeMap::new(), &mut facts);
-        facts
+        let scopes = collect::collect_target(&place, &loader.units, BTreeMap::new(), &mut facts);
+        (facts, scopes)
     }
 
     /// Diagnostics as their rendered lines.
@@ -1279,6 +1402,7 @@ mod tests {
             root: dir.path(),
             package_dir: dir.path(),
             library: true,
+            key: "mayfly_composition",
         };
         let scopes = collect::collect_target(
             &place,

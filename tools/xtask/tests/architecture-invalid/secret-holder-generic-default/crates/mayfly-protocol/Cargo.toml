@@ -1,0 +1,8 @@
+[package]
+name = "mayfly-protocol"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mayfly-domain = { path = "../mayfly-domain" }

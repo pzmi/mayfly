@@ -1,6 +1,26 @@
-//! `Secret<T>` never prints its value (ADR 0014, plan §7.1: "a test proves it").
+//! `Secret<T>` never prints its value (ADR 0014, plan §7.1: "a test proves it"), and
+//! implements no `Serialize`, which the compiler checks below.
 
 use mayfly_domain::Secret;
+
+/// Resolves without ambiguity for a type that does not implement `Serialize`: only the
+/// `()` impl applies. Were `Secret<T>` to implement `Serialize` (a derive, a hand-written
+/// impl or a blanket impl), the `u8` impl would apply too, `<Secret<_> as NotSerialize<_>>`
+/// would be ambiguous, and this test target would not compile. The syntactic rule
+/// `ARCH-secret-serialize` keeps every type that holds a secret from serialising it; this
+/// keeps the wrapper itself from ever becoming serialisable, without a dependency.
+trait NotSerialize<Marker> {
+    fn check() {}
+}
+
+impl<T: ?Sized> NotSerialize<()> for T {}
+
+impl<T: ?Sized + serde::Serialize> NotSerialize<u8> for T {}
+
+const _: fn() = || {
+    let _ = <Secret<String> as NotSerialize<_>>::check;
+    let _ = <Secret<Vec<u8>> as NotSerialize<_>>::check;
+};
 
 #[derive(Debug)]
 struct Holder {

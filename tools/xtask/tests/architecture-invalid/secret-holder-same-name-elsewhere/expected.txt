@@ -1,0 +1,5 @@
+rule: ARCH-secret-serialize
+at: crates/mayfly-domain/src/lib.rs:7
+contains: mayfly-domain derives Serialize for `Launch`, which holds a Secret
+only: true
+absent: crates/mayfly-protocol

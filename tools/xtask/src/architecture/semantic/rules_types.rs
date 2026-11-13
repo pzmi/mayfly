@@ -3,13 +3,29 @@
 //! aggregate is registered where the harnesses walk (`ARCH-aggregate-registered`).
 //!
 //! Both read production code of every workspace package at once: a type that holds a
-//! `Secret` may be declared in one crate and serialised in another. Matching is by name
-//! (types are not resolved), which over-approximates: a type named `Secret` anywhere counts.
+//! `Secret` may be declared in one crate and serialised in another.
+//!
+//! A holder is known by its item path (its crate, module and name), never by its simple name:
+//! a field's type is resolved through `use` items, globs, re-exports and aliases of the
+//! workspace crates ([`super::TypeRef`]), so a `World` holding a secret in one crate says
+//! nothing about a `World` in another. The wrapper itself is the one name matched as written:
+//! a path whose last segment is `Secret`, however it resolves, holds one (over-approximation
+//! on purpose, so a re-implemented or renamed import of the wrapper still counts).
+//!
+//! What makes a type a holder (pinned by
+//! `should_report_serialize_when_a_holder_is_reached_through_alias_generic_or_dyn`): a field,
+//! a generic argument, a `dyn`/`impl` trait's arguments, a generic parameter's bound or
+//! default, naming the wrapper or another holder; a type alias whose target or generics do.
+//! The set is built from production declarations only: a test type never seeds it and never
+//! joins it, so it never makes a production type a holder (pinned by
+//! `should_not_report_serialize_when_a_same_named_type_elsewhere_or_a_test_type_holds_a_secret`).
+//! Test code is not checked either: it cannot serialise a secret while the wrapper implements
+//! no `Serialize`, which `mayfly-domain`'s `tests/secret.rs` asserts at compile time.
 
 use std::collections::BTreeSet;
 
 use super::super::report::{Diagnostic, Rule};
-use super::{Context, Facts};
+use super::{Context, Facts, Site, TypeRef};
 
 /// The redacting wrapper's name (plan section 13).
 const SECRET: &str = "Secret";
@@ -30,20 +46,62 @@ pub fn check(every: &[Facts]) -> Vec<Diagnostic> {
     out
 }
 
-/// The names of every type that is, or transitively holds, a `Secret`.
-fn secret_holders(every: &[Facts]) -> BTreeSet<String> {
-    let mut holders = BTreeSet::from([SECRET.to_owned()]);
+/// The item paths of every production type or alias that is, or transitively holds, a
+/// `Secret`.
+fn secret_holders(every: &[Facts]) -> BTreeSet<Vec<String>> {
+    let production = |site: &Site| site.context == Context::Production;
+    let declared: Vec<(&Vec<String>, &[TypeRef])> = every
+        .iter()
+        .flat_map(|f| {
+            f.types
+                .iter()
+                .filter(|t| production(&t.site))
+                .map(|t| (&t.path, t.refs.as_slice()))
+                .chain(
+                    f.aliases
+                        .iter()
+                        .filter(|a| production(&a.site))
+                        .map(|a| (&a.path, a.refs.as_slice())),
+                )
+        })
+        .collect();
+    let mut holders: BTreeSet<Vec<String>> = every
+        .iter()
+        .flat_map(|f| &f.types)
+        .filter(|t| production(&t.site) && t.name == SECRET)
+        .map(|t| t.path.clone())
+        .collect();
     loop {
         let before = holders.len();
-        for decl in every.iter().flat_map(|f| &f.types) {
-            if decl.fields.iter().any(|f| holders.contains(f)) {
-                holders.insert(decl.name.clone());
+        for &(path, refs) in &declared {
+            if !holders.contains(path) && refs.iter().any(|r| holds(r, &holders)) {
+                holders.insert(path.clone());
             }
         }
         if holders.len() == before {
             return holders;
         }
     }
+}
+
+/// Whether `type_ref` names the wrapper (by its last segment, written or resolved) or one of
+/// `holders` (by item path). A path the scopes cannot resolve (a lone name no `use`, item or
+/// glob binds, as a macro-generated import would leave it) fails closed: it holds when its
+/// name is the simple name of any production holder (pinned by
+/// `should_report_serialize_when_an_unbound_name_or_a_glob_reaches_a_holder`).
+fn holds(type_ref: &TypeRef, holders: &BTreeSet<Vec<String>>) -> bool {
+    if type_ref.last == SECRET {
+        return true;
+    }
+    if type_ref.resolved.is_empty() {
+        return holders
+            .iter()
+            .any(|h| h.last().is_some_and(|l| *l == type_ref.last));
+    }
+    type_ref
+        .resolved
+        .iter()
+        .any(|c| holders.contains(c) || c.last().is_some_and(|l| l == SECRET))
 }
 
 fn secrets(every: &[Facts]) -> Vec<Diagnostic> {
@@ -61,8 +119,8 @@ fn secrets(every: &[Facts]) -> Vec<Diagnostic> {
             .iter()
             .filter(|t| t.site.context == Context::Production)
         {
-            let holds = holders.contains(&decl.name);
-            if holds && decl.derives.iter().any(|d| d == SERIALIZE) {
+            let held = decl.name == SECRET || holders.contains(&decl.path);
+            if held && decl.derives.iter().any(|d| d == SERIALIZE) {
                 out.push(Diagnostic::new(
                     Rule::SecretSerialize,
                     format!(
@@ -90,8 +148,8 @@ fn secrets(every: &[Facts]) -> Vec<Diagnostic> {
             .iter()
             .filter(|i| i.site.context == Context::Production)
         {
-            let holds = imp.self_idents.iter().any(|i| holders.contains(i));
-            if holds && imp.trait_name == SERIALIZE {
+            let held = imp.self_name == SECRET || imp.self_refs.iter().any(|r| holds(r, &holders));
+            if held && imp.trait_name == SERIALIZE {
                 out.push(Diagnostic::new(
                     Rule::SecretSerialize,
                     format!(
@@ -158,8 +216,130 @@ fn aggregates(every: &[Facts]) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{facts_for, rendered};
+    use super::super::testing::{facts_for, package_with_binary, rendered, workspace};
     use super::*;
+
+    /// The `file:line` of each rendered diagnostic.
+    fn locations(got: &[String]) -> Vec<&str> {
+        got.iter()
+            .filter_map(|d| {
+                d.rsplit_once(" (at ")
+                    .map(|(_, at)| at.trim_end_matches(')'))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_not_report_serialize_when_a_same_named_type_elsewhere_or_a_test_type_holds_a_secret()
+    {
+        // given
+        let domain = "pub struct Secret<T>(T);\n#[derive(serde::Serialize)]\npub struct Launch { pub jit: Secret<String> }\nstruct Held { config: Secret<String> }\n#[derive(serde::Serialize)]\npub struct World { pub hosts: u32 }\n#[cfg(test)]\nmod tests {\n    pub struct World { pub key: super::Secret<String> }\n}\n";
+        let protocol = "#[derive(serde::Serialize)]\npub struct Launch { pub name: String }\n#[derive(serde::Serialize)]\npub struct World { pub hosts: u32 }\n#[derive(serde::Serialize)]\npub struct Held { pub name: String }\n#[derive(serde::Serialize)]\npub struct Envelope { pub launch: Launch, pub world: World, pub held: Held }\nimpl serde::Serialize for Wrapper<Held> {}\n";
+
+        // when
+        let got = rendered(&check(&workspace(&[
+            ("mayfly-domain", domain),
+            ("mayfly-protocol", protocol),
+        ])));
+
+        // then
+        assert_eq!(
+            locations(&got),
+            ["crates/mayfly-domain/src/lib.rs:3"],
+            "{got:?}"
+        );
+        assert!(
+            got[0].contains("mayfly-domain derives Serialize for `Launch`"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_serialize_when_a_holder_is_reached_through_alias_generic_or_dyn() {
+        // given
+        let domain = "pub struct Secret<T>(T);\npub struct Envelope<T> { pub body: T }\nmod jit {\n    pub struct Jit { config: crate::Secret<String> }\n    pub type JitConfig = Option<crate::Secret<String>>;\n}\npub use jit::{Jit, JitConfig};\npub type Boxed = Box<dyn Fn() -> Jit>;\n";
+        let protocol = [
+            "use mayfly_domain::{Envelope, Jit};",
+            "#[derive(serde::Serialize)]",
+            "pub struct ThroughAlias { pub jit: mayfly_domain::JitConfig }",
+            "#[derive(serde::Serialize)]",
+            "pub struct Generic { pub jit: Envelope<mayfly_domain::Jit> }",
+            "#[derive(serde::Serialize)]",
+            "pub struct Defaulted<J = mayfly_domain::Jit> { pub jit: Vec<J> }",
+            "#[derive(serde::Serialize)]",
+            "pub struct Dynamic { pub make: Box<dyn Fn() -> mayfly_domain::Jit> }",
+            "#[derive(serde::Serialize)]",
+            "pub struct AliasedDyn { pub make: mayfly_domain::Boxed }",
+            "type Local = Envelope<mayfly_domain::Jit>;",
+            "impl serde::Serialize for Local {}",
+            "impl serde::Serialize for Envelope<mayfly_domain::Jit> {}",
+            "#[derive(serde::Serialize)]",
+            "pub struct Plain<T> { pub body: Envelope<T> }",
+            "impl<Jit> serde::Serialize for Envelope<Jit> {}",
+        ]
+        .join("\n");
+
+        // when
+        let got = rendered(&check(&workspace(&[
+            ("mayfly-domain", domain),
+            ("mayfly-protocol", protocol.as_str()),
+        ])));
+
+        // then
+        let lines: Vec<&str> = locations(&got)
+            .into_iter()
+            .map(|at| at.trim_start_matches("crates/mayfly-protocol/src/lib.rs:"))
+            .collect();
+        assert_eq!(lines, ["3", "5", "7", "9", "11", "13", "14"], "{got:?}");
+    }
+
+    #[test]
+    fn should_report_serialize_when_an_unbound_name_or_a_glob_reaches_a_holder() {
+        // given
+        let domain = "pub struct Secret<T>(T);\nmod jit {\n    pub struct Jit { config: crate::Secret<String> }\n}\npub use jit::*;\n#[cfg(test)]\nmod tests {\n    pub struct World { pub key: super::Secret<String> }\n}\n";
+        let protocol = [
+            "#[derive(serde::Serialize)]",
+            "pub struct Unbound { pub jit: Jit }",
+            "#[derive(serde::Serialize)]",
+            "pub struct ThroughGlob { pub jit: mayfly_domain::Jit }",
+            "#[derive(serde::Serialize)]",
+            "pub struct UnboundTestName { pub world: World }",
+        ]
+        .join("\n");
+
+        // when
+        let got = rendered(&check(&workspace(&[
+            ("mayfly-domain", domain),
+            ("mayfly-protocol", protocol.as_str()),
+        ])));
+
+        // then
+        assert_eq!(
+            locations(&got),
+            [
+                "crates/mayfly-protocol/src/lib.rs:2",
+                "crates/mayfly-protocol/src/lib.rs:4"
+            ],
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_only_the_library_holder_when_a_binary_declares_a_same_named_type() {
+        // given
+        let lib = "pub struct Secret<T>(T);\npub struct World { pub key: Secret<String> }\n";
+        let bin = "#[derive(serde::Serialize)]\npub struct World { pub hosts: u32 }\n#[derive(serde::Serialize)]\npub struct Launch { pub world: World }\n#[derive(serde::Serialize)]\npub struct Real { pub world: mayfly_cli::World }\n";
+
+        // when
+        let got = rendered(&check(&[package_with_binary("mayfly-cli", lib, bin)]));
+
+        // then
+        assert_eq!(
+            locations(&got),
+            ["crates/mayfly-cli/src/main.rs:6"],
+            "{got:?}"
+        );
+    }
 
     #[test]
     fn should_report_serialize_when_a_type_holds_a_secret_through_another() {
