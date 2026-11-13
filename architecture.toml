@@ -17,7 +17,7 @@ production = [
 ]
 test_only = [
   "mayfly-testkit", "mayfly-testkit-shared", "mayfly-testkit-data", "mayfly-conformance",
-  "mayfly-fake-tart", "mayfly-fake-github",
+  "mayfly-fake-tart", "mayfly-fake-github", "mayfly-fake-registry",
 ]
 tool_only = ["xtask", "mayfly-faultlab"]
 
@@ -58,7 +58,7 @@ pure = ["mayfly-domain", "mayfly-protocol", "mayfly-control-domain", "mayfly-dat
 # Crates with process authority. One module beyond them holds it too, by the checker's
 # PROCESS_MODULES: mayfly-adapter-secrets::command, the `exec:` and Keychain runner (ADR 0058).
 process_authority = ["mayfly-adapter-tart", "mayfly-composition"]
-independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]
+independent = ["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github", "mayfly-fake-registry"]
 
 # Allowed workspace edges (foundation.md section 2.2, plan section 4). A dev-dependency may
 # target a test_only crate or a crate in the dependent's normal list, within the plane rule
@@ -142,6 +142,7 @@ mayfly-conformance = [
 # lab drives the binaries, so none of them may reach a workspace crate.
 mayfly-fake-tart = []
 mayfly-fake-github = []
+mayfly-fake-registry = []
 mayfly-faultlab = []
 xtask = []
 
@@ -218,6 +219,11 @@ mayfly-fake-tart = { rustix = ["default", "fs", "process"], serde = ["default", 
 # mayfly-fake-github: tokio `time` for the poll hold and delay faults (one file, ADR 0023),
 # `macros` for the hold's select, `io-util` for the contract's socket client.
 mayfly-fake-github = { aws-lc-rs = ["default"], axum = ["http1", "tokio"], base64 = ["default"], rsa = ["default", "pkcs1v15"], serde = ["default", "derive"], serde_json = ["default"], tokio = ["default", "rt", "net", "sync", "time", "macros", "io-util"] }
+# The fake OCI registry (VER-09, ver section 7.5): an axum HTTP/1.1 server on Tokio (rt, net; sync for
+# its stop signal, macros for the select over serving and stopping) behind TLS from rustls and
+# tokio-rustls over aws-lc-rs; its CA and server certificate generated at run time by rcgen
+# (aws-lc-rs, PEM for a client's trust file); sha2 and serde_json build the synthetic Tart images.
+mayfly-fake-registry = { axum = ["http1", "tokio"], rcgen = ["aws_lc_rs", "pem", "crypto"], rustls = ["aws_lc_rs", "std", "tls12"], serde_json = ["default"], sha2 = ["default"], tokio = ["default", "rt", "net", "sync", "macros"], tokio-rustls = ["aws_lc_rs", "tls12"] }
 # `cargo xtask hw01` (HW-01X): its JSON report and Tart's JSON through serde_json; the run lock's
 # holder (`F_GETLK`), the process-group kill of a child past its deadline and the throwaway home's
 # owner check through rustix; Ctrl-C and SIGTERM set a flag (signal-hook) so the run cleans up.
@@ -254,6 +260,9 @@ mayfly-adapter-github = { tokio = ["default", "rt", "macros", "test-util", "time
 # mayfly-fake-github tests: `tempfile` for the process test's config, tokio `test-util` for the
 # paused clock.
 mayfly-fake-github = { tempfile = ["default"], tokio = ["default", "macros", "rt", "net", "sync", "test-util"] }
+# mayfly-fake-registry tests: a tempdir fake-tart home to seed, a TLS client over Tokio's socket
+# (io-util for its reads and writes).
+mayfly-fake-registry = { tempfile = ["default"], tokio = ["default", "io-util", "macros", "rt", "net"] }
 
 [external.build]
 

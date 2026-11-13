@@ -30,6 +30,7 @@ toml = "1.2.1"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+mayfly-fake-registry = { path = "../mayfly-fake-registry" }
 mayfly-testkit = { path = "../mayfly-testkit" }
 mayfly-testkit-data = { path = "../mayfly-testkit-data" }
 mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }

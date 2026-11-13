@@ -1,15 +1,23 @@
 //! `mayflyd --role all` as a process (integration level, RT-02): the built daemon over
 //! `mayfly-fake-tart` (first on its `PATH`), a SQLite journal and a static demand (one pool
 //! with `min_prepared = 1`, its image manifest beside the config) in a tempdir state directory.
-//! The configured repository is a loopback address nothing serves, so the placement of the
-//! pool's pin (CP-07) fails at once, offline: no test here pulls an image (a local registry is
-//! VER-09's). The test waits only on the daemon's
-//! documented ready line (`mayfly_composition::daemon::Ready`), read from its stdout through a
-//! channel with a bound, and reads the journal and the fake's state once the daemon exited.
 //!
-//! The terms policy (P4, CP-08) is pinned here as far as `mayflyd` can take it before VER-09
-//! serves an image to pull: a pool pinned from its manifest (OPS-02) is open on its host after
-//! the run's ready line, at the pool's current terms revision.
+//! Most tests configure a loopback repository nothing serves, so the placement of the pool's
+//! pin (CP-07) fails at once, offline; they wait only on the daemon's documented ready line
+//! (`mayfly_composition::daemon::Ready`), read from its stdout through a channel with a bound,
+//! and read the journal and the fake's state once the daemon exited. The terms policy (P4,
+//! CP-08): a pool pinned from its manifest (OPS-02) is open on its host after the run's ready
+//! line, at the pool's current terms revision.
+//!
+//! The placement tests (`mod placement`, VER-09, Linux only) do pull: `mayfly-fake-registry`
+//! serves a synthetic Tart image over HTTPS under a CA made for the test, handed to `mayflyd` as
+//! `SSL_CERT_FILE` (ver §7.5), and the same image is seeded in fake-tart's registry, so the
+//! daemon pulls, verifies and materialises the pinned image's base and the reconciler reserves
+//! for the pool. The ready line promises no placement, so these tests read the journal while
+//! the daemon runs, through a second handle that only reads (a second handle on one file is
+//! the journal contract's two-handle mode,
+//! `mayfly-adapter-sqlite`'s `tests/journal_contract.rs::should_pass_journal_contract_when_sqlite_has_two_handles_on_one_file`),
+//! polling with a bound for the fact they assert.
 //!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least).
@@ -76,6 +84,8 @@ struct World {
     env: PlatformEnv,
     /// The state directory and `TART_HOME` the daemon uses.
     places: Places,
+    /// The CA file `mayflyd` trusts through `SSL_CERT_FILE`, when it is given one.
+    trust: Option<PathBuf>,
 }
 
 const POOL: &str = "lin";
@@ -117,7 +127,7 @@ impl World {
     /// A world whose config has `[images]` and `[host]`'s sizing when `complete`, and names
     /// its state directory and `TART_HOME`, made `0700` here.
     fn new(complete: bool) -> Self {
-        let world = Self::build(complete, true);
+        let world = Self::build(complete, true, None);
         private_dir(&world.state());
         private_dir(&world.tart_home());
         world
@@ -126,10 +136,12 @@ impl World {
     /// A complete world whose config names no place: the daemon takes the platform's defaults
     /// under the world's `HOME`, which nothing creates beforehand.
     fn with_default_places() -> Self {
-        Self::build(true, false)
+        Self::build(true, false, None)
     }
 
-    fn build(complete: bool, explicit: bool) -> Self {
+    /// `served` replaces a complete world's repository and `[host]` table: `(repository,
+    /// host)`.
+    fn build(complete: bool, explicit: bool, served: Option<(&str, &str)>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let env = PlatformEnv {
             home: Some(dir.path().join("home")),
@@ -143,17 +155,23 @@ impl World {
         } else {
             paths::defaults(&env).expect("a default under HOME")
         };
-        let world = Self { dir, env, places };
+        let world = Self {
+            dir,
+            env,
+            places,
+            trust: None,
+        };
         private_dir(&world.path("bin"));
         std::os::unix::fs::symlink(sibling("tart"), world.path("bin").join("tart"))
             .expect("the fake tart on PATH");
+        let (repository, host) = served.unwrap_or((
+            REPOSITORY,
+            "[host]\nvm_slots = 2\nmacos_guests = 0\nimage_disk_gib = 50\nclone_disk_gib = 60\n",
+        ));
         let (images, host) = if complete {
-            (
-                "[images]\nrepository = \"127.0.0.1/mayfly/runner\"\n",
-                "[host]\nvm_slots = 2\nmacos_guests = 0\nimage_disk_gib = 50\nclone_disk_gib = 60\n",
-            )
+            (format!("[images]\nrepository = \"{repository}\"\n"), host)
         } else {
-            ("", "")
+            (String::new(), "")
         };
         let (state, provider) = if explicit {
             (
@@ -166,7 +184,7 @@ impl World {
         } else {
             (String::new(), String::new())
         };
-        world.write_manifest(&format!("{REPOSITORY}@{}", digest('a')));
+        world.write_manifest(&format!("{repository}@{}", digest('a')));
         let manifest = world.manifest().display().to_string();
         let config = format!(
             r#"schema_version = 1
@@ -264,6 +282,7 @@ max_running = 2
             .env("PATH", self.path("bin"))
             .env("MAYFLY_APP_KEY", SECRET)
             .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
+            .envs(self.trust.as_ref().map(|ca| ("SSL_CERT_FILE", ca)))
             .args(args);
         command
     }
@@ -940,4 +959,291 @@ fn should_refuse_to_start_when_a_pool_manifest_names_a_tag() {
         !world.state().join("journal.db").exists(),
         "nothing was started"
     );
+}
+
+/// A real placement under `mayflyd` (VER-09, ver §7.5). **Linux only, deliberately:** the
+/// daemon trusts the registry's CA through `SSL_CERT_FILE` in its environment, which the
+/// platform verifier's Linux root loading reads (rustls-native-certs), so no production code or
+/// configuration changes for the test; macOS's verifier trusts its keychain alone, which a test
+/// cannot write without the owner. CI runs these on Linux.
+#[cfg(target_os = "linux")]
+mod placement {
+    use mayfly_control_domain::attempt::{GuestOs, RefusalReason};
+    use mayfly_control_domain::image::{RunnerVersion, base_name};
+    use mayfly_control_domain::placement::{ImagePlacement, PlacementEvent, placement_instance};
+    use mayfly_domain::HostId;
+    use mayfly_fake_registry::{FakeRegistry, Images, Served, TartImage, seed_tart_home};
+
+    use super::*;
+
+    /// The repository path the registry publishes the image under.
+    const IMAGE_NAME: &str = "mayfly/runner";
+
+    /// The runner the pool's manifest pins (`manifest_text`'s; the fake guest installs any
+    /// version given a well-formed checksum).
+    const RUNNER: RunnerVersion = RunnerVersion::new(2, 330, 0);
+
+    /// The host's sizing: small enough that the data plane's resource gate (I33) admits the
+    /// pull, the base and a clone on a test machine's real free disk and memory, which it
+    /// measures (an image of 50 GiB, a clone of 60 GiB or the default 50 GiB disk reserve would
+    /// be refused `insufficient_resources` on a small CI disk).
+    const HOST: &str = "[host]\nvm_slots = 2\nmacos_guests = 0\nimage_disk_gib = 1\nclone_disk_gib = 1\nreserve_disk_gib = 1\nreserve_memory_mib = 512\n";
+
+    fn image() -> TartImage {
+        TartImage::synthetic(b"ver09-runner-image", mayfly_fake_registry::GuestOs::Linux)
+    }
+
+    /// A Linux Tart image published at [`IMAGE_NAME`] and the registry serving it.
+    fn registry() -> (TartImage, FakeRegistry) {
+        let image = image();
+        let registry =
+            FakeRegistry::start(Images::new().publish(IMAGE_NAME, &image)).expect("a registry");
+        (image, registry)
+    }
+
+    /// A complete world whose `[images]` repository is `registry`'s [`IMAGE_NAME`], whose
+    /// pool's manifest (OPS-02) pins `image` there by digest, whose fake-tart registry holds
+    /// `image` as `registry` serves it, and whose `mayflyd` trusts `registry`'s CA when
+    /// `trusted`.
+    fn serving(registry: &FakeRegistry, image: &TartImage, trusted: bool) -> World {
+        let repository = format!("{}/{IMAGE_NAME}", registry.host());
+        let mut world = World::build(true, true, Some((&repository, HOST)));
+        private_dir(&world.state());
+        private_dir(&world.tart_home());
+        world.write_manifest(&format!("{repository}@{}", image.digest()));
+        seed_tart_home(&world.tart_home(), &repository, image).expect("fake-tart's registry");
+        if trusted {
+            let ca = world.path("registry-ca.pem");
+            std::fs::write(&ca, registry.ca_pem()).expect("the CA file");
+            world.trust = Some(ca);
+        }
+        world
+    }
+
+    fn host_of(world: &World) -> HostId {
+        let host = std::fs::read_to_string(world.state().join("host-id")).expect("the host id");
+        HostId::new(host.trim_end()).expect("a host id")
+    }
+
+    /// The pool's reservations on `host`, as `(pool, os)`.
+    fn reservations(journal: &SqliteJournal, host: &HostId) -> Vec<(String, GuestOs)> {
+        let stream = stream_of::<Host>(host.as_str()).expect("the host's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .expect("the host's events")
+            .iter()
+            .filter_map(
+                |e| match decode_event::<HostEvent>(e).expect("a host event") {
+                    HostEvent::SlotReserved(r) => Some((r.pool.as_str().to_owned(), r.os)),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// The events of `digest`'s placement on `host`.
+    fn placement(
+        journal: &SqliteJournal,
+        host: &HostId,
+        digest: &ImageDigest,
+    ) -> Vec<PlacementEvent> {
+        let stream = stream_of::<ImagePlacement>(&placement_instance(host, digest))
+            .expect("the placement's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|e| decode_event::<PlacementEvent>(e).expect("a placement event"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A run that pins the pool from its manifest at start-up (OPS-02), returned with its
+    /// host once ready.
+    fn pinned_run(world: &World) -> (Daemon, HostId) {
+        let daemon = world.start();
+        daemon.ready();
+        (daemon, host_of(world))
+    }
+
+    #[test]
+    fn should_materialise_the_pins_base_and_reserve_for_the_pool_when_the_registry_serves_its_image()
+     {
+        // given: the registry serves the image over HTTPS under a CA mayflyd trusts, fake-tart's
+        // registry holds the same bytes, and the pool's manifest pins the image by digest (OPS-02)
+        let (image, registry) = registry();
+        let digest = ImageDigest::new(image.digest()).expect("a digest");
+        let world = serving(&registry, &image, true);
+        let (daemon, host) = pinned_run(&world);
+
+        // when: the placement manager places the pin and the reconciler reserves. A bounded poll
+        // of the journal for the reservation itself, because the ready line promises recovery
+        // and one terms pass, never a placement; RT-03's status socket will give a documented
+        // signal to wait on instead (noted on RT-03's card).
+        let journal = open_journal(&world);
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "a reservation for the pool once its base is materialised",
+            || !reservations(&journal, &host).is_empty(),
+        );
+        if let Err(timed_out) = waited {
+            // Name what the placement ended in: a refusal `insufficient_resources` means the
+            // test machine has less free disk than `HOST` needs (ver §7.5).
+            panic!(
+                "{timed_out}; the placement: {:?}",
+                placement(&journal, &host, &digest)
+            );
+        }
+        drop(journal);
+        let exit = daemon.terminate();
+
+        // then: the manifest was fetched over HTTPS by digest, Tart pulled and the base was
+        // materialised at the pinned runner, measured at the image's disk, and the reconciler
+        // reserved for the pool on the host
+        assert_eq!(exit, Some(0));
+        let manifest = format!("/v2/{IMAGE_NAME}/manifests/{digest}");
+        assert!(
+            registry.served().contains(&Served {
+                method: "GET".to_owned(),
+                path: manifest,
+                status: 200,
+            }),
+            "{:?}",
+            registry.served()
+        );
+        let journal = open_journal(&world);
+        let events = placement(&journal, &host, &digest);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PlacementEvent::ImagePulled(_))),
+            "{events:?}"
+        );
+        let materialised: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                PlacementEvent::ImageMaterialised(m) => Some((m.runner_version, m.disk_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            materialised,
+            [(RUNNER, Some(image.disk_bytes()))],
+            "{events:?}"
+        );
+        assert_eq!(
+            reservations(&journal, &host).first(),
+            Some(&(POOL.to_owned(), GuestOs::Linux))
+        );
+        assert!(
+            world.names().contains(&base_name(&digest, RUNNER)),
+            "{:?}",
+            world.names()
+        );
+        let commands = world.commands();
+        for command in ["pull", "clone", "exec"] {
+            assert!(
+                commands.iter().any(|c| c == command),
+                "{command}: {commands:?}"
+            );
+        }
+    }
+
+    /// Waits for the data plane's refusal of the pull, stops the daemon and checks that the
+    /// refusal was definite (its effect failed: the manifest was not accepted, never a resource
+    /// shortfall, which the host's sizing rules out), that Tart was never asked to pull and
+    /// that nothing was materialised or reserved.
+    fn assert_refused_before_any_pull(
+        world: &World,
+        daemon: Daemon,
+        host: &HostId,
+        digest: &ImageDigest,
+    ) {
+        // A bounded poll of the journal for the refusal, because the ready line promises no
+        // placement; RT-03's status socket will replace it.
+        let journal = open_journal(world);
+        mayfly_testkit_shared::poll::wait_until(
+            BOUND,
+            "the data plane's refusal of the pull",
+            || {
+                placement(&journal, host, digest)
+                    .iter()
+                    .any(|e| matches!(e, PlacementEvent::PlacementDirectiveRefused(_)))
+            },
+        );
+        drop(journal);
+        assert_eq!(daemon.terminate(), Some(0));
+        let journal = open_journal(world);
+        let events = placement(&journal, host, digest);
+        let refusals: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                PlacementEvent::PlacementDirectiveRefused(r) => Some(r.reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refusals.first(),
+            Some(&RefusalReason::EffectFailed),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PlacementEvent::ImagePulled(_) | PlacementEvent::ImageMaterialised(_)
+            )),
+            "{events:?}"
+        );
+        assert!(reservations(&journal, host).is_empty());
+        assert!(!world.commands().iter().any(|c| c == "pull"));
+        assert!(!world.names().contains(&base_name(digest, RUNNER)));
+    }
+
+    #[test]
+    fn should_pull_nothing_when_mayflyd_does_not_trust_the_registrys_ca() {
+        // given: the same registry and pin, but mayflyd trusts only the system's roots
+        let (image, registry) = registry();
+        let digest = ImageDigest::new(image.digest()).expect("a digest");
+        let world = serving(&registry, &image, false);
+
+        // when
+        let (daemon, host) = pinned_run(&world);
+
+        // then: the handshake failed before any request, so the pull was refused before Tart
+        assert_refused_before_any_pull(&world, daemon, &host, &digest);
+        assert!(registry.served().is_empty(), "{:?}", registry.served());
+    }
+
+    #[test]
+    fn should_pull_nothing_when_the_registry_serves_other_bytes_at_the_pinned_digest() {
+        // given: a trusted registry that answers the pinned digest with another image's
+        // manifest (a tampered or substituted manifest); fake-tart's registry holds the pinned
+        // image, so only the data plane's own check of the bytes against the digest stops it
+        let pinned = image();
+        let other = TartImage::synthetic(b"ver09-substitute", mayfly_fake_registry::GuestOs::Linux);
+        let digest = ImageDigest::new(pinned.digest()).expect("a digest");
+        let registry = FakeRegistry::start(Images::new().publish(IMAGE_NAME, &other).serve_at(
+            IMAGE_NAME,
+            pinned.digest(),
+            other.manifest(),
+        ))
+        .expect("a registry");
+        let world = serving(&registry, &pinned, true);
+
+        // when
+        let (daemon, host) = pinned_run(&world);
+
+        // then: the manifest was served (200), and refused for its bytes before any pull
+        assert_refused_before_any_pull(&world, daemon, &host, &digest);
+        let manifest = format!("/v2/{IMAGE_NAME}/manifests/{digest}");
+        assert!(
+            registry.served().contains(&Served {
+                method: "GET".to_owned(),
+                path: manifest,
+                status: 200,
+            }),
+            "{:?}",
+            registry.served()
+        );
+    }
 }

@@ -21,6 +21,7 @@ members = [
     "crates/mayfly-conformance",
     "crates/mayfly-fake-tart",
     "crates/mayfly-fake-github",
+    "crates/mayfly-fake-registry",
     "tools/faultlab",
     "tools/xtask",
 ]

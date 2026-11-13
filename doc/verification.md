@@ -375,11 +375,46 @@ its stdin); its real-time waits (the hold, a delay fault) live in one file under
 
 ### 7.4 Independence (D11)
 
-The fake binaries and the fault lab import no production crate (`ARCH-independent-oracle`), and no
-production crate imports them. Their own test suites pin their behaviour; when a fake and
+The fake binaries, the fake registry and the fault lab import no production crate
+(`ARCH-independent-oracle`), and no production crate imports them. Their own test suites pin their behaviour; when a fake and
 production disagree, the disagreement is investigated against the real system's documented or
 recorded behaviour, and the side that is wrong is fixed. Neither side is edited merely to match
 the other.
+
+### 7.5 `mayfly-fake-registry`
+
+An HTTPS OCI registry for process tests (VER-09): `mayflyd`'s data plane fetches an image's raw
+manifest by digest over HTTPS itself, trusting the operating system's roots only (ADR 0087), and
+fake-tart never reaches a network, so without it no process test can place an image. A test-only
+library and an independent oracle (§7.4; D11, ADR 0012): it serves the distribution API's pull
+subset (`/v2/`, manifests and blobs by name and reference, OCI error bodies) over HTTP/1.1 behind
+TLS on `127.0.0.1` at port 0, from a thread of its own that stopping or dropping it joins. It
+records every request it answered, so a test can tell a refused handshake (nothing recorded) from
+a refused request, and it can serve other bytes at a digest (a lying registry,
+`Images::serve_at`), the negative control of the data plane's check of the manifest against its
+digest. It builds synthetic Tart disk-v2 images and seeds the same manifest and blobs into
+fake-tart's `TART_HOME/registry/`, so Tart's pull and the data plane's fetch read identical bytes.
+
+- **A CA made at run time.** Each registry generates a CA and a server certificate for
+  `127.0.0.1` and `localhost` when it starts (rcgen); no key or certificate is committed, and
+  each test trusts only its own registry.
+- **`SSL_CERT_FILE`.** The test writes the CA's PEM to its tempdir and starts `mayflyd`, whose
+  environment it clears, with `SSL_CERT_FILE` naming it. On Linux the platform verifier loads its
+  roots through rustls-native-certs, which reads that variable (OpenSSL's convention), so the
+  daemon trusts the CA with no production code, configuration key or test-only build, and nothing
+  reaches its children (the variable is not on the child allowlist). macOS's verifier reads the
+  keychain alone, which a test cannot change without the owner, so **the placement tests under
+  `mayflyd` are Linux-only** (`crates/mayfly-composition/tests/daemon.rs`, `mod placement`);
+  CI runs them on Linux, and the registry's own tests run on both.
+- **Waiting.** The ready line promises recovery and one terms pass, not a placement, so those
+  tests poll the journal (bounded, `mayfly-testkit-shared::poll`) for the fact they assert (the
+  pool's `SlotReserved`, or the placement's refusal) before stopping the daemon; RT-03's status
+  socket will give them a documented signal instead.
+- **Free disk.** The data plane's resource gate (I33) measures the machine's real free disk, so
+  the placement worlds size the host small (1 GiB for the image, a clone and the disk reserve,
+  512 MiB of memory reserve) and need about 3 GiB free where the tests' tempdirs live; with less,
+  the pull is refused `insufficient_resources`, and the test's failure message names that
+  refusal.
 
 ---
 

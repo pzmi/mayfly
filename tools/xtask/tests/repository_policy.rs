@@ -161,7 +161,12 @@ fn should_select_the_foundation_crates_when_repository_purity_and_planes_are_rea
             "mayfly-data-domain",
         ]),
         sorted(&["mayfly-adapter-tart", "mayfly-composition"]),
-        sorted(&["mayfly-faultlab", "mayfly-fake-tart", "mayfly-fake-github"]),
+        sorted(&[
+            "mayfly-faultlab",
+            "mayfly-fake-tart",
+            "mayfly-fake-github",
+            "mayfly-fake-registry",
+        ]),
         sorted(&[
             "mayfly-control-domain",
             "mayfly-control",
