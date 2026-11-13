@@ -146,12 +146,15 @@ impl World {
     /// host)`.
     fn build(complete: bool, explicit: bool, served: Option<(&str, &str)>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        // `TMPDIR` is the world's own private dir: on macOS, where the tempdir's long path
-        // pushes the default socket under `HOME` past the socket-address limit, the daemon falls
-        // back to it (RT-03F), as it does on an owner's Mac with a long `HOME`
+        // `TMPDIR` is a private dir of the world's, `tmp`, made `0700` below: on macOS, where
+        // the tempdir's long path pushes the default socket under `HOME` past the socket-address
+        // limit, the daemon falls back to it (RT-03F), as it does on an owner's Mac with a long
+        // `HOME`, whose `TMPDIR` is private too. Not the tempdir's root: `tempfile` creates it
+        // with the process's default mode (`0755` under the usual umask), which the socket's
+        // private-directory check rightly refuses (RT-03G)
         let env = PlatformEnv {
             home: Some(dir.path().join("home")),
-            tmpdir: Some(dir.path().to_path_buf()),
+            tmpdir: Some(dir.path().join("tmp")),
             ..PlatformEnv::default()
         };
         let places = if explicit {
@@ -169,6 +172,7 @@ impl World {
             trust: None,
         };
         private_dir(&world.path("bin"));
+        private_dir(&world.path("tmp"));
         std::os::unix::fs::symlink(sibling("tart"), world.path("bin").join("tart"))
             .expect("the fake tart on PATH");
         let (repository, host) = served.unwrap_or((

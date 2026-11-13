@@ -1924,6 +1924,10 @@ report the daemon's error at once instead of waiting out their bound, and the ov
 test ignores the error macOS gives a write to a closed peer (EPIPE or EPROTOTYPE). The fallback
 reads `TMPDIR` (a CLI without it needs `--socket`), and macOS may purge an unused file in
 `/var/folders/…/T` after days; both are limitations of the rare long-`HOME` case.
+Note (RT-03G): the daemon test's world first named its tempdir root as `TMPDIR`, which
+`tempfile` creates with the default mode (`0755`), so the fallback's private-directory check
+refused it on macOS; the world now gives `TMPDIR` a dedicated `0700` directory, as macOS gives
+each user, and the check is unchanged.
 Deferred: `quarantine list|inspect|resolve` (CP-06's card), `recover --dry-run|--apply` and
 `safe-mode enter` (RT-08), `image withdraw` (OPS-02's note: model first), `vm list
 --owned-only` and `vm inspect|logs` (no provider listing or timeline on the control plane yet),
