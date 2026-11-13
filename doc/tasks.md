@@ -1916,6 +1916,14 @@ from stderr to `status` (RT-06's note). Pinned by `crates/mayfly-cli/tests/opera
 (`assert_cmd`, goldens in `tests/fixtures/json/`), `crates/mayfly-composition/tests/operator.rs`
 (peer refused, a body claiming an operator decided under the peer's uid, unknown fields and
 commands, the socket `0600`, the follow) and `crates/mayfly-control/tests/store/operator.rs`.
+Note (RT-03F, found by main's macOS CI, 2026-11-13): on macOS a long `HOME` (a test's tempdir
+under `/var/folders/…/T`) put the default socket past the 103-byte socket-address limit, so the
+bind refused and the daemon stopped; a default place too long now falls back on macOS to
+`$TMPDIR/mayfly-<uid>.sock` (`paths::socket`, ADR 0091 decision 5), the in-process daemon tests
+report the daemon's error at once instead of waiting out their bound, and the oversized-request
+test ignores the error macOS gives a write to a closed peer (EPIPE or EPROTOTYPE). The fallback
+reads `TMPDIR` (a CLI without it needs `--socket`), and macOS may purge an unused file in
+`/var/folders/…/T` after days; both are limitations of the rare long-`HOME` case.
 Deferred: `quarantine list|inspect|resolve` (CP-06's card), `recover --dry-run|--apply` and
 `safe-mode enter` (RT-08), `image withdraw` (OPS-02's note: model first), `vm list
 --owned-only` and `vm inspect|logs` (no provider listing or timeline on the control plane yet),

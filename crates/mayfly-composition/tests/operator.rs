@@ -500,15 +500,21 @@ fn should_refuse_a_request_when_it_is_longer_than_the_limit() {
         let mut stream = UnixStream::connect(&socket)
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        stream
-            .write_all(long.as_bytes())
-            .await
-            .unwrap_or_else(|e| panic!("{e}"));
+        // the server stops reading at the limit, answers and closes: the rest of this write may
+        // meet the closed end (EPIPE, or EPROTOTYPE on macOS, which no stable error kind names),
+        // which is the documented behaviour, so its result is ignored; the answer is already in
+        // this end's receive buffer either way
+        let _ = stream.write_all(long.as_bytes()).await;
         let mut answer = String::new();
-        BufReader::new(stream)
-            .read_line(&mut answer)
-            .await
-            .unwrap_or_else(|e| panic!("{e}"));
+        // well under the request deadline, so only the limit (never the deadline) answers
+        mayfly_testkit_shared::poll::within(
+            REQUEST_DEADLINE / 4,
+            "the server's answer to the oversized request",
+            BufReader::new(stream).read_line(&mut answer),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|e| panic!("{e}"));
         answer
     });
 

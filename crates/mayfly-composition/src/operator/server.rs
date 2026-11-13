@@ -72,9 +72,7 @@ pub const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// How long one answer line may take to be written: a client that stops reading is dropped.
 pub const WRITE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The longest socket path, in bytes: `sun_path` holds 104 on macOS (108 on Linux), the
-/// terminating NUL included, so a longer path would be cut or refused by `bind`.
-pub const SOCKET_PATH_MAX: usize = 103;
+pub use crate::paths::SOCKET_PATH_MAX;
 
 /// How long the server waits after an `accept` error before accepting again.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -90,6 +88,8 @@ const STREAM_PAGE: u32 = 256;
 pub enum BindError {
     /// The socket's directory is not private to this user (ADR 0087's layout rule).
     Directory(mayfly_adapter_tart::verify::UnsafeLayout),
+    /// The same, for the macOS fallback place in `$TMPDIR` (`crate::paths::socket`).
+    FallbackDirectory(mayfly_adapter_tart::verify::UnsafeLayout),
     /// Something other than a stale socket of this user is at the path (another file, a link,
     /// another user's socket, or a socket a live daemon answers on): nothing was removed.
     Occupied(PathBuf),
@@ -106,6 +106,12 @@ impl std::fmt::Display for BindError {
                 f,
                 "the operator socket's directory is not private to this user: {e:?}"
             ),
+            Self::FallbackDirectory(e) => write!(
+                f,
+                "the operator socket's fallback directory ($TMPDIR, chosen because the default \
+                 socket path is too long for a socket address) is not private to this user: \
+                 {e:?}; configure a short state_dir instead"
+            ),
             Self::Occupied(path) => write!(
                 f,
                 "{} is in use: another mayflyd answers there, or it is not this user's socket; \
@@ -114,8 +120,9 @@ impl std::fmt::Display for BindError {
             ),
             Self::TooLong(path) => write!(
                 f,
-                "the operator socket path {} is longer than {SOCKET_PATH_MAX} bytes; name a \
-                 shorter state_dir",
+                "the operator socket path {} is longer than {SOCKET_PATH_MAX} bytes, the most a \
+                 socket address holds; configure a short state_dir (the socket goes in it) and \
+                 reach it with mayfly --config, or with mayfly --socket <path>",
                 path.display()
             ),
             Self::Io(e) => write!(f, "cannot open the operator socket: {e}"),
@@ -148,13 +155,19 @@ impl Listener {
     /// # Errors
     /// [`BindError`].
     pub fn bind(path: &Path) -> Result<Self, BindError> {
-        if path.as_os_str().len() > SOCKET_PATH_MAX {
+        if !crate::paths::fits(path) {
             return Err(BindError::TooLong(path.to_path_buf()));
         }
         let dir = path
             .parent()
             .ok_or_else(|| BindError::Occupied(path.to_path_buf()))?;
-        mayfly_adapter_tart::verify::check_private(dir).map_err(BindError::Directory)?;
+        mayfly_adapter_tart::verify::check_private(dir).map_err(|e| {
+            if crate::paths::is_fallback(path) {
+                BindError::FallbackDirectory(e)
+            } else {
+                BindError::Directory(e)
+            }
+        })?;
         match std::fs::symlink_metadata(path) {
             Ok(meta) => {
                 use std::os::unix::fs::FileTypeExt as _;

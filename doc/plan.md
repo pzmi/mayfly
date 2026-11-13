@@ -751,7 +751,8 @@ one digest), adds each manifest's runner pin to the data plane's pin table (so `
 is optional), and at every run registers each pool's image, records it verified and pins the pool.
 As built (RT-03): `mayfly` reaches `mayflyd` over its socket: `<state_dir>/mayfly.sock` when
 `state_dir` is configured, else ADR 0091 decision 5's place (`<state>/mayfly.sock` on Linux
-without an absolute `$XDG_RUNTIME_DIR`); `--socket <path>` or `--config <path>` tell the CLI.
+without an absolute `$XDG_RUNTIME_DIR`; on macOS, a default too long for a socket address falls
+back to `$TMPDIR/mayfly-<uid>.sock`, RT-03F); `--socket <path>` or `--config <path>` tell the CLI.
 The socket is `0600` in a directory private to the daemon's user, its peers limited to the
 daemon's own uid, its wire NDJSON at API 1 (unknown fields ignored, unknown commands answered
 `unknown_command`). Served now: `status`, `pool list|pause|resume|drain|reset-breaker`, `host

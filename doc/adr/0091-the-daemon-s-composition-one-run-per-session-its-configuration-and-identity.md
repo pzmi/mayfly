@@ -66,9 +66,15 @@ by the plan and the ADRs it builds on:
    `<state_dir>/mayfly.sock` when the configuration names `state_dir`, so one setting moves it
    with everything else and two daemons with their own state directories never share one; with
    no `state_dir`, it is `$XDG_RUNTIME_DIR/mayfly.sock` on Linux when that variable is absolute,
-   else `<state>/mayfly.sock`, and `<state>/mayfly.sock` on macOS. A live socket already at the
-   path (another daemon answering) refuses the start; only a stale one of the same user is
-   replaced. Logs' (RT-04) are `~/Library/Logs/mayfly` and `$XDG_STATE_HOME/mayfly/logs`.
+   else `<state>/mayfly.sock`, and `<state>/mayfly.sock` on macOS. A socket address holds at
+   most 103 bytes of path; on macOS a default place longer than that (a long `HOME`) falls back
+   to `$TMPDIR/mayfly-<uid>.sock`, the per-user private temporary directory, so the default
+   still works (RT-03F, 2026-11-13). The fallback reads `TMPDIR`, so a CLI run without it finds
+   the daemon only through `--socket`, and macOS may purge an unused file there after days (a
+   limitation of this rare case). A configured `state_dir` is never moved, and one too long is
+   refused with the fix. A live socket already at the path (another daemon answering) refuses
+   the start; only a stale one of the same user is replaced. Logs' (RT-04) are
+   `~/Library/Logs/mayfly` and `$XDG_STATE_HOME/mayfly/logs`.
 
 ## Consequences
 

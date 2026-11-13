@@ -146,8 +146,12 @@ impl World {
     /// host)`.
     fn build(complete: bool, explicit: bool, served: Option<(&str, &str)>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
+        // `TMPDIR` is the world's own private dir: on macOS, where the tempdir's long path
+        // pushes the default socket under `HOME` past the socket-address limit, the daemon falls
+        // back to it (RT-03F), as it does on an owner's Mac with a long `HOME`
         let env = PlatformEnv {
             home: Some(dir.path().join("home")),
+            tmpdir: Some(dir.path().to_path_buf()),
             ..PlatformEnv::default()
         };
         let places = if explicit {
@@ -606,21 +610,25 @@ fn in_process(
     let report = move |r: &Ready| {
         let _ = ready.send(r.clone());
     };
+    // the run owns the report, so its sender is dropped when the daemon stops: a script
+    // waiting for a ready line then sees the channel close at once (`next_ready` is `None`)
+    // and the test reports the daemon's error instead of waiting out its bound
+    let run = async move { run_with(options, shutdown.clone(), &report, cut).await };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("a runtime")
         .block_on(async {
-            let (ran, ()) = tokio::join!(run_with(options, shutdown.clone(), &report, cut), script);
+            let (ran, ()) = tokio::join!(run, script);
             ran
         })
 }
 
-async fn next_ready(ready: &mut tokio::sync::mpsc::UnboundedReceiver<Ready>) -> Ready {
+/// The next ready report, or `None` once the daemon stopped without one.
+async fn next_ready(ready: &mut tokio::sync::mpsc::UnboundedReceiver<Ready>) -> Option<Ready> {
     mayfly_testkit_shared::poll::within(BOUND, "the daemon's ready report", ready.recv())
         .await
         .unwrap_or_else(|e| panic!("{e}"))
-        .expect("the daemon is still running")
 }
 
 #[test]
@@ -634,9 +642,13 @@ fn should_start_a_new_run_with_a_newer_epoch_when_the_link_is_lost_after_recover
 
     // when
     let script = async {
-        let first = next_ready(&mut rx).await;
+        let Some(first) = next_ready(&mut rx).await else {
+            return;
+        };
         cut.cut();
-        let second = next_ready(&mut rx).await;
+        let Some(second) = next_ready(&mut rx).await else {
+            return;
+        };
         seen.lock().expect("seen").extend([first, second]);
         shutdown.cancel();
     };
@@ -691,8 +703,9 @@ fn should_create_the_platform_places_private_when_the_config_names_none() {
 
     // when
     let script = async {
-        let _ready = next_ready(&mut rx).await;
-        shutdown.cancel();
+        if next_ready(&mut rx).await.is_some() {
+            shutdown.cancel();
+        }
     };
     let ran = in_process(&world, &cut, &shutdown, script, tx);
 

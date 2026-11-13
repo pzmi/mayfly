@@ -15,7 +15,10 @@
 //! ([`socket`], RT-03) is `<state_dir>/mayfly.sock` when the configuration names `state_dir`;
 //! otherwise `$XDG_RUNTIME_DIR/mayfly.sock` on Linux when that variable is absolute (the
 //! per-user runtime directory XDG provides for sockets), else `<state>/mayfly.sock`, and
-//! `<state>/mayfly.sock` on macOS (ADR 0091 decision 5). Service mode under launchd or systemd configures `/Library/Application
+//! `<state>/mayfly.sock` on macOS (ADR 0091 decision 5). A default place whose path would
+//! not fit a socket address ([`SOCKET_PATH_MAX`]; a long `HOME` puts the macOS one past it)
+//! falls back on macOS to `$TMPDIR/mayfly-<uid>.sock`, the per-user private temporary directory
+//! (RT-03F). Service mode under launchd or systemd configures `/Library/Application
 //! Support/mayfly` or `/var/lib/mayfly` explicitly (OPS-01).
 //!
 //! An XDG variable is used only when absolute (the XDG specification: a relative one is
@@ -48,6 +51,9 @@ pub struct PlatformEnv {
     /// `XDG_RUNTIME_DIR`: where the operator socket goes on Linux when the configuration names
     /// no state directory ([`socket`]).
     pub xdg_runtime_dir: Option<PathBuf>,
+    /// `TMPDIR`: on macOS, the per-user private temporary directory the operator socket falls
+    /// back to when its default place is too long for a socket address ([`socket`]).
+    pub tmpdir: Option<PathBuf>,
 }
 
 impl PlatformEnv {
@@ -62,6 +68,7 @@ impl PlatformEnv {
             xdg_state_home: var("XDG_STATE_HOME"),
             xdg_data_home: var("XDG_DATA_HOME"),
             xdg_runtime_dir: var("XDG_RUNTIME_DIR"),
+            tmpdir: var("TMPDIR"),
         }
     }
 }
@@ -153,21 +160,71 @@ pub fn resolve(
 /// The operator socket's file name.
 pub const SOCKET: &str = "mayfly.sock";
 
+/// The longest socket path, in bytes: `sun_path` holds 104 bytes on macOS (108 on Linux), the
+/// terminating NUL included, so a longer path would be cut or refused by `bind`.
+pub const SOCKET_PATH_MAX: usize = 103;
+
 /// The operator socket's place (RT-03, ADR 0091 decision 5): `<state_dir>/mayfly.sock` when the
 /// configuration names `state_dir` (`configured`), so one setting moves everything and two
 /// daemons of one user with their own state directories never share a socket; otherwise, on
 /// Linux, `$XDG_RUNTIME_DIR/mayfly.sock` when that variable is absolute, else
 /// `<state>/mayfly.sock` in the places in use (`places`); on macOS always
-/// `<state>/mayfly.sock`. `mayflyd` and `mayfly` both use this rule, the CLI with the
-/// configuration it is given or none. Pinned by
-/// `tests::should_put_the_socket_in_the_configured_state_dir_when_one_is_named` and
-/// `tests::should_put_the_socket_in_the_runtime_dir_when_linux_names_one`.
+/// `<state>/mayfly.sock`. A default place longer than [`SOCKET_PATH_MAX`] (a long `HOME`:
+/// `~/Library/Application Support/mayfly/mayfly.sock` adds 48 bytes to it) falls back on macOS
+/// to `$TMPDIR/mayfly-<uid>.sock`, when `TMPDIR` is absolute and that fits: macOS gives each
+/// user a private temporary directory there (`/var/folders/…/T`), which the bind's
+/// private-directory check still verifies, so the default stays usable out of the box. A
+/// configured `state_dir` is never moved: a path too long is refused at the bind with the fix.
+/// `mayflyd` and `mayfly` both use this rule, the CLI with the configuration it is given or
+/// none: the fallback reads `TMPDIR`, so a CLI run without it (or with another) finds the
+/// daemon only through `--socket`. macOS may purge files in `/var/folders/…/T` after days
+/// without access; the daemon keeps its socket open, and a purged one is re-created at its next
+/// start (a limitation of the rare long-`HOME` case). Pinned by
+/// `tests::should_put_the_socket_in_the_configured_state_dir_when_one_is_named`,
+/// `tests::should_put_the_socket_in_the_runtime_dir_when_linux_names_one` and
+/// `tests::should_fall_back_to_the_temporary_dir_when_the_default_is_too_long`.
 #[must_use]
 pub fn socket(configured: Option<&Path>, places: &Places, env: &PlatformEnv) -> PathBuf {
     if let Some(state_dir) = configured {
         return state_dir.join(SOCKET);
     }
-    runtime_socket(env).unwrap_or_else(|| places.state_dir.join(SOCKET))
+    let chosen = runtime_socket(env).unwrap_or_else(|| places.state_dir.join(SOCKET));
+    if fits(&chosen) {
+        return chosen;
+    }
+    short_socket(env)
+        .filter(|short| fits(short))
+        .unwrap_or(chosen)
+}
+
+/// Whether `path` is the macOS fallback place, `<TMPDIR>/mayfly-<uid>.sock`, by its name.
+#[must_use]
+pub fn is_fallback(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("mayfly-"))
+        .and_then(|rest| rest.strip_suffix(".sock"))
+        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether `path` fits a socket address.
+#[must_use]
+pub fn fits(path: &Path) -> bool {
+    path.as_os_str().len() <= SOCKET_PATH_MAX
+}
+
+/// The short fallback for a default socket too long to bind, where the platform has one.
+#[cfg(target_os = "macos")]
+fn short_socket(env: &PlatformEnv) -> Option<PathBuf> {
+    let uid = rustix::process::geteuid().as_raw();
+    absolute(env.tmpdir.as_ref()).map(|dir| dir.join(format!("mayfly-{uid}.sock")))
+}
+
+/// The short fallback for a default socket too long to bind, where the platform has one: none
+/// on Linux, whose `TMPDIR` is usually the shared `/tmp` (`XDG_RUNTIME_DIR` is its short place).
+#[cfg(not(target_os = "macos"))]
+const fn short_socket(_env: &PlatformEnv) -> Option<PathBuf> {
+    None
 }
 
 /// The socket in the runtime directory, where the platform has one for it.
@@ -234,6 +291,7 @@ mod tests {
             xdg_state_home: state.map(PathBuf::from),
             xdg_data_home: data.map(PathBuf::from),
             xdg_runtime_dir: None,
+            tmpdir: None,
         }
     }
 
@@ -432,5 +490,62 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(with, in_state);
         assert_eq!(relative, in_state);
+    }
+
+    #[test]
+    fn should_fall_back_to_the_temporary_dir_when_the_default_is_too_long() {
+        // given: a HOME long enough to push the default socket past the limit, and a TMPDIR
+        let long = format!("/Users/{}", "u".repeat(70));
+        let places =
+            macos_defaults(&env(Some(&long), None, None)).unwrap_or_else(|| panic!("places"));
+        let with_tmp = PlatformEnv {
+            tmpdir: Some("/var/folders/xy/abc/T".into()),
+            ..env(Some(&long), None, None)
+        };
+        let configured = PathBuf::from(format!("{long}/state"));
+        let long_tmp = PlatformEnv {
+            tmpdir: Some(format!("/var/folders/{}/T", "t".repeat(100)).into()),
+            ..env(Some(&long), None, None)
+        };
+        let relative_tmp = PlatformEnv {
+            tmpdir: Some("T".into()),
+            ..env(Some(&long), None, None)
+        };
+
+        // when
+        let (fallback, without_tmp, kept) = (
+            socket(None, &places, &with_tmp),
+            socket(None, &places, &env(Some(&long), None, None)),
+            socket(Some(&configured), &places, &with_tmp),
+        );
+        let (too_long, relative) = (
+            socket(None, &places, &long_tmp),
+            socket(None, &places, &relative_tmp),
+        );
+
+        // then: macOS falls back to its per-user temporary directory; without one, or for a
+        // configured state_dir, the long path stays and the bind refuses it with the fix
+        let default = places.state_dir.join(SOCKET);
+        assert!(!fits(&default));
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            fallback,
+            PathBuf::from(format!(
+                "/var/folders/xy/abc/T/mayfly-{}.sock",
+                rustix::process::geteuid().as_raw()
+            ))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(fallback, default);
+        assert_eq!(without_tmp, default);
+        assert_eq!(kept, configured.join(SOCKET));
+        // a fallback that would not fit either, or a relative TMPDIR, is not used
+        assert_eq!(too_long, default);
+        assert_eq!(relative, default);
+        assert!(is_fallback(Path::new(
+            "/var/folders/xy/abc/T/mayfly-501.sock"
+        )));
+        assert!(!is_fallback(Path::new("/var/lib/mayfly/mayfly.sock")));
+        assert!(!is_fallback(Path::new("/tmp/mayfly-.sock")));
     }
 }
