@@ -82,7 +82,8 @@ fn should_fail_the_named_cases_when_the_fake_is_broken() {
     let cases = [
         (Broken::NoCursorApi, vec!["SS-04"]),
         (Broken::RetryAfterIgnoringApi, vec!["SS-06"]),
-        (Broken::NameGuessingRegistry, vec!["RR-02"]),
+        (Broken::NameGuessingRegistry, vec!["RR-02", "RR-05"]),
+        (Broken::StaleListingRegistry, vec!["RR-05"]),
     ];
 
     // when

@@ -937,6 +937,15 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   and trusts one listing by name, so a runner GitHub lists only later is on no reaper list through
   this stream (P14 still reports it as unjournaled, never deleting it); CP-05 takes a second
   listing after a grace period before recording it.
+- **As built (CP-05, `mayfly_control::registration`):** the reaper records `RecordAbsent` after
+  an unknown issue only on a second empty listing by name at least `listing_grace` (10 min)
+  after the first, which the model states as `absentOnlyWhenNoRunner` with the grace no shorter
+  than GitHub's listing lag; the first listing is kept in memory, so a restart only lists again.
+  A failed mint is `RecordAbsent` only for a definite refusal (throttled past the retries,
+  refused, unusable credentials, the scale set gone) and `RecordIssueUnknown` otherwise, a taken
+  name included. A minted config the attempt never got a handle for (a crash between the two) is
+  `PresumeLeaked{handle_orphaned}`. The unrecognised runners P14 reports are its last sweep's
+  report (`RegistrationManager::last_sweep`), not a projection; P12 is left to GH-04.
 
 ### 6.6 `Image` [Image]
 

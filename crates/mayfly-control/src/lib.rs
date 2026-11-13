@@ -33,6 +33,10 @@
 //!   types and failure classes (GH-03).
 //! - [`terms`]: the terms policy (P4): each pool's terms applied on every host, at the pool's
 //!   terms revision, by a level-triggered pass (CP-08).
+//! - [`registration`]: the registration manager and the reaper (P9 to P14 but P12): each
+//!   attempt's JIT runner minted once, held in the single-take broker, confirmed online,
+//!   deregistered by its journaled id before its VM stops, and the runners no journal record
+//!   explains reported, never removed (CP-05).
 
 pub mod delivery;
 pub mod github;
@@ -45,6 +49,7 @@ pub mod projection;
 pub mod queries;
 pub mod reconciler;
 pub mod recovery;
+pub mod registration;
 pub mod saga;
 pub mod secrets;
 pub mod sessions;

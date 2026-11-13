@@ -15,6 +15,11 @@
 //! It answers at once: no hold, no network. A [`WorldFault`] queued with
 //! [`FakeScaleSetApi::inject`] bends the next matching call; a `Retry-After` is waited on the
 //! [`FakeClock`] it was built with, so the wait is observable and nothing sleeps.
+//!
+//! For the registration manager's tests (CP-05) a world can also lose a JIT answer after its
+//! effect ([`FakeScaleSetApi::lose_next_jit_answer`]), whose runner the listings then show only
+//! once they catch up ([`FakeScaleSetApi::catch_up_listings`]), as GitHub's may lag behind a
+//! mint, and it counts the runner listings it answered ([`FakeScaleSetApi::runner_listings`]).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,8 +55,11 @@ pub enum Broken {
     /// Fails SS-06.
     RetryAfterIgnoringApi,
     /// `NameGuessingRegistry`: removes every runner whose name starts with the removed one's
-    /// name. Fails RR-02.
+    /// name. Fails RR-02 and RR-05 (each removes a runner whose name extends another's).
     NameGuessingRegistry,
+    /// `StaleListingRegistry`: keeps listing a runner after its removal, as a cached listing
+    /// would. Fails RR-05.
+    StaleListingRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +108,9 @@ struct Runner {
     /// Whether it reports in (`status: online`), apart from whether it is busy: a runner that
     /// registered and has not taken a job yet can be online and idle.
     online: bool,
+    /// Whether the listings (by name and all) show it yet: a runner registered by a JIT answer
+    /// that was lost is listed only once they catch up.
+    listed: bool,
 }
 
 #[derive(Debug)]
@@ -111,7 +122,15 @@ struct World {
     held: BTreeMap<u64, SessionId>,
     jobs: BTreeMap<u64, Job>,
     runners: BTreeMap<u64, Runner>,
+    /// Runners removed while `StaleListingRegistry` keeps listing them.
+    stale: BTreeMap<u64, Runner>,
     faults: Vec<WorldFault>,
+    /// The next JIT registers its runner and loses its answer.
+    lose_jit_answer: bool,
+    /// Runner listings answered (by name and all).
+    listings: u32,
+    /// Runner removals answered.
+    removals: u32,
 }
 
 impl World {
@@ -319,7 +338,11 @@ impl FakeScaleSetApi {
                 held: BTreeMap::new(),
                 jobs: BTreeMap::new(),
                 runners: BTreeMap::new(),
+                stale: BTreeMap::new(),
                 faults: Vec::new(),
+                lose_jit_answer: false,
+                listings: 0,
+                removals: 0,
             })),
             clock,
         }
@@ -411,6 +434,73 @@ impl FakeScaleSetApi {
             .ok_or_else(|| "no such runner".to_owned())?;
         r.online = online;
         Ok(())
+    }
+
+    /// The next JIT generation registers its runner and loses its answer: the caller gets
+    /// [`Failure::Unavailable`], and the listings show the runner only after
+    /// [`FakeScaleSetApi::catch_up_listings`] (F06, F07).
+    pub fn lose_next_jit_answer(&self) {
+        self.world().lose_jit_answer = true;
+    }
+
+    /// The listings catch up: every runner is listed.
+    pub fn catch_up_listings(&self) {
+        for runner in self.world().runners.values_mut() {
+            runner.listed = true;
+        }
+    }
+
+    /// How many runner listings (by name and all) the world answered.
+    #[must_use]
+    pub fn runner_listings(&self) -> u32 {
+        self.world().listings
+    }
+
+    /// How many runner removals the world answered.
+    #[must_use]
+    pub fn runner_removals(&self) -> u32 {
+        self.world().removals
+    }
+
+    /// The runner `runner`'s job ends and it goes idle (its process may still be registered).
+    ///
+    /// # Errors
+    /// When there is no such runner.
+    pub fn finish_job(&self, runner: RunnerId) -> Result<(), String> {
+        let mut world = self.world();
+        let r = world
+            .runners
+            .get_mut(&runner.0)
+            .ok_or_else(|| "no such runner".to_owned())?;
+        r.job = None;
+        Ok(())
+    }
+
+    /// The runner `runner` as GitHub holds it, listed or not.
+    #[must_use]
+    pub fn runner(&self, runner: RunnerId) -> Option<RunnerInfo> {
+        self.world()
+            .runners
+            .get(&runner.0)
+            .map(|r| runner_info(runner.0, r))
+    }
+
+    /// Registers a runner named `name` in `scale_set` that no JIT of this caller asked for (a
+    /// runner of another installation, or one a person added), listed and online.
+    pub fn add_runner(&self, scale_set: ScaleSetId, name: &str) -> RunnerId {
+        let mut world = self.world();
+        let id = world.next();
+        world.runners.insert(
+            id,
+            Runner {
+                name: name.to_owned(),
+                set: scale_set.0,
+                job: None,
+                online: true,
+                listed: true,
+            },
+        );
+        RunnerId(id)
     }
 
     /// Queues `fault` for the next call it bends.
@@ -713,15 +803,23 @@ impl ScaleSetApi for FakeScaleSetApi {
         if world.runners.values().any(|r| r.name == runner_name) {
             return Err(fail(Failure::NameTaken, "the runner name is taken"));
         }
+        let lost = std::mem::take(&mut world.lose_jit_answer);
         let id = world.next();
         let runner = Runner {
             name: runner_name.to_owned(),
             set: scale_set.0,
             job: None,
             online: false,
+            listed: !lost,
         };
         let info = runner_info(id, &runner);
         world.runners.insert(id, runner);
+        if lost {
+            return Err(fail(
+                Failure::Unavailable,
+                "the connection broke after the runner was registered",
+            ));
+        }
         Ok(JitConfig {
             runner: info,
             encoded: Secret::new(format!("fake-jit-config-{id:08}")),
@@ -740,18 +838,31 @@ impl RunnerRegistry for FakeRunnerRegistry {
     }
 
     async fn find_runners(&self, name: &str) -> Result<Vec<RunnerInfo>, GitHubCallError> {
-        Ok(self
-            .api
-            .world()
+        let mut world = self.api.world();
+        world.listings += 1;
+        Ok(world
             .runners
             .iter()
-            .filter(|(_, r)| r.name == name)
+            .filter(|(_, r)| r.listed && r.name == name)
+            .map(|(id, r)| runner_info(*id, r))
+            .collect())
+    }
+
+    async fn list_runners(&self) -> Result<Vec<RunnerInfo>, GitHubCallError> {
+        let mut world = self.api.world();
+        world.listings += 1;
+        Ok(world
+            .runners
+            .iter()
+            .chain(world.stale.iter())
+            .filter(|(_, r)| r.listed)
             .map(|(id, r)| runner_info(*id, r))
             .collect())
     }
 
     async fn remove_runner(&self, id: RunnerId) -> Result<RemovalOutcome, GitHubCallError> {
         let mut world = self.api.world();
+        world.removals += 1;
         let Some(runner) = world.runners.get(&id.0).cloned() else {
             return Ok(RemovalOutcome::Gone);
         };
@@ -764,6 +875,9 @@ impl RunnerRegistry for FakeRunnerRegistry {
                 .retain(|_, r| !r.name.starts_with(&runner.name) || r.job.is_some());
         } else {
             world.runners.remove(&id.0);
+        }
+        if world.broken == Some(Broken::StaleListingRegistry) {
+            world.stale.insert(id.0, runner);
         }
         Ok(RemovalOutcome::Gone)
     }

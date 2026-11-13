@@ -308,7 +308,7 @@ pub trait ScaleSetApi: Send + Sync {
     ) -> impl Future<Output = Result<JitConfig, GitHubCallError>> + Send;
 }
 
-/// The runner endpoints (spec §2, §7): get and remove by id, list by name. Nothing here
+/// The runner endpoints (spec §2, §7): get and remove by id, list by name or all. Nothing here
 /// registers a runner with a registration token (ADR 0028).
 pub trait RunnerRegistry: Send + Sync {
     /// The runner `id`, `None` when it does not exist.
@@ -328,6 +328,14 @@ pub trait RunnerRegistry: Send + Sync {
         &self,
         name: &str,
     ) -> impl Future<Output = Result<Vec<RunnerInfo>, GitHubCallError>> + Send;
+
+    /// Every runner the service lists (`agents` without `agentName`): the reaper's listing
+    /// (policy P14, CP-05), which it reads at most once an hour.
+    ///
+    /// # Errors
+    /// [`GitHubCallError`].
+    fn list_runners(&self)
+    -> impl Future<Output = Result<Vec<RunnerInfo>, GitHubCallError>> + Send;
 
     /// Removes the runner `id`, and only it.
     ///

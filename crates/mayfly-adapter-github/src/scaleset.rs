@@ -712,11 +712,24 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> RunnerRegistry
             )
             .await
             .map_err(|e| call_error(&e))?;
-        Ok(list_values(&answer)?
-            .iter()
-            .filter_map(decode_runner)
+        Ok(decode_runners(&answer)?
+            .into_iter()
             .filter(|r| r.name == name)
             .collect())
+    }
+
+    async fn list_runners(&self) -> Result<Vec<RunnerInfo>, GitHubCallError> {
+        let answer = self
+            .service(
+                Operation::RunnerRead,
+                Method::Get,
+                &["_apis", "distributedtask", "pools", "0", "agents"],
+                &[],
+                None,
+            )
+            .await
+            .map_err(|e| call_error(&e))?;
+        decode_runners(&answer)
     }
 
     async fn remove_runner(&self, id: RunnerId) -> Result<RemovalOutcome, GitHubCallError> {
@@ -808,6 +821,19 @@ fn decode_session(
 fn body_json(answer: &HttpResponse) -> Result<Value, GitHubCallError> {
     serde_json::from_slice(answer.body_without_bom())
         .map_err(|_| drift("a success answer is not JSON"))
+}
+
+/// Every runner of a list answer. One that does not decode is drift, never dropped: the reaper
+/// concludes an absence from a listing by name (P10), so a runner skipped here could be recorded
+/// absent while it lives. Pinned by
+/// `tests/client/scaleset.rs::should_answer_drift_when_a_listed_runner_cannot_be_decoded`.
+fn decode_runners(answer: &HttpResponse) -> Result<Vec<RunnerInfo>, GitHubCallError> {
+    list_values(answer)?
+        .iter()
+        .map(|value| {
+            decode_runner(value).ok_or_else(|| drift("a listed runner lacks an id or a name"))
+        })
+        .collect()
 }
 
 /// The `value` array of a `{count, value}` answer (spec §2).

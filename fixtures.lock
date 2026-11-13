@@ -10,6 +10,7 @@ a59a33818932b63efeabf0c0bc0e923b9db6b55d937d90268221f87959c6c1d9  crates/mayfly-
 dfcf7e7d09c7fb7829dcfaab25662144b1ea5f5e53a571395443f9e883258043  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-02.json
 171b4327715cbcf9b854bcc15a6890fd6042b22a6cb3f33eba4231c18d074eca  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-03.json
 c54fb8a2ff0d45dfc67a9fb47986d4295875b34cca5ecd395c465f15f4db1da7  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-04.json
+3d5dbd730164e16e7a314b4780d2676a53134272a14280c86377fb84e500a3ab  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/rr-05.json
 81bcdb1865b8cc0a1e9df23ccc118018f21265b46d1520621ba8400443d2b68b  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-01.json
 f3daf2a54f4b942422cdd1b1907738913578a132926cb865ffadb61a013e5569  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-02.json
 e72349c2270a87f64f6828066a6eee3e37dbe1bcf1affab1ed5cf1b4d1d5de88  crates/mayfly-adapter-github/tests/fixtures/github-scaleset/ss-03.json

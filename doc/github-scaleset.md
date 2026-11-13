@@ -147,6 +147,7 @@ in mayfly depends on it (not on the HW-02 list).
 | JIT config | `POST {svc}/_apis/runtime/runnerscalesets/{id}/generatejitconfig`, body `{"name", "workFolder"}` | 200 `{runner, encodedJITConfig}` | client.go, GenerateJitRunnerConfig |
 | Runner by id | `GET {svc}/_apis/distributedtask/pools/0/agents/{runnerId}` | 200 runner | client.go, GetRunner |
 | Runner by name | `GET {svc}/_apis/distributedtask/pools/0/agents?agentName=<name>` | 200 list; none is "absent" | client.go, GetRunnerByName |
+| Every runner (mayfly's reaper, P14) | `GET {svc}/_apis/distributedtask/pools/0/agents`, no `agentName` | 200 `{count, value: [runner]}` | client-assumed: no source lists every runner; the route without the filter, as for the listing by name [open: HW-02, item 13]. Paging is not known: mayfly reads one answer, and a partial one only under-reports (an unrecognised runner reported later, a journaled one removed at the next sweep); no absence is ever concluded from it. An entry that does not decode is drift, never skipped |
 | Remove runner | `DELETE {svc}/_apis/distributedtask/pools/0/agents/{runnerId}` | **204** (also for an absent runner, section 7) | client.go, RemoveRunner |
 
 And on the REST API, with the installation token, for the trust check of section 6.2 (ADR 0090)
@@ -787,6 +788,11 @@ amended 2026-11-12.)
     macOS labels receives an assigned job; the time from `JobAssigned` to the sink's failure;
     that with `maxCapacity` pinned at the assigned count no new job is assigned while the sink is
     up, with a backlog behind it; that the failed run can be re-run (section 6.2).
+13. **Every runner listed.** That `GET {svc}/_apis/distributedtask/pools/0/agents` without
+    `agentName` answers every runner the scale-set registration sees, mayfly's and others', in
+    one answer or how it pages; and how long a runner registered by a JIT whose answer was lost
+    takes to appear in the listings (mayfly assumes at most its ten-minute listing grace,
+    section 2, CP-05).
 
 ## 13. GitHub App permissions (ADR 0045, draft)
 

@@ -31,11 +31,13 @@
 //! the Actions-service path mayfly uses, 422 on the REST path (`doc/github-scaleset.md` §7).
 //! No event carries the JIT config.
 //!
-//! **Limitations.** `RecordAbsent` after an unknown issue is terminal and trusts one listing by
-//! name: if GitHub's listing lags behind a lost mint, a runner that appears later is on no
-//! reaper list through this stream (I20 holds only as far as that listing is true). P14's daily
-//! listing still reports a runner of our name shape with no journaled id, never deleting it;
-//! CP-05 should take a second listing after a grace period before it records `RecordAbsent`.
+//! **Limitations.** `RecordAbsent` after an unknown issue is terminal and trusts the reaper's
+//! listing by name: if GitHub's listing lagged behind a lost mint, a runner that appears later
+//! would be on no reaper list through this stream. The reaper (CP-05,
+//! `mayfly_control::registration`) therefore records it only after a second empty listing at
+//! least a grace period after the first (`formal/registration.qnt`, `absentOnlyWhenNoRunner`),
+//! and P14's listing still reports a runner of our name shape with no journaled id, never
+//! deleting it.
 //! A busy answer cancels only the retirement whose request it answered: a stale request of
 //! retirement A answered busy after the attempt moved to retirement B cancels A, not B.
 

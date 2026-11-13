@@ -28,6 +28,7 @@
 //! | RR-02 | a removal removes the runner of that id and no other |
 //! | RR-03 | removing an absent runner is gone |
 //! | RR-04 | a busy runner's removal is refused as busy and the runner stays |
+//! | RR-05 | every runner is listed with its id and name; a removed one is no longer listed (CP-05) |
 //!
 //! [`check_scaleset_contract`] returns a [`Report`]; no case is skipped.
 
@@ -160,7 +161,7 @@ pub struct ScaleSetCase {
 }
 
 /// Every case, in order.
-pub const CASES: [ScaleSetCase; 17] = [
+pub const CASES: [ScaleSetCase; 18] = [
     case("SS-01", Flow::Direct),
     case("SS-02", Flow::Direct),
     case("SS-03", Flow::Direct),
@@ -178,6 +179,7 @@ pub const CASES: [ScaleSetCase; 17] = [
     case("RR-02", Flow::Direct),
     case("RR-03", Flow::Direct),
     case("RR-04", Flow::Direct),
+    case("RR-05", Flow::Direct),
 ];
 
 const fn case(id: &'static str, flow: Flow) -> ScaleSetCase {
@@ -255,6 +257,7 @@ async fn run<W: ScaleSetWorld>(id: &str, w: &W) -> Outcome {
         "RR-02" => remove_by_id_case(w).await,
         "RR-03" => remove_absent_case(w).await,
         "RR-04" => busy_case(w).await,
+        "RR-05" => list_all_case(w).await,
         _ => Err(format!("no case {id}")),
     }
 }
@@ -679,4 +682,26 @@ async fn busy_case<W: ScaleSetWorld>(w: &W) -> Outcome {
     )?;
     let still = ok(w.registry().get_runner(runner).await, "get")?;
     expect(still.is_some(), "the busy runner was removed")
+}
+
+async fn list_all_case<W: ScaleSetWorld>(w: &W) -> Outcome {
+    let set = ensure(w).await?;
+    let a = mint(w, set, "mf-contract-r5").await?;
+    let b = mint(w, set, "mf-contract-r5b").await?;
+    let listed = ok(w.registry().list_runners().await, "list")?;
+    let named = |id: RunnerId, name: &str| listed.iter().any(|r| r.id == id && r.name == name);
+    expect(
+        named(a, "mf-contract-r5") && named(b, "mf-contract-r5b"),
+        "the listing lacks a runner, or names it otherwise",
+    )?;
+    ok(w.registry().remove_runner(a).await, "remove")?;
+    let after = ok(w.registry().list_runners().await, "list after the removal")?;
+    expect(
+        after.iter().all(|r| r.id != a),
+        "the removed runner is still listed",
+    )?;
+    expect(
+        after.iter().any(|r| r.id == b),
+        "a runner of another id is no longer listed",
+    )
 }

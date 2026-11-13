@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use mayfly_adapter_github::{
     HttpRequest, HttpResponse, Operation, ScaleSetClient, Transport, TransportError,
 };
-use mayfly_control::github::{Failure, ScaleSetApi as _, ScaleSetId, ScaleSetSpec};
+use mayfly_control::github::{
+    Failure, RunnerRegistry as _, ScaleSetApi as _, ScaleSetId, ScaleSetSpec,
+};
 use mayfly_control::store::Clock;
 use mayfly_fake_github::{FakeGithub, Fault, Knobs, Route};
 use mayfly_testkit::clock::{FakeClock, SeededRng};
@@ -217,4 +219,33 @@ async fn should_mint_the_admin_token_again_once_when_a_service_call_answers_401(
         Failure::Refused { status: 401 }
     );
     assert_eq!(world.fake.counts().admin_exchanges, minted + 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn should_answer_drift_when_a_listed_runner_cannot_be_decoded() {
+    // given: a list whose second entry has no id, for the listing of all and by name
+    let world = FakeWorld::new(Flow::Direct);
+    let body = serde_json::json!({
+        "count": 2,
+        "value": [{"id": 1, "name": "mf-a"}, {"name": "mf-a"}],
+    })
+    .to_string();
+    for _ in 0..2 {
+        world.fake.fail_next(
+            Route::ListRunners,
+            Fault::Respond {
+                status: 200,
+                headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+                body: body.clone(),
+            },
+        );
+    }
+
+    // when
+    let all = world.client.list_runners().await;
+    let named = world.client.find_runners("mf-a").await;
+
+    // then: never a shorter list that a reaper could read as an absence
+    assert_eq!(all.expect_err("drift").failure, Failure::ProtocolDrift);
+    assert_eq!(named.expect_err("drift").failure, Failure::ProtocolDrift);
 }

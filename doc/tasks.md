@@ -166,6 +166,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | ARCH-02 | Close the checker bypasses of the second FND-04 review | ARCH-01 | opus | |
 | ARCH-03 | Close the third FND-04 review's bypasses; checker threat model | ARCH-02 | opus | |
 | ARCH-04 | Architecture rules behind the event shape tracer; KER-03G leftovers | ARCH-03, KER-03 | opus | |
+| ARCH-05 | `ARCH-secret-serialize` keyed by path, not by a type's simple name | ARCH-04 | opus | |
 | KER-01 | Shared kernel: ids, VM names, generations, epochs, fences, ownership proof | FND-02 | sonnet | |
 | DDD-01 | Event storming and domain model: contexts, language, aggregates | KER-01 | opus | ⛳ |
 | DEC-01 | Record the owner's decisions as ADRs and apply them to the documents | DDD-01 | opus | |
@@ -211,6 +212,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-06 | Breaker, quarantine and Unknown-escalation policies | KER-10, CP-03 | sonnet | |
 | CP-07 | Image placement manager | KER-11, DP-07 | sonnet | |
 | CP-08 | Terms policy P4: a pool's terms applied on every host | CP-07, RT-02 | sonnet | |
+| CP-09 | Activation grant: P9's `GrantActivation` and `BeginActivation` from the reconciler | CP-05, CP-03, KER-06G | opus | |
 | DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07, VER-09 | opus | |
 | DP-01 | Data-plane executor and observer, resource ledger, fake provider | KER-08 | opus | |
 | DP-02 | In-process link transport and link contract suite | KER-02 | sonnet | |
@@ -226,8 +228,9 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-02 | Composition: wiring, supervision tree, startup, `mayflyd` | CP-04, DP-02, DP-04, DP-06, ES-05, RT-01, SEC-02 | opus | |
 | RT-03 | Operator socket API and `mayfly` CLI | RT-02 | sonnet | |
 | RT-04 | Observability: tracing JSON, metrics, redaction tests | RT-02 | sonnet | |
-| RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05 | opus | |
+| RT-05 | Terminal mode: a clean stop on Ctrl-C | RT-02, CP-05, RT-07 | opus | |
 | RT-06 | Measured host sizing | RT-02, DP-06, DP-07 | opus | |
+| RT-07 | `mayflyd`'s GitHub wiring: the client, the registration manager and the reaper | CP-05, GH-04, RT-02 | sonnet | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09 | opus | ⛳ |
 | GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
@@ -239,9 +242,10 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | GH-10 | Workflow-run lookup of assigned jobs and the cancel of refused runs | GH-02, KER-06G | sonnet | |
 | GH-08 | Trust on github.com: the trust config, the start-up checks, refusals wired | GH-03, GH-10, KER-06G, RT-01 | opus | |
 | GH-09 | (Withdrawn by GH-00S) Operator release of a refusal and the release window | — | — | |
-| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, GH-08, CP-05, E2E-01 | sonnet | ⛳ |
+| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, GH-08, CP-05, CP-09, LNK-02, RT-07, E2E-01 | sonnet | ⛳ |
 | GH-07 | Several organisations: one scale set per pool per organisation, one App | E2E-02, GH-08 | opus | |
 | LNK-01 | UDS transport and split control/data roles | DP-02, RT-02 | sonnet | |
+| LNK-02 | The JIT config on the link: the broker to the data plane's `LaunchStore`, model first | CP-05, DP-05, DP-02 | opus | |
 | VER-01 | Conformance crate: ITF replay, lifecycle driver | KER-04, FND-06 | opus | |
 | VER-02 | Conformance drivers: scheduling, recovery, scaleset, link, registration | VER-01, CP-04, GH-04, KER-06G, LNK-01, KER-09 | opus | |
 | VER-03 | Fault lab: controller, history, verdicts, guardrails | E2E-01 | opus | |
@@ -374,6 +378,18 @@ vocabulary. Landed: ARCH-include-macro, ARCH-pure-clippy-config (semantic `clipp
 pure crate), ARCH-macro-export, declaration checks in ARCH-plane-vocabulary, YAML-parsed CI
 lockstep, the xtask checkout preflight, shared-crate dev edges (ADR 0019 amended).
 Accept: each bypass has a negative fixture failing for its rule; `cargo xtask check` green.
+
+#### ARCH-05 `ARCH-secret-serialize` keyed by path, not by a type's simple name
+Cites: fnd §3; plan §13 (D13); CP-05's build (2026-11-13). The rule's set of secret holders is
+built from simple type names across every package: CP-05's test-only `World` and a private
+`Held` that held a `Secret` made fake-github's `World` and `Session`, fake-tart's `State` and an
+xtask `Entry` read as secret holders, and the rule refused their `Serialize` derives (renamed
+away in CP-05). Key holders by package and module path; seed the set from production
+declarations only (a test type never makes a production one a holder); treat a type alias, a
+generic parameter bound to a holder and `dyn` of a holder as holders; consider a compile-time
+assertion in `mayfly-domain` that `Secret<T>` is not `Serialize`, beside the syntactic rule.
+Accept: a negative fixture where a same-named, secret-free type in another crate is not flagged
+while the real holder is; fixtures for an alias and a generic holder; the rule's own tests.
 
 #### ARCH-04 Architecture rules behind the event shape tracer; KER-03G leftovers
 Cites: ADR 0018 (amended 2026-11-09, ARCH-04), fnd §3.3. The tracer passes, by design, what serde
@@ -1143,6 +1159,38 @@ gone; busy is told by `typeName` (400 or 409). Ghost runners (spec §6.3): a run
 acquire failed is deregistered by GitHub while its process keeps listening, so a registered VM
 whose runner id reads 404 is retired by mayfly's observation and the attempt's deadline, never
 by waiting for the guest to exit.
+
+Note (CP-05, as built; scope option A, coordinator 2026-11-13): `mayfly_control::registration`.
+`RegistrationManager` is a durable consumer of the `attempt-*` and `registration-*` streams and
+a level-triggered `pass`; for one attempt it reads both streams and takes the next step of a
+pure decision table (`manager::next`, unit-tested): the mint once (`RequestRegistration` under
+the VM name, `generate_jit_config`, then `RecordIssued`, or `RecordAbsent` for a definite
+refusal, or `RecordIssueUnknown`, a taken name included), the config into the single-take
+`JitBroker` (bound to attempt and epoch; restart empties it) and only its handle to the attempt
+(`RecordJitHandle`); a `Requested` that no mint of this process answers is an unknown issue; P13
+presumes leaked an orphaned handle, a launch of unknown outcome, a config that reached no handle
+(F32) and a runner not seen online within `online_deadline` (2 min), removes it by its id and
+retires the attempt; P11 (the retirement's or the quarantine stop's latest event as the key)
+through `retirement_step`; P10 in the pass: found by exact name, or absent only on a second
+empty listing `listing_grace` (10 min) after the first, model first (`formal/registration.qnt`:
+`listed`, `graceElapses`, `absentOnlyWhenNoRunner`, the negative control
+`absentOnOneListingViolatesTest`). P14 is `RegistrationManager::sweep`: at most one listing of
+every runner per `listing_interval` (1 h); a journaled id whose attempt's VM is gone is removed
+(`NotLive`), an unjournaled runner of our name shape reported at WARN
+(`unrecognised_runner_reported`) and in the sweep's report, never removed. `RunnerRegistry`
+gains `list_runners` (contract RR-05 on the fake, the adapter over fake-github in both flows
+and the synthetic `rr-05.json`; `StaleListingRegistry` fails it, and `NameGuessingRegistry` now fails it beside RR-02). The testkit fake gains
+`lose_next_jit_answer`, listings that lag a lost mint (`catch_up_listings`), `add_runner`,
+`runner` and `runner_listings`. Component tests in `crates/mayfly-control/tests/store/registration.rs`
+(F06, F07, F32, the online confirmation, P11's busy race, DEC-06F's quarantine stop, the sweep).
+Review fixes (2026-11-13): steps of one attempt never overlap (a second answers `stepping`, so
+no step decides on a stale `Requested`); a busy answer to a leaked runner's removal holds the
+next request back for `busy_retry` (5 min) unless the journal shows the job over, so a long job
+is not a hot loop; a listed runner that does not decode is drift; the broker forgets a settled
+registration's handle; `listing_grace` is never below ten minutes (`MIN_LISTING_GRACE`); the
+model's `reaperRestarts` resets the reaper's memory.
+Left to new cards: P9's grant (CP-09), the config's frame on the link (LNK-02), the daemon's
+wiring (RT-07); P12 to GH-04 (its note).
 #### CP-06 Breaker, quarantine and Unknown-escalation policies
 Cites: dm P15, P16, P19; ADR 0025. Breaker counting and trips per (pool, digest); quarantine opening
 (ERROR, metric, status), escalation levels T_q1/T_q2 that never act on the VM, no timer and no cap
@@ -1327,6 +1375,22 @@ Note (OPS-02): `mayflyd` now pins every pool from its manifest at each run's sta
 the store; the tests' World writes a manifest whose repository is a loopback address nothing
 serves, so a placement fails at once, offline (a materialisation under `mayflyd` is VER-09's;
 done: VER-09, `mod placement`).
+
+#### CP-09 Activation grant: P9's first half
+Cites: dm P9, §6.3 (`GrantActivation`), §6.4 (`BeginActivation`); ADRs 0028, 0090; CP-03,
+KER-06G, GH-08. Found at CP-05's intake (2026-11-13): nothing issues the Host's
+`GrantActivation` or the attempt's `BeginActivation`, so in `mayflyd` no attempt leaves
+`Prepared` and the registration manager never mints. A reconciler action beside `ReserveSlot`:
+for a pool whose shortfall exceeds its activating, listening and busy runners, and only while
+`ScaleSetState::runner_may_start` holds (GH-08), pick a prepared attempt of the pool's current
+digest (the oldest first), `GrantActivation` on its host, then `BeginActivation{grant_ref}` on
+the attempt with a read of the host stream at the grant's revision; a refused grant leaves it
+`Prepared` for the next pass. Model: check `formal/scheduling.qnt` and `formal/lifecycle.qnt`
+first; the lifecycle model already has the grant, the scheduling model may need it beside the
+reservation.
+Accept: component tests: a prepared attempt with demand is granted and activated once, never
+while `runner_may_start` is false nor beyond the shortfall; a racing pass grants no second
+attempt for the same demand; the registration manager (CP-05) then mints for it.
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,
@@ -1667,6 +1731,28 @@ scheduling model takes slots and disk as given, and unknown capacity refuses thr
 `capacity_unknown` path it already models. Also in this commit, the owner's accepted amendment of
 ADR 0087 decision 1 (DP-07F's trusted symlinks), recorded in the ADR.
 
+#### RT-07 `mayflyd`'s GitHub wiring: the client, the registration manager and the reaper
+Cites: plan §7, §11; dm P9–P14; ADRs 0029, 0033, 0045. Found at CP-05's intake (2026-11-13):
+GH-02 and GH-03 built the client and CP-05 the registration manager, but `mayflyd` builds
+neither. Composition builds the `ScaleSetClient` over the configured App, a
+`ScaleSetDirectory` over the `scale_sets` projection (each pool's scale set and its session's
+health), one `JitBroker` shared with the link's control-plane end (LNK-02), and the
+`RegistrationManager` as a durable consumer of the delivery worker, with its `pass` on the
+supervision tree's timer (at most once a minute) and its `sweep` at run start, daily, when a
+session reopens after a long outage and from `mayfly doctor` (RT-03), which shows the last
+report's unrecognised runners; and passes GitHub's view to recovery (RT-02's note). One client
+serves the listener too (GH-04). CP-05's pass folds every registration stream ever written
+once a minute (settled ones are skipped after that fold): before it runs in production, give it
+an `open_registrations` projection (or the delivery ledger's per-stream marks) so it reads only
+registrations not yet settled. The consumer, the pass and the sweep share one
+`RegistrationManager` (its per-attempt step guard, busy backoffs and listing memory live in it);
+the consumer's handle deadline (`DeliveryConfig::handle_deadline`) must exceed the mint's call
+budget, `Retry-After` waits included, or a mint dropped mid-call is recorded as an unknown
+issue every time.
+Accept: daemon tests over fake-github: an activating attempt minted once and its runner
+deregistered on retirement; the reaper runs at start and lists at most once an hour; `doctor`
+lists an unrecognised runner; no secret in the daemon's output or logs.
+
 #### E2E-01 ⛳ Walking skeleton
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +
 fake guest runner completes one "job", VM deleted, slot released; then a demand of 3 with 2 slots
@@ -1848,6 +1934,12 @@ none) and count it as protocol drift, as an unknown type is. A `ProtocolDrift` f
 `create_session` journals no session: the client deletes the session GitHub made, best effort
 (the error's detail says whether that went through). When that delete fails, the session may still
 block the next create: the 409 handling of A3 applies as for any conflict.
+Note (CP-05): P12 is the listener's to wire, since its input is the recorded `JobStarted` and
+`JobCompleted`: find the registration by the runner's name (the attempt's VM name),
+`BindJob` on the attempt and `RecordConsumed` on the registration, `RecordCompleted{result}`,
+then `RequestRetirement{job_done}` once the runner exited or the grace passed. CP-05's manager
+leaves those commands to it and reads their results (a consumed or completed registration is
+still removed by id before a stop).
 
 #### GH-02H GitHub transport hardening
 Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:
@@ -1990,6 +2082,25 @@ repository's job that runs (ADR 0090).
 Cites: plan §3.3. Length-prefixed JSON over a Unix socket; `mayflyd --role control|data`; link
 contract suite on UDS; e2e variant with two processes.
 Accept: killing the data-plane process alone is recovered by the control plane.
+
+#### LNK-02 The JIT config on the link
+Cites: plan §3.1, §3.2 ("Secrets cross the link only as `SecretHandle`"); ADRs 0010, 0014,
+0038, 0082; `formal/link.qnt`. Found at CP-05's intake (2026-11-13): CP-05 holds each minted
+config in `mayfly_control::registration::JitBroker` (single take, bound to its attempt and run
+epoch) and records only its handle, but nothing carries it to the data plane, so every launch
+finds no config held (ADR 0082) and retires its attempt. Model first in `formal/link.qnt`: a
+frame that carries the config, at most one delivery per handle, a resend after a lost frame
+carrying nothing once taken, a stale session's frame never delivered. The control-plane end
+takes the config from the broker when it sends the `LaunchRunner` (its attempt and the
+session's epoch; the directive bound at the take) into a frame that is not `Serialize` and
+that no log, error or ledger sees; the data-plane end puts it in `LaunchStore` with the VM, the
+recorded instance id and the directive's deadline before the executor sees the directive. A
+protocol minor (the next free one) adds the frame; an older peer gets none and the launch fails
+definitely, as now.
+Accept: the link model's scenarios and a negative control (a resend that carries the config
+twice); the link contract over inproc and UDS: one delivery per handle, no secret in any other
+encoded frame or in a transport error; an end-to-end launch over fake-tart with the config on
+the guest's stdin only.
 
 ### Phase 5–6 — evidence
 

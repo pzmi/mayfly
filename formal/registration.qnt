@@ -19,6 +19,11 @@
  * Actions-service path mayfly uses, 422 on the REST path (doc/github-scaleset.md §7). The model
  * and the aggregate name it busy, never by a status code.
  *
+ * GitHub's listings lag behind a mint whose reply was lost (CP-05): such a runner exists before
+ * any listing shows it (`listed`), so the reaper (P10) records `RecordAbsent` only after a first
+ * empty listing by name and a second one past a grace period at least as long as that lag
+ * (`emptyListings`, the reaper's memory, which a restart loses: it then lists again).
+ *
  * Ghost state (`g`) records history for the invariants and never feeds a guard.
  */
 module registration {
@@ -60,6 +65,12 @@ module registration {
   pure val WITHDRAW = "withdraw"
   pure val WAIT = "wait"
 
+  // The reaper's empty listings by name of an unknown issue (P10, CP-05): none yet, a first one,
+  // and the grace period passed since it.
+  pure val NO_LISTING = 0
+  pure val FIRST_EMPTY = 1
+  pure val GRACE_PASSED = 2
+
   // ---- state --------------------------------------------------------------------------------
 
   type Reg = {
@@ -84,8 +95,9 @@ module registration {
     launchUnknown: bool,
   }
 
-  /// One runner on GitHub's list.
-  type Runner = { present: bool, name: int, online: bool, busy: bool, jobDone: bool }
+  /// One runner on GitHub's list; `listed` once GitHub's listings show it (they lag behind a mint
+  /// whose reply was lost).
+  type Runner = { present: bool, listed: bool, name: int, online: bool, busy: bool, jobDone: bool }
 
   type Ghost = {
     // what the last action was: "init" | "command" | "observation" | "world"
@@ -116,6 +128,8 @@ module registration {
   var gh: int -> Runner
   var vmRunner: int -> bool
   var ghUp: bool
+  /// The reaper's empty listings by name per attempt (policy memory, never journaled).
+  var emptyListings: int -> int
   var g: Ghost
 
   // ---- helpers ------------------------------------------------------------------------------
@@ -160,7 +174,19 @@ module registration {
     gh' = runners,
     vmRunner' = inVm,
     ghUp' = ghUp,
+    emptyListings' = emptyListings,
     g' = ghostAfter(ghost, kind, regs, r),
+  }
+
+  /// A reaper's listing by name: what the journal records and the reaper's memory of it.
+  action commitListing(r: int -> Reg, listings: int -> int): bool = all {
+    regs' = r,
+    atts' = atts,
+    gh' = gh,
+    vmRunner' = vmRunner,
+    ghUp' = ghUp,
+    emptyListings' = listings,
+    g' = ghostAfter(g, "observation", regs, r),
   }
 
   // ---- init ---------------------------------------------------------------------------------
@@ -170,10 +196,11 @@ module registration {
       busyFor: NONE }),
     atts' = ATTEMPTS.mapBy(_ => { retire: NOT_RETIRING, vm: true, retirements: 0, launchUnknown: false }),
     gh' = RUNNER_IDS.mapBy(id =>
-      if (id == FOREIGN) { present: true, name: FOREIGN, online: true, busy: false, jobDone: false }
-      else { present: false, name: id, online: false, busy: false, jobDone: false }),
+      if (id == FOREIGN) { present: true, listed: true, name: FOREIGN, online: true, busy: false, jobDone: false }
+      else { present: false, listed: false, name: id, online: false, busy: false, jobDone: false }),
     vmRunner' = ATTEMPTS.mapBy(_ => false),
     ghUp' = true,
+    emptyListings' = ATTEMPTS.mapBy(_ => NO_LISTING),
     g' = {
       lastKind: "init", unknownLeftBy: "", mints: ATTEMPTS.mapBy(_ => 0), unknownNames: Set(),
       remintAfterUnknown: false, deletedUnjournaled: false, stoppedWhileRegistered: false,
@@ -199,8 +226,8 @@ module registration {
     remintAfterUnknown: g0.remintAfterUnknown or g0.unknownNames.contains(i),
   }
 
-  pure def registered(runners: int -> Runner, i: int): int -> Runner =
-    runners.set(i, { present: true, name: i, online: false, busy: false, jobDone: false })
+  pure def registered(runners: int -> Runner, i: int, listed: bool): int -> Runner =
+    runners.set(i, { present: true, listed: listed, name: i, online: false, busy: false, jobDone: false })
 
   /// `generatejitconfig` answered: `RecordIssued{runner_id}`.
   action mintAnswered(i: int): bool = all {
@@ -208,16 +235,16 @@ module registration {
     regs.get(i).phase == REQUESTED,
     commit("observation",
       regs.set(i, { ...regs.get(i), phase: ISSUED, runnerId: i }),
-      atts, registered(gh, i), vmRunner, minted(g, i)),
+      atts, registered(gh, i, true), vmRunner, minted(g, i)),
   }
 
-  /// The mint's reply was lost: GitHub may or may not have registered the runner;
-  /// `RecordIssueUnknown`. Never retried with the same name.
+  /// The mint's reply was lost: GitHub may or may not have registered the runner, and a runner
+  /// it registered is not listed yet; `RecordIssueUnknown`. Never retried with the same name.
   action mintLost(i: int, applied: bool): bool = all {
     regs.get(i).phase == REQUESTED,
     commit("command",
       regs.set(i, { ...regs.get(i), phase: ISSUE_UNKNOWN }),
-      atts, if (applied and ghUp) registered(gh, i) else gh, vmRunner,
+      atts, if (applied and ghUp) registered(gh, i, false) else gh, vmRunner,
       { ...minted(g, i), unknownNames: g.unknownNames.union(Set(i)) }),
   }
 
@@ -229,20 +256,72 @@ module registration {
       minted(g, i)),
   }
 
-  /// P10: the reaper lists runners by the unknown issue's name: `RecordFoundByName{runner_id}`
-  /// (journaled, presumed leaked, then deregistered) or `RecordAbsent`.
+  /// Whether GitHub's listing by name shows a runner named for attempt `i`.
+  pure def listedByName(runners: int -> Runner, i: int): bool =
+    RUNNER_IDS.exists(id => runners.get(id).present and runners.get(id).listed and runners.get(id).name == i)
+
+  /// P10: the reaper lists runners by the unknown issue's name. A runner listed:
+  /// `RecordFoundByName{runner_id}` (journaled, presumed leaked, then deregistered). None: the
+  /// first empty listing is only remembered; `RecordAbsent` takes a second empty listing past the
+  /// grace period (CP-05), since the listing may lag behind the lost mint.
   action reaperByName(i: int): bool = {
     val r = regs.get(i)
-    val found = RUNNER_IDS.exists(id => gh.get(id).present and gh.get(id).name == i)
+    val found = listedByName(gh, i)
+    val seen = emptyListings.get(i)
     all {
       ghUp,
       r.phase == ISSUE_UNKNOWN,
-      commit("observation",
-        regs.set(i,
-          if (found) { ...r, phase: ISSUED, runnerId: i, leaked: true }
-          else { ...r, phase: ABSENT }),
-        atts, gh, vmRunner, g),
+      any {
+        all {
+          found,
+          commitListing(regs.set(i, { ...r, phase: ISSUED, runnerId: i, leaked: true }),
+            emptyListings.set(i, NO_LISTING)),
+        },
+        all {
+          not(found),
+          seen == NO_LISTING,
+          commitListing(regs, emptyListings.set(i, FIRST_EMPTY)),
+        },
+        all {
+          not(found),
+          seen == GRACE_PASSED,
+          commitListing(regs.set(i, { ...r, phase: ABSENT }), emptyListings.set(i, NO_LISTING)),
+        },
+      },
     }
+  }
+
+  /// The grace period passes after the reaper's first empty listing. It is at least as long as
+  /// GitHub's listing lag, so by now every runner of the name is listed.
+  action graceElapses(i: int): bool = all {
+    emptyListings.get(i) == FIRST_EMPTY,
+    regs' = regs,
+    atts' = atts,
+    gh' = RUNNER_IDS.mapBy(id =>
+      if (gh.get(id).present and gh.get(id).name == i) { ...gh.get(id), listed: true } else gh.get(id)),
+    vmRunner' = vmRunner,
+    ghUp' = ghUp,
+    emptyListings' = emptyListings.set(i, GRACE_PASSED),
+    g' = ghostAfter(g, "world", regs, regs),
+  }
+
+  /// A restart of the daemon: the reaper's memory of its empty listings is lost (it is never
+  /// journaled), so each unknown issue starts over with a first listing.
+  action reaperRestarts: bool = all {
+    regs' = regs,
+    atts' = atts,
+    gh' = gh,
+    vmRunner' = vmRunner,
+    ghUp' = ghUp,
+    emptyListings' = ATTEMPTS.mapBy(_ => NO_LISTING),
+    g' = ghostAfter(g, "world", regs, regs),
+  }
+
+  /// The world: GitHub's listings catch up with a runner registered by a lost mint.
+  action listingCatchesUp(i: int): bool = all {
+    gh.get(i).present,
+    not(gh.get(i).listed),
+    commit("world", regs, atts, gh.set(i, { ...gh.get(i), listed: true }), vmRunner, g),
   }
 
   // ---- delivery and confirmation (P9, P13) --------------------------------------------------
@@ -467,6 +546,7 @@ module registration {
     gh' = gh,
     vmRunner' = vmRunner,
     ghUp' = not(ghUp),
+    emptyListings' = emptyListings,
     g' = ghostAfter(g, "world", regs, regs),
   }
 
@@ -482,6 +562,9 @@ module registration {
       mintLost(i, flag),
       mintRefused(i),
       reaperByName(i),
+      graceElapses(i),
+      listingCatchesUp(i),
+      reaperRestarts,
       deliver(i),
       deliverUnknown(i, flag),
       runnerConnects(i),
@@ -565,6 +648,11 @@ module registration {
   /// listing), never on a command or a timeout.
   val issueUnknownLeavesOnlyOnObservation = g.unknownLeftBy == "" or g.unknownLeftBy == "observation"
 
+  /// I20 (CP-05): a registration recorded absent has no runner of its name on GitHub, listed or
+  /// not, so an absence never takes a runner off the reaper's list.
+  val absentOnlyWhenNoRunner = ATTEMPTS.forall(i =>
+    regs.get(i).phase == ABSENT implies not(RUNNER_IDS.exists(id => gh.get(id).present and gh.get(id).name == i)))
+
   // Every invariant of the model, so a new one cannot be left out of a stage.
   val allInvariants = and {
     i19OnlyJournaledIdsDeregistered,
@@ -575,6 +663,7 @@ module registration {
     i21BusyCancelsRetirement,
     i22IssuedAndDeliveredOnce,
     issueUnknownLeavesOnlyOnObservation,
+    absentOnlyWhenNoRunner,
   }
 
   // ---- scenarios ----------------------------------------------------------------------------
@@ -655,25 +744,59 @@ module registration {
       .then(requestRetirement(1)).expect(stepOf(regs.get(1), atts.get(1)) == CONFIRM)
       .then(confirmRetirement(1)).then(stopVm(1))
       .expect(i20SettledOrOnReaperList and deregisterBeforeStop)
-      .then(reaperByName(1))
+      .then(listingCatchesUp(1)).then(reaperByName(1))
       .expect(regs.get(1).phase == ISSUED and regs.get(1).leaked and regs.get(1).runnerId == 1)
       .expect(issueUnknownLeavesOnlyOnObservation)
       .then(requestDeregistration(1)).then(deregisterCall(1, false))
       .expect(regs.get(1).phase == DEREGISTERED and noRemintAfterUnknown and allInvariants)
   }
 
-  // P10: the reaper finds nothing by name: the registration is absent.
+  // P10: the reaper finds nothing by name twice, the grace period between: the registration is
+  // absent.
   run issueUnknownAbsentTest = {
     init.then(requestRegistration(1)).then(mintLost(1, false))
       .then(reaperByName(1))
+      .expect(regs.get(1).phase == ISSUE_UNKNOWN and emptyListings.get(1) == FIRST_EMPTY)
+      .then(graceElapses(1)).then(reaperByName(1))
       .expect(regs.get(1).phase == ABSENT and g.mints.get(1) == 1 and allInvariants)
+  }
+
+  // CP-05: the lost mint registered a runner that the first listing does not show yet; the
+  // second listing, past the grace period, finds it, and it is deregistered by its id.
+  run issueUnknownListedLateTest = {
+    init.then(requestRegistration(1)).then(mintLost(1, true))
+      .expect(gh.get(1).present and not(gh.get(1).listed))
+      .then(reaperByName(1)).expect(regs.get(1).phase == ISSUE_UNKNOWN)
+      .then(graceElapses(1)).then(reaperByName(1))
+      .expect(regs.get(1).phase == ISSUED and regs.get(1).leaked and regs.get(1).runnerId == 1)
+      .then(requestDeregistration(1)).then(deregisterCall(1, false))
+      .expect(regs.get(1).phase == DEREGISTERED and not(gh.get(1).present) and allInvariants)
+  }
+
+  // A restart between the two listings forgets the first: the reaper starts over and still
+  // records nothing on one empty listing.
+  run issueUnknownRestartListsAgainTest = {
+    init.then(requestRegistration(1)).then(mintLost(1, false)).then(reaperByName(1))
+      .then(graceElapses(1)).then(reaperRestarts)
+      .expect(emptyListings.get(1) == NO_LISTING)
+      .then(reaperByName(1)).expect(regs.get(1).phase == ISSUE_UNKNOWN)
+      .then(graceElapses(1)).then(reaperByName(1))
+      .expect(regs.get(1).phase == ABSENT and allInvariants)
+  }
+
+  // Before the grace period passes, a second empty listing records nothing.
+  run issueUnknownWaitsForTheGraceTest = {
+    init.then(requestRegistration(1)).then(mintLost(1, true)).then(reaperByName(1))
+      .expect(emptyListings.get(1) == FIRST_EMPTY)
+      .then(reaperByName(1).fail())
   }
 
   // While GitHub is down the unknown issue stays on the reaper's list.
   run issueUnknownWaitsForGitHubTest = {
     init.then(requestRegistration(1)).then(ghToggles).then(mintLost(1, false))
       .expect(not(ghUp) and regs.get(1).phase == ISSUE_UNKNOWN)
-      .then(ghToggles).then(reaperByName(1)).expect(regs.get(1).phase == ABSENT)
+      .then(ghToggles).then(reaperByName(1)).then(graceElapses(1)).then(reaperByName(1))
+      .expect(regs.get(1).phase == ABSENT)
   }
 
   // P13: a launch of unknown outcome is presumed leaked, never launched again, deregistered
@@ -805,5 +928,25 @@ module registration {
   run quarantineStopAtOnceViolatesTest = {
     init.then(toConnected(1)).then(quarantineStopAtOnce(1)).then(stopVm(1))
       .expect(not(deregisterBeforeStop) and not(allInvariants))
+  }
+
+  /// KER-09's reaper, a negative control kept out of every step relation: one empty listing by
+  /// name records the registration absent, trusting a listing that may lag behind the lost mint.
+  action reaperAbsentOnOneListing(i: int): bool = {
+    val r = regs.get(i)
+    all {
+      ghUp,
+      r.phase == ISSUE_UNKNOWN,
+      not(listedByName(gh, i)),
+      commitListing(regs.set(i, { ...r, phase: ABSENT }), emptyListings),
+    }
+  }
+
+  // ...which `absentOnlyWhenNoRunner` flags: the lost mint's runner lives, unlisted, and no
+  // reaper list holds it any more.
+  run absentOnOneListingViolatesTest = {
+    init.then(requestRegistration(1)).then(mintLost(1, true)).then(reaperAbsentOnOneListing(1))
+      .expect(regs.get(1).phase == ABSENT and gh.get(1).present)
+      .expect(not(absentOnlyWhenNoRunner) and not(allInvariants))
   }
 }
