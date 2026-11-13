@@ -444,7 +444,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
         saga: &AttemptSaga<'_, J, C, R, N>,
     ) -> Result<Recovery, StartupError> {
         let vms = match &inventory.kind {
-            ObservationKind::Inventory { vms } => vms,
+            ObservationKind::Inventory { vms, .. } => vms,
             ObservationKind::InventoryIncomplete { .. } => {
                 return Ok(Recovery::Waiting {
                     waiting: host_attempts(self.store, &self.config.host)
@@ -570,7 +570,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
                 .filter(|(_, state)| adoptable(state, run.epoch))
                 .collect();
         let vms = match &inventory.kind {
-            ObservationKind::Inventory { vms } => vms,
+            ObservationKind::Inventory { vms, .. } => vms,
             ObservationKind::InventoryIncomplete { .. } => {
                 return Ok(unadopted.into_iter().map(|(id, _)| id).collect());
             }

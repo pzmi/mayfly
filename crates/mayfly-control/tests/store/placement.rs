@@ -2,7 +2,9 @@
 //! `AggregateStore` and projections on `MemoryJournal`: a pin placed through the placement relay
 //! and the inbox until the reconciler admits the pool on the host, the clone's base read from
 //! the materialised placement, withdrawal refused while pinned, an unknown materialisation
-//! resolved only by its base's absence, and the runner version's expiry tripping the breaker.
+//! resolved only by its base's absence, an unknown pull or materialisation resolved from the
+//! data plane's image listing (protocol 1.5, DP-08) and never by a new directive meanwhile, and
+//! the runner version's expiry tripping the breaker.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -34,8 +36,8 @@ use mayfly_domain::{
     Resources, Sample,
 };
 use mayfly_protocol::{
-    BaseName, Directive, DirectiveKind, DirectiveRef, LinkError, Mode, Observation,
-    ObservationKind, VmObservation,
+    BaseName, Directive, DirectiveKind, DirectiveRef, ImageStoreListing, LinkError, ListedBase,
+    Mode, Observation, ObservationKind, VmObservation,
 };
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, SeededRng};
@@ -431,6 +433,7 @@ fn should_resolve_an_unknown_materialisation_only_when_its_base_is_absent() {
                     disk_bytes: None,
                 })
                 .collect(),
+            image_store: None,
         },
     };
 
@@ -455,6 +458,483 @@ fn should_resolve_an_unknown_materialisation_only_when_its_base_is_absent() {
         again.accepted.as_slice(),
         [PlacementAction::Issue { .. }]
     ));
+}
+
+/// The image store's listing of `images` and the `Ready` `bases` with their disks.
+fn store_listing(images: &[ImageDigest], bases: &[(&str, Option<u64>)]) -> ImageStoreListing {
+    ImageStoreListing {
+        images: images.to_vec(),
+        bases: bases
+            .iter()
+            .map(|(name, disk_bytes)| ListedBase {
+                base_name: BaseName::new(name).unwrap_or_else(|e| panic!("{e}")),
+                digest: ImageDigest::sample(),
+                disk_bytes: *disk_bytes,
+            })
+            .collect(),
+    }
+}
+
+/// `observation` as a data plane of a later session than [`EPOCH`]'s sends it: its run epoch
+/// is newer than the one any directive of these tests was sent under.
+fn later(observation: Observation) -> Observation {
+    Observation {
+        epoch: mayfly_domain::Epoch::new(EPOCH.get() + 1),
+        ..observation
+    }
+}
+
+/// A complete inventory of the stopped VMs `names`, with `image_store` beside it (`None`: a 1.4
+/// session, or a store that could not be listed), in the session of [`EPOCH`].
+fn inventory(n: u128, names: &[&str], image_store: Option<ImageStoreListing>) -> Observation {
+    Observation {
+        observation_id: ObservationId::from_u128(0x0d00 + n),
+        epoch: EPOCH,
+        answers: None,
+        observed_at_dp: Millis::new(0),
+        kind: ObservationKind::Inventory {
+            vms: names
+                .iter()
+                .map(|name| VmObservation {
+                    name: (*name).to_owned(),
+                    instance_id: None,
+                    running: false,
+                    guest: Some(mayfly_protocol::GuestOs::Linux),
+                    memory_bytes: None,
+                    disk_bytes: None,
+                })
+                .collect(),
+            image_store,
+        },
+    }
+}
+
+#[test]
+fn should_resolve_an_unknown_pull_from_the_listing_when_its_image_is_listed() {
+    // given: a pull sent and past its deadline unanswered (its answer lost, as over a restart)
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let config = PlacementConfig::new(EPOCH);
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        config,
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let _ = block_on(manager.run_pass());
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let sent = link.take();
+    clock.advance(Millis::new(
+        config.timeouts.pull.get() + config.reply_grace.get() + 1,
+    ));
+    let _ = block_on(manager.run_pass());
+    let instance = placement_instance(&HostId::sample(), &ImageDigest::sample());
+    let unknown =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+
+    // when: a pass while it is unknown, an inventory without the listing (a 1.4 session), one
+    // of the send's own session whose listing shows the image (it may predate the pull, or show
+    // an entry removed since), then one of a later session that shows it pulled and verified
+    let held = block_on(manager.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let while_unknown = link.take();
+    block_on(inbox.record(&inventory(1, &[], None))).unwrap_or_else(|e| panic!("{e}"));
+    let still = block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let listed = || Some(store_listing(&[ImageDigest::sample()], &[]));
+    block_on(inbox.record(&inventory(2, &[], listed()))).unwrap_or_else(|e| panic!("{e}"));
+    let same_session =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    block_on(inbox.record(&later(inventory(3, &[], listed())))).unwrap_or_else(|e| panic!("{e}"));
+    let resolved =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let next = link.take();
+
+    // then: unknown leaves only on the listing (ADR 0025), nothing is issued meanwhile (P7), and
+    // the pull is recorded completed without a second `PullImage`; the next step is the base
+    assert!(matches!(
+        unknown.pending.map(|p| p.outcome),
+        Some(PendingOutcome::Unknown { .. })
+    ));
+    assert!(
+        !held
+            .accepted
+            .iter()
+            .any(|a| matches!(a, PlacementAction::Issue { .. })),
+        "{:?}",
+        held.accepted
+    );
+    assert!(while_unknown.is_empty(), "{while_unknown:?}");
+    assert_eq!(still.pending, unknown.pending, "no listing, no resolution");
+    assert_eq!(
+        same_session.pending, unknown.pending,
+        "a listing of the send's own session shows no pull completed"
+    );
+    assert_eq!(resolved.pending, None);
+    assert_eq!(resolved.phase, PlacementPhase::Pulled);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        next.iter().map(|d| &d.kind).collect::<Vec<_>>(),
+        vec![&DirectiveKind::MaterialiseImage {
+            digest: ImageDigest::sample(),
+            base_name: BaseName::new(BASE).unwrap_or_else(|e| panic!("{e}")),
+            runner_version: "2.330.0".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn should_resolve_an_unknown_pull_as_not_applied_when_a_listing_omits_its_image() {
+    // given: a pull past its deadline unanswered
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let config = PlacementConfig::new(EPOCH);
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        config,
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let _ = block_on(manager.run_pass());
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let first = link.take();
+    clock.advance(Millis::new(
+        config.timeouts.pull.get() + config.reply_grace.get() + 1,
+    ));
+    let _ = block_on(manager.run_pass());
+    let instance = placement_instance(&HostId::sample(), &ImageDigest::sample());
+
+    // when: a complete listing holds another image only (the pull was cut before its check)
+    let listed = Some(store_listing(&[other_image()], &[]));
+    block_on(inbox.record(&inventory(1, &[], listed))).unwrap_or_else(|e| panic!("{e}"));
+    let resolved =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let again = block_on(manager.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let second = link.take();
+
+    // then: it did not apply, and only now, with the outcome known, is the image pulled again
+    // under a new directive
+    assert_eq!(resolved.pending, None);
+    assert_eq!(resolved.phase, PlacementPhase::Wanted);
+    assert!(matches!(
+        again.accepted.as_slice(),
+        [PlacementAction::Issue { .. }]
+    ));
+    let pull = DirectiveKind::PullImage {
+        digest: ImageDigest::sample(),
+    };
+    assert_eq!(
+        first.iter().map(|d| &d.kind).collect::<Vec<_>>(),
+        vec![&pull]
+    );
+    assert_eq!(
+        second.iter().map(|d| &d.kind).collect::<Vec<_>>(),
+        vec![&pull]
+    );
+    assert_ne!(
+        first.first().map(|d| d.directive_id),
+        second.first().map(|d| d.directive_id)
+    );
+}
+
+/// Drives the sample placement to a materialisation sent and past its deadline unanswered,
+/// returning the placement's stream instance.
+fn unknown_materialisation(
+    manager: &PlacementManager<
+        '_,
+        MemoryJournal,
+        FakeClock,
+        SeededRng,
+        mayfly_control::store::NoNotifier,
+        MemoryJournal,
+    >,
+    relay: &Relay<'_>,
+    worker: &Worker,
+    link: &Link,
+    inbox: &Inbox<'_, MemoryJournal, FakeClock, SeededRng, mayfly_control::store::NoNotifier>,
+    clock: &FakeClock,
+    config: PlacementConfig,
+) -> String {
+    let _ = block_on(manager.run_pass());
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let pull = link
+        .take()
+        .first()
+        .map_or(DirectiveId::from_u128(0), |d| d.directive_id);
+    let pulled = answer(
+        1,
+        pull,
+        ObservationKind::ImagePulled {
+            digest: ImageDigest::sample(),
+        },
+    );
+    block_on(inbox.record(&pulled)).unwrap_or_else(|e| panic!("{e}"));
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let _ = link.take();
+    clock.advance(Millis::new(
+        config.timeouts.materialise.get() + config.reply_grace.get() + 1,
+    ));
+    let _ = block_on(manager.run_pass());
+    placement_instance(&HostId::sample(), &ImageDigest::sample())
+}
+
+#[test]
+fn should_resolve_an_unknown_materialisation_when_the_listing_shows_its_base_ready() {
+    // given: a materialisation past its deadline unanswered; nothing admitted for the pool
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let config = PlacementConfig::new(EPOCH);
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        config,
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let instance =
+        unknown_materialisation(&manager, &relay, &worker, &link, &inbox, &clock, config);
+    let before = reservations(&store, &journal);
+
+    // when: a listing of a later session (a restart's) shows the base Ready, measured at 50 GiB
+    let disk = 50 << 30;
+    let listed = Some(store_listing(
+        &[ImageDigest::sample()],
+        &[(BASE, Some(disk))],
+    ));
+    block_on(inbox.record(&later(inventory(1, &[BASE], listed)))).unwrap_or_else(|e| panic!("{e}"));
+    let resolved =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let placed = block_on(manager.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let after = reservations(&store, &journal);
+
+    // then: materialised from the observation, with its disk, with no new directive, and the
+    // pool is admitted on the host
+    assert_eq!(before, 0);
+    assert_eq!(resolved.pending, None);
+    assert_eq!(resolved.phase, PlacementPhase::Materialised);
+    assert_eq!(resolved.base, Some(RunnerVersion::new(2, 330, 0)));
+    assert_eq!(resolved.disk_bytes, Some(disk));
+    assert!(link.take().is_empty());
+    assert_eq!(
+        placed.bases.get(&(HostId::sample(), ImageDigest::sample())),
+        Some(&BASE.to_owned())
+    );
+    assert_eq!(after, 2, "the pool is admitted once its base is Ready");
+}
+
+#[test]
+fn should_resolve_nothing_when_the_listed_base_is_not_ready() {
+    // given: a materialisation past its deadline unanswered
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let config = PlacementConfig::new(EPOCH);
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        config,
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let instance =
+        unknown_materialisation(&manager, &relay, &worker, &link, &inbox, &clock, config);
+    let unknown =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+
+    // when: the inventory lists a VM under the base's name that the store's listing does not
+    // show Ready (half made, quarantined or retiring), the image itself listed
+    let listed = Some(store_listing(&[ImageDigest::sample()], &[]));
+    block_on(inbox.record(&later(inventory(1, &[BASE], listed)))).unwrap_or_else(|e| panic!("{e}"));
+    let after = block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let pass = block_on(manager.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+
+    // then: the outcome stays unknown (`materialisedOnlyFromReady`), no directive is issued
+    // (P7) and the pool is not admitted
+    assert!(matches!(
+        unknown.pending.map(|p| p.outcome),
+        Some(PendingOutcome::Unknown { .. })
+    ));
+    assert_eq!(after.pending, unknown.pending);
+    assert_eq!(after.phase, PlacementPhase::Pulled);
+    assert!(
+        !pass
+            .accepted
+            .iter()
+            .any(|a| matches!(a, PlacementAction::Issue { .. })),
+        "{:?}",
+        pass.accepted
+    );
+    assert!(link.take().is_empty());
+    assert_eq!(reservations(&store, &journal), 0);
+}
+
+#[test]
+fn should_resolve_nothing_when_the_listing_is_of_the_sends_own_epoch() {
+    // given: a materialisation sent under EPOCH and past its deadline unanswered
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let config = PlacementConfig::new(EPOCH);
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        config,
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let instance =
+        unknown_materialisation(&manager, &relay, &worker, &link, &inbox, &clock, config);
+    let unknown =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    let ready = || Some(store_listing(&[ImageDigest::sample()], &[(BASE, None)]));
+
+    // when: a listing of the send's own session shows the base Ready (it may predate the
+    // effect: a base of that name made earlier and since evicted), then one of a later session
+    block_on(inbox.record(&inventory(1, &[BASE], ready()))).unwrap_or_else(|e| panic!("{e}"));
+    let same = block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+    block_on(inbox.record(&later(inventory(2, &[BASE], ready()))))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let resolved =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: only the later session's listing shows the directive completed
+    assert_eq!(unknown.pending.and_then(|p| p.sent_epoch), Some(EPOCH));
+    assert_eq!(same.pending, unknown.pending);
+    assert_eq!(resolved.pending, None);
+    assert_eq!(resolved.phase, PlacementPhase::Materialised);
+}
+
+#[test]
+fn should_resolve_nothing_from_a_listing_when_the_directive_is_in_flight() {
+    // given: a pull sent, its deadline not passed
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = world(&store);
+    let index = PlacementIndex::default();
+    let manager = PlacementManager::new(
+        &store,
+        &journal,
+        PlacementConfig::new(EPOCH),
+        mayfly_control::delivery::Kicks::new(8),
+        index.clone(),
+    );
+    let link = Link::default();
+    let relay: Relay<'_> = PlacementRelay::new(
+        &store,
+        link.clone(),
+        FakeClock::at(Millis::new(0)),
+        sessions(),
+        PlacementRelayConfig::default(),
+        &DeliveryConfig::default(),
+        index.clone(),
+    );
+    let worker = worker(&journal);
+    let inbox = Inbox::new(&store, HostId::sample(), EPOCH).with_placements(index);
+    let _ = block_on(manager.run_pass());
+    let _ = block_on(manager.run_pass());
+    block_on(worker.catch_up(&relay)).unwrap_or_else(|e| panic!("{e:?}"));
+    let instance = placement_instance(&HostId::sample(), &ImageDigest::sample());
+    let in_flight =
+        block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+
+    // when: listings of a later session that show the image pulled and that omit it
+    let listed = Some(store_listing(&[ImageDigest::sample()], &[]));
+    block_on(inbox.record(&later(inventory(1, &[], listed)))).unwrap_or_else(|e| panic!("{e}"));
+    let omitted = Some(store_listing(&[], &[]));
+    block_on(inbox.record(&later(inventory(2, &[], omitted)))).unwrap_or_else(|e| panic!("{e}"));
+    let after = block_on(store.load::<ImagePlacement>(&instance)).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: an answer may still come, so nothing is read from a listing (`inbox::resolvable`)
+    assert!(matches!(
+        in_flight.pending.map(|p| p.outcome),
+        Some(PendingOutcome::InFlight)
+    ));
+    assert_eq!(after.pending, in_flight.pending);
+    assert_eq!(after.phase, PlacementPhase::Pulling);
 }
 
 #[test]

@@ -15,7 +15,7 @@ use mayfly_domain::{
 use serde::{Deserialize, Serialize};
 
 use crate::directive::{AttemptRef, BaseName};
-use crate::version::{ProtocolVersion, UNKNOWN_FACTS, VANISHED_TARGET};
+use crate::version::{IMAGE_LISTING, ProtocolVersion, UNKNOWN_FACTS, VANISHED_TARGET};
 
 /// One observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +100,11 @@ pub enum ObservationKind {
     Inventory {
         /// Every VM listed, foreign ones included.
         vms: Vec<VmObservation>,
+        /// The image store as the same observer pass listed it, when that listing was complete;
+        /// `None` when it failed or the session is older than 1.5 ([`crate::IMAGE_LISTING`]),
+        /// which the control plane reads as saying nothing about images or bases (DP-08).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_store: Option<ImageStoreListing>,
     },
     /// The inventory could not be read completely; never read as the absence of a VM (I25).
     InventoryIncomplete {
@@ -205,12 +210,19 @@ impl ObservationKind {
     /// and `should_write_proof_mismatch_when_the_session_is_older_than_the_vanished_target`.
     /// Below [`crate::MEASURED_BASE_DISK`] (1.4) an `ImageMaterialised` is written without its
     /// disk (pinned by `should_leave_the_base_disk_out_when_the_session_is_older_than_measured_disk`).
+    /// Below [`IMAGE_LISTING`] (1.5) an `Inventory` is written without its image-store listing
+    /// (pinned by `should_leave_the_image_listing_out_when_the_session_is_older_than_image_listing`).
     #[must_use]
     pub fn written_in(self, version: ProtocolVersion) -> Self {
-        let this = if version < crate::MEASURED_BASE_DISK {
-            self.without_base_disk()
+        let this = if version < IMAGE_LISTING {
+            self.without_image_listing()
         } else {
             self
+        };
+        let this = if version < crate::MEASURED_BASE_DISK {
+            this.without_base_disk()
+        } else {
+            this
         };
         if version >= VANISHED_TARGET {
             return this;
@@ -238,7 +250,8 @@ impl ObservationKind {
                     ..report
                 })
             }
-            Self::Inventory { vms } if before_facts => Self::Inventory {
+            Self::Inventory { vms, image_store } if before_facts => Self::Inventory {
+                image_store,
                 vms: vms
                     .into_iter()
                     .map(|vm| VmObservation {
@@ -276,6 +289,37 @@ impl ObservationKind {
 }
 
 impl ObservationKind {
+    /// The kind as protocol 1.4 carries it: an `Inventory` without its image-store listing.
+    fn without_image_listing(self) -> Self {
+        match self {
+            Self::Inventory { vms, .. } => Self::Inventory {
+                vms,
+                image_store: None,
+            },
+            other @ (Self::VmCloned { .. }
+            | Self::VmBooted
+            | Self::GuestVerified { .. }
+            | Self::GuestRejected { .. }
+            | Self::RunnerLaunched
+            | Self::RunnerLaunchUnknown
+            | Self::RunnerExited { .. }
+            | Self::DiagnosticsExported { .. }
+            | Self::DiagnosticsLost { .. }
+            | Self::VmStopped
+            | Self::VmDeleted
+            | Self::VmObservedStopped { .. }
+            | Self::InventoryIncomplete { .. }
+            | Self::HostFacts(..)
+            | Self::HypervisorLimitHit
+            | Self::ImagePulled { .. }
+            | Self::ImageMaterialised { .. }
+            | Self::ImageEvicted { .. }
+            | Self::DirectiveRefused { .. }
+            | Self::OutcomeUnknown { .. }
+            | Self::CapacityReported(..)) => other,
+        }
+    }
+
     /// The kind as protocol 1.3 carries it: an `ImageMaterialised` without its disk.
     fn without_base_disk(self) -> Self {
         match self {
@@ -445,6 +489,36 @@ pub struct VmObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
     /// Its disk ceiling, when the provider describes it. From protocol 1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+}
+
+/// The data plane's image store as one clean observer pass listed it (protocol 1.5, DP-08):
+/// taken while no effect that changes a listing ran (the executor's listing gate), and sent only
+/// when the store's listing was complete. Every entry is a fact the store proved at the listing,
+/// never an intent: an image only once its content was verified against its digest and while
+/// its cache entry is unchanged since, a base only while it is `Ready` and passes the clone proof
+/// (ADR 0087). A base being built, retiring, quarantined or tampered with is not listed here,
+/// though its VM is in the inventory beside it; the control plane resolves nothing from such a
+/// base (`formal/image_store.qnt`, `materialisedOnlyFromReady`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageStoreListing {
+    /// The pulled images, in digest order.
+    pub images: Vec<ImageDigest>,
+    /// The `Ready` bases that pass the clone proof, in name order.
+    pub bases: Vec<ListedBase>,
+}
+
+/// One `Ready` base of an [`ImageStoreListing`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedBase {
+    /// The base.
+    pub base_name: BaseName,
+    /// The image it was materialised from, as the store recorded it (ADR 0087): the control
+    /// plane matches it as well as the name, so a base is never read as another digest's.
+    pub digest: ImageDigest,
+    /// The disk it reconstructs to, measured from its image's verified manifest; `None` when it
+    /// did not measure (never a default, ADR 0052).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
@@ -650,6 +724,50 @@ mod tests {
         assert_eq!(current, materialised);
     }
 
+    #[test]
+    fn should_leave_the_image_listing_out_when_the_session_is_older_than_image_listing() {
+        use mayfly_domain::Sample as _;
+
+        // given
+        let base =
+            crate::BaseName::new("mfb-0123456789ab-r2-330-0").unwrap_or_else(|e| panic!("{e}"));
+        let vm = VmObservation {
+            name: base.as_str().to_owned(),
+            instance_id: None,
+            running: false,
+            guest: Some(GuestOs::Linux),
+            memory_bytes: None,
+            disk_bytes: Some(50 << 30),
+        };
+        let listed = ObservationKind::Inventory {
+            vms: vec![vm.clone()],
+            image_store: Some(ImageStoreListing {
+                images: vec![ImageDigest::sample()],
+                bases: vec![ListedBase {
+                    base_name: base,
+                    digest: ImageDigest::sample(),
+                    disk_bytes: Some(50 << 30),
+                }],
+            }),
+        };
+
+        // when
+        let older = listed.clone().written_in(crate::MEASURED_BASE_DISK);
+        let current = listed.clone().written_in(IMAGE_LISTING);
+
+        // then: a 1.4 reader gets the inventory alone, which resolves nothing it did not before
+        assert_eq!(
+            older,
+            ObservationKind::Inventory {
+                vms: vec![vm],
+                image_store: None,
+            }
+        );
+        let text = serde_json::to_string(&older).expect("encodes");
+        assert!(!text.contains("image_store"), "{text}");
+        assert_eq!(current, listed);
+    }
+
     fn report_with_unknown_memory() -> CapacityReport {
         CapacityReport {
             report_id: 1,
@@ -691,6 +809,7 @@ mod tests {
             ObservationKind::CapacityReported(report_with_unknown_memory()),
             ObservationKind::Inventory {
                 vms: vec![described.clone()],
+                image_store: None,
             },
             ObservationKind::VmDeleted,
         ];
@@ -723,6 +842,7 @@ mod tests {
                         disk_bytes: None,
                         ..described
                     }],
+                    image_store: None,
                 },
                 ObservationKind::VmDeleted,
             ]

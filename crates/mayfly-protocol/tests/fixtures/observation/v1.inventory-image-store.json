@@ -1,0 +1,47 @@
+{
+  "protocol_version": {
+    "major": 1,
+    "minor": 5
+  },
+  "message": {
+    "observation": {
+      "observation_id": "000000000000000000000000000000b5",
+      "epoch": 7,
+      "answers": null,
+      "observed_at_dp": 1700000001000,
+      "kind": {
+        "inventory": {
+          "vms": [
+            {
+              "name": "mfb-0123456789ab-r2-330-0",
+              "instance_id": "0a:1b:2c:3d:4e:5f",
+              "running": false,
+              "guest": "linux",
+              "disk_bytes": 53687091200
+            },
+            {
+              "name": "mfb-0123456789ab-r2-331-0",
+              "instance_id": "0a:1b:2c:3d:4e:60",
+              "running": true,
+              "guest": "linux",
+              "memory_bytes": 4294967296,
+              "disk_bytes": 53687091200
+            }
+          ],
+          "image_store": {
+            "images": [
+              "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ],
+            "bases": [
+              {
+                "base_name": "mfb-0123456789ab-r2-330-0",
+                "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "disk_bytes": 53687091200
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -29,10 +29,11 @@ pub use link::{
 };
 pub use observation::{
     Capacity, CapacityConstraint, CapacityReport, DiagnosticsLoss, DirectiveOutcome, DirectiveRef,
-    GuestFacts, GuestOs, GuestRejection, HostFacts, InventoryGap, Observation, ObservationKind,
-    RefusalReason, ResourceDimension, UnknownCapacity, UnknownCause, UnknownReason, VmObservation,
+    GuestFacts, GuestOs, GuestRejection, HostFacts, ImageStoreListing, InventoryGap, ListedBase,
+    Observation, ObservationKind, RefusalReason, ResourceDimension, UnknownCapacity, UnknownCause,
+    UnknownReason, VmObservation,
 };
 pub use version::{
-    CURRENT, GUEST_IDENTITY, MEASURED_BASE_DISK, ProtocolVersion, SUPPORTED, UNKNOWN_FACTS,
-    VersionRefusal, admit_frame, handshake_version, negotiate,
+    CURRENT, GUEST_IDENTITY, IMAGE_LISTING, MEASURED_BASE_DISK, ProtocolVersion, SUPPORTED,
+    UNKNOWN_FACTS, VersionRefusal, admit_frame, handshake_version, negotiate,
 };

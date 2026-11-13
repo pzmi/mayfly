@@ -49,7 +49,7 @@ pub fn decide(state: &PlacementState, command: Command<PlacementCommand>) -> Dec
         PlacementCommand::RecordSent {
             directive_id,
             deadline,
-        } => decide_sent(state, directive_id, deadline)?,
+        } => decide_sent(state, directive_id, deadline, run_epoch)?,
         PlacementCommand::RecordPulled { directive_id } => decide_pulled(state, directive_id)?,
         PlacementCommand::RecordDrift {
             directive_id,
@@ -183,8 +183,14 @@ fn pending_for(
         .ok_or(PlacementRejection::NotPending)
 }
 
-/// The relay sent the pending directive: recorded once, while its outcome is in flight.
-fn decide_sent(state: &PlacementState, directive_id: DirectiveId, deadline: Deadline) -> Decision {
+/// The relay sent the pending directive: recorded once, while its outcome is in flight, with
+/// the run epoch of the session that carried it (the command's).
+fn decide_sent(
+    state: &PlacementState,
+    directive_id: DirectiveId,
+    deadline: Deadline,
+    epoch: Epoch,
+) -> Decision {
     let pending = pending_for(state, directive_id)?;
     match pending.outcome {
         PendingOutcome::InFlight if !pending.sent => {
@@ -192,6 +198,7 @@ fn decide_sent(state: &PlacementState, directive_id: DirectiveId, deadline: Dead
                 PlacementDirectiveSent {
                     directive_id,
                     deadline,
+                    epoch: Some(epoch),
                 },
             )])
         }
@@ -419,6 +426,7 @@ pub fn evolve(mut state: PlacementState, event: &PlacementEvent) -> PlacementSta
                 directive: e.directive,
                 deadline: e.deadline,
                 sent: false,
+                sent_epoch: None,
                 outcome: PendingOutcome::InFlight,
             });
             state.phase = evolve_issued_phase(state.phase, e.directive);
@@ -427,6 +435,7 @@ pub fn evolve(mut state: PlacementState, event: &PlacementEvent) -> PlacementSta
             if let Some(pending) = state.pending.as_mut() {
                 pending.sent = true;
                 pending.deadline = e.deadline;
+                pending.sent_epoch = e.epoch;
             }
         }
         PlacementEvent::PlacementOutcomeUnknown(e) => {

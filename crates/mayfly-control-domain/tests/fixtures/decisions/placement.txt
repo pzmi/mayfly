@@ -60,7 +60,7 @@ case record_materialised accepted
 case record_pulled accepted
   image_pulled/v1 {"directive_id":"0000000000000000000000000000d001"}
 case record_sent accepted
-  placement_directive_sent/v1 {"directive_id":"0000000000000000000000000000d001","deadline":60000}
+  placement_directive_sent/v2 {"directive_id":"0000000000000000000000000000d001","deadline":60000,"epoch":1}
 case refresh_materialised_keeps_previous accepted
   image_materialised/v2 {"directive_id":"0000000000000000000000000000d003","runner_version":{"major":2,"minor":331,"patch":0},"disk_bytes":null}
 case refresh_of_current_records_nothing accepted

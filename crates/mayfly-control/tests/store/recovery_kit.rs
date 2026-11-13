@@ -589,7 +589,10 @@ pub fn inventory(id: u128, epoch: Epoch, vms: Vec<VmObservation>) -> Observation
         epoch,
         answers: None,
         observed_at_dp: Millis::new(5),
-        kind: ObservationKind::Inventory { vms },
+        kind: ObservationKind::Inventory {
+            vms,
+            image_store: None,
+        },
     }
 }
 

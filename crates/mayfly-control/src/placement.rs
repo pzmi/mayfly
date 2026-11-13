@@ -40,13 +40,14 @@
 //!
 //! **Safe mode** ([`PlacementManager::set_safe_mode`]): only timeouts are recorded.
 //!
-//! **A pull or materialisation of `Unknown` outcome after a restart** is resolved only by an
-//! observation (ADR 0025, P7: no new directive while it is unknown): a late answer, or, for a
-//! materialisation or an eviction, a complete inventory that does not list the base. Nothing on
-//! the link proves a pull or a materialisation *completed* (the inventory lists a base's VM but
-//! not that it is Ready, and no observation carries the image store's listing), so such a
-//! placement stays `Unknown` and its pool not admissible on that host until a protocol minor
-//! carries the data plane's image listing (DP-08).
+//! **A pull or materialisation of `Unknown` outcome** is resolved only by an observation (ADR
+//! 0025, P7: no new directive while it is unknown): a late answer, or a complete inventory, with
+//! the image store's listing beside it from protocol 1.5 (DP-08), which shows a pulled image or
+//! a `Ready` base and so the directive completed, or shows the image or the base absent and so
+//! it did not apply; a VM under the base's name that is not a `Ready` base resolves nothing
+//! ([`crate::inbox`]). A pull or materialisation sent before a restart stays in flight until its
+//! deadline (the relay never sends a sent directive again, and an answer comes only in the
+//! session it ran in), and only then becomes `Unknown` and resolvable (DP-08's open question).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -292,6 +293,9 @@ pub fn inputs_of(view: &FleetView, now: Millis, reply_grace: Millis) -> PolicyIn
                     directive: p.directive,
                     deadline: p.deadline,
                     sent: p.sent,
+                    // The pass plans from phase, deadline and outcome; only the inbox reads the
+                    // send's epoch, from the placement stream itself.
+                    sent_epoch: None,
                     outcome: p.unknown_since.map_or(PendingOutcome::InFlight, |since| {
                         PendingOutcome::Unknown { since }
                     }),

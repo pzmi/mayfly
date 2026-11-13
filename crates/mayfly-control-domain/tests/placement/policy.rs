@@ -92,6 +92,7 @@ fn should_issue_the_directive_due_when_nothing_is_pending() {
         directive: PlacementDirective::PullImage,
         deadline: Deadline::after(Millis::new(0), Millis::new(600_000)),
         sent: true,
+        sent_epoch: None,
         outcome: PendingOutcome::InFlight,
     });
     let given = inputs(
@@ -122,6 +123,7 @@ fn should_make_the_outcome_unknown_when_a_sent_directive_passes_its_deadline() {
         directive: PlacementDirective::PullImage,
         deadline: Deadline::after(Millis::new(0), Millis::new(90_000)),
         sent: true,
+        sent_epoch: None,
         outcome: PendingOutcome::InFlight,
     });
     let mut unsent = late.clone();

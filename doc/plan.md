@@ -162,6 +162,15 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   2026-11-12), at which the control plane plans a clone when `clone_disk_gib` is not configured.
   A 1.3 or older session gets none; the control plane reads that as unknown and plans the clone
   with no disk, and the data plane's gate (I33) refuses what does not fit, as before.
+- **Protocol 1.5 (DP-08).** `Inventory`'s optional `image_store: {images, bases}`: the image
+  store as the same clean observer pass listed it, its verified images and its `Ready` bases
+  that pass the clone proof (ADR 0087) with their images' digests and measured disks, left out
+  when the store could not be listed. A base is read as materialised only from a listing of a
+  later run epoch than the directive's send, since observations are not ordered. The control plane resolves a pull or a materialisation of unknown outcome from
+  it, never by a new directive (P7) or an asserted outcome (ADR 0025); a VM under a base's name
+  that is not a listed `Ready` base resolves nothing. A 1.4 or older session gets the inventory
+  alone, and the control plane resolves as before: a materialisation or an eviction only by its
+  base's absence, a pull only by its late answer.
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly

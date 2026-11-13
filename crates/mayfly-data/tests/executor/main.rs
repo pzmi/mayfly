@@ -83,7 +83,7 @@ fn should_answer_unknown_never_success_when_the_provider_error_is_ambiguous() {
             hung.release();
             let listed = vm(2).to_string();
             tap.wait_for(|o| match &o.kind {
-                ObservationKind::Inventory { vms } => vms.iter().any(|v| v.name == listed),
+                ObservationKind::Inventory { vms, .. } => vms.iter().any(|v| v.name == listed),
                 _ => false,
             })
             .await;
@@ -230,7 +230,7 @@ fn should_discard_the_listing_when_an_effect_overlaps_it() {
         // then
         let name = vm(1).to_string();
         let lists_deleted = |kind: &ObservationKind| match kind {
-            ObservationKind::Inventory { vms } => vms.iter().any(|v| v.name == name),
+            ObservationKind::Inventory { vms, .. } => vms.iter().any(|v| v.name == name),
             _ => false,
         };
         assert_eq!(answers_to(&seen, 1), [ObservationKind::VmDeleted]);
@@ -290,7 +290,7 @@ fn should_list_before_further_effects_when_a_pass_is_due() {
         let first = vm(1).to_string();
         assert!(matches!(
             answers_to(&seen, 2).as_slice(),
-            [ObservationKind::Inventory { vms }] if vms.iter().any(|v| v.name == first)
+            [ObservationKind::Inventory { vms, .. }] if vms.iter().any(|v| v.name == first)
         ));
         assert_eq!(exec.stats(), Stats::default(), "no listing was overlapped");
     });

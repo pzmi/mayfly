@@ -40,7 +40,7 @@ wanted x stale_run -> refused stale_run
 pulling x request_same -> accepted, no event
 pulling x request_other_digest -> refused placement_differs
 pulling x issue -> refused directive_pending
-pulling x record_sent -> accepted placement_directive_sent/v1
+pulling x record_sent -> accepted placement_directive_sent/v2
 pulling x record_pulled -> accepted image_pulled/v1
 pulling x record_drift -> accepted image_drift_detected/v1 placement_failed/v1
 pulling x record_materialised -> refused not_pending
@@ -116,7 +116,7 @@ pulled x stale_run -> refused stale_run
 materialising x request_same -> accepted, no event
 materialising x request_other_digest -> refused placement_differs
 materialising x issue -> refused directive_pending
-materialising x record_sent -> accepted placement_directive_sent/v1
+materialising x record_sent -> accepted placement_directive_sent/v2
 materialising x record_pulled -> refused not_pending
 materialising x record_drift -> refused not_pending
 materialising x record_materialised -> accepted image_materialised/v2
@@ -154,7 +154,7 @@ materialised x stale_run -> refused stale_run
 refreshing x request_same -> accepted, no event
 refreshing x request_other_digest -> refused placement_differs
 refreshing x issue -> refused directive_pending
-refreshing x record_sent -> accepted placement_directive_sent/v1
+refreshing x record_sent -> accepted placement_directive_sent/v2
 refreshing x record_pulled -> refused not_pending
 refreshing x record_drift -> refused not_pending
 refreshing x record_materialised -> accepted image_materialised/v2
@@ -211,7 +211,7 @@ eviction_requested x stale_run -> refused stale_run
 evicting x request_same -> accepted, no event
 evicting x request_other_digest -> refused placement_differs
 evicting x issue -> refused directive_pending
-evicting x record_sent -> accepted placement_directive_sent/v1
+evicting x record_sent -> accepted placement_directive_sent/v2
 evicting x record_pulled -> refused not_pending
 evicting x record_drift -> refused not_pending
 evicting x record_materialised -> refused not_pending

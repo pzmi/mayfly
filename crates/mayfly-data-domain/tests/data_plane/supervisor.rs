@@ -60,5 +60,11 @@ fn should_say_listed_or_absent_when_the_inventory_is_complete() {
         seen,
         [Some(Seen::Running), Some(Seen::Stopped), Some(Seen::Absent)]
     );
-    assert_eq!(complete.observation(), ObservationKind::Inventory { vms });
+    assert_eq!(
+        complete.observation(),
+        ObservationKind::Inventory {
+            vms,
+            image_store: None
+        }
+    );
 }

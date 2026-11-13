@@ -335,7 +335,10 @@ pub fn applied(kind: &DirectiveKind) -> ObservationKind {
         },
         DirectiveKind::StopVm { .. } => ObservationKind::VmStopped,
         DirectiveKind::DeleteVm { .. } => ObservationKind::VmDeleted,
-        DirectiveKind::ReportInventory => ObservationKind::Inventory { vms: Vec::new() },
+        DirectiveKind::ReportInventory => ObservationKind::Inventory {
+            vms: Vec::new(),
+            image_store: None,
+        },
         DirectiveKind::ReportCapacity => {
             ObservationKind::CapacityReported(mayfly_protocol::CapacityReport {
                 report_id: 1,

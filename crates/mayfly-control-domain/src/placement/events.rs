@@ -60,7 +60,12 @@ impl DomainEvent for PlacementDirectiveIssued {
 }
 
 /// The directive relay put the pending directive on the link (CP-02): from now on its deadline
-/// runs. A directive held unsent never times out (ADR 0025).
+/// runs. A directive held unsent never times out (ADR 0025). Version 2 records the run epoch of
+/// the session whose frame carried it (DP-08). Only a listing of a later session may show the
+/// directive completed: that session ended, and every effect it ran finished or was lost (a
+/// child that survives a killed data plane cannot write the registry's Ready or a verified
+/// image), and an eviction that removed an earlier base was resolved before this directive was
+/// issued, so such a listing comes after both.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PlacementDirectiveSent {
@@ -68,11 +73,38 @@ pub struct PlacementDirectiveSent {
     pub directive_id: DirectiveId,
     /// The deadline the frame carried.
     pub deadline: Deadline,
+    /// The run epoch the frame was stamped with; `None` when version 1 did not record it.
+    pub epoch: Option<Epoch>,
 }
 
 impl DomainEvent for PlacementDirectiveSent {
     const EVENT_TYPE: &'static str = "placement_directive_sent";
+    const SCHEMA_VERSION: u32 = 2;
+}
+
+/// Version 1 of [`PlacementDirectiveSent`] (CP-07), without the epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PlacementDirectiveSentV1 {
+    /// The directive.
+    pub directive_id: DirectiveId,
+    /// The deadline the frame carried.
+    pub deadline: Deadline,
+}
+
+impl DomainEvent for PlacementDirectiveSentV1 {
+    const EVENT_TYPE: &'static str = "placement_directive_sent";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Version 1 recorded no epoch: it reads as unknown, so no listing shows that directive
+/// completed and only its late answer or its base's absence resolves it, as before DP-08.
+fn upcast_sent_v1(old: PlacementDirectiveSentV1) -> PlacementEvent {
+    PlacementEvent::PlacementDirectiveSent(PlacementDirectiveSent {
+        directive_id: old.directive_id,
+        deadline: old.deadline,
+        epoch: None,
+    })
 }
 
 /// Whether the pending directive took effect is not known; only an observation resolves it
@@ -299,5 +331,6 @@ event_set! {
     }
     legacy {
         ImageMaterialisedV1 => upcast_materialised_v1,
+        PlacementDirectiveSentV1 => upcast_sent_v1,
     }
 }

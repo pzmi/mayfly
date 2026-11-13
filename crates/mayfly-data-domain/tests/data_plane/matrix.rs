@@ -69,6 +69,7 @@ fn should_define_every_pair_when_each_session_state_meets_each_stimulus() {
         ("welcome_e6_v1.3", LinkStimulus::Welcome(welcome(6, 1, 3))),
         ("welcome_e6_v1.4", LinkStimulus::Welcome(welcome(6, 1, 4))),
         ("welcome_e6_v1.5", LinkStimulus::Welcome(welcome(6, 1, 5))),
+        ("welcome_e6_v1.6", LinkStimulus::Welcome(welcome(6, 1, 6))),
         ("welcome_e6_v2.0", LinkStimulus::Welcome(welcome(6, 2, 0))),
         ("floor_raised_e5", LinkStimulus::FloorRaised(Epoch::new(5))),
         ("floor_raised_e6", LinkStimulus::FloorRaised(Epoch::new(6))),
@@ -226,7 +227,10 @@ fn should_fence_every_frame_when_it_meets_each_session_state_and_table_entry() {
         ("reobserving", Some(Phase::Executing(Stage::ReObserve))),
         (
             "done",
-            Some(Phase::Done(ObservationKind::Inventory { vms: Vec::new() })),
+            Some(Phase::Done(ObservationKind::Inventory {
+                vms: Vec::new(),
+                image_store: None,
+            })),
         ),
         ("refused", Some(Phase::Refused(RefusalReason::SafeMode))),
         ("unknown", Some(Phase::Unknown(UnknownReason::Deadline))),

@@ -22,11 +22,15 @@ pub enum Inventory {
 }
 
 impl Inventory {
-    /// The observation that reports it.
+    /// The observation that reports it, without the image store's listing: the executor puts
+    /// that beside it only from a clean observer pass (DP-08).
     #[must_use]
     pub fn observation(&self) -> ObservationKind {
         match self {
-            Self::Complete { vms } => ObservationKind::Inventory { vms: vms.clone() },
+            Self::Complete { vms } => ObservationKind::Inventory {
+                vms: vms.clone(),
+                image_store: None,
+            },
             Self::Incomplete { reason } => ObservationKind::InventoryIncomplete { reason: *reason },
         }
     }

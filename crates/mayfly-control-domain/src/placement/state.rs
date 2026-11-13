@@ -105,6 +105,11 @@ pub struct Pending {
     /// The relay put it on the link: only then can it time out (a directive held unsent, in safe
     /// mode or without a session, did nothing, ADR 0025).
     pub sent: bool,
+    /// The run epoch of the session that carried it, once sent (`PlacementDirectiveSent` v2);
+    /// `None` before, or when a version-1 event did not record it. A listing of a later epoch
+    /// was taken after that session ended, so after every effect the directive could have had,
+    /// finished or lost, and after any removal resolved before the directive was issued (DP-08).
+    pub sent_epoch: Option<Epoch>,
     /// In flight or unknown.
     pub outcome: PendingOutcome,
 }

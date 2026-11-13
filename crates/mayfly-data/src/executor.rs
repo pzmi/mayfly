@@ -30,6 +30,9 @@
 //!   discarded, never applied and never reported.
 //! - **Capacity.** `CapacityReported` is sent when a session opens, whenever the ledger's report
 //!   changes, and as the answer to `ReportCapacity` (ADR 0024).
+//! - **The image listing.** A clean pass's inventory carries the image store's listing beside it
+//!   (its verified images and `Ready` bases, protocol 1.5), none when the store could not be
+//!   listed, so the control plane can resolve an unknown placement from it (DP-08, `beside`).
 //! - **Session end.** When [`Executor::serve`] returns, the domain's session is ended (its
 //!   reservations held); the next session needs [`Executor::enter`].
 
@@ -45,8 +48,8 @@ use mayfly_data_domain::{
 use mayfly_domain::{Deadline, DirectiveId, Epoch, HostId, ImageDigest, Millis, OwnedVmName};
 use mayfly_protocol::{
     BaseName, CapacityReport, Directive, DirectiveKind, DirectiveRef, DirectiveSource,
-    HandshakeInitiator, Hello, InventoryGap, LinkError, Observation, ObservationKind,
-    ObservationSink, ProtocolVersion, ResourceDimension, SUPPORTED, UnknownReason,
+    HandshakeInitiator, Hello, ImageStoreListing, InventoryGap, LinkError, ListedBase, Observation,
+    ObservationKind, ObservationSink, ProtocolVersion, ResourceDimension, SUPPORTED, UnknownReason,
 };
 
 use crate::gate::{ListingGate, Ticket};
@@ -697,6 +700,51 @@ async fn remeasure<V, I, G, H, C, D>(
     }
 }
 
+/// The image store's listing as the link carries it (protocol 1.5, DP-08): its verified images
+/// and its `Ready` bases, each with the image it was made from and the disk measured from that
+/// image's manifest (the base's own, else its image's), in order. A base whose image the store
+/// did not name is left out: the control plane matches a base by name and digest, and resolves
+/// nothing from what it cannot match.
+fn store_listing(listing: &ImageListing) -> ImageStoreListing {
+    let disks = &listing.disks;
+    ImageStoreListing {
+        images: listing.images.iter().cloned().collect(),
+        bases: listing
+            .bases
+            .keys()
+            .filter_map(|base| {
+                let digest = disks.base_images.get(base)?;
+                Some(ListedBase {
+                    base_name: base.clone(),
+                    digest: digest.clone(),
+                    disk_bytes: disks
+                        .bases
+                        .get(base)
+                        .or_else(|| disks.images.get(digest))
+                        .copied(),
+                })
+            })
+            .collect(),
+    }
+}
+
+/// A complete inventory with the image store's listing of the same clean pass beside it, when
+/// that listing was complete; anything else as it is. Only a pass the listing gate kept reaches
+/// here, so the listing ran while no effect that changes it did, and the control plane may
+/// resolve an unknown placement from it (DP-08). A session older than 1.5 gets the inventory
+/// alone (`ObservationKind::written_in`). Pinned by
+/// `tests/executor/effects.rs::should_send_the_image_listing_beside_the_inventory_when_a_pass_is_clean`
+/// and `should_send_no_image_listing_when_the_store_cannot_be_listed`.
+fn beside(observed: ObservationKind, listing: Option<&ImageListing>) -> ObservationKind {
+    match observed {
+        ObservationKind::Inventory { vms, .. } => ObservationKind::Inventory {
+            vms,
+            image_store: listing.map(store_listing),
+        },
+        other => other,
+    }
+}
+
 /// Runs the effect of `kind`, answering what was observed.
 async fn effect<V, I, G, H, C, D>(ports: &Ports<V, I, G, H, C, D>, kind: DirectiveKind) -> Stimulus
 where
@@ -1148,10 +1196,10 @@ impl Core {
             return;
         }
         ledger.apply_inventory(&pass.inventory);
-        if let Some(listing) = pass.images {
+        if let Some(listing) = &pass.images {
             ledger.apply_images(&listing.images, &listing.bases, &listing.disks);
         }
-        let observed = pass.inventory.observation();
+        let observed = beside(pass.inventory.observation(), pass.images.as_ref());
         run.unsolicited(observed.clone());
         for waiter in std::mem::take(&mut run.waiters) {
             let progress = self.plane.finish(

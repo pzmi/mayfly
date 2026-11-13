@@ -1018,6 +1018,15 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   through `Pool`'s `TripBreaker{digest, reason: runner_version, at}` (`PoolBreakerTripped` v2
   names its reason). Withdrawal is refused while a pool pins the image, saved with a read of
   every pool stream.
+- **As built (DP-08):** a pending directive of `Unknown` outcome is resolved from the image
+  store's listing beside a complete inventory (protocol 1.5): `RecordPulled` when the image is
+  listed, `RecordMaterialised` (with the base's disk) when the base is listed `Ready`, by name
+  and image digest, each only from a listing of a later run epoch than the directive's send
+  (`PlacementDirectiveSent` v2's epoch: observations are not ordered, and what a listing shows
+  can be removed after it),
+  `RecordNotApplied` when the listing omits the image, or when neither the listing nor the
+  inventory shows the base; a VM under the base's name that is not a listed `Ready` base
+  resolves nothing (`formal/image_store.qnt`, `materialisedOnlyFromReady`).
 
 ### 6.8 `HostRun` [Operations]
 

@@ -28,7 +28,7 @@ impl ProtocolVersion {
 }
 
 /// The version this build writes when the session allows it.
-pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 4);
+pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 5);
 
 /// The minor that added what the data plane cannot determine (ADR 0052: the refusal
 /// `capacity_unknown`, a capacity report's `unknown` dimensions, a listed VM's facts) and
@@ -58,6 +58,15 @@ pub const GUEST_IDENTITY: ProtocolVersion = ProtocolVersion::new(1, 3);
 /// then reads it as unknown and plans the clone with no disk, and the data plane's gate (I33)
 /// refuses what does not fit, as before.
 pub const MEASURED_BASE_DISK: ProtocolVersion = ProtocolVersion::new(1, 4);
+
+/// The minor that added the image-store listing beside a complete inventory
+/// (`ObservationKind::Inventory::image_store`, DP-08): the data plane's verified images and its
+/// `Ready` bases, from which the control plane resolves a pull or a materialisation whose outcome
+/// is unknown, with no new directive and no outcome asserted (ADR 0025, P7). A session below it
+/// is written without it ([`crate::ObservationKind::written_in`]); the control plane then
+/// resolves as before: a materialisation or an eviction only by its base's absence from the
+/// inventory, a pull only by its late answer.
+pub const IMAGE_LISTING: ProtocolVersion = ProtocolVersion::new(1, 5);
 
 /// What this build speaks: the highest minor of each major, one entry per major.
 pub const SUPPORTED: &[ProtocolVersion] = &[CURRENT];

@@ -13,6 +13,10 @@
 //!   `tests/tart/images.rs::should_never_read_the_cached_manifest_when_verifying_an_image`). A
 //!   failed check deletes the entry and pulls once more, then refuses `Definite`.
 //!   Compressed blobs are not re-checked (their content is, through the uncompressed digests).
+//!   A digest already verified, whose cache entry is unchanged and whose kept manifest still
+//!   hashes to it, is done before anything is fetched, so a pull issued again after an unknown
+//!   outcome costs no registry request (DP-08;
+//!   `tests/tart/images.rs::should_fetch_nothing_when_the_image_is_already_pulled_and_unchanged`).
 //! - **materialise**: the base's name must be the one the digest and runner version give, the
 //!   runner must have a pinned checksum, the image must be verified and unchanged, and Tart must
 //!   not list the name (a complete listing). Then the registry ([`crate::bases`]) takes each
@@ -717,6 +721,14 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
     async fn pull(&self, digest: &ImageDigest) -> Result<(), VmError> {
         let flight = self.flight(digest);
         let _flight = flight.lock().await;
+        let record = self.bases.read().map_err(|_| VmError::Definite)?;
+        let kept = self
+            .bases
+            .manifest(digest)
+            .is_some_and(|raw| matches(&raw, digest));
+        if kept && self.image_current(&record, digest) {
+            return Ok(());
+        }
         let raw = self
             .manifests
             .fetch(&self.images.repository, digest)
@@ -726,10 +738,6 @@ impl<M: ManifestSource> ImageStore for TartImageStore<M> {
             return Err(VmError::Definite);
         }
         let layout = verify::layout(&raw).map_err(|_| VmError::Definite)?;
-        let record = self.bases.read().map_err(|_| VmError::Definite)?;
-        if self.image_current(&record, digest) && self.bases.manifest(digest).is_some() {
-            return Ok(());
-        }
         let reference = self.reference(digest);
         for _ in 0..PULL_TRIES {
             self.tart

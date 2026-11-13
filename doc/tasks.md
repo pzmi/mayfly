@@ -1271,7 +1271,9 @@ restart) therefore stays `Unknown`, and its pool not admissible on that host, un
 arrives; no new directive is issued while it is unknown (P7), and no operator asserts its outcome
 (ADR 0025). The fix is DP-08: a protocol minor carrying the data plane's image listing (pulled
 images verified against their digests, `Ready` bases of the owned-base registry), from which the
-inbox resolves it. A failed placement is not requested again (P17's
+inbox resolves it. (DP-08 built the listing and the resolution of an `Unknown` outcome; a
+directive sent before a restart becomes `Unknown` only at its deadline, which DP-08's intake note
+puts to the owner.) A failed placement is not requested again (P17's
 failure path); the operator path is OPS-06's `mayfly image refresh <pool>`, which requests the
 pool's placements again, a failed one included (planned there), or a new pin. P18: `Pool`'s new `TripBreaker{digest, reason, at}` (`PoolBreakerTripped` v2 with
 an optional `reason`; v1 upcast to `None`); the manager trips under a command id derived from
@@ -1317,6 +1319,68 @@ Note (CP-08): the `mayflyd` part of this Accept needs a registry `mayflyd` can p
 VER-09 builds; until then nothing serves `mayflyd` an image.
 Note (VER-09): built: `mayfly-fake-registry` (ver §7.5); VER-09's note says how a test starts one,
 seeds fake-tart with the same image and has `mayflyd` trust it (`tests/daemon.rs`, `mod placement`).
+Note (DP-08, intake, 2026-11-13): a runtime prerequisite is missing. After a restart (or any
+session that ends), a placement directive sent in the previous run stays in flight until its
+deadline (two hours for a pull, one for a materialisation, `PlacementTimeouts::default()`): the
+relay never sends a sent directive again, a data plane answers only in the session it ran in, and
+nothing at a new run makes the directive's outcome `Unknown`. The resolution below applies only to
+`Unknown`, so the `mayflyd` restart part of the Accept cannot resolve in bounded time. The way a
+directive of an earlier run becomes resolvable changes how I10 is read, so it is the owner's
+(options put: resolve from a newer session's listing; record the outcome unknown at the new run
+because no answer can come; configurable timeouts; or move the restart test to a follow-up). Pending
+that decision, the parts every option shares are built.
+Note (DP-08, as built): model first, `formal/image_store.qnt` gains the control plane's view of
+the base's `MaterialiseImage` (in flight, unknown, materialised, not applied), the listing the data
+plane sends (the base only while Ready and proven, any VM under the name) and the inbox's
+resolution, with invariants `materialisedOnlyFromReady` and `noDirectiveWhileUnknown` and negative
+controls `listingBeforeReadyIsFlaggedTest` (a listing that shows a base being built as a base) and
+`issueWhileUnknownIsFlaggedTest`. Protocol 1.5 (`IMAGE_LISTING`): `Inventory`'s optional
+`image_store: {images, bases: [{base_name, disk_bytes?}]}`, written out below 1.5
+(`ObservationKind::written_in`;
+`observation.rs::should_leave_the_image_listing_out_when_the_session_is_older_than_image_listing`);
+the link matrix speaks 1.5 and keeps `welcome_e6_v1.6` unspoken. The data plane puts its store's
+listing beside the inventory of a clean observer pass, none when the store could not be listed
+(`mayfly-data`'s
+`tests/executor/effects.rs::should_send_the_image_listing_beside_the_inventory_when_a_pass_is_clean`,
+`should_send_no_image_listing_when_the_store_cannot_be_listed`). The inbox resolves an `Unknown`
+pull from it (`RecordPulled` when listed, `RecordNotApplied` when a listing omits it) and an
+`Unknown` materialisation (`RecordMaterialised` with the base's disk when the base is listed
+`Ready`, matched by name and image digest, by a listing of a later run epoch than the directive's
+send; `RecordNotApplied` only when neither the listing nor the inventory shows the base; a VM that
+is not a listed `Ready` base resolves nothing), issuing nothing meanwhile (`mayfly-control`'s
+`tests/store/placement.rs::should_resolve_an_unknown_pull_from_the_listing_when_its_image_is_listed`,
+`should_resolve_an_unknown_pull_as_not_applied_when_a_listing_omits_its_image`,
+`should_resolve_an_unknown_materialisation_when_the_listing_shows_its_base_ready`,
+`should_resolve_nothing_when_the_listed_base_is_not_ready`,
+`should_resolve_nothing_when_the_listing_is_of_the_sends_own_epoch`,
+`should_resolve_nothing_from_a_listing_when_the_directive_is_in_flight`). One seam takes the
+owner's decision: `inbox::resolvable`, today `Unknown` only.
+**Ordering (found at the review, 2026-11-13):** the link gives no order to observations (plan
+§3.2: no sequence number on a frame, and observation ids are random in production), so a listing
+can be read long after it was taken. A stale listing showing a base `Ready`, read after that base
+was evicted and a new materialisation of the same name went `Unknown`, would record a
+materialisation that never happened, admitting the pool on a host without its base. So
+`PlacementDirectiveSent` v2 records the run epoch the frame was stamped with
+(`Pending::sent_epoch`; v1 upcast to `None`, which no listing resolves positively), and a
+materialisation or a pull is read as completed only from a listing of a later epoch, which comes
+after both the effect and any removal: the session that sent the directive ended, and every effect
+it ran finished or was lost with it (a child that survives a killed data plane cannot write the
+registry's Ready or a verified image), and an eviction that removed an earlier base was resolved
+before this directive was issued (no directive is issued while one is pending). Pulls take the same
+rule because a listed image can go too: a later pull's failed check deletes the cache entry Tart
+linked it to, which may be another verified digest's, and a change outside mayfly can alter an
+entry. The cost: an `Unknown` pull or materialisation whose effect completed inside its own session
+is resolved only by its late answer or by a later session's listing. The model has the evict and re-materialise cycle,
+sessions, `materialisedOnlyFromReady` over observations made after the issue, and the negative
+control `staleListingIsFlaggedTest`.
+**Residual (recorded 2026-11-13):** a listing taken before a directive ran and read after its
+outcome became `Unknown` can still record `RecordNotApplied` for a directive that did apply. It
+costs one more directive, which the image store makes a no-op: a pull of a verified, unchanged image
+returns before any registry fetch
+(`mayfly-adapter-tart`'s `tests/tart/images.rs::should_fetch_nothing_when_the_image_is_already_pulled_and_unchanged`),
+and the materialisation of a `Ready` base from the same digest and runner is done. The
+inventory-based resolution of CP-07 carries the same window; the model reaches it and claims no
+exactness for a not-applied outcome.
 
 #### CP-08 Terms policy P4
 Cites: dm P4, §6.2, §6.3; ADR 0024. Issue `ApplyPoolTerms` (`pool::terms`) to every host serving

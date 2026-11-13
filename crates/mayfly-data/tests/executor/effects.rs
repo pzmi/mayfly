@@ -8,8 +8,9 @@ use mayfly_data::{
 };
 use mayfly_domain::{ImageDigest, Millis, ProviderInstanceId, SecretHandleId};
 use mayfly_protocol::{
-    BaseName, DiagnosticsLoss, DirectiveKind, GuestFacts, GuestOs, GuestRejection, Nonce,
-    ObservationKind, RefusalReason, ResourceDimension, SecretHandle,
+    BaseName, DiagnosticsLoss, DirectiveKind, GuestFacts, GuestOs, GuestRejection,
+    ImageStoreListing, ListedBase, Nonce, ObservationKind, RefusalReason, ResourceDimension,
+    SecretHandle,
 };
 use mayfly_testkit_data::{FakeImageStore, GuestScript};
 
@@ -439,5 +440,77 @@ fn should_answer_no_disk_when_the_listing_fails_after_a_materialisation() {
                 .bases
                 .contains_key(&BaseName::new("mfb-two").expect("a valid base name"))
         );
+    });
+}
+
+/// The image-store listing beside the answer to one `ReportInventory`, or `None` when the
+/// answer carries none (or is no inventory).
+async fn listed_beside_inventory(fakes: &Fakes) -> Option<ImageStoreListing> {
+    let mut exec = fakes.open(2).await;
+    let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+        feed.send(directive(1, DirectiveKind::ReportInventory))
+            .await;
+        tap.wait_for(answers(1)).await;
+        tap
+    })
+    .await;
+    answers_to(&seen, 1)
+        .into_iter()
+        .find_map(|kind| match kind {
+            ObservationKind::Inventory { image_store, .. } => image_store,
+            _ => None,
+        })
+}
+
+#[test]
+fn should_send_the_image_listing_beside_the_inventory_when_a_pass_is_clean() {
+    run(async {
+        // given: the store holds a verified image and a Ready base made from it, the base's own
+        // size unread (it takes its image's)
+        let mut fakes = Fakes::new(probe(4));
+        fakes.images = FakeImageStore::new(ImageListing {
+            images: BTreeSet::from([digest()]),
+            bases: BTreeMap::from([(base(), GuestOs::Linux)]),
+            disks: MeasuredDisks {
+                images: BTreeMap::from([(digest(), 20 * GIB)]),
+                base_images: BTreeMap::from([(base(), digest())]),
+                ..MeasuredDisks::default()
+            },
+        });
+
+        // when
+        let listed = listed_beside_inventory(&fakes).await;
+
+        // then: what the clean pass listed crosses the link beside the inventory (DP-08)
+        assert_eq!(
+            listed,
+            Some(ImageStoreListing {
+                images: vec![digest()],
+                bases: vec![ListedBase {
+                    base_name: base(),
+                    digest: digest(),
+                    disk_bytes: Some(20 * GIB),
+                }],
+            })
+        );
+    });
+}
+
+#[test]
+fn should_send_no_image_listing_when_the_store_cannot_be_listed() {
+    run(async {
+        // given: the store holds an image, but its listing fails from the session's start
+        let mut fakes = Fakes::new(probe(4));
+        fakes.images = FakeImageStore::new(ImageListing {
+            images: BTreeSet::from([digest()]),
+            ..ImageListing::default()
+        });
+        fakes.images.fail_listing(true);
+
+        // when
+        let listed = listed_beside_inventory(&fakes).await;
+
+        // then: the inventory goes alone: an absent image is never read from a failed listing
+        assert_eq!(listed, None);
     });
 }

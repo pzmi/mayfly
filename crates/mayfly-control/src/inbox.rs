@@ -38,12 +38,46 @@
 //!   outcome by the directive, found in the [`PlacementIndex`] the placement manager keeps; an
 //!   answer whose placement is not known is not routed (`unknown_placement`), and the
 //!   manager's timeout makes its outcome `Unknown`, never a success. A complete inventory also
-//!   resolves a placement directive of `Unknown` outcome by the base's absence only: a
-//!   materialisation whose base is not listed did not apply (`RecordNotApplied`), an eviction
-//!   whose base is not listed did (`RecordEvicted`); a listed base proves nothing (it may be
-//!   half made, or still being removed), so it leaves the outcome `Unknown` (ADR 0025). A pull
-//!   is not resolved by a listing (images are not VMs): only its late answer resolves it.
-//!   Pinned by `tests/store/placement.rs::should_resolve_an_unknown_materialisation_only_when_its_base_is_absent`.
+//!   resolves a placement directive of `Unknown` outcome, from what the data plane observed
+//!   and never by a new directive (P7) or an asserted outcome (ADR 0025):
+//!   - with the image store's listing beside it (protocol 1.5, DP-08), a pull whose image is
+//!     listed (pulled and verified against its digest) completed (`RecordPulled`), and a
+//!     materialisation whose base the listing shows (`Ready` and passing the clone proof, ADR
+//!     0087, matched by name and image digest) completed (`RecordMaterialised`, with the base's
+//!     measured disk), each only from a listing of a later run epoch than the session that sent
+//!     the directive (`Pending::sent_epoch`). Observations carry no order on the link (plan
+//!     §3.2; no sequence number, random observation ids), and what a listing shows can be
+//!     removed after it was taken (a base by eviction; a cache entry by a later pull's failed
+//!     check, which deletes the entry Tart linked it to, or by a change outside mayfly), so a
+//!     listing of the send's own session may predate the effect, even show what an earlier
+//!     directive made before it was removed. A listing of a later session comes after both the
+//!     effect and any such removal: the session that sent the directive ended, and with it
+//!     every effect it ran, finished or lost (a child that survives a killed data plane cannot
+//!     write the registry's Ready or a verified image), and an eviction that removed an earlier
+//!     base was resolved before this directive was issued (one directive per placement, none
+//!     while one is pending). A directive sent before DP-08 recorded no epoch and is never
+//!     resolved positively from a listing. A pull whose image a listing of any session omits
+//!     did not apply (`RecordNotApplied`);
+//!   - with or without it, a materialisation whose base no VM of the inventory bears did not
+//!     apply (`RecordNotApplied`), and an eviction whose base no VM bears did (`RecordEvicted`);
+//!   - anything else resolves nothing: a VM under the base's name that the listing does not
+//!     show `Ready` may be half made or still being removed (`formal/image_store.qnt`,
+//!     `materialisedOnlyFromReady`), and without the listing (a 1.4 session, or a store that
+//!     could not be listed) a pull is resolved only by its late answer.
+//!
+//!   Pinned by `tests/store/placement.rs::should_resolve_an_unknown_materialisation_only_when_its_base_is_absent`,
+//!   `should_resolve_an_unknown_pull_from_the_listing_when_its_image_is_listed`,
+//!   `should_resolve_an_unknown_pull_as_not_applied_when_a_listing_omits_its_image`,
+//!   `should_resolve_an_unknown_materialisation_when_the_listing_shows_its_base_ready` and
+//!   `should_resolve_nothing_when_the_listed_base_is_not_ready`,
+//!   `should_resolve_nothing_when_the_listing_is_of_the_sends_own_epoch` and
+//!   `should_resolve_nothing_from_a_listing_when_the_directive_is_in_flight`. A listing taken
+//!   before an effect ran and read after its outcome became unknown can still make a
+//!   `RecordNotApplied` wrong; it costs one more directive, which the data plane's image store
+//!   makes a no-op (a pull of a present image returns before any fetch, the materialisation of a
+//!   `Ready` base succeeds doing nothing), and is the residual recorded on DP-08's card. An
+//!   unknown materialisation whose effect completed within its own session is resolved only by
+//!   its late answer or a listing of a later session.
 //!
 //! Host facts are not routed here (`Recorded::not_routed`): their aggregates' inboxes are later
 //! tasks'. The report's own non-VM use (`ReportedCapacity::base`) is not separable from
@@ -65,9 +99,13 @@ use mayfly_control_domain::placement::{
     ImagePlacement, PendingOutcome, PlacementCommand, PlacementDirective, placement_instance,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command};
-use mayfly_domain::{AttemptId, CommandId, Epoch, Generation, HostId, ObservationId, OwnedVmName};
+use mayfly_domain::{
+    AttemptId, CommandId, DirectiveId, Epoch, Generation, HostId, ImageDigest, ObservationId,
+    OwnedVmName,
+};
 use mayfly_protocol::{
-    CapacityReport, Observation, ObservationKind, ResourceDimension, VmObservation,
+    CapacityReport, ImageStoreListing, Observation, ObservationKind, ResourceDimension,
+    VmObservation,
 };
 
 use crate::ids::derive;
@@ -176,7 +214,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
                     .await;
                 recorded.add(saved)?;
             }
-            ObservationKind::Inventory { vms } => {
+            ObservationKind::Inventory { vms, image_store } => {
                 for (attempt, state) in host_attempts(self.store, &self.host).await? {
                     let Some(generation) = state.identity.as_ref().map(|i| i.generation) else {
                         continue;
@@ -198,7 +236,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
                         recorded.add(saved)?;
                     }
                 }
-                self.resolve_placements(observation, vms, &mut recorded)
+                self.resolve_placements(observation, vms, image_store.as_ref(), &mut recorded)
                     .await?;
             }
             ObservationKind::ImagePulled { digest }
@@ -315,12 +353,13 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
         recorded.add(saved)
     }
 
-    /// A complete inventory resolves this host's placement directives of `Unknown` outcome by
-    /// their base's absence only (see the module docs).
+    /// A complete inventory, with the image store's listing beside it when the session carries
+    /// one, resolves this host's placement directives of `Unknown` outcome (see the module docs).
     async fn resolve_placements(
         &self,
         observation: &Observation,
         vms: &[VmObservation],
+        image_store: Option<&ImageStoreListing>,
         recorded: &mut Recorded,
     ) -> Result<(), SaveError> {
         for (directive_id, pending) in self.placements.on_host(&self.host) {
@@ -328,26 +367,22 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Inbox<'s, J, C, R, N> {
             let Some(open) = state
                 .pending
                 .filter(|p| p.directive_id == directive_id)
-                .filter(|p| matches!(p.outcome, PendingOutcome::Unknown { .. }))
+                .filter(|p| resolvable(p.outcome))
             else {
                 continue;
             };
-            let listed = |version| {
-                let name = base_name(&pending.digest, version);
-                vms.iter().any(|vm| vm.name == name)
-            };
-            let body = match open.directive {
-                PlacementDirective::MaterialiseImage { runner_version }
-                    if !listed(runner_version) =>
-                {
-                    PlacementCommand::RecordNotApplied { directive_id }
-                }
-                PlacementDirective::EvictImage { runner_version } if !listed(runner_version) => {
-                    PlacementCommand::RecordEvicted { directive_id }
-                }
-                PlacementDirective::MaterialiseImage { .. }
-                | PlacementDirective::EvictImage { .. }
-                | PlacementDirective::PullImage => continue,
+            let after_send = open.sent_epoch.is_some_and(|sent| observation.epoch > sent);
+            let Some(body) = resolution(
+                directive_id,
+                open.directive,
+                &pending.digest,
+                Listed {
+                    vms,
+                    image_store,
+                    after_send,
+                },
+            ) else {
+                continue;
             };
             let message = format!("placement/{directive_id}");
             let saved = self
@@ -648,6 +683,76 @@ pub const fn refusal(reason: mayfly_protocol::RefusalReason) -> RefusalReason {
         mayfly_protocol::RefusalReason::SafeMode => RefusalReason::SafeMode,
         mayfly_protocol::RefusalReason::DeadlineExpired
         | mayfly_protocol::RefusalReason::EffectFailed => RefusalReason::EffectFailed,
+    }
+}
+
+/// Whether a pending placement directive's outcome may be resolved from a listing: only once it
+/// is `Unknown` (I10, ADR 0025). An answer still in flight may yet come and is waited for
+/// (`tests/store/placement.rs::should_resolve_nothing_from_a_listing_when_the_directive_is_in_flight`).
+const fn resolvable(outcome: PendingOutcome) -> bool {
+    matches!(outcome, PendingOutcome::Unknown { .. })
+}
+
+/// What one complete inventory shows: its VMs, the image store's listing beside it when there
+/// is one, and whether it was taken in a later run epoch than the directive's send.
+#[derive(Clone, Copy)]
+struct Listed<'a> {
+    vms: &'a [VmObservation],
+    image_store: Option<&'a ImageStoreListing>,
+    after_send: bool,
+}
+
+/// What `listed` shows about `directive` of `digest`'s placement, as the command that records
+/// it; `None` when it shows nothing (see the module docs). Pinned by the placement tests the
+/// module docs name.
+fn resolution(
+    directive_id: DirectiveId,
+    directive: PlacementDirective,
+    digest: &ImageDigest,
+    listed: Listed<'_>,
+) -> Option<PlacementCommand> {
+    let Listed {
+        vms,
+        image_store,
+        after_send,
+    } = listed;
+    let named = |version| {
+        let name = base_name(digest, version);
+        vms.iter().any(|vm| vm.name == name)
+    };
+    let ready = |version| {
+        let name = base_name(digest, version);
+        image_store
+            .filter(|_| after_send)?
+            .bases
+            .iter()
+            .find(|base| base.base_name.as_str() == name && base.digest == *digest)
+    };
+    match directive {
+        PlacementDirective::PullImage => image_store.and_then(|listing| {
+            if !listing.images.contains(digest) {
+                Some(PlacementCommand::RecordNotApplied { directive_id })
+            } else if after_send {
+                Some(PlacementCommand::RecordPulled { directive_id })
+            } else {
+                None
+            }
+        }),
+        PlacementDirective::MaterialiseImage { runner_version } => {
+            if let Some(base) = ready(runner_version) {
+                Some(PlacementCommand::RecordMaterialised {
+                    directive_id,
+                    disk_bytes: base.disk_bytes,
+                })
+            } else if named(runner_version) {
+                None
+            } else {
+                Some(PlacementCommand::RecordNotApplied { directive_id })
+            }
+        }
+        PlacementDirective::EvictImage { runner_version } => {
+            (!named(runner_version)).then_some(PlacementCommand::RecordEvicted { directive_id })
+        }
     }
 }
 

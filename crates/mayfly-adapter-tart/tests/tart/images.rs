@@ -580,6 +580,25 @@ fn should_refuse_without_running_tart_when_the_registry_serves_another_manifest(
 }
 
 #[test]
+fn should_fetch_nothing_when_the_image_is_already_pulled_and_unchanged() {
+    // given: an image pulled and verified, then a registry that no longer answers
+    let world = ImageTartWorld::new();
+    let digest = world.publish(b"kept", GuestOs::Macos);
+    let rt = ImageTartWorld::runtime();
+    let first = rt.block_on(world.store.pull(&digest));
+    std::fs::rename(world.registry(), world.fake.home().join("registry-gone"))
+        .expect("the registry moved away");
+
+    // when: the same pull again (a directive issued again after its outcome was not applied)
+    let again = rt.block_on(world.store.pull(&digest));
+
+    // then: done without a manifest fetch or a second `tart pull`
+    assert_eq!(first, Ok(()));
+    assert_eq!(again, Ok(()));
+    assert_eq!(world.pulls(), 1);
+}
+
+#[test]
 fn should_never_read_the_cached_manifest_when_verifying_an_image() {
     // given: Tart 2.41.1 caches the manifest as served (2.28.0 re-serialized it); neither copy
     // is checked against the digest, so the store must not depend on it
