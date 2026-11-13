@@ -22,6 +22,9 @@ clone_disk_gib = 90
 kind = "tart"
 tart_home = "/var/lib/mayfly/tart"
 
+[shutdown]
+busy_wait = "45m"
+
 [images]
 repository = "ghcr.io/example-org/runner-macos"
 realm_hosts = ["auth.example.com"]

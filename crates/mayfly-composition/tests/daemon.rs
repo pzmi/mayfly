@@ -21,6 +21,12 @@
 //! they made is stopped with `tart stop` once the daemon exited, and its shim waited for
 //! (`placement::Reaped`): the daemon leaves VMs running under their shims by design (ADR 0037).
 //!
+//! Terminal mode (RT-05a, `mod placement`): the tests send SIGINT to the daemon they started
+//! (only that pid), wait for its exit by a bounded poll, and hold a VM's stop where a test needs
+//! the graceful stop to wait: a fake-tart `hang` fault on `stop`, whose landing they read from
+//! the fake's invocation log (its documented `fault` record), and whose file they remove before
+//! anything else runs `tart stop` (`placement::Unfaulted`).
+//!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least: `mayfly` runs each VM's
 //! shim).
@@ -35,7 +41,7 @@ use mayfly_adapter_sqlite::{SqliteJournal, SqliteOptions};
 use mayfly_adapter_tart::FloorFile;
 use mayfly_composition::daemon::{DaemonError, Options, Ready, child_environment, run_with};
 use mayfly_composition::paths::{self, Places, PlatformEnv};
-use mayfly_composition::supervise::{SessionCut, Shutdown};
+use mayfly_composition::supervise::{SessionCut, Shutdown, Stops};
 use mayfly_control::journal::Journal as _;
 use mayfly_control::placement::image_instance;
 use mayfly_control::store::{AggregateStore, NoNotifier, decode_event, stream_of};
@@ -617,7 +623,11 @@ fn in_process(
     // the run owns the report, so its sender is dropped when the daemon stops: a script
     // waiting for a ready line then sees the channel close at once (`next_ready` is `None`)
     // and the test reports the daemon's error instead of waiting out its bound
-    let run = async move { run_with(options, shutdown.clone(), &report, cut).await };
+    let stops = Stops {
+        force: shutdown.clone(),
+        graceful: Shutdown::new(),
+    };
+    let run = async move { run_with(options, stops, &report, cut).await };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1041,7 +1051,10 @@ fn should_refuse_to_start_when_a_pool_manifest_names_a_tag() {
 #[cfg(target_os = "linux")]
 mod placement {
     use mayfly_adapter_tart::shim::{self, RunRecord};
-    use mayfly_control_domain::attempt::{Attempt, AttemptEvent, GuestOs, RefusalReason};
+    use mayfly_composition::state_dir::StateDirLock;
+    use mayfly_control_domain::attempt::{
+        Attempt, AttemptEvent, GuestOs, RefusalReason, RetireReason,
+    };
     use mayfly_control_domain::image::{RunnerVersion, base_name};
     use mayfly_control_domain::placement::{ImagePlacement, PlacementEvent, placement_instance};
     use mayfly_data::Shim;
@@ -1500,6 +1513,371 @@ mod placement {
             }),
             "{:?}",
             registry.served()
+        );
+    }
+
+    // ---- terminal mode (RT-05a) -----------------------------------------------------------
+
+    /// The fault file that holds every `tart stop` (a fake-tart `hang`, ADR 0023): a retired
+    /// VM's stop never ends, so the graceful stop waits.
+    const STOP_HANGS: &str =
+        "[[rule]]\nid = \"stop-hangs\"\ncommand = \"stop\"\naction = \"hang\"\n";
+
+    /// Removes the fake's fault file when dropped (declared after [`Reaped`], so dropped before
+    /// it): no `tart stop` of the reaping may hang.
+    struct Unfaulted<'w>(&'w World);
+
+    impl Drop for Unfaulted<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.tart_home().join("faults.toml"));
+        }
+    }
+
+    /// A world serving the pool's pinned image (as [`serving`]), whose pool keeps
+    /// `min_prepared` VMs ahead of demand on a host with a slot more (a foreign VM a test makes
+    /// takes one), with `[shutdown] busy_wait` when given.
+    fn terminal(
+        registry: &FakeRegistry,
+        image: &TartImage,
+        min_prepared: u32,
+        busy_wait: Option<&str>,
+    ) -> World {
+        let world = serving(registry, image, true);
+        let config = std::fs::read_to_string(world.config()).expect("the config");
+        assert!(config.contains("min_prepared = 1"), "{config}");
+        assert!(config.contains("vm_slots = 2"), "{config}");
+        let mut config = config
+            .replace(
+                "min_prepared = 1",
+                &format!("min_prepared = {min_prepared}"),
+            )
+            .replace("vm_slots = 2", &format!("vm_slots = {}", min_prepared + 1));
+        if let Some(wait) = busy_wait {
+            config.push_str(&format!("\n[shutdown]\nbusy_wait = \"{wait}\"\n"));
+        }
+        std::fs::write(world.config(), config).expect("the config");
+        world
+    }
+
+    /// Starts `mayflyd` as [`World::start`] does, with its stderr lines sent to the returned
+    /// channel (read to the end even once the channel is dropped, so the pipe never fills).
+    fn start_capturing(world: &World) -> (Daemon, mpsc::Receiver<String>) {
+        use std::io::BufRead as _;
+        let mut child = world
+            .mayflyd(&["--config", &world.config().display().to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start mayflyd");
+        let forward = |stream: Box<dyn std::io::Read + Send>| {
+            let (lines, received) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    let _ = lines.send(line);
+                }
+            });
+            received
+        };
+        let received = forward(Box::new(child.stdout.take().expect("stdout")));
+        let errors = forward(Box::new(child.stderr.take().expect("stderr")));
+        (Daemon { child, received }, errors)
+    }
+
+    impl Daemon {
+        /// Ctrl-C: SIGINT to this test's own daemon, by its pid.
+        fn interrupt(&self) {
+            let pid = rustix::process::Pid::from_child(&self.child);
+            rustix::process::kill_process(pid, rustix::process::Signal::INT).expect("SIGINT");
+        }
+
+        /// The exit code, waiting for the exit by a bounded poll; on a timeout, the world's
+        /// status names where the stop is.
+        fn exited(&mut self, world: &World, what: &str) -> Option<i32> {
+            let mut status = None;
+            let waited = mayfly_testkit_shared::poll::try_wait_until(BOUND, what, || {
+                status = self.child.try_wait().expect("try_wait");
+                status.is_some()
+            });
+            if let Err(timed_out) = waited {
+                let opened = open_journal(world);
+                let attempts: Vec<_> = reserved_attempts(&opened, &host_of(world))
+                    .into_iter()
+                    .map(|a| (a, attempt_events(&opened, a)))
+                    .collect();
+                let stream = stream_of::<Host>(host_of(world).as_str()).expect("the stream");
+                let hosted: Vec<HostEvent> = block_on(opened.read_stream(&stream, None, None))
+                    .expect("the host's events")
+                    .iter()
+                    .map(|e| decode_event::<HostEvent>(e).expect("a host event"))
+                    .collect();
+                panic!(
+                    "{timed_out}; status: {}; the attempts: {attempts:?}; the host: {hosted:?}",
+                    world.try_status()
+                );
+            }
+            status.and_then(|s| s.code())
+        }
+    }
+
+    /// The live attempts by phase in `mayfly status --json` (RT-03's `attempts.by_phase`).
+    fn live(status: &Value) -> (u64, u64) {
+        let count = |phase: &str| status["attempts"]["by_phase"][phase].as_u64().unwrap_or(0);
+        let prepared = count("prepared");
+        let preparing: u64 = ["reserved", "cloning", "booting", "verifying", "backoff"]
+            .iter()
+            .map(|p| count(p))
+            .sum();
+        (prepared, prepared + preparing)
+    }
+
+    /// Waits, by a bounded poll of `mayfly status --json` (the ready line promises no
+    /// preparation), for `alive` attempts of which at least one is prepared.
+    fn await_attempts(world: &World, alive: u64) -> Value {
+        let mut last = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "attempts alive with one prepared, in mayfly status",
+            || {
+                last = world.try_status();
+                let (prepared, live) = live(&last);
+                prepared >= 1 && live >= alive
+            },
+        );
+        if let Err(timed_out) = waited {
+            let opened = open_journal(world);
+            let host = host_of(world);
+            let stream = stream_of::<Host>(host.as_str()).expect("the host's stream");
+            let events: Vec<HostEvent> = block_on(opened.read_stream(&stream, None, None))
+                .expect("the host's events")
+                .iter()
+                .map(|e| decode_event::<HostEvent>(e).expect("a host event"))
+                .collect();
+            panic!("{timed_out}; status: {last}; the host: {events:?}");
+        }
+        last
+    }
+
+    /// Waits for the hold on `tart stop` to land: the fault's record in the fake's invocation
+    /// log, which fake-tart writes when the hang takes effect (its documented signal).
+    fn await_stop_held(world: &World) {
+        mayfly_testkit_shared::poll::wait_until(
+            BOUND,
+            "a retired VM's tart stop held by the fault",
+            || {
+                std::fs::read_to_string(world.tart_home().join("invocations.jsonl"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .any(|entry| entry["event"] == "fault" && entry["rule"] == "stop-hangs")
+            },
+        );
+    }
+
+    /// The first line on the daemon's stderr that contains `needle`, read by a bounded poll.
+    fn await_line(errors: &mpsc::Receiver<String>, needle: &str) -> String {
+        let mut found = None;
+        mayfly_testkit_shared::poll::wait_until(BOUND, "the line on mayflyd's stderr", || {
+            found = errors.try_iter().find(|line| line.contains(needle));
+            found.is_some()
+        });
+        found.unwrap_or_default()
+    }
+
+    /// The VM names `tart delete` was asked for, from the fake's invocation log.
+    fn deleted(world: &World) -> Vec<String> {
+        std::fs::read_to_string(world.tart_home().join("invocations.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["event"] == "invoke" && entry["argv"][0] == "delete")
+            .flat_map(|entry| {
+                entry["argv"]
+                    .as_array()
+                    .map(|argv| {
+                        argv.iter()
+                            .skip(1)
+                            .filter_map(|a| a.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Each started attempt's VM name and the reason it was retired, if it was.
+    fn retirements(journal: &SqliteJournal, host: &HostId) -> Vec<(String, Option<RetireReason>)> {
+        reserved_attempts(journal, host)
+            .into_iter()
+            .filter_map(|a| {
+                let events = attempt_events(journal, a);
+                let vm = events.iter().find_map(|e| match e {
+                    AttemptEvent::AttemptStarted(s) => Some(s.vm_name.to_string()),
+                    _ => None,
+                })?;
+                let reason = events.iter().find_map(|e| match e {
+                    AttemptEvent::AttemptRetired(r) => Some(r.reason),
+                    _ => None,
+                });
+                Some((vm, reason))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_delete_the_idle_vms_and_exit_when_ctrl_c_is_pressed_once() {
+        // given: the pool keeps two VMs ahead of demand, one prepared and the other idle (still
+        // preparing, or prepared too by the time the status reads it), beside the pin's base, a
+        // foreign VM and an `mf-*` VM no record names
+        let (image, registry) = registry();
+        let digest = ImageDigest::new(image.digest()).expect("a digest");
+        let world = terminal(&registry, &image, 2, None);
+        let _reaped = Reaped(&world);
+        assert!(world.tart(&["create", "foreign-vm"]).status.success());
+        let (mut daemon, errors) = start_capturing(&world);
+        daemon.ready();
+        let host = host_of(&world);
+        assert!(world.tart(&["create", "mf-leftover"]).status.success());
+        let before = await_attempts(&world, 2);
+
+        // when: Ctrl-C once
+        daemon.interrupt();
+        let exit = daemon.exited(&world, "mayflyd to exit after one Ctrl-C");
+
+        // then: a clean exit; every VM of ours retired `drain` and deleted, nothing else
+        // deleted; the run ended clean, the lock released, no warning printed
+        assert_eq!(exit, Some(0), "status before the Ctrl-C: {before}");
+        let opened = open_journal(&world);
+        let retired = retirements(&opened, &host);
+        assert!(retired.len() >= 2, "{retired:?}");
+        for (vm, reason) in &retired {
+            assert_eq!(*reason, Some(RetireReason::Drain), "{vm}: {retired:?}");
+        }
+        let ours: Vec<String> = retired.into_iter().map(|(vm, _)| vm).collect();
+        let names = world.names();
+        assert!(names.iter().all(|n| !ours.contains(n)), "left: {names:?}");
+        assert!(names.contains(&base_name(&digest, RUNNER)), "{names:?}");
+        assert!(names.contains(&"foreign-vm".to_owned()), "{names:?}");
+        assert!(names.contains(&"mf-leftover".to_owned()), "{names:?}");
+        let deleted = deleted(&world);
+        assert!(deleted.iter().all(|vm| ours.contains(vm)), "{deleted:?}");
+        drop(opened);
+        let (events, _, _) = journal(&world);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, HostRunEvent::ShutdownStarted(_))),
+            "{events:?}"
+        );
+        assert!(
+            StateDirLock::acquire(&world.state()).is_ok(),
+            "the lock is released"
+        );
+        let printed: Vec<String> = errors.try_iter().collect();
+        assert!(
+            !printed.iter().any(|l| l.contains("Ctrl-C again")),
+            "{printed:?}"
+        );
+    }
+
+    #[test]
+    fn should_force_p24_when_ctrl_c_is_pressed_a_third_time_during_the_wait() {
+        // given: one VM prepared, and every `tart stop` held, so the graceful stop waits
+        let (image, registry) = registry();
+        let world = terminal(&registry, &image, 1, None);
+        let _reaped = Reaped(&world);
+        let _unfaulted = Unfaulted(&world);
+        let (mut daemon, errors) = start_capturing(&world);
+        daemon.ready();
+        let host = host_of(&world);
+        await_attempts(&world, 1);
+        std::fs::write(world.tart_home().join("faults.toml"), STOP_HANGS).expect("the faults");
+
+        // when: Ctrl-C, its stop held; Ctrl-C again, read the warning; then a third time
+        daemon.interrupt();
+        await_stop_held(&world);
+        daemon.interrupt();
+        let warning = await_line(&errors, "Ctrl-C again");
+        daemon.interrupt();
+        let exit = daemon.exited(&world, "mayflyd to exit after the third Ctrl-C");
+
+        // then: the warning names the next Ctrl-C; the stop is P24: a clean exit, the run's
+        // end recorded, the retired VM left running under its shim with its retirement
+        // recorded, nothing deleted
+        assert!(warning.contains("press Ctrl-C again"), "{warning}");
+        assert_eq!(exit, Some(0));
+        let opened = open_journal(&world);
+        let retired = retirements(&opened, &host);
+        let (vm, reason) = retired.first().cloned().expect("a started attempt");
+        assert_eq!(reason, Some(RetireReason::Drain), "{retired:?}");
+        assert!(world.names().contains(&vm), "{:?}", world.names());
+        assert!(deleted(&world).is_empty(), "{:?}", deleted(&world));
+        drop(opened);
+        let (events, _, _) = journal(&world);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, HostRunEvent::ShutdownStarted(_))),
+            "{events:?}"
+        );
+
+        // and then: the next start adopts the retirement it left (`mayfly status --json`'s
+        // `attempts.by_phase`, read once its ready line is out). Finishing it waits for the
+        // left stop's two-minute directive deadline, beyond a test's bound, so this stops here.
+        std::fs::remove_file(world.tart_home().join("faults.toml")).expect("the faults");
+        let next = world.start();
+        next.ready();
+        let adopted = world.status();
+        assert!(
+            adopted["attempts"]["by_phase"]["retiring"]
+                .as_u64()
+                .is_some_and(|n| n >= 1),
+            "{adopted}"
+        );
+        assert_eq!(next.terminate(), Some(0));
+    }
+
+    #[test]
+    fn should_take_p24_when_the_busy_wait_runs_out() {
+        // given: one VM prepared, every `tart stop` held before the Ctrl-C, and a busy wait of
+        // fifteen seconds: the retirement and the held stop land well within it (they take
+        // about a second over fake-tart). Failure mode: on a machine slower than that, the wait
+        // runs out before the retirement is recorded and the `drain` assertion below fails.
+        let (image, registry) = registry();
+        let world = terminal(&registry, &image, 1, Some("15s"));
+        let _reaped = Reaped(&world);
+        let _unfaulted = Unfaulted(&world);
+        let (mut daemon, errors) = start_capturing(&world);
+        daemon.ready();
+        let host = host_of(&world);
+        await_attempts(&world, 1);
+        std::fs::write(world.tart_home().join("faults.toml"), STOP_HANGS).expect("the faults");
+
+        // when: Ctrl-C once, and nothing more
+        daemon.interrupt();
+        await_stop_held(&world);
+        let exit = daemon.exited(&world, "mayflyd to exit once its busy wait ran out");
+
+        // then: P24: a clean exit with the run's end recorded, the retired VM left running
+        // under its shim with its retirement recorded for the next start, no warning printed
+        assert_eq!(exit, Some(0));
+        let opened = open_journal(&world);
+        let retired = retirements(&opened, &host);
+        let (vm, reason) = retired.first().cloned().expect("a started attempt");
+        assert_eq!(reason, Some(RetireReason::Drain), "{retired:?}");
+        assert!(world.names().contains(&vm), "{:?}", world.names());
+        assert!(deleted(&world).is_empty(), "{:?}", deleted(&world));
+        drop(opened);
+        let (events, _, _) = journal(&world);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, HostRunEvent::ShutdownStarted(_))),
+            "{events:?}"
+        );
+        let printed: Vec<String> = errors.try_iter().collect();
+        assert!(
+            !printed.iter().any(|l| l.contains("Ctrl-C again")),
+            "{printed:?}"
         );
     }
 }

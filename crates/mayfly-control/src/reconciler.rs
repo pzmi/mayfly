@@ -32,6 +32,15 @@
 //! reserves nothing twice (pinned by
 //! `tests/store/reconciler.rs::should_reserve_nothing_twice_when_a_pass_is_repeated_over_the_same_revisions`).
 //!
+//! **A stopping run (RT-05a).** Terminal mode's graceful stop names this run's host with
+//! [`Reconciler::set_stopping`]: every pass is then [`stopping_pass`], which plans that host as
+//! draining (nothing reserved, started or granted there, its prepared attempts retired `drain`,
+//! its unstarted reservations released; granted and listening ones wait, their deregistration
+//! being RT-05b's). No drain is recorded on the host's stream, so nothing is left that the next
+//! start must undo; the capacity inputs the passes record are re-planned by the next run's
+//! passes. Pinned by
+//! `tests/store/reconciler.rs::should_retire_and_admit_nothing_on_its_host_when_the_run_stops`.
+//!
 //! **Refusals.** An aggregate's refusal is the answer (P5: a `Host` refusal admits nothing, the
 //! reason goes to the report); nothing is retried within a pass, the next pass reads again.
 //!
@@ -81,7 +90,7 @@ use mayfly_control_domain::host::{Host, HostCommand, ReleaseEvidence, ReserveSlo
 use mayfly_control_domain::pool::{Pool, PoolCommand, PoolMode};
 use mayfly_control_domain::reconcile::{
     HostReport, HostTerms, HostView, LeaseView, Pass, PassCommand, PassInputs, PassMemory,
-    PolicyOf, PoolView, RunnerStage, ScaleSetView, Settings, exact, plan_pass,
+    PolicyOf, PoolView, RunnerStage, ScaleSetView, Settings, exact, plan_pass, stopping_pass,
 };
 use mayfly_control_domain::scaleset::{ScaleSet, ScaleSetCommand};
 use mayfly_control_domain::{Actor, Aggregate, Command, Rejection};
@@ -203,6 +212,7 @@ struct Timing {
     last_pass: Option<Millis>,
     memory: PassMemory,
     safe_mode: bool,
+    stopping: Option<HostId>,
 }
 
 /// The reconciler over an [`AggregateStore`] and the [`ProjectionStore`] it reads.
@@ -262,6 +272,12 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
         self.lock().safe_mode = safe_mode;
     }
 
+    /// Plans `host` as draining from the next pass on, without a drain on its stream: terminal
+    /// mode's graceful stop of this run (RT-05a); `None` plans every host as its stream says.
+    pub fn set_stopping(&self, host: Option<HostId>) {
+        self.lock().stopping = host;
+    }
+
     /// When the timer next makes a pass due: at once before the first pass, else one interval
     /// after the last.
     #[must_use]
@@ -307,9 +323,13 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
         let view = queries::fleet(self.projections)
             .await
             .map_err(ReconcileError::Query)?;
-        let (memory, safe_mode) = {
+        let (memory, safe_mode, stopping) = {
             let timing = self.lock();
-            (timing.memory.clone(), timing.safe_mode)
+            (
+                timing.memory.clone(),
+                timing.safe_mode,
+                timing.stopping.clone(),
+            )
         };
         let inputs = inputs_of(
             &view,
@@ -319,7 +339,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
             safe_mode,
             memory,
         );
-        let pass = (self.config.plan)(&inputs);
+        let pass = match &stopping {
+            Some(host) => stopping_pass(self.config.plan, &inputs, host),
+            None => (self.config.plan)(&inputs),
+        };
         let digest = versions_digest(&view);
         let mut report = PassReport {
             pass: pass.clone(),

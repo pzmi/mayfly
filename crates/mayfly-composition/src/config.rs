@@ -60,6 +60,30 @@ pub struct Config {
     pub images: Option<ImagesConfig>,
     /// The pools, in file order; one pool is one scale set (ADR 0040). Never empty.
     pub pools: Vec<PoolConfig>,
+    /// `[shutdown]`: terminal mode's graceful stop (RT-05a, ADR 0031's amendment of
+    /// 2026-11-12); every key optional.
+    pub shutdown: ShutdownConfig,
+}
+
+/// `[shutdown]`: how terminal mode's first Ctrl-C stops (ADR 0031, amended 2026-11-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownConfig {
+    /// The longest the graceful stop waits, from the first Ctrl-C, for busy jobs to end and
+    /// idle VMs to be deleted before it takes P24's path (VMs left under their shims, the
+    /// unsettled state recorded for the next start). [`DEFAULT_BUSY_WAIT`] when absent.
+    pub busy_wait: Duration,
+}
+
+/// The graceful stop's wait when `[shutdown] busy_wait` is not configured: 30 minutes (owner,
+/// 2026-11-12).
+pub const DEFAULT_BUSY_WAIT: Duration = Duration::from_secs(30 * 60);
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            busy_wait: DEFAULT_BUSY_WAIT,
+        }
+    }
 }
 
 /// `[images]`: the OCI repository the data plane pulls images from by digest (ADR 0039,
@@ -506,6 +530,7 @@ impl Config {
                 "provider",
                 "images",
                 "pools",
+                "shutdown",
             ],
         );
         root.table.remove("schema_version");
@@ -514,6 +539,7 @@ impl Config {
         let host = root.read_section("host", false, |reader| Some(read_host(reader)));
         let provider = root.read_section("provider", false, read_provider);
         let images = root.read_section("images", false, read_images);
+        let shutdown = root.read_section("shutdown", false, read_shutdown);
         let pools = read_pools(&mut root);
         let errors = root.finish();
         match (github, pools) {
@@ -524,6 +550,7 @@ impl Config {
                 provider: provider.unwrap_or_default(),
                 images,
                 pools,
+                shutdown: shutdown.unwrap_or_default(),
             }),
             _ => Err(ConfigErrors(errors)),
         }
@@ -875,6 +902,7 @@ fn section_keys(key: &str) -> &'static [&'static str] {
             "clone_disk_gib",
         ],
         "images" => &["repository", "runners", "realm_hosts"],
+        "shutdown" => &["busy_wait"],
         _ => &["kind", "tart_home"],
     }
 }
@@ -924,8 +952,10 @@ fn show_duration(duration: Duration) -> String {
         format!("{}d", seconds / 86_400)
     } else if seconds.is_multiple_of(3600) {
         format!("{}h", seconds / 3600)
-    } else {
+    } else if seconds.is_multiple_of(60) {
         format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -1237,6 +1267,19 @@ fn read_provider(reader: &mut Reader) -> Option<ProviderConfig> {
     };
     let tart_home = reader.path("tart_home", "tart_home = \"/var/lib/mayfly/tart\"", false);
     kind.map(|kind| ProviderConfig { kind, tart_home })
+}
+
+/// `[shutdown]`: `busy_wait` from a second to a week. An older build refuses the section as an
+/// unknown key (ADR 0046), loudly, rather than run with another stop than configured.
+fn read_shutdown(reader: &mut Reader) -> Option<ShutdownConfig> {
+    let busy_wait = reader.duration(
+        "busy_wait",
+        &(Duration::from_secs(1)..=Duration::from_secs(7 * 86_400)),
+        "30m",
+    );
+    Some(ShutdownConfig {
+        busy_wait: busy_wait.unwrap_or(DEFAULT_BUSY_WAIT),
+    })
 }
 
 fn read_pools(root: &mut Reader) -> Option<Vec<PoolConfig>> {

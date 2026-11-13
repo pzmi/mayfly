@@ -62,14 +62,39 @@
 //!
 //! # Shutdown (P24)
 //!
-//! SIGTERM or SIGINT cancels the root ([`Shutdown`]). Each supervised loop ends between two
-//! units of work, so no save is cut; nothing more is admitted or acquired (the reconciler has
-//! stopped); `BeginShutdown` and `EndRun` record a clean end; the control plane's link halves are
-//! dropped, and the data plane's serve returns once every effect in flight finished. VMs are
-//! left running under their shims (ADR 0037) for the next start to adopt. The loops are
-//! bounded by [`SHUTDOWN_DEADLINE`] and the runtime by [`RUNTIME_SHUTDOWN`], under a service
-//! manager's own. RT-05 adds terminal mode's
-//! own stop for Ctrl-C.
+//! SIGTERM, or terminal mode's third Ctrl-C, cancels the root ([`Stops::force`]). Each
+//! supervised loop ends between two units of work, so no save is cut; nothing more is admitted
+//! or acquired (the reconciler has stopped); `BeginShutdown` and `EndRun` record a clean end;
+//! the control plane's link halves are dropped, and the data plane's serve returns once every
+//! effect in flight finished. VMs are left running under their shims (ADR 0037) for the next
+//! start to adopt. The loops are bounded by [`SHUTDOWN_DEADLINE`] and the runtime by
+//! [`RUNTIME_SHUTDOWN`], under a service manager's own.
+//!
+//! # Terminal mode's graceful stop (RT-05a, ADR 0031's amendment of 2026-11-12)
+//!
+//! The first Ctrl-C ([`Stops::graceful`]) stops working here. Once the run's recovery
+//! completed in normal mode, the reconciler plans this host as draining for the rest of the run
+//! ([`Reconciler::set_stopping`]: nothing reserved, started or granted; prepared attempts
+//! retired `drain`; unstarted reservations released; granted and listening ones wait, their
+//! deregistration being RT-05b's), and the attempt saga
+//! stops and deletes each retired VM with its ownership proof (ADR 0026) as after any
+//! retirement: never a base, a foreign VM or an unrecorded one. The stop reads the host's
+//! leases after every commit; once every lease left is quarantined (an operator's case, never
+//! deleted automatically, ADR 0025), or none is left, the run ends as P24 records it and the
+//! daemon exits 0, releasing the state-dir lock. A busy job keeps its lease, so the stop waits
+//! for it. No drain is recorded on the host's stream, so a forced stop or a crash leaves
+//! nothing the next start must undo; the capacity inputs the stopping passes record are
+//! re-planned by the next run's passes.
+//!
+//! The wait is bounded by `[shutdown] busy_wait` (default 30 minutes) from the first Ctrl-C;
+//! when it runs out, or on the third Ctrl-C or SIGTERM, the stop is P24 above: what is not done
+//! stays recorded (retirements, pending deletes) and the next start's recovery continues it
+//! (`formal/recovery.qnt`'s `forcedStopMidDeleteIsFinishedByTheNextStartTest`). In safe mode,
+//! or once a stored kind this build cannot decode was met, nothing destructive may run (I29),
+//! so the first Ctrl-C is P24 at once. Pinned by
+//! `tests/daemon.rs::placement::should_delete_the_idle_vms_and_exit_when_ctrl_c_is_pressed_once`,
+//! `should_force_p24_when_ctrl_c_is_pressed_a_third_time_during_the_wait` and
+//! `should_take_p24_when_the_busy_wait_runs_out`.
 //!
 //! # Seams left for later tasks
 //!
@@ -85,8 +110,8 @@
 //! the attempt saga then prepares its VM over the provider; a VM that becomes Prepared kicks a
 //! pass at once (`Notifier::prepared`), so a grant does not wait for the interval (nothing
 //! grants under `mayflyd` until a trusted job is recorded: GH-04, GH-10). Logging (RT-04),
-//! Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
-//! (OPS-05) and split roles (LNK-01) are separate tasks.
+//! terminal mode over real jobs (deregistration and the Busy wait, RT-05b), the watchdog's
+//! `crash_loop` (OPS-05) and split roles (LNK-01) are separate tasks.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -106,8 +131,8 @@ use mayfly_adapter_tart::{
     TartImageStore, TartProvider,
 };
 use mayfly_control::delivery::{
-    DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, PlacementRelay, PlacementRelayConfig,
-    SinkConfig,
+    DeliveryConfig, DeliveryWorker, DirectiveRelay, Kicks, LinkSink, PlacementRelay,
+    PlacementRelayConfig, SinkConfig,
 };
 use mayfly_control::images::{self, CatalogError, PinError};
 use mayfly_control::inbox::Inbox;
@@ -122,6 +147,7 @@ use mayfly_control::sessions::HostSessions;
 use mayfly_control::store::{AggregateStore, Clock as _, Outcome, SaveError, SaveRequest};
 use mayfly_control::terms::{TermsConfig, TermsPolicy};
 use mayfly_control_domain::attempt::GuestOs as DomainOs;
+use mayfly_control_domain::host::{Host, LeasePhase};
 use mayfly_control_domain::image::Verification;
 use mayfly_control_domain::operations::hostrun::{HostRun, HostRunCommand, SafeModeReason};
 use mayfly_control_domain::pool::{ConfigurePool, Pool, PoolCommand, PoolConfig, TrustTier};
@@ -148,7 +174,7 @@ use crate::operator;
 use crate::operator::server::{Listener, Operators, Service};
 use crate::paths::{self, Places, PlatformEnv};
 use crate::state_dir::{StateDirError, StateDirLock};
-use crate::supervise::{Cuttable, Notifier, SessionCut, Shutdown, ShutdownSignal};
+use crate::supervise::{Cuttable, Notifier, SessionCut, Shutdown, ShutdownSignal, Stops};
 
 /// How often every consumer catches up and the reconciler passes without a kick: the
 /// level-triggered floor under the kicks (a lost kick costs at most this).
@@ -744,6 +770,110 @@ where
     Duration::from_millis(terms.until_due().get()).clamp(Duration::from_secs(1), COARSE)
 }
 
+/// What the reconciler's loop drives: the [`Reconciler`] ([`RunPasses`]), or a test's
+/// counter.
+trait Passes {
+    /// A pass when one is due (kicks or the interval); `false` when it could not run.
+    async fn tick(&self) -> bool;
+    /// A pass now; `false` when it could not run.
+    async fn pass(&self) -> bool;
+    /// Plans `host` as draining from now on (terminal mode's graceful stop, RT-05a).
+    fn stop_on(&self, host: &HostId);
+    /// How long the loop may wait for a kick before the next pass falls due.
+    fn until_due(&self) -> Duration;
+}
+
+/// The run's reconciler and the clock its interval is read by.
+struct RunPasses<'r, 's, C> {
+    reconciler: &'r Reconciler<'s, Journal, SystemClock, OsRng, Notifier, Journal>,
+    clock: &'r C,
+}
+
+impl<C: mayfly_control::store::Clock> Passes for RunPasses<'_, '_, C> {
+    async fn tick(&self) -> bool {
+        self.reconciler.tick().await.is_ok()
+    }
+
+    async fn pass(&self) -> bool {
+        self.reconciler.run_pass().await.is_ok()
+    }
+
+    fn stop_on(&self, host: &HostId) {
+        self.reconciler.set_stopping(Some(host.clone()));
+    }
+
+    fn until_due(&self) -> Duration {
+        Duration::from_millis(
+            self.reconciler
+                .next_due()
+                .get()
+                .saturating_sub(self.clock.now().get()),
+        )
+    }
+}
+
+/// The kicks that wake the reconciler's loop.
+struct ReconcileWakes<'k> {
+    /// A host, pool, scale-set or placement stream moved (taken by the reconciler's `tick`).
+    kicked: &'k Kicks,
+    /// An attempt became Prepared (taken by `tick` too).
+    prepared: &'k Kicks,
+    /// Any commit: the only wake while the run stops, taken here.
+    stopping: &'k Kicks,
+}
+
+/// The loop's run: its host, its mode, terminal mode's stop and the run's cancel, and where it
+/// says its first stopping pass ran.
+struct LoopControl<'c> {
+    host: &'c HostId,
+    normal: bool,
+    stop: ShutdownSignal,
+    cancel: ShutdownSignal,
+    planned: &'c watch::Sender<bool>,
+}
+
+/// The reconciler's loop (P5): a pass when one is due, on its kicks and its interval. Once
+/// terminal mode's graceful stop is asked in normal mode, the host is planned as draining and a
+/// pass runs at once, then one on every commit (a deleted VM's lease is released at once; a pass
+/// that changes nothing commits nothing) and on the interval. While stopping, `tick` no longer
+/// runs, so the kick sets only it takes (`kicked`, `prepared`) wake nothing: waiting on them
+/// would find them ready forever and pass back to back. Pinned by
+/// `tests::should_pass_a_bounded_number_of_times_when_the_run_stops_with_kicks_pending`.
+async fn reconcile_loop<P: Passes>(
+    passes: &P,
+    wakes: ReconcileWakes<'_>,
+    mut run: LoopControl<'_>,
+) {
+    let mut stopping = false;
+    loop {
+        if run.normal && !stopping && run.stop.is_cancelled() {
+            stopping = true;
+            passes.stop_on(run.host);
+            let _ = wakes.stopping.take();
+            if !passes.pass().await {
+                tracing::warn!("reconciler_pass_failed");
+            }
+            run.planned.send_replace(true);
+        } else if stopping {
+            let _ = wakes.stopping.take();
+            if !passes.pass().await {
+                tracing::warn!("reconciler_pass_failed");
+            }
+        } else if !passes.tick().await {
+            tracing::warn!("reconciler_pass_failed");
+        }
+        let wait = passes.until_due().clamp(Duration::from_secs(1), COARSE);
+        tokio::select! {
+            () = run.cancel.cancelled() => return,
+            () = run.stop.cancelled(), if run.normal && !stopping => {}
+            () = wakes.stopping.wait(), if stopping => {}
+            () = wakes.kicked.wait(), if !stopping => {}
+            () = wakes.prepared.wait(), if !stopping => {}
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
 /// Everything a run borrows.
 struct Daemon<'a> {
     config: &'a Config,
@@ -789,17 +919,18 @@ enum RunEnd {
     SessionEnded,
 }
 
-/// Runs the daemon until `shutdown` is cancelled (by [`crate::supervise::on_signals`] in the
-/// binary), reporting each run's [`Ready`] to `ready`.
+/// Runs the daemon until `stops.force` is cancelled, or `stops.graceful` ended the run clean
+/// (both by [`crate::supervise::on_signals`] in the binary), reporting each run's [`Ready`] to
+/// `ready`.
 ///
 /// # Errors
-/// [`DaemonError`]; a cancelled run is `Ok`.
+/// [`DaemonError`]; a stopped run is `Ok`.
 pub async fn run(
     options: Options,
-    shutdown: Shutdown,
+    stops: Stops,
     ready: &(dyn Fn(&Ready) + Sync),
 ) -> Result<(), DaemonError> {
-    run_with(options, shutdown, ready, &SessionCut::default()).await
+    run_with(options, stops, ready, &SessionCut::default()).await
 }
 
 /// [`run`], each data-plane session ended early by `cut` when a test asks (production never
@@ -809,10 +940,11 @@ pub async fn run(
 /// As [`run`].
 pub async fn run_with(
     options: Options,
-    shutdown: Shutdown,
+    stops: Stops,
     ready: &(dyn Fn(&Ready) + Sync),
     cut: &SessionCut,
 ) -> Result<(), DaemonError> {
+    let shutdown = &stops.force;
     let loaded = load(&options.config, &options.env).map_err(DaemonError::Config)?;
     let config = &loaded.config;
     let state_dir = &loaded.places.state_dir;
@@ -896,12 +1028,30 @@ pub async fn run_with(
             () = done.cancelled() => {}
         }
     };
+    // terminal mode's wait, from the first Ctrl-C: once it runs out, the stop is P24
+    let busy_wait = config.shutdown.busy_wait;
+    let expire = async {
+        let (mut graceful, mut done) = (stops.graceful.signal(), stop_serving.signal());
+        tokio::select! {
+            () = graceful.cancelled() => {}
+            () = done.cancelled() => return,
+        }
+        tokio::select! {
+            () = tokio::time::sleep(busy_wait) => {
+                tracing::warn!(busy_wait_s = busy_wait.as_secs(), "terminal_stop_wait_expired");
+                shutdown.cancel();
+            }
+            () = done.cancelled() => {}
+        }
+    };
     let runs = async {
-        let ended = daemon.runs(&mut exec, &floor, &shutdown, ready, cut).await;
+        let ended = daemon
+            .runs(&mut exec, &floor, shutdown, &stops.graceful, ready, cut)
+            .await;
         stop_serving.cancel();
         ended
     };
-    let ((), (), ended) = tokio::join!(serving, forward, runs);
+    let ((), (), (), ended) = tokio::join!(serving, forward, expire, runs);
     ended
 }
 
@@ -912,6 +1062,7 @@ impl Daemon<'_> {
         exec: &mut Exec,
         floor: &FloorFile,
         shutdown: &Shutdown,
+        graceful: &Shutdown,
         ready: &(dyn Fn(&Ready) + Sync),
         cut: &SessionCut,
     ) -> Result<(), DaemonError> {
@@ -932,7 +1083,7 @@ impl Daemon<'_> {
                 tokio::time::sleep(SHUTDOWN_DEADLINE).await;
             };
             let ended = tokio::select! {
-                ended = self.run_once(exec, floor, shutdown, &report, cut) => ended?,
+                ended = self.run_once(exec, floor, shutdown, graceful, &report, cut) => ended?,
                 () = bounded => {
                     tracing::error!("shutdown_deadline_passed");
                     RunEnd::Shutdown
@@ -952,6 +1103,7 @@ impl Daemon<'_> {
         exec: &mut Exec,
         floor: &FloorFile,
         shutdown: &Shutdown,
+        graceful: &Shutdown,
         ready: &(dyn Fn(&Ready) + Sync),
         cut: &SessionCut,
     ) -> Result<RunEnd, DaemonError> {
@@ -1022,6 +1174,7 @@ impl Daemon<'_> {
                 observations: cp_observations,
             },
             shutdown,
+            graceful,
             ready,
         );
         let (served, ended) = tokio::join!(data, control);
@@ -1195,12 +1348,13 @@ impl Daemon<'_> {
     }
 
     /// The control plane's side of one run: the supervised loops, then the clean end when the
-    /// root was cancelled. Owns the link's control-plane halves, so the data plane's serve ends
-    /// once this returns.
+    /// root was cancelled or terminal mode's graceful stop settled. Owns the link's
+    /// control-plane halves, so the data plane's serve ends once this returns.
     async fn control_plane<D, O>(
         &self,
         session: Session<'_, '_, D, O>,
         shutdown: &Shutdown,
+        graceful: &Shutdown,
         ready: &(dyn Fn(&Ready) + Sync),
     ) -> Result<RunEnd, DaemonError>
     where
@@ -1276,6 +1430,10 @@ impl Daemon<'_> {
         // set once the ready line is out: the terms policy's loop starts only then, so its
         // passes never race the ready line's own pass on the host stream
         let (readied_tx, readied) = watch::channel(false);
+        // set once the reconciler passed with this host stopping: the graceful stop reads the
+        // leases only then, so a pass that read the fleet before the stop cannot reserve after
+        // the stop found the host empty
+        let (planned_tx, planned) = watch::channel(false);
         let inbox = Inbox::new(&self.store, self.host.clone(), epoch).with_placements(index);
         let empty = BTreeMap::new();
 
@@ -1474,29 +1632,33 @@ impl Daemon<'_> {
             let mut cancel = run.signal();
             let mut recovered = recovered.clone();
             let reconciler = &reconciler;
+            let planned_tx = &planned_tx;
+            let stop = graceful.signal();
             async move {
                 tokio::select! {
                     () = cancel.cancelled() => return,
                     Ok(_) = recovered.wait_for(Option::is_some) => {}
                 }
-                loop {
-                    if reconciler.tick().await.is_err() {
-                        tracing::warn!("reconciler_pass_failed");
-                    }
-                    let wait = Duration::from_millis(
-                        reconciler
-                            .next_due()
-                            .get()
-                            .saturating_sub(self.store.clock().now().get()),
-                    )
-                    .clamp(Duration::from_secs(1), COARSE);
-                    tokio::select! {
-                        () = cancel.cancelled() => return,
-                        () = self.notifier.reconciler.wait() => {}
-                        () = self.notifier.prepared.wait() => {}
-                        () = tokio::time::sleep(wait) => {}
-                    }
-                }
+                let normal = *recovered.borrow() == Some(Mode::Normal);
+                reconcile_loop(
+                    &RunPasses {
+                        reconciler,
+                        clock: self.store.clock(),
+                    },
+                    ReconcileWakes {
+                        kicked: &self.notifier.reconciler,
+                        prepared: &self.notifier.prepared,
+                        stopping: &self.notifier.stopping,
+                    },
+                    LoopControl {
+                        host: &self.host,
+                        normal,
+                        stop,
+                        cancel,
+                        planned: planned_tx,
+                    },
+                )
+                .await;
             }
         };
 
@@ -1571,6 +1733,54 @@ impl Daemon<'_> {
             }
         };
 
+        // RT-05a: terminal mode's graceful stop of this run, once recovery completed: the run
+        // ends clean once no lease but a quarantined one is left on the host; in safe mode (or
+        // once an unknown kind was met) nothing destructive may run, so the stop is P24 at once
+        let terminal = {
+            let mut cancel = run.signal();
+            let mut stop = graceful.signal();
+            let mut recovered = recovered.clone();
+            let mut planned = planned;
+            let run = run.clone();
+            async move {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    () = stop.cancelled() => {}
+                }
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = recovered.wait_for(Option::is_some) => {}
+                }
+                if *recovered.borrow() != Some(Mode::Normal) || self.notifier.unknown_kind_seen() {
+                    tracing::warn!("terminal_stop_in_safe_mode");
+                    shutdown.cancel();
+                    return;
+                }
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    Ok(_) = planned.wait_for(|p| *p) => {}
+                }
+                loop {
+                    // taken before the read, so a commit after it wakes the next turn
+                    let _ = self.notifier.stop.take();
+                    if self.stop_settled().await {
+                        run.cancel();
+                        return;
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = self.notifier.unknown_kind() => {
+                            tracing::warn!("terminal_stop_in_safe_mode");
+                            shutdown.cancel();
+                            return;
+                        }
+                        () = self.notifier.stop.wait() => {}
+                        () = tokio::time::sleep(COARSE) => {}
+                    }
+                }
+            }
+        };
+
         let unknown = {
             let mut cancel = run.signal();
             let reconciler = &reconciler;
@@ -1600,7 +1810,7 @@ impl Daemon<'_> {
             }
         };
 
-        let ((), ended, (), (), (), (), (), ()) = tokio::join!(
+        let ((), ended, (), (), (), (), (), (), ()) = tokio::join!(
             forward,
             observe,
             consume,
@@ -1608,12 +1818,32 @@ impl Daemon<'_> {
             reconcile,
             place,
             apply_terms,
+            terminal,
             unknown
         );
         if matches!(ended, Ok(RunEnd::Shutdown)) {
             self.end_run(epoch).await;
         }
         ended
+    }
+
+    /// Whether terminal mode's graceful stop has nothing left to wait for on this host: every
+    /// lease left is quarantined, or none is. A lease is released only on its VM's deletion or
+    /// loss being observed (`vm_deleted`, `attempt_lost`) or for a reservation never started, and
+    /// a quarantined one is an operator's case (ADR 0025), so this is
+    /// `formal/recovery.qnt`'s `settled` for every record. A host stream that cannot be read
+    /// is not settled.
+    async fn stop_settled(&self) -> bool {
+        match self.store.load::<Host>(self.host.as_str()).await {
+            Ok(host) => host
+                .leases
+                .values()
+                .all(|lease| matches!(lease.phase, LeasePhase::Quarantined { .. })),
+            Err(_) => {
+                tracing::warn!("terminal_stop_host_unread");
+                false
+            }
+        }
     }
 
     /// P24's record: `BeginShutdown` then `EndRun`, under the run's epoch.
@@ -1650,8 +1880,10 @@ impl Daemon<'_> {
     }
 }
 
-/// Runs `mayflyd --role all` on its own runtime until SIGTERM or SIGINT: the binary's whole
-/// body, under umask `077`. Each run's ready line goes to stdout ([`Ready`]'s `Display`), flushed.
+/// Runs `mayflyd --role all` on its own runtime until SIGTERM, or Ctrl-C's escalation ends it
+/// ([`crate::supervise::on_signals`]: the graceful stop, a warning on stderr, then P24): the
+/// binary's whole body, under umask `077`. Each run's ready line goes to stdout ([`Ready`]'s
+/// `Display`), flushed.
 ///
 /// # Errors
 /// [`DaemonError`]; its [`DaemonError::exit_code`] is the process's.
@@ -1664,18 +1896,24 @@ pub fn serve(options: Options) -> Result<(), DaemonError> {
         .build()
         .map_err(|_| DaemonError::Start("the async runtime"))?;
     let ended = runtime.block_on(async {
-        let shutdown = Shutdown::new();
+        let stops = Stops::default();
         let print = |ready: &Ready| {
             use std::io::Write as _;
             let mut out = std::io::stdout().lock();
             let _ = writeln!(out, "{ready}");
             let _ = out.flush();
         };
-        let daemon = run(options, shutdown.clone(), &print);
+        let warn = |line: &str| {
+            use std::io::Write as _;
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "{line}");
+            let _ = err.flush();
+        };
+        let daemon = run(options, stops.clone(), &print);
         tokio::pin!(daemon);
         tokio::select! {
             ended = &mut daemon => ended,
-            installed = crate::supervise::on_signals(shutdown) => {
+            installed = crate::supervise::on_signals(stops, warn) => {
                 if installed.is_err() {
                     return Err(DaemonError::Start("the signal handlers"));
                 }
@@ -1691,7 +1929,6 @@ pub fn serve(options: Options) -> Result<(), DaemonError> {
 mod tests {
     use std::cell::{Cell, RefCell};
 
-    use mayfly_control::delivery::Kicks;
     use mayfly_control_domain::host::Host;
     use mayfly_domain::PoolName;
     use mayfly_testkit::contracts::journal::InjectedFault;
@@ -1767,6 +2004,94 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A [`Passes`] that records when each pass ran on the paused clock, and cancels the loop
+    /// once it was asked how long to wait twice.
+    struct Counted {
+        ticks: Cell<u32>,
+        passes: RefCell<Vec<tokio::time::Instant>>,
+        stopped: RefCell<Option<HostId>>,
+        asked: Cell<u32>,
+        cancel: Shutdown,
+    }
+
+    impl Passes for Counted {
+        async fn tick(&self) -> bool {
+            self.ticks.set(self.ticks.get() + 1);
+            true
+        }
+
+        async fn pass(&self) -> bool {
+            self.passes.borrow_mut().push(tokio::time::Instant::now());
+            true
+        }
+
+        fn stop_on(&self, host: &HostId) {
+            *self.stopped.borrow_mut() = Some(host.clone());
+        }
+
+        fn until_due(&self) -> Duration {
+            self.asked.set(self.asked.get() + 1);
+            if self.asked.get() >= 2 {
+                self.cancel.cancel();
+            }
+            COARSE
+        }
+    }
+
+    #[test]
+    fn should_pass_a_bounded_number_of_times_when_the_run_stops_with_kicks_pending() {
+        // given: the reconciler's own kicks pending (a host stream and a Prepared attempt
+        // moved), which only `tick` takes, and the graceful stop asked
+        let stream =
+            mayfly_control::journal::StreamId::new("host-h1").unwrap_or_else(|e| panic!("{e}"));
+        let (kicked, prepared, stopping) = (Kicks::new(8), Kicks::new(8), Kicks::new(8));
+        kicked.kick(&stream);
+        prepared.kick(&stream);
+        stopping.kick(&stream);
+        let (graceful, run) = (Shutdown::new(), Shutdown::new());
+        graceful.cancel();
+        let counted = Counted {
+            ticks: Cell::new(0),
+            passes: RefCell::new(Vec::new()),
+            stopped: RefCell::new(None),
+            asked: Cell::new(0),
+            cancel: run.clone(),
+        };
+        let host = HostId::new("h1").unwrap_or_else(|e| panic!("{e}"));
+        let planned = watch::channel(false).0;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        // when: the loop runs until its second pass (the paused clock jumps to each timer)
+        runtime.block_on(reconcile_loop(
+            &counted,
+            ReconcileWakes {
+                kicked: &kicked,
+                prepared: &prepared,
+                stopping: &stopping,
+            },
+            LoopControl {
+                host: &host,
+                normal: true,
+                stop: graceful.signal(),
+                cancel: run.signal(),
+                planned: &planned,
+            },
+        ));
+
+        // then: no tick, the host planned as stopping and the first pass reported; the second
+        // pass waited for the interval, not back to back on kicks only `tick` takes
+        let passes = counted.passes.borrow();
+        assert_eq!(counted.ticks.get(), 0);
+        assert_eq!(passes.len(), 2);
+        assert!(passes[1] - passes[0] >= COARSE, "{passes:?}");
+        assert_eq!(counted.stopped.borrow().as_ref(), Some(&host));
+        assert!(*planned.borrow());
     }
 
     #[test]

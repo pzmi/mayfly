@@ -213,6 +213,7 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     );
     assert_eq!(mac.capacity_policy, CapacityPolicy::Demand);
     assert_eq!(config.pools[1].guest_os, GuestOs::Linux);
+    assert_eq!(config.shutdown.busy_wait, Duration::from_secs(45 * 60));
 }
 
 #[test]
@@ -299,6 +300,11 @@ fn should_apply_the_defaults_when_the_optional_keys_are_absent() {
     );
     assert_eq!(config.images, None);
     assert_eq!(config.provider.kind, ProviderKind::Tart);
+    assert_eq!(
+        config.shutdown.busy_wait,
+        Duration::from_secs(30 * 60),
+        "terminal mode waits 30 minutes for busy jobs when absent (owner, 2026-11-12)"
+    );
     assert!(matches!(
         config.github.scope,
         GithubScope::Organisation { .. }
@@ -533,6 +539,38 @@ fn should_refuse_each_bad_value_when_it_is_outside_its_range_or_shape() {
         assert_eq!(errors[0].0, field, "{to}");
         assert_eq!(errors[0].1, ConfigErrorKind::Invalid, "{to}");
     }
+}
+
+#[test]
+fn should_read_the_busy_wait_when_shutdown_names_one_within_its_bounds() {
+    // given: `[shutdown]` (RT-05a) at both bounds, outside them, not a duration, and a key it
+    // does not know
+    let with = |table: &str| format!("{}\n[shutdown]\n{table}\n", minimal());
+    let (low, high) = (with("busy_wait = \"1s\""), with("busy_wait = \"7d\""));
+    let refused = [
+        with("busy_wait = \"0s\""),
+        with("busy_wait = \"8d\""),
+        with("busy_wait = \"soon\""),
+        with("busy_wait = 30"),
+    ];
+    let unknown = with("grace = \"1m\"");
+
+    // when
+    let (low, high) = (Config::parse(&low).unwrap(), Config::parse(&high).unwrap());
+    let refusals: Vec<_> = refused.iter().map(|text| errors_of(text)).collect();
+    let unknown = errors_of(&unknown);
+
+    // then
+    assert_eq!(low.shutdown.busy_wait, Duration::from_secs(1));
+    assert_eq!(high.shutdown.busy_wait, Duration::from_secs(7 * 86_400));
+    for errors in refusals {
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, "shutdown.busy_wait", "{errors:?}");
+    }
+    assert_eq!(
+        unknown,
+        [("shutdown.grace".to_owned(), ConfigErrorKind::Unknown)]
+    );
 }
 
 #[test]

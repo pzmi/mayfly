@@ -20,6 +20,18 @@
  * is the hardest case for I10. A frame stays on the link after it executes (at-least-once) and
  * may arrive in a later session, where it is never executed (ADR 0042).
  *
+ * Terminal mode (RT-05a, ADR 0031's amendment of 2026-11-12): the first Ctrl-C after recovery
+ * completed in a trusted journal is a graceful stop (`stopping`). The run stops acquiring and
+ * acking, the stop retires every record whose VM serves no job (`stopRetireWith`), the saga
+ * deletes each with its proof as after any retirement, and the daemon exits only once every
+ * record is settled (deleted, lost or quarantined: `gracefulExit`). A Busy or registered runner
+ * is never retired by it; the stop waits for it instead, and the third Ctrl-C (or the busy wait
+ * running out) is P24, which this model reads as a `crash`: the volatile run is lost, the
+ * journal and the provider are kept, and the next start's recovery continues what the stop left.
+ * Admission closes for the stopping run in memory only (the reconciler plans the host as
+ * draining, `formal/scheduling.qnt`'s drain), so nothing is left that the next start must undo;
+ * the capacity it advertised is re-planned by the next run.
+ *
  * Ghost state (`g`) records history for the invariants and never feeds a guard.
  */
 module recovery {
@@ -80,6 +92,8 @@ module recovery {
   pure val WELCOMED = "welcomed"
   pure val INVENTORIED = "inventoried"
   pure val OPERATING = "operating"
+  /// Terminal mode's graceful stop (RT-05a): after recovery, until every record settled.
+  pure val STOPPING = "stopping"
 
   // The attempt's runner registration and GitHub's view of its runner (`GithubView`), an
   // environment choice read at classification: "not_registered" and "issued_not_delivered" are
@@ -198,6 +212,8 @@ module recovery {
     planUnbound: bool,
     outcomeWithoutIntent: bool,
     ackWithoutRecord: bool,
+    // the graceful stop exited with a record that was not settled (RT-05a)
+    stopExitUnsettled: bool,
     // the heads the plan was drawn from, advanced by its own writes only: what a bound plan
     // must still see (KER-10F)
     ownHeads: int -> int,
@@ -432,7 +448,8 @@ module recovery {
         busyRetiredWhileRunning: false,
         unknownClearedWithoutObservation: false, inconsistentResolution: false,
         absenceFromIncomplete: false, admittedOnIncomplete: false, planUnbound: false,
-        outcomeWithoutIntent: false, ackWithoutRecord: false, ownHeads: STREAMS.mapBy(_ => 0),
+        outcomeWithoutIntent: false, ackWithoutRecord: false, stopExitUnsettled: false,
+        ownHeads: STREAMS.mapBy(_ => 0),
       },
     }
   }
@@ -532,10 +549,11 @@ module recovery {
   /// The data plane's inventory: `tart list`, each shim's lock and `exit.json`. An incomplete
   /// one (a failed or unparseable listing) is a fault and lists nothing; it is never absence.
   action inventoryWith(complete: bool): bool = all {
-    Set(WELCOMED, INVENTORIED, OPERATING).contains(daemon.phase),
+    Set(WELCOMED, INVENTORIED, OPERATING, STOPPING).contains(daemon.phase),
     // during recovery a complete inventory is taken once; again only after an incomplete one
     daemon.phase != INVENTORIED or not(daemon.invOk) or daemon.safe,
-    commit(if (not(complete)) "fault" else if (daemon.phase == OPERATING or daemon.safe) "env"
+    commit(if (not(complete)) "fault"
+           else if (Set(OPERATING, STOPPING).contains(daemon.phase) or daemon.safe) "env"
            else "pipeline",
       j,
       { ...daemon, phase: if (daemon.phase == WELCOMED) INVENTORIED else daemon.phase, invOk: complete,
@@ -628,7 +646,7 @@ module recovery {
     val d = nextDirective(r)
     val frame = { epoch: daemon.epoch, name: a, kind: d, proof: r.instance }
     all {
-      daemon.phase == OPERATING,
+      Set(OPERATING, STOPPING).contains(daemon.phase),
       d != NO_DIRECTIVE,
       j' = { ...j, recs: j.recs.set(a, { ...r, pending: d, unknown: true,
                                          phase: if (d == DELETE_VM) DELETING else r.phase }),
@@ -717,7 +735,7 @@ module recovery {
       else if (vm.instance == r.instance) { ...r, pending: NO_DIRECTIVE, unknown: false }
       else { ...r, phase: QUARANTINED, pending: NO_DIRECTIVE, unknown: false }
     all {
-      daemon.phase == OPERATING,
+      Set(OPERATING, STOPPING).contains(daemon.phase),
       daemon.invOk,
       r.unknown,
       commit("observation", { ...j, recs: j.recs.set(a, r2), heads: bump(j.heads, a) }, daemon,
@@ -733,6 +751,9 @@ module recovery {
 
   // ---- GitHub: the listener records before it acks (I12) ------------------------------------
 
+  /// The listener polls, records and acks only while the run operates (or holds in safe mode):
+  /// a graceful stop stops acquiring and acking (P24's rule), so a message delivered before it
+  /// is redelivered to the next start.
   val listening = daemon.phase == OPERATING or (daemon.safe and daemon.phase == INVENTORIED)
 
   action ghDeliver(m: int): bool = all {
@@ -922,9 +943,112 @@ module recovery {
           refusePlan, completePlan, foreignWriteWith(a) }
   }
 
+  // ---- terminal mode: the graceful stop (RT-05a) -------------------------------------------
+
+  /// The phases the graceful stop retires: a VM, or a reservation, that serves no job and holds
+  /// no registration. A Busy, Activating or Listening runner is never retired by it (F13; the
+  /// deregistration of a listening runner is RT-05b's, `registration.qnt`'s
+  /// `deregisterBeforeStop`), nor a record in cleanup already (Finished, Retiring, Deleting).
+  pure val STOP_RETIRES = Set(RESERVED, BOOTING, VERIFYING, PREPARED)
+
+  /// A record the graceful stop has nothing left to wait for: its VM's deletion or loss was
+  /// observed, or it is quarantined, which only an operator resolves (ADR 0025). The Rust stop
+  /// reads the same from the host's leases: one is released only on that evidence, and a
+  /// quarantined lease is kept.
+  pure def settled(r: Record): bool = Set(DELETED, LOST, QUARANTINED).contains(r.phase)
+
+  /// The retirement the stop records: as `lifecycle.qnt`'s `retire`, a reservation with no VM
+  /// is done at once, a VM is retired (its stop and delete follow, with its proof).
+  pure def stopRetired(r: Record, e: int): Record =
+    if (r.instance == NONE) { ...r, phase: DELETED, seen: e }
+    else { ...r, phase: RETIRING, epoch: e, seen: e }
+
+  /// The first Ctrl-C in terminal mode, enabled only once recovery completed in a trusted
+  /// journal (`operating`). In safe mode nothing destructive may run (I29), so Ctrl-C is P24
+  /// there: `crash`. Before recovery completes the stop is deferred until it does (the Rust stop
+  /// waits for the run's recovery), so the model enables it from `operating` only.
+  action ctrlC = all {
+    daemon.phase == OPERATING,
+    not(daemon.safe),
+    commit("env", j, { ...daemon, phase: STOPPING }, g),
+  }
+
+  /// The stop retires one idle record (the reconciler's drain retirement under the stopping
+  /// run): never one with a directive pending or an Unknown outcome, never one held.
+  action stopRetireWith(a: int): bool = {
+    val r = j.recs.get(a)
+    all {
+      daemon.phase == STOPPING,
+      STOP_RETIRES.contains(r.phase),
+      r.pending == NO_DIRECTIVE,
+      not(r.unknown),
+      not(r.hold),
+      commit("saga", { ...j, recs: j.recs.set(a, stopRetired(r, daemon.epoch)),
+                       heads: bump(j.heads, a) }, daemon,
+        { ...g, busyRetiredWhileRunning: g.busyRetiredWhileRunning
+                  or retiredWhileServing(r, RETIRE, world.get(a), "unreachable") }),
+    }
+  }
+
+  action stopRetire = {
+    nondet a = ATTEMPTS.oneOf()
+    stopRetireWith(a)
+  }
+
+  /// The stop ends once every record is settled: the run ends clean (`BeginShutdown`,
+  /// `EndRun`), the state-dir lock is released, and the process exits.
+  action gracefulExit = all {
+    daemon.phase == STOPPING,
+    ATTEMPTS.forall(a => settled(j.recs.get(a))),
+    j' = j, backup' = backup, floor' = floor, world' = world, net' = net,
+    daemon' = { phase: DOWN, epoch: NONE, safe: false, invOk: false, inv: EMPTY_INV,
+                strayDone: false },
+    dp' = dp, plan' = plan, gh' = gh,
+    g' = { ...ghostAfter(g, "env", j, j),
+           stopExitUnsettled: g.stopExitUnsettled
+             or ATTEMPTS.exists(a => not(settled(j.recs.get(a)))) },
+  }
+
+  /// Negative control (in no step relation): a stop that retires whatever is not terminal, a
+  /// Busy runner included. `stopRetiringBusyViolatesTest` shows `busyNeverRetiredWhileRunning`
+  /// catches it.
+  action stopRetireAnyWith(a: int): bool = {
+    val r = j.recs.get(a)
+    all {
+      daemon.phase == STOPPING,
+      not(terminal(r.phase)),
+      r.phase != QUARANTINED,
+      r.pending == NO_DIRECTIVE,
+      commit("saga", { ...j, recs: j.recs.set(a, stopRetired(r, daemon.epoch)),
+                       heads: bump(j.heads, a) }, daemon,
+        { ...g, busyRetiredWhileRunning: g.busyRetiredWhileRunning
+                  or retiredWhileServing(r, RETIRE, world.get(a), "unreachable") }),
+    }
+  }
+
+  /// Negative control (in no step relation): an exit once every retirement is requested, before
+  /// the deletes are observed. `exitBeforeDeletesObservedViolatesTest` shows
+  /// `gracefulStopSettles` catches it.
+  action gracefulExitEarly = all {
+    daemon.phase == STOPPING,
+    ATTEMPTS.forall(a => settled(j.recs.get(a))
+                      or Set(RETIRING, DELETING).contains(j.recs.get(a).phase)),
+    j' = j, backup' = backup, floor' = floor, world' = world, net' = net,
+    daemon' = { phase: DOWN, epoch: NONE, safe: false, invOk: false, inv: EMPTY_INV,
+                strayDone: false },
+    dp' = dp, plan' = plan, gh' = gh,
+    g' = { ...ghostAfter(g, "env", j, j),
+           stopExitUnsettled: g.stopExitUnsettled
+             or ATTEMPTS.exists(a => not(settled(j.recs.get(a)))) },
+  }
+
+  action terminalStop = any { ctrlC, stopRetire, gracefulExit }
+
   // ---- faults -------------------------------------------------------------------------------
 
-  /// The daemon dies at whatever await it was in (SIGKILL, power loss, upgrade).
+  /// The daemon dies at whatever await it was in (SIGKILL, power loss, upgrade), or stops by
+  /// P24 (SIGTERM, terminal mode's third Ctrl-C, its busy wait run out): the volatile run is lost
+  /// either way, VMs are left as they are and the journal is kept for the next start.
   action crash = all {
     daemon.phase != DOWN,
     j' = j, backup' = backup, floor' = floor, world' = world, net' = net,
@@ -975,6 +1099,7 @@ module recovery {
 
   action step = any {
     pipeline,
+    terminalStop,
     issueNext,
     dpExecute,
     observe,
@@ -986,10 +1111,12 @@ module recovery {
   }
 
   /// Restarts under stress: the startup sequence with crashes at every await, restores,
-  /// incomplete inventories, stale frames and a changing provider, but no GitHub traffic and
-  /// no plan, so a bounded check spends its depth on the pipeline itself.
+  /// incomplete inventories, stale frames, a changing provider and terminal mode's graceful
+  /// stop cut short by P24, but no GitHub traffic and no plan, so a bounded check spends its
+  /// depth on the pipeline itself.
   action restartStep = any {
     pipeline,
+    terminalStop,
     issueNext,
     dpExecute,
     observe,
@@ -1039,13 +1166,15 @@ module recovery {
     else Set(OPENED, VERIFIED, WELCOMED).contains(daemon.phase)
 
   /// I11 (bounded): a fault-free start completes within the pipeline's length, every record
-  /// classified, and a start the journal trusts never stalls before admission opens.
+  /// classified, and a start the journal trusts never stalls before admission opens. A graceful
+  /// stop is entered only from a completed recovery, so it counts as completed.
   val i11RecoveryCompletes = and {
     (g.progress >= PIPELINE and not(daemon.safe) and daemon.phase != DOWN) implies and {
-      daemon.phase == OPERATING,
+      Set(OPERATING, STOPPING).contains(daemon.phase),
       ATTEMPTS.forall(a => j.recs.get(a).seen == daemon.epoch),
     },
-    (not(daemon.safe) and not(Set(DOWN, OPERATING).contains(daemon.phase))) implies pipelineEnabled,
+    (not(daemon.safe) and not(Set(DOWN, OPERATING, STOPPING).contains(daemon.phase)))
+      implies pipelineEnabled,
   }
 
   /// I12: a GitHub message is acked only after its durable record.
@@ -1090,6 +1219,11 @@ module recovery {
   /// job: a Busy attempt's, or a registered attempt's whose runner GitHub shows busy (F13).
   val busyNeverRetiredWhileRunning = not(g.busyRetiredWhileRunning)
 
+  /// gracefulStopSettles (RT-05a): terminal mode's graceful stop exits only once every record's
+  /// VM is observed deleted or lost, or the record is quarantined; what it cannot settle (a busy
+  /// runner) keeps it waiting until P24 cuts it short.
+  val gracefulStopSettles = not(g.stopExitUnsettled)
+
   val allInvariants = and {
     i04UnrecognisedNeverDeleted,
     i05BaseNeverDeletable,
@@ -1106,6 +1240,7 @@ module recovery {
     noAssertion,
     quarantineNeverDeleted,
     busyNeverRetiredWhileRunning,
+    gracefulStopSettles,
   }
 
   // ---- scenarios (`quint test`) -------------------------------------------------------------
@@ -1451,5 +1586,110 @@ module recovery {
     initWith(recWith(CLONING, 1), recWith(DELETED, 2), R_ABSENT, R_ABSENT, R_ABSENT, 2, true, Set())
       .then(startTo(true))
       .expect(daemon.safe and dp.safe and daemon.phase != OPERATING)
+  }
+
+  // ---- terminal mode (RT-05a) ---------------------------------------------------------------
+
+  /// A healthy start with a Prepared attempt (1) and a booted one still verifying (2), both
+  /// running under their shims, a base and an unrecorded `mf-*` VM beside them.
+  action operatingWithIdleVms: bool =
+    initWith(recWith(PREPARED, 1), recWith(VERIFYING, 2), running(1), running(2), running(2), 1,
+             true, Set())
+      .then(startTo(true)).then(finish("not_registered", "unreachable"))
+
+  // The first Ctrl-C: both idle VMs are retired and deleted with their proof, the base and the
+  // unrecorded VM are untouched, and the daemon exits once both deletions are observed.
+  run gracefulStopDeletesIdleVmsWithProofTest = {
+    operatingWithIdleVms
+      .expect(daemon.phase == OPERATING and allInvariants)
+      .then(ctrlC).then(stopRetireWith(1)).then(stopRetireWith(2))
+      .expect(j.recs.get(1).phase == RETIRING and j.recs.get(2).phase == RETIRING)
+      .then(issueNextWith(1)).then(issueNextWith(2))
+      .expect(net == Set({ epoch: 2, name: 1, kind: DELETE_VM, proof: 1 },
+                         { epoch: 2, name: 2, kind: DELETE_VM, proof: 2 }))
+      .then(dpExecuteWith({ epoch: 2, name: 1, kind: DELETE_VM, proof: 1 }, false, 1))
+      .then(dpExecuteWith({ epoch: 2, name: 2, kind: DELETE_VM, proof: 2 }, false, 1))
+      .then(inventoryWith(true)).then(observeWith(1)).then(observeWith(2))
+      .expect(j.recs.get(1).phase == DELETED and j.recs.get(2).phase == DELETED)
+      .then(gracefulExit)
+      .expect(daemon.phase == DOWN and not(world.get(1).exists) and not(world.get(2).exists)
+        and world.get(BASE).exists and world.get(STRAY).exists and allInvariants)
+  }
+
+  // A Busy runner is not retired by the stop, which waits for it; P24 (the third Ctrl-C, or the
+  // busy wait run out) leaves it running, and the next start adopts it with its job.
+  run gracefulStopWaitsForBusyThenP24LeavesItTest = {
+    initWith(recWith(BUSY, 1), recWith(PREPARED, 2), running(1), running(2), R_ABSENT, 1, true,
+             Set())
+      .then(startTo(true)).then(finish("busy", "not_registered"))
+      .then(ctrlC).then(stopRetireWith(2))
+      .expect(j.recs.get(1).phase == BUSY and not(STOP_RETIRES.contains(j.recs.get(1).phase)))
+      .then(issueNextWith(2))
+      .then(dpExecuteWith({ epoch: 2, name: 2, kind: DELETE_VM, proof: 2 }, false, 1))
+      .then(inventoryWith(true)).then(observeWith(2))
+      .expect(j.recs.get(2).phase == DELETED and not(settled(j.recs.get(1))))
+      .then(crash)
+      .expect(world.get(1).running and j.recs.get(1).phase == BUSY)
+      .then(startTo(true)).then(finish("busy", "unreachable"))
+      .expect(daemon.phase == OPERATING and j.recs.get(1).phase == BUSY
+        and j.recs.get(1).epoch == 3 and allInvariants)
+  }
+
+  // P24 cuts the stop between the retirement's delete and its execution: the record stays
+  // Deleting with its VM, the old session's frame never executes, and the next start's recovery
+  // re-issues the delete with its proof under the new epoch.
+  run forcedStopMidDeleteIsFinishedByTheNextStartTest = {
+    operatingWithIdleVms
+      .then(ctrlC).then(stopRetireWith(1)).then(issueNextWith(1))
+      .expect(j.recs.get(1).phase == DELETING and j.recs.get(1).unknown)
+      .then(crash)
+      .expect(world.get(1).exists and j.recs.get(1).phase == DELETING)
+      .then(startTo(true)).then(classifyWith(1, "unreachable"))
+      .expect(j.recs.get(1).phase == DELETING and not(j.recs.get(1).unknown))
+      .then(dpExecuteWith({ epoch: 2, name: 1, kind: DELETE_VM, proof: 1 }, false, 1))
+      .expect(world.get(1).exists)
+      .then(classifyWith(2, "not_registered")).then(classifyStrayWith("unreachable"))
+      .then(complete)
+      .then(issueNextWith(1))
+      .then(dpExecuteWith({ epoch: 3, name: 1, kind: DELETE_VM, proof: 1 }, false, 1))
+      .then(inventoryWith(true)).then(observeWith(1))
+      .expect(j.recs.get(1).phase == DELETED and world.get(BASE).exists and allInvariants)
+  }
+
+  // P24 right after the retirement was recorded: the next start reads Retiring and continues
+  // the cleanup; the Prepared record the stop had not reached is adopted again.
+  run forcedStopAfterRetirementContinuesTest = {
+    operatingWithIdleVms
+      .then(ctrlC).then(stopRetireWith(1)).then(crash)
+      .then(startTo(true)).then(finish("unreachable", "not_registered"))
+      .expect(j.recs.get(1).phase == RETIRING and j.recs.get(2).phase == VERIFYING)
+      .then(issueNextWith(1))
+      .expect(net == Set({ epoch: 3, name: 1, kind: DELETE_VM, proof: 1 }) and allInvariants)
+  }
+
+  // No graceful stop in safe mode: nothing destructive may run there (I29); Ctrl-C is P24.
+  run noGracefulStopInSafeModeTest = {
+    initWith(recWith(PREPARED, 1), recWith(DELETED, 2), running(1), R_ABSENT, R_ABSENT, 2, true,
+             Set())
+      .then(startTo(true))
+      .expect(daemon.safe and daemon.phase == INVENTORIED)
+      .then(crash)
+      .expect(daemon.phase == DOWN and world.get(1).exists and allInvariants)
+  }
+
+  // Negative control: a stop that retires any record retires a Busy runner under its job.
+  run stopRetiringBusyViolatesTest = {
+    initWith(recWith(BUSY, 1), recWith(DELETED, 2), running(1), R_ABSENT, R_ABSENT, 1, true, Set())
+      .then(startTo(true)).then(finish("busy", "unreachable"))
+      .then(ctrlC).then(stopRetireAnyWith(1))
+      .expect(not(busyNeverRetiredWhileRunning))
+  }
+
+  // Negative control: an exit once the retirements are requested, before the deletes are seen.
+  run exitBeforeDeletesObservedViolatesTest = {
+    operatingWithIdleVms
+      .then(ctrlC).then(stopRetireWith(1)).then(stopRetireWith(2))
+      .then(gracefulExitEarly)
+      .expect(daemon.phase == DOWN and world.get(1).exists and not(gracefulStopSettles))
   }
 }

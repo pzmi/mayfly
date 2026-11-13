@@ -497,6 +497,82 @@ fn should_retire_a_prepared_surplus_only_after_the_hysteresis_when_demand_drops(
 }
 
 #[test]
+fn should_retire_and_admit_nothing_on_its_host_when_the_run_stops() {
+    // given: three reservations ahead of demand, two of them prepared and one not started
+    // yet, and the host's own stream open (no drain recorded)
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 3);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        Kicks::new(8),
+    );
+    let grow = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let mut unstarted = world.unstarted();
+    let waiting = unstarted.split_off(2);
+    for (host, attempt) in unstarted {
+        world.start(&host, attempt);
+        for _ in 0..12 {
+            if world.attempt(attempt).phase == Phase::Prepared {
+                break;
+            }
+            world.progress(attempt, None);
+        }
+    }
+
+    // when: terminal mode's graceful stop names the host (RT-05a)
+    reconciler.set_stopping(Some(h1()));
+    let stop = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    for (_, attempt) in world.leased_attempts() {
+        for _ in 0..12 {
+            if world.attempt(attempt).phase == Phase::Deleted {
+                break;
+            }
+            world.progress(attempt, None);
+        }
+    }
+    let cleanup = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let last = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: at the stop both prepared VMs are retired `drain`, the unstarted reservation is
+    // released at once (well within the start grace), nothing is reserved, started or granted;
+    // once the VMs are deleted their leases are released, and no drain completion is issued on
+    // a host whose stream never drained
+    assert_eq!(reserved(&grow.accepted).len(), 3);
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(
+        retired(&stop.accepted),
+        vec![RetireReason::Drain, RetireReason::Drain]
+    );
+    assert_eq!(released(&stop.accepted), vec![waiting[0].1]);
+    assert!(reserved(&stop.pass.commands).is_empty(), "{:?}", stop.pass);
+    assert!(started(&stop.pass.commands).is_empty(), "{:?}", stop.pass);
+    assert!(
+        !stop
+            .pass
+            .commands
+            .iter()
+            .any(|c| matches!(c, PassCommand::Activate { .. })),
+        "{:?}",
+        stop.pass
+    );
+    assert_eq!(released(&cleanup.accepted).len(), 2, "{cleanup:?}");
+    assert!(world.host(&h1()).leases.is_empty());
+    assert!(last.refused.is_empty(), "{last:?}");
+    assert!(
+        !last
+            .pass
+            .commands
+            .iter()
+            .any(|c| matches!(c, PassCommand::CompleteHostDrain { .. })),
+        "{last:?}"
+    );
+}
+
+#[test]
 fn should_admit_nothing_on_the_host_until_it_reports_again_when_the_data_plane_refuses_a_clone() {
     // given: one job reserved; the data plane refuses its clone insufficient_resources (the
     // attempt backs off) while two more jobs arrive

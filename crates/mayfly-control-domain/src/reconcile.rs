@@ -81,7 +81,9 @@
 //!   module docs name its tests and its limits).
 //! - Cleanup: `ReleaseSlot` for a lease whose attempt's VM is gone (`vm_deleted`,
 //!   `attempt_lost`) or that no `AttemptStarted` followed within [`Settings::start_grace`]
-//!   (`attempt_never_started`, P2's failure path), and `CompleteHostDrain` /
+//!   (`attempt_never_started`, P2's failure path; at once on a draining host, which starts
+//!   nothing: `tests/reconcile.rs::should_release_an_unstarted_lease_at_once_when_its_host_drains`),
+//!   and `CompleteHostDrain` /
 //!   `CompletePoolDrain` once no lease is left in a draining scope (P23). The pass may read a
 //!   lease unstarted from a projection behind the journal (or rebuilding), so it only *plans*
 //!   the never-started release: the driver saves it with a read of the attempt stream
@@ -871,6 +873,58 @@ fn retirements(
     out
 }
 
+/// The pass of terminal mode's graceful stop (RT-05a, ADR 0031 amended 2026-11-12): `plan`
+/// over `inputs` with `host` planned as draining (its gate closed: nothing reserved, started or
+/// granted there; its unstarted reservations released; its prepared attempts retired `drain`),
+/// less what the host's own stream would refuse or what needs GitHub first: no
+/// `CompleteHostDrain` (the stream is not draining), and no retirement of a granted or listening
+/// attempt, whose runner P11 deregisters before its VM stops (RT-05b): the stop waits for those
+/// as for a busy one. A host whose stream drains already (an operator's `host drain`) is planned
+/// as its stream says, P23 unchanged. `formal/recovery.qnt`'s `STOP_RETIRES`. Pinned by
+/// `tests/reconcile.rs::should_retire_only_prepared_attempts_when_the_run_stops`.
+#[must_use]
+pub fn stopping_pass(plan: fn(&PassInputs) -> Pass, inputs: &PassInputs, host: &HostId) -> Pass {
+    let Some(view) = inputs.hosts.iter().find(|h| &h.host_id == host) else {
+        return plan(inputs);
+    };
+    if view.draining {
+        return plan(inputs);
+    }
+    let waiting: BTreeSet<AttemptId> = view
+        .leases
+        .iter()
+        .filter(|l| match l.stage {
+            RunnerStage::Granted | RunnerStage::Listening => true,
+            RunnerStage::NotStarted
+            | RunnerStage::Preparing
+            | RunnerStage::Prepared
+            | RunnerStage::Activating
+            | RunnerStage::Busy
+            | RunnerStage::Ending
+            | RunnerStage::Gone(..)
+            | RunnerStage::Quarantined => false,
+        })
+        .map(|l| l.attempt_id)
+        .collect();
+    let mut stopped = inputs.clone();
+    for h in stopped.hosts.iter_mut().filter(|h| &h.host_id == host) {
+        h.draining = true;
+        h.admission_open = false;
+    }
+    let mut pass = plan(&stopped);
+    pass.commands.retain(|c| match c {
+        PassCommand::CompleteHostDrain { host_id } => host_id != host,
+        PassCommand::Retire { attempt_id, .. } => !waiting.contains(attempt_id),
+        PassCommand::ApplyCapacity { .. }
+        | PassCommand::ReserveSlot { .. }
+        | PassCommand::Start { .. }
+        | PassCommand::Activate { .. }
+        | PassCommand::ReleaseSlot { .. }
+        | PassCommand::CompletePoolDrain { .. } => true,
+    });
+    pass
+}
+
 /// How many more runners [`demand::runner_may_start`] lets the pool start beside its `idle`
 /// ones: none without a scale set (ADR 0090: a runner starts only for a job its scale set
 /// classified trusted). The pool's own mode closes it as its wire mode would (a paused or
@@ -1050,7 +1104,10 @@ fn cleanup(
                         .unstarted_since
                         .entry(lease.attempt_id)
                         .or_insert(now);
-                    let late = now.get().saturating_sub(since.get()) >= settings.start_grace.get();
+                    // a draining host starts nothing, so waiting out the grace only delays its
+                    // drain (and terminal mode's stop, RT-05a)
+                    let late = host.draining
+                        || now.get().saturating_sub(since.get()) >= settings.start_grace.get();
                     (late && !lease.quarantined).then_some(ReleaseEvidence::AttemptNeverStarted)
                 }
                 RunnerStage::Preparing

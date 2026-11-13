@@ -51,7 +51,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0028](adr/0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only, no classic mode; only prepared, unregistered VMs ahead of demand, no registered standby (OD18, OD8). Amended by 0048 (registration token as an auth-chain step only; accepted by the owner, 2026-11-10). | Accepted |
 | [ADR 0029](adr/0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration aggregate and reaper; `maxCapacity` and acquisition under pause, drain and safe mode (OD11, OD15). | Accepted |
 | [ADR 0030](adr/0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked in, self-update off, breaker on expiry, `mayfly image refresh` (OD12). | Accepted |
-| [ADR 0031](adr/0031-service-modes-and-the-internal-watchdog.md) | `mayflyd` in the foreground by hand or under launchd; internal watchdog plus `KeepAlive` (OD16, OD17). | Accepted |
+| [ADR 0031](adr/0031-service-modes-and-the-internal-watchdog.md) | `mayflyd` in the foreground by hand or under launchd; internal watchdog plus `KeepAlive` (OD16, OD17). Amended 2026-11-12: Ctrl-C escalates (a graceful stop of idle VMs, a warning, then P24); SIGTERM stays P24. | Accepted; amended by the owner, 2026-11-12 |
 | [ADR 0032](adr/0032-support-softnet-with-the-daemon-kept-non-root.md) | Support Softnet; privilege model by NET-01's ADR; the daemon stays non-root (OD19). | Accepted |
 | [ADR 0033](adr/0033-secret-providers-selected-by-uri.md) | `SecretProvider` port, backends selected per secret by URI (`keychain:`, `file:`, `env:`, `exec:`) (OD20). | Accepted |
 | [ADR 0034](adr/0034-event-store-choices-for-directives-receipts-epochs-snapshots-and-rebuild.md) | Directives as events (no outbox table), refusal receipts bound to a revision, epochs now, model before delivery, snapshots, online projection rebuild (E2, E3, E6–E9). | Accepted |
@@ -1777,7 +1777,7 @@ cancellation token; startup sequence of plan §10; SIGTERM → drain-safe shutdo
 Accept: integration test starts `mayflyd` against fake-tart and a static demand, kills it, restarts it, and the inventory converges.
 DEC-01: registers the store's consumers, takes the owner lease, runs event-store §6.3 then
 `catch_up`, owns the kick wiring and timer; secrets through SEC-02; foreground mode with
-Ctrl-C → P24 (ADR 0031).
+Ctrl-C → P24 (ADR 0031; since RT-05a, Ctrl-C escalates: ADR 0031's amendment of 2026-11-12).
 SEC-02: build the secrets with `UriSecretProvider::from_process(references, deadline)` (it
 captures `env:` names and withholds them from every child it runs); any child composition
 spawns clears its environment (ADR 0058, `ARCH-child-environment`); `doctor` calls
@@ -1978,11 +1978,46 @@ ends with no `mf-*` VM left, the bases untouched and the state-dir lock released
 prints the warning; the third during a wait behaves as SIGTERM and leaves what remains recorded
 for the next start; a `busy_wait` that runs out takes the same P24 path (VMs left under their
 shims, the unsettled state recorded).
+As built (RT-05a): `mayfly_composition::supervise::on_signals` counts Ctrl-C (`escalation`):
+the first cancels `Stops::graceful`, the second writes `FORCE_WARNING` on stderr, the third and
+SIGTERM cancel `Stops::force` (P24, unchanged). Once the run's recovery completed in normal
+mode, the reconciler plans the host as draining for the rest of the run
+(`Reconciler::set_stopping` and the pure `reconcile::stopping_pass`, in memory: no
+`StartHostDrain`, no new event; a `CompleteHostDrain` the host's stream would refuse is not
+issued; the capacity inputs recorded are re-planned by the next run), so nothing is reserved,
+started or granted there, prepared attempts are retired `drain` (an attempt still preparing is
+retired once Prepared; granted and listening ones wait like busy ones, RT-05b), and unstarted
+reservations are released at once (a
+draining host's start grace is nil, P23 included: `reconcile.rs`); the saga stops and deletes
+each VM with its proof. The daemon reads the host's leases after every commit and ends the run
+clean (`BeginShutdown`, `EndRun`, exit 0, the lock released) once every lease left is
+quarantined or none is. `[shutdown] busy_wait` (1 s to 7 d, default 30 min) bounds the whole
+stop from the first Ctrl-C, then P24 (`terminal_stop_wait_expired`); in safe mode, or after an
+unknown kind, the first Ctrl-C is P24 at once. Model: `formal/recovery.qnt` (`ctrlC`,
+`stopRetireWith`, `gracefulExit`, `gracefulStopSettles`, negative controls
+`stopRetiringBusyViolatesTest`, `exitBeforeDeletesObservedViolatesTest`; in `step` and
+`restartStep`) and two `formal/lifecycle.qnt` scenarios (no new action: the stop is a
+`requestRetirement`). Pinned by `crates/mayfly-composition/tests/daemon.rs` (`mod placement`,
+Linux): one Ctrl-C with the pool's two VMs (one Prepared, the other idle: preparing or
+prepared when the status is read) ends with every VM of ours deleted, the base, a foreign VM
+and an unrecorded `mf-*` VM untouched, the lock free; with every `tart stop` held by a fake-tart
+fault, the second Ctrl-C's warning, the third's P24 (the retired VM left under its shim, its
+retirement recorded, and the next start's `status` showing it adopted as `retiring`) and a
+`busy_wait` of 15 s running out. The next start finishing what a forced stop left is recovery's
+adoption (Retiring: cleanup continues), modelled by
+`forcedStopMidDeleteIsFinishedByTheNextStartTest`; its end is not driven here: the left stop is in
+flight under the previous run, so it is read again only after its directive's 2-minute deadline,
+beyond a test's 120 s bound. Not here: an idle *Listening* runner and the Busy wait over a real job (RT-05b,
+GitHub), `mayfly status` naming a stopping run.
 
 #### RT-05b Terminal mode over real jobs: deregistration and the Busy wait
 Cites: as RT-05; dm P11, P12. Deps: RT-05a, GH-04, GH-08, GH-10, RT-07, LNK-02. The graceful stop
 deregisters each Listening runner before its VM stops (P11; a busy answer keeps it running), and
 the Busy wait follows real jobs to their end.
+Note (RT-05a): until this lands the graceful stop does not retire a granted or listening attempt
+(`reconcile::stopping_pass` spares them; `formal/recovery.qnt`'s `STOP_RETIRES` excludes
+them): they wait like a busy one, bounded by `busy_wait`, then P24. This task adds them to the
+stop's retirements with their deregistration first (P11), model first.
 Accept: an e2e test over fake-tart and fake-github: Ctrl-C with an idle, a Prepared and a Busy
 attempt ends with no runner registered, no `mf-*` VM left and the bases untouched once the job
 ends; during the wait the second Ctrl-C warns and the third forces the stop, leaving what

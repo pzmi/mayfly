@@ -11,7 +11,7 @@ use mayfly_control_domain::host::ReleaseEvidence;
 use mayfly_control_domain::pool::PoolMode;
 use mayfly_control_domain::reconcile::{
     HostReport, HostTerms, HostView, LeaseView, Pass, PassCommand, PassInputs, PassMemory,
-    PoolView, RunnerStage, ScaleSetView, Settings, exact, plan_pass,
+    PoolView, RunnerStage, ScaleSetView, Settings, exact, plan_pass, stopping_pass,
 };
 use mayfly_domain::{AttemptId, HostId, ImageDigest, Millis, PoolName, Resources, Sample};
 use proptest::prelude::*;
@@ -595,6 +595,102 @@ fn should_release_a_gone_vm_at_once_and_an_unstarted_lease_after_the_grace_when_
 }
 
 #[test]
+fn should_release_an_unstarted_lease_at_once_when_its_host_drains() {
+    // given: a draining host (an operator's drain, or terminal mode's stopping run, RT-05a)
+    // holding a reservation no `AttemptStarted` followed yet, and a quarantined one
+    let mut h = host("h1", &[("lin", 4)]);
+    h.draining = true;
+    h.admission_open = false;
+    let mut quarantined = lease(3, "lin", RunnerStage::NotStarted);
+    quarantined.quarantined = true;
+    h.leases = vec![lease(2, "lin", RunnerStage::NotStarted), quarantined];
+
+    // when: the first pass that sees it, well within the start grace
+    let pass = plan_pass(&inputs(vec![h], vec![linux("lin", Some(0))]));
+
+    // then: released at once, never started, the quarantined lease kept, no drain completion
+    // while a lease is left
+    let released: Vec<(u128, ReleaseEvidence)> = pass
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::ReleaseSlot {
+                attempt_id,
+                evidence,
+                ..
+            } => Some((attempt_id.as_u128(), *evidence)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(released, vec![(2, ReleaseEvidence::AttemptNeverStarted)]);
+    assert!(started(&pass.commands).is_empty(), "{:?}", pass.commands);
+    assert!(
+        !pass
+            .commands
+            .iter()
+            .any(|c| matches!(c, PassCommand::CompleteHostDrain { .. })),
+        "{:?}",
+        pass.commands
+    );
+}
+
+#[test]
+fn should_retire_only_prepared_attempts_when_the_run_stops() {
+    // given: a host whose stream does not drain, holding a prepared, a granted, a listening, a
+    // busy and an unstarted lease, a pool that wants more; and the same host draining by an
+    // operator's `host drain`
+    let mut h = host("h1", &[("lin", 8)]);
+    h.leases = vec![
+        lease(1, "lin", RunnerStage::Prepared),
+        lease(2, "lin", RunnerStage::Granted),
+        lease(3, "lin", RunnerStage::Listening),
+        lease(4, "lin", RunnerStage::Busy),
+        lease(5, "lin", RunnerStage::NotStarted),
+    ];
+    let mut wanting = linux("lin", Some(6));
+    wanting.min_prepared = 2;
+    let stopping = inputs(vec![h.clone()], vec![wanting.clone()]);
+    let mut operator = h;
+    operator.draining = true;
+    operator.admission_open = false;
+    let drained = inputs(vec![operator], vec![wanting]);
+
+    // when
+    let pass = stopping_pass(plan_pass, &stopping, &host_id("h1"));
+    let p23 = stopping_pass(plan_pass, &drained, &host_id("h1"));
+
+    // then: only the prepared VM is retired; the granted and listening runners wait (their
+    // deregistration is RT-05b's), as the busy one does; the unstarted lease is released;
+    // nothing is reserved, started or granted, and no drain completion is planned. An
+    // operator's drain is P23 as before, its granted and listening runners retired too.
+    assert_eq!(retired(&pass.commands), vec![(1, RetireReason::Drain)]);
+    assert!(pass.commands.contains(&PassCommand::ReleaseSlot {
+        host_id: host_id("h1"),
+        attempt_id: AttemptId::from_u128(5),
+        evidence: ReleaseEvidence::AttemptNeverStarted,
+    }));
+    assert!(reserves(&pass.commands).is_empty(), "{:?}", pass.commands);
+    assert!(started(&pass.commands).is_empty(), "{:?}", pass.commands);
+    assert!(
+        !pass.commands.iter().any(|c| matches!(
+            c,
+            PassCommand::Activate { .. } | PassCommand::CompleteHostDrain { .. }
+        )),
+        "{:?}",
+        pass.commands
+    );
+    assert_eq!(p23, plan_pass(&drained));
+    assert_eq!(
+        retired(&p23.commands),
+        vec![
+            (1, RetireReason::Drain),
+            (2, RetireReason::Drain),
+            (3, RetireReason::Drain)
+        ]
+    );
+}
+
+#[test]
 fn should_plan_nothing_more_when_a_pass_is_repeated_on_its_own_result() {
     // given: two hosts, two pools with jobs
     let hosts = vec![
@@ -668,14 +764,13 @@ fn started(commands: &[PassCommand]) -> Vec<u128> {
 #[test]
 fn should_start_a_reserved_lease_only_when_its_host_admits_and_its_pin_is_placed() {
     // given: a reservation not started yet on an open host whose pin is placed, and the same
-    // reservation where the pin has no base, the pool is paused, the host drains, its gate or
-    // the pool's terms there are closed, in safe mode, and past the start grace
+    // reservation where the pin has no base, the pool is paused, its gate or the pool's terms
+    // there are closed, in safe mode, and past the start grace (a draining host releases it at
+    // once: `should_release_an_unstarted_lease_at_once_when_its_host_drains`)
     let mut open = host("h1", &[("lin", 4)]);
     open.leases = vec![lease(1, "lin", RunnerStage::NotStarted)];
     let mut unplaced = open.clone();
     unplaced.placed.clear();
-    let mut draining = open.clone();
-    draining.draining = true;
     let mut closed = open.clone();
     closed.admission_open = false;
     let mut terms_closed = open.clone();
@@ -697,7 +792,6 @@ fn should_start_a_reserved_lease_only_when_its_host_admits_and_its_pin_is_placed
     let waiting = [
         plan_pass(&inputs(vec![unplaced], vec![linux("lin", Some(1))])),
         plan_pass(&inputs(vec![open], vec![paused])),
-        plan_pass(&inputs(vec![draining], vec![linux("lin", Some(1))])),
         plan_pass(&inputs(vec![closed], vec![linux("lin", Some(1))])),
         plan_pass(&inputs(vec![terms_closed], vec![linux("lin", Some(1))])),
         plan_pass(&safe),

@@ -1,5 +1,11 @@
-//! The supervision tree's shared pieces: the root cancellation ([`Shutdown`]), the signals that
-//! trigger it, and the store's after-commit [`Notifier`].
+//! The supervision tree's shared pieces: the root cancellation ([`Shutdown`]), terminal mode's
+//! graceful stop beside it ([`Stops`]), the signals that trigger them, and the store's
+//! after-commit [`Notifier`].
+//!
+//! **Signals (ADR 0031, amended 2026-11-12).** SIGTERM, a service manager's stop, is P24 at
+//! once: [`Stops::force`]. Ctrl-C (SIGINT) escalates ([`escalation`]): the first starts
+//! terminal mode's graceful stop ([`Stops::graceful`]), the second prints a warning that the
+//! next forces the stop, the third is exactly SIGTERM.
 //!
 //! **One root, structured.** Every supervised loop of the daemon is a future polled by the
 //! daemon's own task (`crate::daemon`), never a detached spawn: a loop cannot outlive the run
@@ -16,6 +22,7 @@
 //! cannot decode, met mid-run (§6.3 rule 4), raises a flag the run reacts to by entering safe
 //! mode.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -78,21 +85,75 @@ impl ShutdownSignal {
     }
 }
 
-/// Waits for SIGTERM (a service manager's stop) or SIGINT (Ctrl-C in a terminal), then cancels
-/// `shutdown`. Both mean P24 here; RT-05 gives Ctrl-C its own terminal-mode stop. Returns
-/// without cancelling when the signals cannot be installed, which the caller reports.
+/// How the daemon stops: P24 ([`Stops::force`], the root every loop ends on) and terminal
+/// mode's graceful stop ([`Stops::graceful`], RT-05a), which the daemon turns into a clean end
+/// of the run once its idle VMs are deleted, or into P24 when its wait runs out.
+#[derive(Debug, Clone, Default)]
+pub struct Stops {
+    /// P24: SIGTERM, the third Ctrl-C, or the graceful stop's wait run out.
+    pub force: Shutdown,
+    /// The first Ctrl-C: retire and delete the idle VMs, wait for busy jobs, then end clean.
+    pub graceful: Shutdown,
+}
+
+/// What the `nth` Ctrl-C (counted from 1) does in terminal mode (ADR 0031, amended
+/// 2026-11-12). Pinned by `tests::should_escalate_to_p24_when_ctrl_c_is_pressed_three_times`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escalation {
+    /// The first: the graceful stop.
+    Graceful,
+    /// The second: a warning that the next one forces the stop.
+    Warn,
+    /// The third and any later: P24, exactly as SIGTERM.
+    Force,
+}
+
+/// The step of the `nth` Ctrl-C, counted from 1.
+#[must_use]
+pub const fn escalation(nth: NonZeroU32) -> Escalation {
+    match nth.get() {
+        1 => Escalation::Graceful,
+        2 => Escalation::Warn,
+        _ => Escalation::Force,
+    }
+}
+
+/// The second Ctrl-C's line on stderr.
+pub const FORCE_WARNING: &str = "mayflyd: stopping; press Ctrl-C again to stop now and leave \
+     the remaining VMs running for the next start";
+
+/// Waits for SIGTERM (a service manager's stop: [`Stops::force`] at once) and SIGINT (Ctrl-C in
+/// a terminal, escalating by [`escalation`]); `warn` writes the second Ctrl-C's
+/// [`FORCE_WARNING`]. Returns once the stop is forced; without cancelling anything when the
+/// signals cannot be installed, which the caller reports. Presses the kernel delivers before the
+/// handler reads the first are coalesced into one (a pending signal is not queued), so a quick
+/// double press may count once; the next press then counts.
 ///
 /// # Errors
 /// The handlers could not be installed.
-pub async fn on_signals(shutdown: Shutdown) -> std::io::Result<()> {
+pub async fn on_signals(stops: Stops, warn: impl Fn(&str)) -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+    let mut interrupts: Option<NonZeroU32> = None;
+    loop {
+        tokio::select! {
+            _ = term.recv() => break,
+            _ = int.recv() => {
+                let nth = interrupts.map_or(NonZeroU32::MIN, |n| n.saturating_add(1));
+                interrupts = Some(nth);
+                match escalation(nth) {
+                    Escalation::Graceful => {
+                        tracing::info!("terminal_stop_started");
+                        stops.graceful.cancel();
+                    }
+                    Escalation::Warn => warn(FORCE_WARNING),
+                    Escalation::Force => break,
+                }
+            }
+        }
     }
-    shutdown.cancel();
+    stops.force.cancel();
     Ok(())
 }
 
@@ -114,6 +175,11 @@ pub struct Notifier {
     pub placement_relay: Kicks,
     /// The terms policy, P4 (CP-08).
     pub terms: Kicks,
+    /// Terminal mode's graceful stop (RT-05a): it reads the host's leases again after a commit.
+    pub stop: Kicks,
+    /// The reconciler's wake while the run stops (RT-05a): any commit, so a lease is released
+    /// as soon as its VM's deletion is recorded, not an interval later.
+    pub stopping: Kicks,
     /// `mayfly events --follow` (RT-03, `doc/event-store.md` §5.6): every committed unit, best
     /// effort. A follower that falls more than [`FOLLOW_CAPACITY`] units behind is told how
     /// many it lost; nothing decides from it.
@@ -146,6 +212,8 @@ impl Notifier {
             placement: Kicks::new(KICK_CAPACITY),
             placement_relay: Kicks::new(KICK_CAPACITY),
             terms: Kicks::new(KICK_CAPACITY),
+            stop: Kicks::new(KICK_CAPACITY),
+            stopping: Kicks::new(KICK_CAPACITY),
             follow: broadcast::channel(FOLLOW_CAPACITY).0,
             unknown: Arc::new((AtomicBool::new(false), Notify::new())),
         }
@@ -182,6 +250,8 @@ impl StoreNotifier for Notifier {
         self.placement.committed(commit);
         self.placement_relay.committed(commit);
         self.terms.committed(commit);
+        self.stop.committed(commit);
+        self.stopping.committed(commit);
         if self.follow.receiver_count() > 0 {
             // no follower is not an error: the send only reaches those subscribed now
             let _ = self.follow.send(commit.clone());
@@ -286,7 +356,9 @@ mod tests {
             notifier.placement_relay.take(),
             std::slice::from_ref(&stream)
         );
-        assert_eq!(notifier.terms.take(), [stream]);
+        assert_eq!(notifier.terms.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.stop.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.stopping.take(), [stream]);
         assert!(notifier.prepared.take().is_empty());
     }
 
@@ -320,6 +392,27 @@ mod tests {
         // then
         assert!(on_clone.is_empty());
         assert_eq!(on_prepared, [attempt]);
+    }
+
+    #[test]
+    fn should_escalate_to_p24_when_ctrl_c_is_pressed_three_times() {
+        // given
+        let presses = [1, 2, 3, 4].map(|n| NonZeroU32::new(n).unwrap_or(NonZeroU32::MIN));
+
+        // when
+        let steps = presses.map(escalation);
+
+        // then: graceful, a warning, then P24 (and P24 again for any later press)
+        assert_eq!(
+            steps,
+            [
+                Escalation::Graceful,
+                Escalation::Warn,
+                Escalation::Force,
+                Escalation::Force
+            ]
+        );
+        assert!(FORCE_WARNING.contains("Ctrl-C again"));
     }
 
     #[test]

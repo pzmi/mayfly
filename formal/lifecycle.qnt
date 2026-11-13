@@ -1397,6 +1397,28 @@ module lifecycle {
       .then(issueNext).expect(a.pending == DELETE_VM and a.tries == 1 and allInvariants)
   }
 
+  // RT-05a: terminal mode's graceful stop retires an idle attempt with `requestRetirement`
+  // (`drain`), nothing new at the attempt. P24 (the third Ctrl-C, or the busy wait run out) cuts
+  // it after the stop was sent: the outcome is Unknown, the next run adopts the attempt, the
+  // listing resolves the stop, and the delete follows under the same name and generation.
+  run terminalStopCutByP24IsAdoptedAndFinishedTest = {
+    initWith(1, 1).then(toPrepared).then(requestRetirement)
+      .then(issueNext).then(ok).then(issueNext).expect(a.pending == STOP_VM)
+      .then(replyLostWith(1, true)).expect(a.unknown)
+      .then(adopt).expect(a.unknown and a.epoch == 2)
+      .then(inventoryPresent)
+      .expect(not(a.unknown) and not(a.vmRunning))
+      .then(issueNext).expect(a.phase == DELETING and a.pending == DELETE_VM)
+      .then(ok).expect(a.phase == DELETED and not(w.exists) and allInvariants)
+  }
+
+  // RT-05a: the graceful stop never retires a Busy attempt: it cannot be retired until its
+  // runner exits, so the stop waits for it (or P24 leaves it running for the next start).
+  run terminalStopNeverRetiresBusyTest = {
+    initWith(1, 1).then(toPrepared).then(toListening).then(bindJobWith(1))
+      .expect(a.phase == BUSY and not(canRequestRetirement(a)) and allInvariants)
+  }
+
   // VER-01F: a retirement requested while activating outlives a failed fresh verification;
   // the deregistration's confirmation retires the attempt from Backoff.
   run confirmRetirementInBackoffTest = {

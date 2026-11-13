@@ -680,6 +680,13 @@ intent then outcome (I31). A plan never asserts an outcome (ADR 0025).
 to a timeout, then alert; never force. `--force` is a separate, explicit operator action.
 **Shutdown** (P24, SIGTERM or Ctrl-C): close admission, stop acquiring and acking, finish durable
 writes, leave VMs running under their shims, exit before the service manager's deadline.
+**Terminal mode** (ADR 0031, amended 2026-11-12; RT-05a): Ctrl-C escalates. The first is a graceful
+stop: admission closes for the run (the host planned as draining, in memory), idle and Prepared
+attempts are retired and their VMs stopped and deleted with their ownership proof, Busy ones are
+waited for, and once only quarantined leases (or none) are left the run ends clean and the
+daemon exits, releasing the lock; never a base or a foreign VM. The second prints a warning that
+the next forces the stop; the third is P24, as SIGTERM always is. `[shutdown] busy_wait`
+(default 30 min) bounds the graceful stop, then P24. In safe mode the first Ctrl-C is P24.
 
 ---
 
@@ -760,6 +767,9 @@ drain|resume`, `vm list`, `events [--follow] [--since]`, a basic `doctor` and, o
 validate`; exit codes 0, 1 (refused), 64, 69 (no daemon answers), 78. `quarantine` arrives with
 CP-06, `recover` and `safe-mode enter` with RT-08, `image withdraw` once its withdrawal is two-step
 (OPS-02's note); the rest of the list above with their tasks.
+As built (RT-05a): `[shutdown]` takes `busy_wait` (a duration from `1s` to `7d`, default `30m`),
+how long terminal mode's graceful stop waits from the first Ctrl-C before P24 (§10, ADR 0031's
+amendment of 2026-11-12). An older build refuses the section as an unknown key.
 
 ---
 

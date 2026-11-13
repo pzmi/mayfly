@@ -80,7 +80,7 @@ when it lands renumbers its record and every citation of it in the same commit.
 | [0028](0028-scale-sets-only-with-prepared-unregistered-vms.md) | Scale sets only with prepared unregistered VMs | Accepted. Amended by 0048 |
 | [0029](0029-registration-reaper-and-the-wire-behaviour-of-pause-drain-and-safe-mode.md) | Registration reaper and the wire behaviour of pause, drain and safe mode | Accepted |
 | [0030](0030-runner-baked-into-the-image-with-refresh-tooling.md) | Runner baked into the image with refresh tooling | Accepted |
-| [0031](0031-service-modes-and-the-internal-watchdog.md) | Service modes and the internal watchdog | Accepted |
+| [0031](0031-service-modes-and-the-internal-watchdog.md) | Service modes and the internal watchdog | Accepted. Amended 2026-11-12 |
 | [0032](0032-support-softnet-with-the-daemon-kept-non-root.md) | Support Softnet with the daemon kept non-root | Accepted |
 | [0033](0033-secret-providers-selected-by-uri.md) | Secret providers selected by URI | Accepted |
 | [0034](0034-event-store-choices-for-directives-receipts-epochs-snapshots-and-rebuild.md) | Event store choices for directives, receipts, epochs, snapshots and rebuild | Accepted |
