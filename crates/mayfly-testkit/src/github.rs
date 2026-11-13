@@ -20,18 +20,27 @@
 //! effect ([`FakeScaleSetApi::lose_next_jit_answer`]), whose runner the listings then show only
 //! once they catch up ([`FakeScaleSetApi::catch_up_listings`]), as GitHub's may lag behind a
 //! mint, and it counts the runner listings it answered ([`FakeScaleSetApi::runner_listings`]).
+//!
+//! For the listener's tests (GH-04) a world can drop a poll's connection
+//! ([`FakeScaleSetApi::drop_next_poll`], F08), lose an acquire's answer after its effect
+//! ([`FakeScaleSetApi::lose_next_acquire_answer`], F27), complete a running job
+//! ([`FakeScaleSetApi::complete_job`]) and queue a message its own numbering would not produce
+//! ([`FakeScaleSetApi::script_message`]: a reused or restarted id, an unknown type, an envelope
+//! without statistics; F10, F44), and it shows the `maxCapacity` the last poll advertised and how
+//! many polls it answered. A `JobStarted` names its runner when the name is one of mayfly's VM
+//! names, as the adapter's ACL does.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mayfly_control::github::{
-    AssignedJob, EventName, Failure, GitHubCallError, JitConfig, JobFact, JobKey, MessageId,
-    MessageItem, Offer, OpenedSession, PolledMessage, RemovalOutcome, RepositoryName, RunnerId,
-    RunnerInfo, RunnerRegistry, RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetInfo,
+    AssignedJob, EventName, Failure, GitHubCallError, JitConfig, JobFact, JobKey, JobResult,
+    MessageId, MessageItem, Offer, OpenedSession, PolledMessage, RemovalOutcome, RepositoryName,
+    RunnerId, RunnerInfo, RunnerRegistry, RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetInfo,
     ScaleSetSpec, SessionId, Statistics, WorkflowJobId, WorkflowRunId,
 };
 use mayfly_control::store::Clock;
-use mayfly_domain::{Millis, Secret};
+use mayfly_domain::{Millis, OwnedVmName, Secret};
 
 use crate::clock::FakeClock;
 use crate::contracts::scaleset::{Flow, WorldFault};
@@ -67,7 +76,7 @@ enum JobState {
     Queued,
     Offered { set: u64, request: u64 },
     Assigned { set: u64, request: u64 },
-    Running { set: u64 },
+    Running { set: u64, request: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +90,8 @@ struct Job {
 struct Message {
     id: u64,
     items: Vec<MessageItem>,
-    statistics: Statistics,
+    /// `None` for a scripted envelope that lacked any of the seven counts (spec §2).
+    statistics: Option<Statistics>,
     delivered: bool,
 }
 
@@ -131,6 +141,12 @@ struct World {
     listings: u32,
     /// Runner removals answered.
     removals: u32,
+    /// The next poll's connection drops before any answer (F08): nothing is delivered.
+    drop_poll: bool,
+    /// The next acquire takes effect and its answer is lost (F27).
+    lose_acquire_answer: bool,
+    /// Polls answered (a message, a 202 or a fault).
+    polls: u32,
 }
 
 impl World {
@@ -254,7 +270,7 @@ impl World {
         let message = Message {
             id: s.next_message,
             items,
-            statistics,
+            statistics: Some(statistics),
             delivered: true,
         };
         s.next_message += 1;
@@ -267,7 +283,7 @@ impl World {
 fn polled(m: &Message) -> PolledMessage {
     PolledMessage {
         message_id: MessageId(m.id),
-        statistics: Some(m.statistics),
+        statistics: m.statistics,
         items: m.items.clone(),
     }
 }
@@ -343,6 +359,9 @@ impl FakeScaleSetApi {
                 lose_jit_answer: false,
                 listings: 0,
                 removals: 0,
+                drop_poll: false,
+                lose_acquire_answer: false,
+                polls: 0,
             })),
             clock,
         }
@@ -408,14 +427,19 @@ impl FakeScaleSetApi {
             r.online = true;
         }
         let started_key = world.jobs.get(&id).map(|j| key(id, j));
+        // the adapter's ACL keeps a runner name only when it is one of mayfly's VM names
+        let runner_name = world
+            .runners
+            .get(&runner.0)
+            .and_then(|r| OwnedVmName::parse(&r.name).ok());
         if let Some(j) = world.jobs.get_mut(&id) {
-            j.state = JobState::Running { set };
+            j.state = JobState::Running { set, request };
         }
         if let Some(s) = world.sets.get_mut(&set) {
             s.pending.push(MessageItem::Fact(JobFact::Started {
                 request_id: RunnerRequestId(request),
                 runner_id: Some(runner),
-                runner_name: None,
+                runner_name,
                 job: started_key,
             }));
         }
@@ -501,6 +525,112 @@ impl FakeScaleSetApi {
             },
         );
         RunnerId(id)
+    }
+
+    /// The runner `runner`'s job completes with `result`, as `JobCompleted` (a cancel is
+    /// `JobResult::Canceled`), and the runner goes idle.
+    ///
+    /// # Errors
+    /// When the runner is not running a job.
+    pub fn complete_job(&self, runner: RunnerId, result: JobResult) -> Result<(), String> {
+        let mut world = self.world();
+        let Some(job_id) = world.runners.get(&runner.0).and_then(|r| r.job) else {
+            return Err("the runner runs no job".to_owned());
+        };
+        let Some(job) = world.jobs.remove(&job_id) else {
+            return Err("no such job".to_owned());
+        };
+        let JobState::Running { set, request } = job.state.clone() else {
+            return Err("the job is not running".to_owned());
+        };
+        if let Some(r) = world.runners.get_mut(&runner.0) {
+            r.job = None;
+        }
+        if let Some(s) = world.sets.get_mut(&set) {
+            s.pending.push(MessageItem::Fact(JobFact::Completed {
+                request_id: RunnerRequestId(request),
+                result,
+                runner_id: Some(runner),
+                job: Some(key(job_id, &job)),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Queues a message GitHub's own numbering would not produce: `id` as given (a reused id, a
+    /// restarted numbering, an id out of order), `items` as given (an unknown type included)
+    /// and `statistics` as given (`None`: an envelope that lacked a count). It is delivered after
+    /// the messages already queued, and redelivered until acked like any other.
+    pub fn script_message(
+        &self,
+        scale_set: ScaleSetId,
+        id: u64,
+        items: Vec<MessageItem>,
+        statistics: Option<Statistics>,
+    ) {
+        if let Some(s) = self.world().sets.get_mut(&scale_set.0) {
+            s.queue.push_back(Message {
+                id,
+                items,
+                statistics,
+                delivered: false,
+            });
+        }
+    }
+
+    /// The statistics GitHub would send for `scale_set` now.
+    #[must_use]
+    pub fn statistics(&self, scale_set: ScaleSetId) -> Statistics {
+        self.world().statistics(scale_set.0)
+    }
+
+    /// The next poll's connection drops before any answer (F08): the call answers
+    /// [`Failure::Unavailable`] and nothing is delivered or assigned.
+    pub fn drop_next_poll(&self) {
+        self.world().drop_poll = true;
+    }
+
+    /// The next acquire takes effect and its answer is lost (F27): the caller gets
+    /// [`Failure::Unavailable`], the jobs are acquired.
+    pub fn lose_next_acquire_answer(&self) {
+        self.world().lose_acquire_answer = true;
+    }
+
+    /// The `maxCapacity` the last poll of `scale_set` advertised (0 before any).
+    #[must_use]
+    pub fn max_capacity(&self, scale_set: ScaleSetId) -> u32 {
+        self.world()
+            .sets
+            .get(&scale_set.0)
+            .map_or(0, |s| s.max_capacity)
+    }
+
+    /// How many polls the world answered.
+    #[must_use]
+    pub fn polls(&self) -> u32 {
+        self.world().polls
+    }
+
+    /// The messages of `scale_set` not acked yet, by id, oldest first.
+    #[must_use]
+    pub fn unacked(&self, scale_set: ScaleSetId) -> Vec<u64> {
+        self.world()
+            .sets
+            .get(&scale_set.0)
+            .map(|s| s.queue.iter().map(|m| m.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// The client's process restarted (F42): it holds no session any more, while GitHub keeps
+    /// the live one until it is deleted or ends.
+    pub fn restart_client(&self) {
+        self.world().held.clear();
+    }
+
+    /// The live session of `scale_set` at GitHub, whoever holds it.
+    #[must_use]
+    pub fn live_session(&self, scale_set: ScaleSetId) -> Option<SessionId> {
+        self.world().sets.get(&scale_set.0).and_then(|s| s.live)
     }
 
     /// Queues `fault` for the next call it bends.
@@ -672,6 +802,10 @@ impl ScaleSetApi for FakeScaleSetApi {
             if !world.held.contains_key(&scale_set.0) {
                 return Err(fail(Failure::NoSession, "no session is held"));
             }
+            world.polls += 1;
+            if std::mem::take(&mut world.drop_poll) {
+                return Err(fail(Failure::Unavailable, "the poll's connection dropped"));
+            }
             let is_for = |f: &WorldFault, set: ScaleSetId| match f {
                 WorldFault::SessionExpired { scale_set }
                 | WorldFault::QueueTokenExpired { scale_set }
@@ -763,6 +897,9 @@ impl ScaleSetApi for FakeScaleSetApi {
                 }
                 _ => {}
             }
+        }
+        if std::mem::take(&mut world.lose_acquire_answer) {
+            return Err(fail(Failure::Unavailable, "the acquire's answer was lost"));
         }
         Ok(acquired)
     }

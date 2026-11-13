@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use mayfly_control_domain::attempt::{Attempt, AttemptCommand, AttemptEvent, AttemptState, Jit};
+use mayfly_control_domain::attempt::{
+    Attempt, AttemptCommand, AttemptEvent, AttemptState, Jit, RunnerRequestId,
+};
 use mayfly_control_domain::attempt::{Phase as AttemptPhase, RetireReason, StopDeregistration};
 use mayfly_control_domain::registration::{
     DeregistrationAnswer, DeregistrationReason, LeakReason, Phase, RegistrationCommand,
@@ -124,6 +126,8 @@ enum Next {
     Confirm,
     Withdraw,
     Retire(RetireReason),
+    /// P12: the registration consumed a job the listening attempt has not bound yet.
+    Bind(RunnerRequestId),
     RecordHandle,
     RecordDelivered,
     ConfirmOnline(RunnerId),
@@ -185,22 +189,35 @@ const fn retirable(a: &AttemptState) -> bool {
 /// 1. a `Requested` is an unknown issue (a crash or a dropped call between the request and the
 ///    record): never minted again (I19);
 /// 2. a pending removal is made, by the journaled id;
-/// 3. P13: an orphaned handle, a launch of unknown outcome, or an issued config that reached no
+/// 3. P12 (GH-04): a registration that consumed a job its attempt has not bound (the runner took
+///    it before the launch was journaled) binds it once the attempt listens (pinned by
+///    `should_bind_only_a_consumed_job_when_its_attempt_listens_unbound` and
+///    `tests/store/registration.rs::should_apply_a_second_runners_fact_and_bind_the_first_once_it_listens_when_its_launch_lags`);
+/// 4. P13: an orphaned handle, a launch of unknown outcome, or an issued config that reached no
 ///    handle and is held nowhere is presumed leaked;
-/// 4. P11: a pending retirement or quarantine stop follows `retirement_step` (I21);
-/// 5. a leaked runner is removed by its id, unless GitHub answered busy for it and the backoff
+/// 5. P11: a pending retirement or quarantine stop follows `retirement_step` (I21);
+/// 6. a leaked runner is removed by its id, unless GitHub answered busy for it and the backoff
 ///    holds (a busy runner is never asked again on every event: its job may last hours);
-/// 6. the attempt of a deregistered leaked, a lost or an absent registration is retired, never
-///    launched again;
-/// 7. a config issued and held but whose handle is not recorded yet gets it recorded;
-/// 8. a launched runner is recorded delivered, then confirmed online (ADR 0038);
-/// 9. an activating attempt with its grant and a fresh verification is minted for, once.
+/// 7. the attempt of a deregistered leaked, a lost or an absent registration is retired, never
+///    launched again; and a finished attempt (its runner exited) whose registration completed
+///    its job is retired `job_done` (P12's second half, GH-04; pinned by
+///    `should_retire_a_finished_attempt_only_when_its_job_completed`);
+/// 8. a config issued and held but whose handle is not recorded yet gets it recorded;
+/// 9. a launched runner is recorded delivered, then confirmed online (ADR 0038);
+/// 10. an activating attempt with its grant and a fresh verification is minted for, once.
 fn next(a: &AttemptState, r: &RegistrationState, h: History, held: bool, backed_off: bool) -> Next {
     if r.phase == Phase::Requested {
         return Next::RecordIssueUnknown;
     }
     if let (Some(_), Some(id)) = (r.deregistration, r.runner_id) {
         return Next::Remove(id);
+    }
+    if let Some(request_id) = r.request_id
+        && matches!(r.phase, Phase::Consumed | Phase::Completed)
+        && a.phase == AttemptPhase::Listening
+        && a.job_binding.is_none()
+    {
+        return Next::Bind(request_id);
     }
     let holds = holds_runner(r);
     if holds && r.leaked.is_none() {
@@ -238,6 +255,12 @@ fn next(a: &AttemptState, r: &RegistrationState, h: History, held: bool, backed_
         if lost && a.phase == AttemptPhase::Activating && a.jit == Jit::None {
             return Next::Retire(RetireReason::JitLost);
         }
+    }
+    if a.phase == AttemptPhase::Finished
+        && a.retirement_requested.is_none()
+        && r.phase == Phase::Completed
+    {
+        return Next::Retire(RetireReason::JobDone);
     }
     if r.phase == Phase::Issued && r.leaked.is_none() && a.jit == Jit::None && held {
         return Next::RecordHandle;
@@ -565,6 +588,11 @@ where
                         AttemptCommand::WithdrawRetirement,
                     )
                     .await;
+                return progress(saved).map(moved);
+            }
+            Next::Bind(request_id) => {
+                let body = AttemptCommand::BindJob { request_id };
+                let saved = self.attempt(attempt, epoch, "bind", a_rev, body).await;
                 return progress(saved).map(moved);
             }
             Next::Retire(reason) => {
@@ -1091,6 +1119,72 @@ mod tests {
 
         // then
         assert_eq!(decided, [Next::Mint, Next::Idle, Next::Idle]);
+    }
+
+    #[test]
+    fn should_bind_only_a_consumed_job_when_its_attempt_listens_unbound() {
+        // given
+        let mut listening = AttemptState::initial();
+        listening.phase = P::Listening;
+        let mut bound = listening.clone();
+        bound.job_binding = Some(RunnerRequestId(0));
+        let mut activating = listening.clone();
+        activating.phase = P::Activating;
+        let mut finished = listening.clone();
+        finished.phase = P::Finished;
+        let consumed = |phase| {
+            let mut r = registration(phase, Some(7));
+            r.request_id = Some(RunnerRequestId(0));
+            r
+        };
+        let connected = registration(Phase::Connected, Some(7));
+        let cases = [
+            (&listening, consumed(Phase::Consumed)),
+            (&listening, consumed(Phase::Completed)),
+            (&bound, consumed(Phase::Consumed)),
+            (&activating, consumed(Phase::Consumed)),
+            (&finished, consumed(Phase::Consumed)),
+            (&listening, connected),
+        ];
+
+        // when
+        let binds: Vec<bool> = cases
+            .iter()
+            .map(|(a, r)| {
+                next(a, r, History::default(), false, false) == Next::Bind(RunnerRequestId(0))
+            })
+            .collect();
+
+        // then: only a listening, unbound attempt whose registration consumed the job
+        assert_eq!(binds, [true, true, false, false, false, false]);
+    }
+
+    #[test]
+    fn should_retire_a_finished_attempt_only_when_its_job_completed() {
+        // given
+        let mut finished = AttemptState::initial();
+        finished.phase = P::Finished;
+        finished.runner_exited = true;
+        let mut retiring = finished.clone();
+        retiring.retirement_requested = Some(RetireReason::JobDone);
+        let mut busy = finished.clone();
+        busy.phase = P::Busy;
+        let completed = registration(Phase::Completed, Some(7));
+        let consumed = registration(Phase::Consumed, Some(7));
+
+        // when
+        let decided = [
+            next(&finished, &completed, History::default(), false, false),
+            next(&finished, &consumed, History::default(), false, false),
+            next(&busy, &completed, History::default(), false, false),
+            next(&retiring, &completed, History::default(), false, false),
+        ];
+
+        // then
+        assert_eq!(decided[0], Next::Retire(RetireReason::JobDone));
+        assert_eq!(decided[1], Next::Idle);
+        assert_eq!(decided[2], Next::Idle);
+        assert_ne!(decided[3], Next::Retire(RetireReason::JobDone));
     }
 
     #[test]

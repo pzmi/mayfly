@@ -243,6 +243,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | GH-02H | GitHub transport hardening: service and queue host rule, HTTP/2 health, JIT throttling | GH-02 | sonnet | |
 | KER-06G | `ScaleSet` aggregate follows GH-00R's model: assigned-job classification, numbering restart, scale set re-created | KER-06, GH-00R | opus | |
 | GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06G, CP-04 | opus | |
+| GH-11 | GHES: plan the acquirable jobs listed when a session opens, model first | GH-04 | opus | |
+| GH-12 | P12's grace: a job ended whose runner never reports its exit, model first | GH-04, CP-05 | opus | |
 | GH-10 | Workflow-run lookup of assigned jobs and the cancel of refused runs | GH-02, KER-06G | sonnet | |
 | GH-08 | Trust on github.com: the trust config, the start-up checks, refusals wired | GH-03, GH-10, KER-06G, RT-01 | opus | |
 | GH-09 | (Withdrawn by GH-00S) Operator release of a refusal and the release window | — | — | |
@@ -2046,6 +2048,14 @@ issue every time.
 Accept: daemon tests over fake-github: an activating attempt minted once and its runner
 deregistered on retirement; the reaper runs at start and lists at most once an hour; `doctor`
 lists an unrecognised runner; no secret in the daemon's output or logs.
+Note (GH-04): the daemon also drives each pool's `mayfly_control::listener::Listener` (`tick`
+in a loop, sleeping until a `Tick::Waiting` instant, one listener per scale set under a local
+lease, `close` on an orderly stop), registers `JobFacts` as a durable consumer, and passes the
+listener the reconciler's `Kicks`. The assigned-jobs gap (`Polled::gap`, spec §3.4) needs a
+metric: the control plane has none, so GH-04 reports it per poll and logs
+`assigned_jobs_gap_persists` once at WARN; export it as a gauge per pool (bounded labels: the
+pool, never a job id) with RT-04's metrics, so the operator's alarm is a metric rule, not a log
+search.
 
 #### RT-08 Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter`
 Cites: plan §10, §11; dm P20, I31; ADRs 0025, 0034, 0043; `formal/recovery.qnt`. Found at RT-03's
@@ -2261,6 +2271,86 @@ Note (CP-05): P12 is the listener's to wire, since its input is the recorded `Jo
 then `RequestRetirement{job_done}` once the runner exited or the grace passed. CP-05's manager
 leaves those commands to it and reads their results (a consumed or completed registration is
 still removed by id before a stop).
+Note (GH-04, as built): `mayfly_control::listener`. `Listener::tick` takes one step of
+`formal/scaleset.qnt`'s listener (ensure or re-create, delete the stale session, open with a
+30 s backoff doubling to 5 min, or one poll); the model's header names the mapping, and a
+message without statistics is recorded with one unknown item added (drift). A poll sends
+`ScaleSetState::wire_max()` with `lastMessageId` = the journaled cursor; a record consumes
+`InboxKey{gh-<session>, <id>}` under the command id `(session, message)`; the cursor's message
+with its key consumed is a duplicate acked without a write, any other consumed id is recorded
+anew under an id derived with the stream head; the ack follows an accepted or duplicate save and
+is retried, never re-acquiring. A refused message is never acked, following `formal/scaleset.qnt`
+(`ack` requires the record; acking a refusal is its `ackBeforeRecord` mutant), which supersedes
+the ES-03 sentence above: its refusal consumed no key (ADR 0041 rule 6), so GitHub redelivers it
+and the next session records it; `stale_run` stops the listener (`ListenerError::Fenced`). The
+acquire is the journaled `MessageRecorded.acquire` list (only a 400 refuses the batch), and the
+pending set is asked again while open after a lost answer, under its own backoff that an answered
+poll does not end. A poll answered `NoSession` is a
+restart (`RecordSessionLoss{restarted}`), `SessionExpired` a loss, an unavailable or throttled poll
+keeps the session. Every failed GitHub call backs off (30 s doubling to 5 min, `Tick::Waiting`),
+and only a poll that answers ends the run of failures; the port carries no `Retry-After` past the
+client's deadline, and the aggregate has no degraded cause for repeated call failures (left so). An empty poll kicks the scale-set stream. The
+assigned-running gap beyond the jobs the stream knows is in every poll's report and logged once at
+WARN (`assigned_jobs_gap_persists`) after 15 min; there is no metric in the control plane yet
+(RT-07 or OPS wire one). P12: `JobFacts`, a durable consumer of `MessageRecorded`, binds and
+consumes on `JobStarted` (registration found by runner name, else id; a runner that took its job
+before its launch was journaled is consumed now and bound by the registration manager once its
+attempt listens, so the stream is never blocked) and records
+consumed and completed on `JobCompleted` (one without a `runnerId` is unmatched: GH-12); the
+registration manager retires a finished attempt whose job
+completed (`job_done`). Component tests `crates/mayfly-control/tests/store/listener.rs` (F08,
+F09, F10, F11, F25, F27, F42, F44, the KER-06G and ES-03 cases, the GH-00R and GH-03 notes) and
+`tests/store/registration.rs::should_bind_complete_and_retire_the_attempt_when_its_runner_takes_a_job`.
+The testkit fake gained `drop_next_poll`, `lose_next_acquire_answer`, `script_message`,
+`complete_job`, `restart_client` and accessors; its `JobStarted` names a VM runner as the ACL does.
+Left open: listing `acquirablejobs` when a GHES session opens (GH-11); P12's grace G and probe
+for a job that ended while its runner never reports its exit (GH-12); the daemon's driver, its
+local lease, the job-facts consumer's registration and the gap's metric (RT-07).
+
+#### GH-11 GHES: the acquirable jobs listed when a session opens
+Cites: `doc/github-scaleset.md` §6.1, plan §7.2 step 5, `formal/scaleset.qnt`, GH-03's GH-00R
+note, GH-04's note. Found at GH-04 (2026-11-13): an offer made while no session lived is not
+offered again to the next one, so a GHES listener lists `acquirablejobs` after a session opens
+whose initial statistics show available or assigned jobs (client-assumed, spec §6.1). The
+`ScaleSet` aggregate plans offers only inside `RecordMessage`, and the model has no such step.
+Model first: an action that lists the offers GitHub holds for the set after `openSession` and
+plans them with `offerStep` against the same budget (I23, I32, `noDoubleReservationPerRequest`:
+an offer listed and later delivered in a message is reserved once), a scenario for each and a
+negative control; then a new command (`RecordAcquirableJobs{session_id, offers}`, its event a
+new type with a golden fixture, `DETERMINISM_CASES` accepted and refused), and the listener lists
+them once per opened session (only on GHES: the flow is the pool's, never guessed) and acquires the
+journaled plan as it does a message's. github.com never calls it.
+Accept: model scenarios and the negative control; aggregate rules and a property test on the new
+command; a listener component test over the fake's acquire flow: an offer made while no session
+lived is acquired once after the open, and not again when a message delivers it later.
+
+#### GH-12 P12's grace: a job ended whose runner never reports its exit
+Cites: dm P12, P11, I14, I21; `formal/lifecycle.qnt`, `formal/registration.qnt`; ADR 0038;
+`doc/github-scaleset.md` §4.1 (a held poll delivers `JobCompleted` up to a hold late), §6.3
+(a deregistered runner may keep running), GH-04's note. Found at GH-04 (2026-11-13): GH-04
+retires a finished attempt (its runner exited) whose registration completed (`job_done`). P12's
+other branch, "or grace G expires (then probe)", is not built: G is defined nowhere, and an
+attempt in `Busy` refuses `RequestRetirement` (`busy`), so a job that completed while its runner
+never reported its exit (a lost `RunnerExited`, a runner process that lingers) holds its VM and
+slot until the attempt's own deadlines act. Model first (`lifecycle.qnt`: a busy attempt whose
+job is known over may be retired through P11's deregistration first; the negative control: a
+retirement before the job is known over violates I14/I21), then the attempt's rule and the
+registration manager's step: once the registration is `Completed` for G with the runner not
+exited, probe the runner by its journaled id (`get_runner`): absent or offline is retired
+`job_done` (deregistration by id first, P11); online and busy (a new job bound to a reused runner
+is impossible for a JIT runner, so this is drift) is reported and probed again after G; online and
+idle is retired the same way (its process outlives its job, spec §6.3).
+Proposed default, for the owner to confirm when this is picked up: **G = 5 minutes**. Reasoning:
+`JobCompleted` already arrives up to one long-poll hold (about 50 s) after the job ended, and an
+ephemeral runner exits within seconds of finishing, so a healthy runner's exit is normally
+journaled long before G; 5 minutes leaves room for log upload and the guest's own shutdown, matches
+the registration manager's other tuning values (`busy_retry` 5 min, above `online_deadline` 2 min),
+and costs at most one slot for 5 minutes per lost exit, while a shorter G would probe GitHub for
+runners that are about to exit. A tuning value, never below the hold plus the runner's exit.
+Accept: model scenarios and the negative control; attempt rules for the new transition with
+`DETERMINISM_CASES`; component tests: a completed job whose runner exits is retired at once (no
+probe); one whose exit never comes is probed after G and retired, its runner deregistered by id
+first; a busy answer withdraws nothing it should not (I21).
 
 #### GH-02H GitHub transport hardening
 Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:

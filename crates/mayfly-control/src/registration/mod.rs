@@ -40,7 +40,10 @@
 //!
 //! **What this module does not do yet.** The grant that starts an activation (P9's first half)
 //! is CP-09's; the frame that carries a config from the broker to the data plane's
-//! `LaunchStore` is LNK-02's; P12 (job facts to registrations) needs GH-04's listener; and the
+//! `LaunchStore` is LNK-02's; P12's first half (job facts to `BindJob`, `RecordConsumed` and
+//! `RecordCompleted`) is the listener's [`JobFacts`](crate::listener::JobFacts) consumer, and
+//! its second half, a finished attempt whose job completed retired `job_done`, is a step here
+//! (GH-04); and the
 //! daemon's wiring (the GitHub client, the consumer, the pass and sweep timers, the
 //! [`ScaleSetDirectory`]) is RT-07's.
 //!

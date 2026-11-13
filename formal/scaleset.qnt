@@ -74,7 +74,14 @@
  *
  * Every message here carries statistics. The Rust aggregate also takes an envelope without
  * them; it keeps the statistics' floor (`statistics_after`) apart from the cursor so that such a
- * message orders statistics exactly as this model's cursor does.
+ * message orders statistics exactly as this model's cursor does, and the listener records it
+ * with one unknown item added, so it counts as protocol drift like `unknownTypeQueued` (GH-04).
+ *
+ * The listener (`mayfly_control::listener`, GH-04) takes these actions one to one: `poll` with
+ * the stream's `wireMax`, `record` (a receipt is a duplicate only for the cursor's id), `ack`
+ * once the record or its receipt answered, `acquireCall` for the record's plan and, after a lost
+ * answer, for the pending set while open, `sessionLoss` and `restart`, `deleteStale`,
+ * `openSession` and `recreateScaleSet`.
  *
  * `CAP = 2` stands for the service's 50 messages per batch: a backlog larger than a batch is
  * truncated, which is why demand never counts job messages. Ghost state (`g`) records history

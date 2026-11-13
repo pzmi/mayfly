@@ -5,7 +5,8 @@
 //! the start of an attempt (P2), the image catalog's pin (OPS-02), the observation inbox (P8),
 //! startup recovery (P1) and the application of a recovery plan (P20); the terms policy (P4); and
 //! the registration manager and the reaper (P9 to P14 but P12, CP-05); the reconciler's
-//! activation grant (P9, CP-09); and the operator's commands (RT-03).
+//! activation grant (P9, CP-09); the operator's commands (RT-03); and the scale-set listener
+//! with P12's job facts (GH-04).
 
 mod activation;
 mod attempts;
@@ -15,6 +16,7 @@ mod delivery;
 mod images;
 mod inbox;
 mod link_sink;
+mod listener;
 mod operator;
 mod placement;
 mod projections;

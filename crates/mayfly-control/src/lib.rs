@@ -35,10 +35,14 @@
 //!   types and failure classes (GH-03).
 //! - [`terms`]: the terms policy (P4): each pool's terms applied on every host, at the pool's
 //!   terms revision, by a level-triggered pass (CP-08).
-//! - [`registration`]: the registration manager and the reaper (P9 to P14 but P12): each
-//!   attempt's JIT runner minted once, held in the single-take broker, confirmed online,
-//!   deregistered by its journaled id before its VM stops, and the runners no journal record
-//!   explains reported, never removed (CP-05).
+//! - [`registration`]: the registration manager and the reaper (P9 to P14, P12 with
+//!   [`listener`]): each attempt's JIT runner minted once, held in the single-take broker,
+//!   confirmed online, deregistered by its journaled id before its VM stops, a finished
+//!   attempt whose job completed retired, and the runners no journal record explains reported,
+//!   never removed (CP-05, GH-04).
+//! - [`listener`]: the scale-set listener (plan §7.2, GH-04): the scale set ensured and its
+//!   session opened, each message recorded with its inbox key before it is acked, the planned
+//!   acquisitions made, and the job facts turned into registration and attempt commands (P12).
 
 pub mod commands;
 pub mod delivery;
@@ -47,6 +51,7 @@ mod ids;
 pub mod images;
 pub mod inbox;
 pub mod journal;
+pub mod listener;
 pub mod placement;
 pub mod projection;
 pub mod queries;

@@ -945,7 +945,12 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   refused, unusable credentials, the scale set gone) and `RecordIssueUnknown` otherwise, a taken
   name included. A minted config the attempt never got a handle for (a crash between the two) is
   `PresumeLeaked{handle_orphaned}`. The unrecognised runners P14 reports are its last sweep's
-  report (`RegistrationManager::last_sweep`), not a projection; P12 is left to GH-04.
+  report (`RegistrationManager::last_sweep`), not a projection. P12 as built (GH-04): the
+  listener's `JobFacts` consumer records `BindJob` and `RecordConsumed` on `JobStarted` and
+  `RecordConsumed`, `RecordCompleted` on `JobCompleted`, keyed by the event and the fact's
+  position (never `runnerRequestId`, 0 on github.com); the registration manager retires a
+  finished attempt whose registration completed (`job_done`). The grace G and its probe are
+  GH-12's (G is not defined yet; a busy attempt is not retirable).
 
 ### 6.6 `Image` [Image]
 

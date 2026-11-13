@@ -1,5 +1,5 @@
 //! The registration manager and the reaper over a real store and the in-memory GitHub
-//! (component level, CP-05; policies P9 to P14 but P12; ver §8.4 F06, F07, F32): one mint per
+//! (component level, CP-05; policies P9 to P14, and P12 with the listener, GH-04; ver §8.4 F06, F07, F32): one mint per
 //! registration and only its handle journaled, an unknown issue never minted again and resolved
 //! only by listings past the grace, a config that reached no handle presumed leaked and removed
 //! by its id, the online confirmation, deregistration before every stop (a retirement's and a
@@ -1108,4 +1108,243 @@ fn should_ask_again_at_once_and_once_only_when_the_runner_exits_during_the_busy_
     assert_eq!(after_exit, Ok(Step::Waiting("runner_busy")));
     assert_eq!(again, Ok(Step::Waiting("runner_busy")));
     assert_eq!(w.api.runner_removals(), before + 1);
+}
+
+type PoolListener<'s> = mayfly_control::listener::Listener<
+    's,
+    MemoryJournal,
+    FakeClock,
+    SeededRng,
+    mayfly_control::delivery::Kicks,
+    FakeScaleSetApi,
+>;
+
+/// The pool's listener on the fixture's scale set, its session open and `deliverable` runners.
+fn pool_listener(w: &Fixture, deliverable: u32) -> PoolListener<'_> {
+    use mayfly_control::listener::{Listener, ListenerConfig, Tick};
+    use mayfly_control_domain::demand::{Capacity, WireMode};
+    use mayfly_control_domain::pool::TrustTier;
+    use mayfly_control_domain::scaleset::{ScaleSet, ScaleSetCommand};
+
+    let config = ListenerConfig::new(
+        PoolName::sample(),
+        ScaleSetSpec {
+            name: "mayfly".to_owned(),
+            runner_group: DEFAULT_GROUP.to_owned(),
+            labels: vec![LABEL.to_owned()],
+        },
+        TrustTier::Trusted,
+        "host0/pool0".to_owned(),
+        EPOCH,
+    );
+    let listener = Listener::new(&w.h.store, &w.api, config);
+    let tick = || block_on(listener.tick()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(tick(), Tick::Ensured(w.directory.set));
+    assert!(matches!(tick(), Tick::Opened(..)));
+    let capacity = Command::new(
+        CommandId::from_u128(0xCA01),
+        NOW,
+        EPOCH,
+        Actor::Automation {
+            policy: "reconciler",
+        },
+        ScaleSetCommand::ApplyCapacity(Capacity {
+            revision: 1,
+            deliverable,
+            reported_max: deliverable,
+            mode: WireMode::Open,
+        }),
+    );
+    block_on(
+        w.h.store
+            .execute::<ScaleSet>(SaveRequest::new(PoolName::sample(), capacity)),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    listener
+}
+
+fn poll_once(listener: &PoolListener<'_>) {
+    let tick = block_on(listener.tick()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        matches!(tick, mayfly_control::listener::Tick::Polled(..)),
+        "{tick:?}"
+    );
+}
+
+/// Applies the job facts of every recorded scale-set event, as redelivered.
+fn apply_facts(
+    w: &Fixture,
+) -> Vec<Result<mayfly_control::listener::JobFactsReport, mayfly_control::listener::JobFactsError>>
+{
+    let facts = mayfly_control::listener::JobFacts::new(&w.h.store, EPOCH);
+    let stream = StreamId::new(&format!("scaleset-{}", PoolName::sample()))
+        .unwrap_or_else(|e| panic!("{e}"));
+    block_on(w.h.journal.read_stream(&stream, None, None))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .iter()
+        .map(|e| block_on(facts.apply(e)))
+        .collect()
+}
+
+#[test]
+fn should_apply_a_second_runners_fact_and_bind_the_first_once_it_listens_when_its_launch_lags() {
+    // given: attempt 1's runner minted but its launch not journaled yet, attempt 2's listening;
+    // each runner takes a job
+    let w = fixture();
+    let m = w.manager();
+    w.activating(1);
+    assert_eq!(block_on(m.step(attempt(1))), Ok(Step::Moved));
+    let first = w.runner_id(1);
+    let second = w.connected(&m, 2);
+    let listener = pool_listener(&w, 2);
+    let jobs = w.api.queue_jobs(2, LABEL, 7);
+    poll_once(&listener);
+    w.api
+        .start_job(&jobs[0], first)
+        .unwrap_or_else(|e| panic!("{e}"));
+    w.api
+        .start_job(&jobs[1], second)
+        .unwrap_or_else(|e| panic!("{e}"));
+    poll_once(&listener);
+    let facts = mayfly_control::listener::JobFacts::new(&w.h.store, EPOCH);
+
+    // when: the facts are delivered while attempt 1 still activates, then it listens
+    let report = block_on(w.h.worker.catch_up(&facts)).unwrap_or_else(|e| panic!("{e}"));
+    let while_activating = (w.attempt(1).phase, w.registration(1).phase);
+    w.launched(1);
+    let step = block_on(m.step(attempt(1)));
+
+    // then: nothing blocked the stream; the second is bound at once, the first once it listens
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(w.attempt(2).phase, AttemptPhase::Busy);
+    assert_eq!(
+        while_activating,
+        (AttemptPhase::Activating, Phase::Consumed)
+    );
+    assert_eq!(step, Ok(Step::Moved));
+    assert_eq!(w.attempt(1).phase, AttemptPhase::Busy);
+}
+
+#[test]
+fn should_retire_the_attempt_when_its_job_completes_after_the_runner_exited() {
+    // given: attempt 1's runner takes a job and exits before GitHub reports the completion
+    let w = fixture();
+    let m = w.manager();
+    let runner = w.connected(&m, 1);
+    let listener = pool_listener(&w, 1);
+    let job = w.api.queue_jobs(1, LABEL, 7).remove(0);
+    poll_once(&listener);
+    w.api
+        .start_job(&job, runner)
+        .unwrap_or_else(|e| panic!("{e}"));
+    poll_once(&listener);
+    assert!(apply_facts(&w).iter().all(Result::is_ok));
+    w.apply(
+        1,
+        (1 << 20) + 0x200,
+        EPOCH,
+        observe(ob(1, 9), EPOCH, Fact::RunnerExited { code: 0 }),
+    );
+
+    // when
+    let before = block_on(m.step(attempt(1)));
+    let held = w.attempt(1).retire_reason;
+    w.api
+        .complete_job(
+            runner,
+            mayfly_control_domain::registration::JobResult::Succeeded,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    poll_once(&listener);
+    assert!(apply_facts(&w).iter().all(Result::is_ok));
+    let after = block_on(m.step(attempt(1)));
+
+    // then: nothing until the completion is recorded, then retired as done
+    assert_eq!(before, Ok(Step::Idle));
+    assert_eq!(held, None);
+    assert_eq!(after, Ok(Step::Moved));
+    assert_eq!(w.attempt(1).retire_reason, Some(RetireReason::JobDone));
+}
+
+#[test]
+fn should_bind_complete_and_retire_the_attempt_when_its_runner_takes_a_job() {
+    // given: P12 (GH-04), attempt 1's runner listening and the pool's listener on its scale set
+    use mayfly_control::listener::{JobFacts, Listener, ListenerConfig, Tick};
+    use mayfly_control_domain::demand::{Capacity, WireMode};
+    use mayfly_control_domain::pool::TrustTier;
+    use mayfly_control_domain::registration::JobResult;
+    use mayfly_control_domain::scaleset::{ScaleSet, ScaleSetCommand};
+
+    let w = fixture();
+    let m = w.manager();
+    let runner = w.connected(&m, 1);
+    let config = ListenerConfig::new(
+        PoolName::sample(),
+        ScaleSetSpec {
+            name: "mayfly".to_owned(),
+            runner_group: DEFAULT_GROUP.to_owned(),
+            labels: vec![LABEL.to_owned()],
+        },
+        TrustTier::Trusted,
+        "host0/pool0".to_owned(),
+        EPOCH,
+    );
+    let listener = Listener::new(&w.h.store, &w.api, config);
+    let facts = JobFacts::new(&w.h.store, EPOCH);
+    let tick = || block_on(listener.tick()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(tick(), Tick::Ensured(w.directory.set));
+    assert!(matches!(tick(), Tick::Opened(..)));
+    let capacity = Command::new(
+        CommandId::from_u128(0xCA01),
+        NOW,
+        EPOCH,
+        Actor::Automation {
+            policy: "reconciler",
+        },
+        ScaleSetCommand::ApplyCapacity(Capacity {
+            revision: 1,
+            deliverable: 1,
+            reported_max: 1,
+            mode: WireMode::Open,
+        }),
+    );
+    block_on(
+        w.h.store
+            .execute::<ScaleSet>(SaveRequest::new(PoolName::sample(), capacity)),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let job = w.api.queue_jobs(1, LABEL, 7).remove(0);
+    assert!(matches!(tick(), Tick::Polled(..)));
+    let apply_all = || {
+        let report = block_on(w.h.worker.catch_up(&facts)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(report.failed.is_empty(), "{report:?}");
+    };
+
+    // when: the runner takes the job, completes it and exits
+    w.api
+        .start_job(&job, runner)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(tick(), Tick::Polled(..)));
+    apply_all();
+    let busy = (w.attempt(1).phase, w.registration(1).phase);
+    w.api
+        .complete_job(runner, JobResult::Succeeded)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(tick(), Tick::Polled(..)));
+    apply_all();
+    let completed = w.registration(1);
+    w.apply(
+        1,
+        (1 << 20) + 0x200,
+        EPOCH,
+        observe(ob(1, 9), EPOCH, Fact::RunnerExited { code: 0 }),
+    );
+    let step = block_on(m.step(attempt(1)));
+
+    // then: bound and consumed, completed, then retired as done
+    assert_eq!(busy, (AttemptPhase::Busy, Phase::Consumed));
+    assert_eq!(completed.phase, Phase::Completed);
+    assert_eq!(completed.result, Some(JobResult::Succeeded));
+    assert_eq!(step, Ok(Step::Moved));
+    assert_eq!(w.attempt(1).retire_reason, Some(RetireReason::JobDone));
 }
