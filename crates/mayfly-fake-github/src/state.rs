@@ -243,6 +243,8 @@ pub struct Counts {
     pub run_lookups: u64,
     /// Run cancels answered 202.
     pub run_cancels: u64,
+    /// Listings of every runner answered (a listing by name is not counted).
+    pub runner_listings: u64,
 }
 
 /// Holds a route's requests until released ([`FakeGithub::hold`]).

@@ -11,7 +11,7 @@ use crate::knobs::Knobs;
 use crate::routes::Route;
 use crate::state::{FakeGithub, FakeResponse, Fault};
 use crate::wire::{empty, json, status};
-use crate::world::{Job, JobSpec, JobState, Run, SessionState, World};
+use crate::world::{Job, JobSpec, JobState, Label, Run, Runner, ScaleSet, SessionState, World};
 
 /// Why a control call was refused.
 pub type ControlError = String;
@@ -201,6 +201,89 @@ impl FakeGithub {
             .ok_or("no such runner")?
             .online = online;
         Ok(())
+    }
+
+    /// A scale set as another client, or an earlier run, left it: named `name` in the runner
+    /// group named `group`, its name its one label; returns its id. Pinned by
+    /// `tests/wire/scaleset.rs::should_list_a_runner_added_by_the_control_api_when_its_set_was_added`.
+    ///
+    /// # Errors
+    /// When the knobs know no such group, or a live scale set of that name is in it.
+    pub fn add_scale_set(&self, name: &str, group: &str) -> Result<u64, ControlError> {
+        let now = self.now();
+        let mut state = self.state();
+        let group = state
+            .knobs
+            .runner_groups
+            .iter()
+            .find(|g| g.name == group)
+            .cloned()
+            .ok_or("no such runner group")?;
+        if state
+            .world
+            .scale_sets
+            .values()
+            .any(|s| !s.deleted && s.runner_group_id == group.id && s.name == name)
+        {
+            return Err("a scale set of that name exists in the group".to_owned());
+        }
+        let id = state.world.next_id();
+        let first = state.knobs.first_message_id;
+        state.world.scale_sets.insert(
+            id,
+            ScaleSet {
+                id,
+                name: name.to_owned(),
+                runner_group_id: group.id,
+                runner_group_name: group.name,
+                labels: vec![Label {
+                    kind: "System".to_owned(),
+                    name: name.to_owned(),
+                }],
+                disable_update: false,
+                created_on: now,
+                deleted: false,
+                max_capacity: 0,
+                pending: Vec::new(),
+                queue: std::collections::VecDeque::new(),
+                next_message_id: first,
+                queue_generation: 0,
+            },
+        );
+        Ok(id)
+    }
+
+    /// A runner registered in `scale_set` by a JIT config no client of this test minted (an
+    /// operator's, or one whose mint was lost before it was recorded); offline, idle; returns its
+    /// id.
+    ///
+    /// # Errors
+    /// When there is no such live scale set, or a runner of that name exists.
+    pub fn add_runner(&self, scale_set: u64, name: &str) -> Result<u64, ControlError> {
+        let mut state = self.state();
+        if !state
+            .world
+            .scale_sets
+            .get(&scale_set)
+            .is_some_and(|s| !s.deleted)
+        {
+            return Err("no such scale set".to_owned());
+        }
+        if state.world.runners.values().any(|r| r.name == name) {
+            return Err("a runner of that name exists".to_owned());
+        }
+        let id = state.world.next_id();
+        state.world.runners.insert(
+            id,
+            Runner {
+                id,
+                name: name.to_owned(),
+                scale_set,
+                online: false,
+                job: None,
+            },
+        );
+        Ok(id)
     }
 
     /// The service expires the scale set's live session: its token answers 401, a refresh or

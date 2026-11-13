@@ -5,6 +5,7 @@
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
+use mayfly_composition::github::{DOCTOR_WAIT, ReaperDesk};
 use mayfly_composition::operator::server::{
     BindError, Listener, MAX_CONNECTIONS, MAX_REQUEST, Operators, REQUEST_DEADLINE,
     SOCKET_PATH_MAX, Service, serve,
@@ -41,6 +42,7 @@ struct Kit {
     host: HostId,
     sizing: SizingReport,
     ready: tokio::sync::watch::Sender<bool>,
+    reaper: ReaperDesk,
     dir: tempfile::TempDir,
     next: std::cell::Cell<u128>,
 }
@@ -75,6 +77,7 @@ impl Kit {
                 unmeasured_images: Vec::new(),
             },
             ready: tokio::sync::watch::channel(true).0,
+            reaper: ReaperDesk::default(),
             dir,
             next: std::cell::Cell::new(1),
         }
@@ -177,6 +180,7 @@ impl Kit {
                 ready: &self.ready,
                 follow: &self.notifier.follow,
                 operators,
+                reaper: &self.reaper,
             };
             let stop = Shutdown::new();
             let script = async {
@@ -328,6 +332,28 @@ fn should_answer_unknown_command_when_the_daemon_does_not_know_it() {
     assert_eq!(code(&newer), Some("unsupported_api"));
     assert_eq!(code(&garbage), Some("bad_request"));
     assert_eq!(code(&no_api), Some("bad_request"));
+}
+
+#[test]
+fn should_answer_the_last_sweep_when_doctor_asks_and_no_run_answers() {
+    // given: the last listing failed, and no run takes the ask
+    let kit = Kit::new();
+    kit.reaper.failed("unavailable");
+
+    // when: the paused clock runs the ask's wait out
+    let (answer, _) = kit.serving(true, Operators::this_user(), |socket| async move {
+        let started = tokio::time::Instant::now();
+        let answer = ask(&socket, r#"{"api":1,"command":"reaper"}"#).await;
+        (answer, started.elapsed())
+    });
+    let (answer, waited) = answer;
+
+    // then: served after the wait, with what the desk holds
+    assert!(answer.ok, "{answer:?}");
+    let result = answer.result.unwrap_or_default();
+    assert_eq!(result["last"], serde_json::Value::Null, "{result}");
+    assert_eq!(result["failure"], "unavailable", "{result}");
+    assert!(waited >= DOCTOR_WAIT, "{waited:?}");
 }
 
 #[test]

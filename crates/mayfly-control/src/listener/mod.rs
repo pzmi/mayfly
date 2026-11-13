@@ -91,8 +91,8 @@
 //!
 //! Left to other cards: the classification of assigned jobs through run lookups (GH-08, GH-10),
 //! the listing of `acquirablejobs` when a GHES session opens (GH-11, spec §6.1), P12's grace for a
-//! job that ended while its runner never reports its exit (GH-12), and the daemon's driver, its
-//! local lease and the gap's metric (RT-07).
+//! job that ended while its runner never reports its exit (GH-12), and the gap's metric (RT-04).
+//! The daemon's driver and its local lease are `mayfly_composition::github` (RT-07).
 
 mod jobs;
 

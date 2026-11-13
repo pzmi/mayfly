@@ -28,6 +28,7 @@ use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use mayfly_adapter_github::{BaseProblem, Url, parse_base};
 use mayfly_control_domain::capacity;
 use mayfly_control_domain::reconcile::PolicyOf;
 use mayfly_domain::{PoolName, SecretRef};
@@ -115,7 +116,20 @@ pub struct GithubConfig {
     pub installation_id: u64,
     /// Where the App's private key comes from (resolved by the secret provider, ADR 0033).
     pub private_key: SecretRef,
+    /// The REST API's base (`api_url`): [`DEFAULT_API_URL`] when absent, `https://<host>/api/v3`
+    /// for GHES, a loopback `http` URL for the fake (owner, 2026-11-13, RT-07). Only `https`,
+    /// or plain `http` to a loopback host, is accepted: the App's credentials are sent there.
+    pub api_url: Url,
+    /// The web base runners register under (`web_url`): [`DEFAULT_WEB_URL`] when absent, the
+    /// GHES host's root for GHES. The same rule as `api_url`.
+    pub web_url: Url,
 }
+
+/// `[github] api_url` when absent: github.com's REST API.
+pub const DEFAULT_API_URL: &str = "https://api.github.com";
+
+/// `[github] web_url` when absent: github.com.
+pub const DEFAULT_WEB_URL: &str = "https://github.com";
 
 /// Where the scale sets live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -891,6 +905,8 @@ fn section_keys(key: &str) -> &'static [&'static str] {
             "app_client_id",
             "installation_id",
             "private_key",
+            "api_url",
+            "web_url",
         ],
         "host" => &[
             "reserve_memory_mib",
@@ -1010,6 +1026,8 @@ fn read_github(reader: &mut Reader) -> Option<GithubConfig> {
         "private_key",
         "private_key = \"file:/etc/mayfly/app-key.pem\"",
     );
+    let api_url = reader.base_url("api_url", DEFAULT_API_URL, "https://ghes.example/api/v3");
+    let web_url = reader.base_url("web_url", DEFAULT_WEB_URL, "https://ghes.example");
 
     let organisation = organisation.filter(|text| {
         let ok = organisation_ok(text);
@@ -1057,6 +1075,8 @@ fn read_github(reader: &mut Reader) -> Option<GithubConfig> {
         app_client_id: app_client_id?,
         installation_id: installation_id?,
         private_key: private_key?,
+        api_url: api_url?,
+        web_url: web_url?,
     })
 }
 
@@ -1465,6 +1485,48 @@ fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
 }
 
 impl Reader {
+    /// An optional base URL a credential is sent to (`[github] api_url`, `web_url`): `default`
+    /// when absent; refused unless `https`, or plain `http` to a loopback host, with no query,
+    /// fragment or user info (`mayfly_adapter_github::parse_base`). The refused text is not
+    /// repeated: an operator may have pasted a URL carrying a token.
+    fn base_url(&mut self, key: &str, default: &str, example: &str) -> Option<Url> {
+        let example_line = format!("{key} = \"{example}\"");
+        let text = match self.value(key, &example_line, false) {
+            None => return parse_base(default).ok(),
+            Some(Value::String(text)) => text,
+            Some(other) => {
+                self.wrong_type(key, "a string", &other, &example_line);
+                return None;
+            }
+        };
+        match parse_base(&text) {
+            Ok(url) => Some(url),
+            Err(problem) => {
+                let (why, fix) = match problem {
+                    BaseProblem::Insecure => (
+                        "is not https: the App's credentials would cross the network in clear",
+                        "use an `https` URL (plain `http` only to a loopback host, for a test)",
+                    ),
+                    BaseProblem::Shape => (
+                        "carries a query, a fragment or user info",
+                        "give the base URL alone",
+                    ),
+                    BaseProblem::NotUrl => (
+                        "is not an absolute URL",
+                        "write the scheme and host, like the example",
+                    ),
+                };
+                self.push(
+                    key,
+                    ConfigErrorKind::Invalid,
+                    why.to_owned(),
+                    &format!("{fix}: `{example_line}`"),
+                );
+                None
+            }
+        }
+    }
+
     fn secret(&mut self, key: &str, example: &str) -> Option<SecretRef> {
         let text = self.string(key, example, true)?;
         match text.parse::<SecretRef>() {

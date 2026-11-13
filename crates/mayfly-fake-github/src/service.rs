@@ -656,8 +656,11 @@ fn runner_by_id(state: &State, ctx: &Ctx<'_>) -> FakeResponse {
     }
 }
 
-fn list_runners(state: &State, ctx: &Ctx<'_>) -> FakeResponse {
+fn list_runners(state: &mut State, ctx: &Ctx<'_>) -> FakeResponse {
     let name = ctx.params.query.get("agentName");
+    if name.is_none() {
+        state.counts.runner_listings += 1;
+    }
     list(
         state
             .world

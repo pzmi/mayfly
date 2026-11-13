@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use mayfly_composition::operator::wire::{
     self, Answer, AttemptStatus, Desync, EventLine, Following, HostStatus, Lagged, PoolList,
-    PoolOnHost, PoolStatus, Request, Reset, RunStatus, SizingValue, Status, Tripped, Value, Vm,
-    VmList,
+    PoolOnHost, PoolStatus, Reaper, Request, Reset, RunStatus, SizingValue, Status, Sweep, Tripped,
+    UnrecognisedRunner, Value, Vm, VmList,
 };
 use mayfly_composition::paths::PlatformEnv;
 
@@ -368,10 +368,29 @@ fn should_exit_with_the_matching_code_when_the_daemon_cannot_serve() {
 
 #[test]
 fn should_report_each_check_when_doctor_meets_a_daemon_in_trouble() {
-    // given: a daemon in safe mode, not ready, a breaker tripped and a desync
+    // given: a daemon in safe mode, not ready, a breaker tripped, a desync and an unrecognised
+    // runner; then an older daemon that knows no `reaper`
+    let reaper = Reaper {
+        last: Some(Sweep {
+            trigger: "run_started".to_owned(),
+            at_ms: 1,
+            listed: 2,
+            deregistered: 0,
+            pending: 0,
+            unrecognised: vec![UnrecognisedRunner {
+                id: 41,
+                name: "mf-h0123456789abcde-lin-1".to_owned(),
+                scale_set: Some(7),
+            }],
+            foreign: 1,
+        }),
+        failure: None,
+    };
     let canned = Canned::new(vec![
         vec![served!(status())],
+        vec![served!(reaper)],
         vec![served!(status())],
+        vec![failed("unknown_command")],
         vec![failed("unauthorised")],
     ]);
     let named = canned.target();
@@ -417,9 +436,17 @@ fn should_report_each_check_when_doctor_meets_a_daemon_in_trouble() {
          warn ready: the run has not reported ready yet\n\
          FAIL safe_mode: in safe mode (epoch_below_floor): nothing is created or destroyed\n\
          warn breakers: tripped in mac: `mayfly pool reset-breaker <pool>` once fixed\n\
-         warn desync: 1 VM(s) vanished outside mayfly: a desync; send the diagnostics bundle\n"
+         warn desync: 1 VM(s) vanished outside mayfly: a desync; send the diagnostics bundle\n\
+         warn reaper: 1 runner(s) of mayfly's name shape that no registration recorded: \
+         mf-h0123456789abcde-lin-1 (id 41); mayfly never removes them: check each and remove it \
+         by hand\n"
     );
     assert!(json.1.contains(r#""verdict": "fail""#), "{}", json.1);
+    assert!(
+        json.1.contains("this mayflyd does not report the reaper"),
+        "{}",
+        json.1
+    );
     assert!(
         refused.1.contains("FAIL daemon: refused: unauthorised"),
         "{}",

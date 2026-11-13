@@ -1,6 +1,8 @@
 //! `mayfly doctor [--json]`, basic (RT-03): what an operator checks first, from the CLI's side.
-//! OPS-01 adds the real host checks (launchd, Softnet, the App's permissions) and RT-07 the
-//! reaper's last report.
+//! OPS-01 adds the real host checks (launchd, Softnet, the App's permissions); RT-07 added the
+//! reaper's last report (`reaper`: a sweep asked of the run, within P14's hourly budget, then
+//! its runners of mayfly's name shape that no registration recorded, which mayfly never
+//! removes).
 //!
 //! Each check is `ok`, `warn` or `fail`; any `fail` makes `mayfly doctor` exit 1. Pinned by
 //! `crates/mayfly-cli/tests/operator.rs::should_report_every_check_when_doctor_runs_against_a_ready_daemon`.
@@ -11,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::client;
-use super::wire::{Request, Status};
+use super::wire::{Reaper, Request, Status};
 use crate::config::Config;
 
 /// One check's verdict.
@@ -38,7 +40,7 @@ pub struct Check {
 }
 
 /// Every check, in a fixed order: `config`, `tart`, `daemon`, `ready`, `safe_mode`,
-/// `breakers`, `desync`.
+/// `breakers`, `desync`, `reaper`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
     /// The checks.
@@ -178,5 +180,76 @@ pub fn run(config: Option<&Path>, socket: &Path, from: SocketFrom, path: Option<
             ),
         )
     });
+    checks.push(reaper_check(socket));
     Report { checks }
+}
+
+/// The `reaper` check: the daemon's answer to `reaper` (RT-07). Pinned by
+/// `crates/mayfly-cli/src/operate_tests.rs::should_report_each_check_when_doctor_meets_a_daemon_in_trouble`.
+fn reaper_check(socket: &Path) -> Check {
+    let answer = match client::request(socket, &Request::Reaper) {
+        Ok(answer) => answer,
+        Err(e) => return check("reaper", Verdict::Warn, e.to_string()),
+    };
+    if !answer.ok {
+        return match answer.error {
+            Some(e) if e.code == "unknown_command" => check(
+                "reaper",
+                Verdict::Warn,
+                "this mayflyd does not report the reaper (it is older than this mayfly)",
+            ),
+            Some(e) => check("reaper", Verdict::Warn, e.message),
+            None => check("reaper", Verdict::Warn, "refused"),
+        };
+    }
+    let Some(reaper) = answer
+        .result
+        .and_then(|v| serde_json::from_value::<Reaper>(v).ok())
+    else {
+        return check(
+            "reaper",
+            Verdict::Warn,
+            "mayflyd answered a reaper report this mayfly cannot read",
+        );
+    };
+    let failed = reaper
+        .failure
+        .as_deref()
+        .map(|code| format!("; its last listing failed ({code})"))
+        .unwrap_or_default();
+    match reaper.last {
+        None => check(
+            "reaper",
+            Verdict::Warn,
+            format!("GitHub's runners have not been listed yet{failed}"),
+        ),
+        Some(sweep) if sweep.unrecognised.is_empty() => check(
+            "reaper",
+            if failed.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Warn
+            },
+            format!(
+                "the last sweep listed {} runner(s), none unrecognised{failed}",
+                sweep.listed
+            ),
+        ),
+        Some(sweep) => {
+            let named: Vec<String> = sweep
+                .unrecognised
+                .iter()
+                .map(|r| format!("{} (id {})", r.name, r.id))
+                .collect();
+            check(
+                "reaper",
+                Verdict::Warn,
+                format!(
+                    "{} runner(s) of mayfly's name shape that no registration recorded: {}; mayfly never removes them: check each and remove it by hand{failed}",
+                    named.len(),
+                    named.join(", ")
+                ),
+            )
+        }
+    }
 }

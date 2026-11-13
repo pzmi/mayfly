@@ -345,6 +345,42 @@ async fn should_move_the_queue_url_when_a_refresh_moves_it() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn should_list_a_runner_added_by_the_control_api_when_its_set_was_added() {
+    // given: a scale set and a runner nobody in this test minted
+    let (fake, setup) = fake();
+    let api = Api::connect(&fake, &setup).await;
+    let set = fake.add_scale_set("left-behind", "Default").expect("a set");
+    let runner = fake.add_runner(set, "mf-left-1").expect("a runner");
+
+    // when
+    let all = api.svc("GET", "distributedtask/pools/0/agents", None).await;
+    let by_name = api
+        .svc(
+            "GET",
+            "distributedtask/pools/0/agents?agentName=mf-left-1",
+            None,
+        )
+        .await;
+    let again = fake.add_scale_set("left-behind", "Default");
+    let unknown_group = fake.add_scale_set("other", "no-such-group");
+    let duplicate = fake.add_runner(set, "mf-left-1");
+
+    // then: listed with its id and set; a full listing counted, a listing by name not
+    assert_eq!(all.status, 200);
+    let listed = all.json()["value"].clone();
+    assert!(
+        listed
+            .as_array()
+            .is_some_and(|v| v.iter().any(|r| r["id"].as_u64() == Some(runner))),
+        "{listed}"
+    );
+    assert_eq!(by_name.status, 200);
+    assert_eq!(fake.counts().runner_listings, 1);
+    assert!(again.is_err() && unknown_group.is_err() && duplicate.is_err());
+    assert_eq!(fake.world().runners[&runner].scale_set, set);
+}
+
+#[tokio::test(start_paused = true)]
 async fn should_answer_the_knob_when_removing_an_absent_runner() {
     // given
     let (fake, setup) = fake();

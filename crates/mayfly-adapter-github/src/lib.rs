@@ -39,7 +39,7 @@ mod wire;
 
 pub use auth::{AdminConnection, AppAuth, InstallationToken, REFRESH_MARGIN};
 pub use client::{ApiClient, CallPolicy, DEFAULT_CALL_POLICY};
-pub use config::{AppConfig, BaseProblem, ConfigError, Scope, credential_base_problem};
+pub use config::{AppConfig, BaseProblem, ConfigError, Scope, credential_base_problem, parse_base};
 pub use error::{ErrorClass, ErrorKind, GitHubError, redacted_endpoint};
 pub use http::{HttpRequest, HttpResponse, MAX_RESPONSE_BYTES, Method, Transport, TransportError};
 pub use jwt::{AppKey, JWT_BACKDATE_SECS, JWT_LIFETIME_SECS, JwtError, app_jwt, token_expiry};
@@ -57,6 +57,9 @@ pub use scaleset::{
 };
 pub use timefmt::{parse_http_date, parse_rfc3339};
 pub use transport::{CONNECT_TIMEOUT, ReqwestTransport, TlsSetupError, USER_AGENT};
+/// The URL type of [`AppConfig`]'s bases, so the composition root names it without its own
+/// dependency on `url`.
+pub use url::Url;
 pub use wire::{
     JOB_MESSAGES, MAX_LABELS, MAX_TEXT_BYTES, decode_job, decode_message, decode_offer,
     decode_runner, decode_scale_set, decode_statistics, event_name, job_result,

@@ -11,6 +11,8 @@
 //!   after-commit notifier.
 //! - [`clocks`], [`identity`], [`details`]: the production clocks and randomness, the host's
 //!   persisted identity, and what a directive needs from the configuration.
+//! - [`github`]: the daemon's GitHub client, its scale-set directory and the reaper's desk
+//!   (RT-07).
 //! - [`paths`]: the platform's standard places when the configuration names none.
 //! - [`operator`]: the operator socket, its wire format, server and client, and `doctor`
 //!   (RT-03).
@@ -23,6 +25,7 @@ pub mod config;
 pub mod daemon;
 pub mod details;
 pub mod exit_code;
+pub mod github;
 pub mod identity;
 pub mod manifest;
 pub mod operator;

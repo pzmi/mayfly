@@ -10,7 +10,8 @@ use mayfly_control::journal::{
     StreamHead, StreamId, StreamRevision, SupportedEpochs, UnitOfWork,
 };
 use mayfly_control::projection::views::{
-    Attempts, Hosts, Images, PendingEffects, Placements, Pools, RecentFailures, ScaleSets, Slots,
+    Attempts, Hosts, Images, OpenRegistrations, PendingEffects, Placements, Pools, RecentFailures,
+    ScaleSets, Slots, settled,
 };
 use mayfly_control::projection::{
     BuildId, ProjectionSpec, ProjectionStore, SpecEvent, control, prepare,
@@ -80,6 +81,7 @@ fn should_subscribe_to_every_kind_a_projection_reacts_to_when_case_histories_are
         ("scale_sets", subscriptions::<ScaleSets>()),
         ("images", subscriptions::<Images>()),
         ("placements", subscriptions::<Placements>()),
+        ("open_registrations", subscriptions::<OpenRegistrations>()),
     ];
 
     // when
@@ -87,6 +89,56 @@ fn should_subscribe_to_every_kind_a_projection_reacts_to_when_case_histories_are
 
     // then
     assert!(missed.is_empty(), "{missed:?}");
+}
+
+#[test]
+fn should_keep_a_registration_row_only_when_it_is_not_settled() {
+    // given: every case history of the registration aggregate, decided events included
+    use mayfly_control::journal::StreamRevision;
+    use mayfly_control::projection::EventMeta;
+    use mayfly_control_domain::Aggregate as _;
+    use mayfly_control_domain::registration::RunnerRegistration;
+    let histories = histories::<RunnerRegistration>();
+
+    // when: each is folded through the projection as the store folds it
+    let mut ends = Vec::new();
+    for history in &histories {
+        let mut state = RunnerRegistration::initial();
+        let mut rows = std::collections::BTreeMap::new();
+        for (n, event) in history.iter().enumerate() {
+            state = RunnerRegistration::evolve(state, event);
+            let at = EventMeta {
+                revision: StreamRevision::new(u64::try_from(n).unwrap_or(0)),
+                recorded_at: Millis::new(0),
+            };
+            for change in OpenRegistrations::apply(&rows, event, &state, at) {
+                match change.row {
+                    Some(row) => rows.insert(change.suffix, row),
+                    None => rows.remove(&change.suffix),
+                };
+            }
+        }
+        ends.push((settled(state.phase), state.attempt_id, rows));
+    }
+
+    // then: a row, naming its attempt, exactly while the registration is not settled
+    for (is_settled, attempt, rows) in &ends {
+        match (is_settled, attempt) {
+            (false, Some(attempt)) => {
+                assert_eq!(rows.len(), 1, "{rows:?}");
+                assert!(rows.values().all(|row| row.attempt_id == *attempt));
+            }
+            _ => assert!(rows.is_empty(), "{rows:?}"),
+        }
+    }
+    assert!(
+        ends.iter().any(|(s, _, _)| *s),
+        "a settled history is covered"
+    );
+    assert!(
+        ends.iter().any(|(s, a, _)| !*s && a.is_some()),
+        "an open history is covered"
+    );
 }
 
 /// A journal that commits a copy of the last event to the stream it is asked to read, right before

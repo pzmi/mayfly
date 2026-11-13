@@ -212,6 +212,22 @@ where
         self.local().last_sweep.clone()
     }
 
+    /// When the last listing of every runner was asked of GitHub (answered or not): what P14's
+    /// hourly budget counts from. A daemon keeps it across its runs ([`Self::seed_listing`]).
+    #[must_use]
+    pub fn last_listing(&self) -> Option<Millis> {
+        self.local().last_listing
+    }
+
+    /// Starts the budget from `at`, the last listing a previous manager of this process asked
+    /// for, so a new run (a link that flapped) does not list again within the hour; a later
+    /// listing already known here is kept. Pinned by
+    /// `tests/store/registration.rs::should_list_at_most_once_an_hour_when_a_new_manager_is_seeded`.
+    pub fn seed_listing(&self, at: Option<Millis>) {
+        let mut local = self.local();
+        local.last_listing = local.last_listing.max(at);
+    }
+
     /// Asks for the removal of `attempt`'s journaled runner when its VM is gone, and lets the
     /// manager make it: `None` when the runner is live (or already being removed), else whether
     /// it is deregistered now.

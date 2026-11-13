@@ -175,6 +175,10 @@ pub struct Notifier {
     pub placement_relay: Kicks,
     /// The terms policy, P4 (CP-08).
     pub terms: Kicks,
+    /// The registration manager's worker (RT-07).
+    pub registration: Kicks,
+    /// The job facts' worker, P12 (RT-07).
+    pub job_facts: Kicks,
     /// Terminal mode's graceful stop (RT-05a): it reads the host's leases again after a commit.
     pub stop: Kicks,
     /// The reconciler's wake while the run stops (RT-05a): any commit, so a lease is released
@@ -212,6 +216,8 @@ impl Notifier {
             placement: Kicks::new(KICK_CAPACITY),
             placement_relay: Kicks::new(KICK_CAPACITY),
             terms: Kicks::new(KICK_CAPACITY),
+            registration: Kicks::new(KICK_CAPACITY),
+            job_facts: Kicks::new(KICK_CAPACITY),
             stop: Kicks::new(KICK_CAPACITY),
             stopping: Kicks::new(KICK_CAPACITY),
             follow: broadcast::channel(FOLLOW_CAPACITY).0,
@@ -250,6 +256,8 @@ impl StoreNotifier for Notifier {
         self.placement.committed(commit);
         self.placement_relay.committed(commit);
         self.terms.committed(commit);
+        self.registration.committed(commit);
+        self.job_facts.committed(commit);
         self.stop.committed(commit);
         self.stopping.committed(commit);
         if self.follow.receiver_count() > 0 {
@@ -357,6 +365,8 @@ mod tests {
             std::slice::from_ref(&stream)
         );
         assert_eq!(notifier.terms.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.registration.take(), std::slice::from_ref(&stream));
+        assert_eq!(notifier.job_facts.take(), std::slice::from_ref(&stream));
         assert_eq!(notifier.stop.take(), std::slice::from_ref(&stream));
         assert_eq!(notifier.stopping.take(), [stream]);
         assert!(notifier.prepared.take().is_empty());

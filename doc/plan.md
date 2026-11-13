@@ -771,6 +771,11 @@ not read or disagrees with the deployment (another repository than `[images] rep
 guest than `guest_os`, a runner pin that contradicts another pin of the package, two manifests for
 one digest), adds each manifest's runner pin to the data plane's pin table (so `[images.runners]`
 is optional), and at every run registers each pool's image, records it verified and pins the pool.
+As built (RT-07, ADR 0091 decisions 11 and 12; owner, 2026-11-13): `[github]` takes the optional
+`api_url` and `web_url`, github.com's when absent, set for GHES (`https://<host>/api/v3`,
+`https://<host>`) or to a fake's loopback base in tests; only `https`, or plain `http` to a
+loopback host, is accepted. A pool's scale set is named after the pool, in the runner group
+`Default`, with its name as its one label.
 As built (RT-03): `mayfly` reaches `mayflyd` over its socket: `<state_dir>/mayfly.sock` when
 `state_dir` is configured, else ADR 0091 decision 5's place (`<state>/mayfly.sock` on Linux
 without an absolute `$XDG_RUNTIME_DIR`; on macOS, a default too long for a socket address falls

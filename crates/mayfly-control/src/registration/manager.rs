@@ -27,6 +27,9 @@ use super::{
 use crate::delivery::{Consumer, ConsumerError, Delivery};
 use crate::github::{Failure, RemovalOutcome, RunnerRegistry, ScaleSetApi};
 use crate::journal::{Journal, MAX_PAGE, StreamId, StreamRevision};
+use crate::projection::ProjectionStore;
+use crate::projection::views::{Attempts, OpenRegistrations};
+use crate::queries::all_rows;
 use crate::sessions::HostSessions;
 use crate::store::{
     AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier, decode_event,
@@ -439,9 +442,20 @@ where
     /// failed): P10's listing by name for an unknown issue, then its
     /// steps (a removal GitHub did not answer, a busy runner's backoff, the online deadline, a
     /// pending retirement). The supervision tree runs it at most once a minute (RT-07).
-    pub async fn pass(&self) -> PassReport {
+    ///
+    /// It reads only the registrations not settled (the `open_registrations` projection) and
+    /// the attempts in a phase whose retirement may still wait on a settled registration
+    /// (`attempts` rows activating, listening, backing off, finished or quarantined), never
+    /// every registration stream ever written (RT-07, CP-05's note); an attempt with no
+    /// registration stream is left to the consumer, as before. The store must keep the control
+    /// projections (`crate::projection::control`). Pinned by
+    /// `tests/store/registration.rs::should_skip_a_settled_registration_when_its_attempt_needs_nothing`.
+    pub async fn pass(&self) -> PassReport
+    where
+        J: ProjectionStore,
+    {
         let mut report = PassReport::default();
-        let attempts = match self.registration_attempts().await {
+        let attempts = match self.pass_candidates().await {
             Ok(attempts) => attempts,
             Err(code) => {
                 report.failed.push((AttemptId::from_u128(0), code));
@@ -451,10 +465,12 @@ where
         for attempt in attempts {
             match self
                 .store
-                .load::<RunnerRegistration>(&attempt.to_string())
+                .load_with_head::<RunnerRegistration>(&attempt.to_string())
                 .await
             {
-                Ok(r) if matches!(r.phase, Phase::Deregistered | Phase::Absent) => {
+                // no registration stream: the consumer's, as before the projection
+                Ok((_, None)) => continue,
+                Ok((r, _)) if matches!(r.phase, Phase::Deregistered | Phase::Absent) => {
                     match self.store.load::<Attempt>(&attempt.to_string()).await {
                         Ok(a) if !retirement_pending(&a) && !retirable(&a) => continue,
                         Ok(_) => {}
@@ -491,6 +507,34 @@ where
             }
         }
         report
+    }
+
+    /// The pass's candidates: every registration not settled, and every attempt whose
+    /// retirement may still wait on its registration, in id order without repeats.
+    async fn pass_candidates(&self) -> Result<Vec<AttemptId>, &'static str>
+    where
+        J: ProjectionStore,
+    {
+        let journal = self.store.journal();
+        let open = all_rows::<OpenRegistrations, J>(journal)
+            .await
+            .map_err(|_| "projection_unreadable")?;
+        let live = all_rows::<Attempts, J>(journal)
+            .await
+            .map_err(|_| "projection_unreadable")?;
+        let mut candidates: BTreeSet<AttemptId> =
+            open.into_iter().map(|(_, row)| row.attempt_id).collect();
+        candidates.extend(
+            live.into_iter()
+                .filter(|(_, row)| {
+                    matches!(
+                        row.phase.as_str(),
+                        "activating" | "listening" | "backoff" | "finished" | "quarantined"
+                    )
+                })
+                .map(|(_, row)| row.attempt_id),
+        );
+        Ok(candidates.into_iter().collect())
     }
 
     /// Every attempt with a registration stream, in the journal's key order.

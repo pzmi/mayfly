@@ -27,6 +27,13 @@
 //! the fake's invocation log (its documented `fault` record), and whose file they remove before
 //! anything else runs `tart stop` (`placement::Unfaulted`).
 //!
+//! GitHub (RT-07, `mod github` and the mint in `mod placement`): every world's `[github]
+//! api_url` is a loopback port where nothing serves, so no test reaches GitHub; a test about
+//! GitHub serves `mayfly-fake-github` in process on a thread of its own ([`ServedGithub`]),
+//! points the config at it and hands the daemon the App key the fake made, through the `env:`
+//! reference. Those tests wait by a bounded poll on the fake's own counts, never a log line,
+//! and read the journal once the daemon exited.
+//!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least: `mayfly` runs each VM's
 //! shim).
@@ -95,6 +102,20 @@ struct World {
     places: Places,
     /// The CA file `mayflyd` trusts through `SSL_CERT_FILE`, when it is given one.
     trust: Option<PathBuf>,
+    /// The App key `MAYFLY_APP_KEY` holds: [`SECRET`], which never parses as a key, unless a
+    /// test serves a fake GitHub ([`World::serve_github`]).
+    app_key: Option<String>,
+    /// The config's `api_url` until a test serves a fake GitHub ([`no_github`]).
+    api_url: String,
+}
+
+/// The `api_url` of every world's config: a loopback port bound and released here, where
+/// nothing serves, so a test that is not about GitHub never reaches it (and [`SECRET`] never
+/// parses as a key anyway).
+fn no_github() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    format!("http://127.0.0.1:{port}")
 }
 
 const POOL: &str = "lin";
@@ -176,6 +197,8 @@ impl World {
             env,
             places,
             trust: None,
+            app_key: None,
+            api_url: no_github(),
         };
         private_dir(&world.path("bin"));
         private_dir(&world.path("tmp"));
@@ -203,6 +226,7 @@ impl World {
         };
         world.write_manifest(&format!("{repository}@{}", digest('a')));
         let manifest = world.manifest().display().to_string();
+        let github_extra = format!("api_url = \"{}\"\n", world.api_url);
         let config = format!(
             r#"schema_version = 1
 {state}
@@ -212,7 +236,7 @@ organisation = "example-org"
 app_client_id = "Iv1.0123456789abcdef"
 installation_id = 1
 private_key = "env:MAYFLY_APP_KEY"
-
+{github_extra}
 {host}
 {provider}
 {images}
@@ -313,6 +337,12 @@ max_running = 2
         serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
     }
 
+    /// `mayfly --config <config> doctor --json` against the running daemon: its report, parsed
+    /// (`tart` is not on the CLI's path here, so that check fails and the exit is 1).
+    fn doctor(&self) -> Value {
+        doctor_of(&self.config())
+    }
+
     /// [`World::try_status`], which must answer.
     fn status(&self) -> Value {
         let status = self.try_status();
@@ -339,19 +369,65 @@ max_running = 2
         command
             .env_clear()
             .env("PATH", self.path("bin"))
-            .env("MAYFLY_APP_KEY", SECRET)
+            .env("MAYFLY_APP_KEY", self.app_key.as_deref().unwrap_or(SECRET))
             .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
             .envs(self.trust.as_ref().map(|ca| ("SSL_CERT_FILE", ca)))
             .args(args);
         command
     }
 
-    /// Starts `mayflyd`.
+    /// Points the config's `[github]` at `github` and hands the daemon its App key.
+    fn serve_github(&mut self, github: &ServedGithub) {
+        let config = std::fs::read_to_string(self.config()).expect("the config");
+        let line = format!("api_url = \"{}\"", self.api_url);
+        assert!(config.contains(&line), "{config}");
+        std::fs::write(
+            self.config(),
+            config.replace(&line, &format!("api_url = \"{}\"", github.base)),
+        )
+        .expect("the config");
+        self.app_key = Some(github.keys.private_pem.clone());
+    }
+
+    /// Puts the served fake's App key in a `0600` file of a `0700` directory and points the
+    /// config's `private_key` at it (`file:`): an in-process daemon reads this process's
+    /// environment, which a test does not change.
+    fn key_in_file(&self) {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = self.path("secrets");
+        private_dir(&dir);
+        let key = dir.join("app-key.pem");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key)
+            .expect("the key file");
+        file.write_all(self.app_key.as_deref().expect("a served key").as_bytes())
+            .expect("the key");
+        let config = std::fs::read_to_string(self.config()).expect("the config");
+        let line = "private_key = \"env:MAYFLY_APP_KEY\"";
+        assert!(config.contains(line), "{config}");
+        std::fs::write(
+            self.config(),
+            config.replace(line, &format!("private_key = \"file:{}\"", key.display())),
+        )
+        .expect("the config");
+    }
+
+    /// Where [`World::start`] writes the daemon's stderr.
+    fn log(&self) -> PathBuf {
+        self.path("mayflyd.stderr")
+    }
+
+    /// Starts `mayflyd`, its stderr to [`World::log`].
     fn start(&self) -> Daemon {
+        let log = std::fs::File::create(self.log()).expect("the daemon's log");
         let mut child = self
             .mayflyd(&["--config", &self.config().display().to_string()])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .expect("start mayflyd");
         let stdout = child.stdout.take().expect("stdout");
@@ -414,6 +490,174 @@ impl Drop for Daemon {
             let _ = self.child.wait();
         }
     }
+}
+
+/// [`World::doctor`] for the config at `config`, from any thread.
+fn doctor_of(config: &Path) -> Value {
+    let output = Command::new(sibling("mayfly"))
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
+        .args([
+            "--config",
+            &config.display().to_string(),
+            "doctor",
+            "--json",
+        ])
+        .output()
+        .expect("run mayfly");
+    serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
+}
+
+/// `mayfly-fake-github` served on a loopback port by a thread of its own, whose runtime lives as
+/// long as it does; its service and queue URLs are its own base, so `mayflyd` reaches every
+/// route over the socket. Dropped, it stops the server and joins the thread: test support that
+/// owns a live thread stops it.
+struct ServedGithub {
+    fake: mayfly_fake_github::FakeGithub,
+    base: String,
+    keys: mayfly_fake_github::AppKeyPair,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The world's App and installation, as its config names them.
+const APP_CLIENT_ID: &str = "Iv1.0123456789abcdef";
+const ORGANISATION: &str = "example-org";
+
+impl ServedGithub {
+    /// The fake with `knobs`, the world's App installed in its organisation with the
+    /// self-hosted runners permission, and a key pair made for it.
+    fn start(knobs: mayfly_fake_github::Knobs) -> Self {
+        use mayfly_fake_github::{FakeConfig, FakeGithub, FakeServer, Scope};
+        let keys = mayfly_fake_github::generate_app_key();
+        let (public, private) = (keys.public_pem.clone(), keys.private_pem.clone());
+        let (made, received) = mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("the fake's runtime");
+            runtime.block_on(async move {
+                let mut fake = None;
+                let server = FakeServer::start_with(|base| {
+                    let built = FakeGithub::with_knobs(
+                        FakeConfig {
+                            app_client_id: APP_CLIENT_ID.to_owned(),
+                            app_public_key_pem: public,
+                            installation_id: 1,
+                            scope: Scope::Organization(ORGANISATION.to_owned()),
+                            web_base: "https://github.com".to_owned(),
+                            service_url: format!("{base}/service"),
+                            admin_token_lifetime_secs: 3600,
+                            admin_token_key_pem: private,
+                            permissions: [
+                                ("metadata", "read"),
+                                ("organization_self_hosted_runners", "write"),
+                            ]
+                            .into_iter()
+                            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                            .collect(),
+                        },
+                        knobs,
+                        std::sync::Arc::new(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                        }),
+                    );
+                    fake = Some(built.clone());
+                    built
+                })
+                .await
+                .expect("the fake's port");
+                let _ = made.send((fake.expect("the fake"), server.base_url()));
+                let _ = stopped.await;
+                let _ = server.stop().await;
+            });
+        });
+        let (fake, base) = received.recv_timeout(BOUND).expect("the fake serving");
+        Self {
+            fake,
+            base,
+            keys,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ServedGithub {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Knobs for a daemon test: GHES's offer flow (an offer is made whatever the advertised
+/// capacity, and an acquired one is a trusted job waiting: CP-09's grant), and a poll held one
+/// second so the listener's loop turns quickly.
+fn daemon_knobs() -> mayfly_fake_github::Knobs {
+    mayfly_fake_github::Knobs {
+        flow: mayfly_fake_github::Flow::Acquire,
+        poll_hold: Duration::from_secs(1),
+        ..mayfly_fake_github::Knobs::default()
+    }
+}
+
+/// A job routed to the world's pool's scale set (labelled with its name, ADR 0040).
+fn pool_job(run_id: u64) -> mayfly_fake_github::JobSpec {
+    mayfly_fake_github::JobSpec {
+        owner: ORGANISATION.to_owned(),
+        run_id,
+        labels: vec![POOL.to_owned()],
+        ..mayfly_fake_github::JobSpec::default()
+    }
+}
+
+/// The events of `pool`'s scale-set stream.
+fn scale_set_events(
+    journal: &SqliteJournal,
+    pool: &str,
+) -> Vec<mayfly_control_domain::scaleset::ScaleSetEvent> {
+    let stream = stream_of::<mayfly_control_domain::scaleset::ScaleSet>(pool)
+        .expect("the scale set's stream");
+    block_on(journal.read_stream(&stream, None, None))
+        .map(|events| {
+            events
+                .iter()
+                .map(|e| decode_event(e).expect("a scale-set event"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the daemon wrote to stderr (its stdout holds only ready lines).
+fn daemon_output(world: &World) -> String {
+    std::fs::read_to_string(world.log()).unwrap_or_default()
+}
+
+/// Asserts that no secret of `github`'s reached `out`: the App's private key, any token the
+/// fake issued, a JIT config's encoding (ADR 0014).
+fn assert_no_secret(out: &str, github: &ServedGithub) {
+    let key_body: String = github
+        .keys
+        .private_pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .take(2)
+        .collect();
+    assert!(!key_body.is_empty());
+    assert!(!out.contains(&key_body), "the App key in the output");
+    assert!(!out.contains("PRIVATE KEY"), "a PEM in the output");
+    for token in github.fake.issued_tokens() {
+        assert!(!out.contains(&token), "a token in the output");
+    }
+    assert!(!out.contains("encoded_jit_config") && !out.contains("encodedJITConfig"));
 }
 
 /// The host run's events and the pool's state, read from the journal once the daemon exited.
@@ -1041,6 +1285,169 @@ fn should_refuse_to_start_when_a_pool_manifest_names_a_tag() {
         !world.state().join("journal.db").exists(),
         "nothing was started"
     );
+}
+
+/// `mayflyd`'s GitHub side over `mayfly-fake-github` (RT-07): the pool's listener, the reaper and
+/// `doctor`. The tests read the fake's own counts and world (the test's oracle, not a signal of
+/// the daemon's), wait for them by a bounded poll, and read the journal once the daemon exited.
+mod github {
+    use mayfly_control_domain::registration::ScaleSetId;
+    use mayfly_control_domain::scaleset::ScaleSetEvent;
+
+    use super::*;
+
+    #[test]
+    fn should_open_a_session_and_report_an_unrecognised_runner_when_github_serves_the_pool() {
+        // given: the App's organisation already holds the pool's scale set (an earlier run's),
+        // with a runner of mayfly's name shape that no registration recorded; a job for the pool
+        // is queued, which the fake offers nothing of while the scale set advertises no
+        // capacity (this world places no image)
+        let github = ServedGithub::start(daemon_knobs());
+        let set = github
+            .fake
+            .add_scale_set(POOL, "Default")
+            .expect("the pool's scale set");
+        let stray = github
+            .fake
+            .add_runner(set, "mf-left-behind")
+            .expect("a stray runner");
+        github.fake.queue_job(pool_job(7));
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        let daemon = world.start();
+        daemon.ready();
+
+        // when: the listener ensures the scale set and opens a session, and the reaper lists the
+        // runners at run start; then `doctor` asks for a sweep within the hour
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "a session opened and the runners listed, at the fake",
+            || {
+                let counts = github.fake.counts();
+                counts.sessions_created >= 1 && counts.runner_listings >= 1
+            },
+        );
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; counts: {:?}; world: {}; daemon: {}",
+                github.fake.counts(),
+                github.fake.state_json()["world"],
+                daemon_output(&world)
+            );
+        }
+        let doctor = world.doctor();
+        let listings = github.fake.counts().runner_listings;
+        let exit = daemon.terminate();
+
+        // then: ensured, opened and closed; nothing recorded or acquired without capacity; the
+        // stray runner reported by `doctor`, listed once and never removed; no secret in what
+        // the daemon wrote
+        assert_eq!(exit, Some(0));
+        let journal = open_journal(&world);
+        let events = scale_set_events(&journal, POOL);
+        assert!(
+            events.iter().any(
+                |e| matches!(e, ScaleSetEvent::ScaleSetEnsured(x) if x.github_id == ScaleSetId(set))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ScaleSetEvent::SessionOpened(_))),
+            "{events:?}"
+        );
+        assert_eq!(github.fake.counts().messages_delivered, 0);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ScaleSetEvent::SessionClosed(_) | ScaleSetEvent::SessionDeleted(_)
+            )),
+            "the session is closed on an orderly stop: {events:?}"
+        );
+        let reaper = doctor["checks"]
+            .as_array()
+            .and_then(|checks| checks.iter().find(|c| c["name"] == "reaper"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert_eq!(reaper["verdict"], "warn", "{doctor}");
+        assert!(
+            reaper["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("mf-left-behind")),
+            "{doctor}"
+        );
+        assert_eq!(
+            listings, 1,
+            "the doctor's ask listed nothing within the hour"
+        );
+        assert!(
+            github.fake.world().runners.contains_key(&stray),
+            "an unrecognised runner is never removed"
+        );
+        assert_no_secret(&daemon_output(&world), &github);
+        let tart_log = std::fs::read_to_string(world.tart_home().join("invocations.jsonl"))
+            .unwrap_or_default();
+        assert_no_secret(&tart_log, &github);
+    }
+
+    #[test]
+    fn should_list_once_when_a_second_run_starts_within_the_hour() {
+        // given: the fake serves the App's organisation; the daemon runs in this process, its
+        // key read from a file
+        let github = ServedGithub::start(daemon_knobs());
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        world.key_in_file();
+        let (cut, shutdown) = (SessionCut::default(), Shutdown::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let seen = std::sync::Mutex::new(None);
+
+        // when: the first run lists at its start; its link is cut and a second run starts
+        // within the hour; then `doctor` asks, answered only after the second run's own
+        // run-start sweep
+        let script = async {
+            let Some(first) = next_ready(&mut rx).await else {
+                return;
+            };
+            // the daemon runs in this task: wait off it, on a blocking thread
+            let fake = github.fake.clone();
+            tokio::task::spawn_blocking(move || {
+                mayfly_testkit_shared::poll::wait_until(
+                    BOUND,
+                    "the first run's listing, at the fake",
+                    || fake.counts().runner_listings >= 1,
+                );
+            })
+            .await
+            .expect("the first listing");
+            cut.cut();
+            let Some(second) = next_ready(&mut rx).await else {
+                return;
+            };
+            let config = world.config();
+            let doctor = tokio::task::spawn_blocking(move || doctor_of(&config))
+                .await
+                .expect("doctor");
+            let listings = github.fake.counts().runner_listings;
+            *seen.lock().expect("seen") = Some((first, second, doctor, listings));
+            shutdown.cancel();
+        };
+        let ran = in_process(&world, &cut, &shutdown, script, tx);
+
+        // then: two runs, one listing: P14's budget is the process's, not a run's
+        let (first, second, doctor, listings) = seen
+            .into_inner()
+            .expect("seen")
+            .unwrap_or_else(|| panic!("the daemon stopped early: {ran:?}"));
+        assert!(ran.is_ok(), "{ran:?}");
+        assert!(second.epoch > first.epoch, "a second run");
+        assert_eq!(listings, 1, "{doctor}");
+        assert!(
+            doctor.to_string().contains("the last sweep listed"),
+            "{doctor}"
+        );
+    }
 }
 
 /// A real placement under `mayflyd` (VER-09, ver §7.5). **Linux only, deliberately:** the
@@ -1879,5 +2286,153 @@ mod placement {
             !printed.iter().any(|l| l.contains("Ctrl-C again")),
             "{printed:?}"
         );
+    }
+
+    /// The registration events of `attempt` (none before its registration was requested).
+    fn registration_events(
+        journal: &SqliteJournal,
+        attempt: AttemptId,
+    ) -> Vec<mayfly_control_domain::registration::RegistrationEvent> {
+        let stream = stream_of::<mayfly_control_domain::registration::RunnerRegistration>(
+            &attempt.to_string(),
+        )
+        .expect("the registration's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|e| decode_event(e).expect("a registration event"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// How long the chain up to the launch may take (the pull, the preparation, the offer, the
+    /// grant, the mint), within the test runner's own bound (two minutes).
+    const TO_LAUNCH: Duration = Duration::from_secs(100);
+
+    /// The SHA-256 of every stdin the fake's guests read (each VM record's `guest_launches`):
+    /// the launcher's verify nonces and any config a launch delivered.
+    fn guest_stdins(world: &World) -> Vec<String> {
+        let dir = world.tart_home().join("vms");
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter_map(|p| std::fs::read(p).ok())
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .flat_map(|record| {
+                record["guest_launches"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|l| l["stdin_sha256"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn sha256_hex(text: &str) -> String {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn should_mint_once_and_deliver_the_config_to_the_guest_when_an_acquired_job_activates_an_attempt()
+     {
+        // given: the registry serves the pool's pinned image (as above); the App's organisation
+        // offers a job for the pool (GHES's flow), which the listener acquires: a trusted job
+        // waiting, for which the reconciler grants a prepared attempt (CP-09)
+        use mayfly_control_domain::registration::RegistrationEvent;
+        use mayfly_control_domain::scaleset::ScaleSetEvent;
+        let (image, registry) = registry();
+        let github = ServedGithub::start(daemon_knobs());
+        let mut world = serving(&registry, &image, true);
+        world.serve_github(&github);
+        let _reaped = Reaped(&world);
+        github.fake.queue_job(pool_job(9));
+        let (daemon, host) = pinned_run(&world);
+
+        // when: the listener records the offer's message and acquires the job; the activated
+        // attempt's runner is minted, and its config crosses the link to the guest launcher's
+        // stdin (LNK-02). Its removal on retirement is not driven here: nothing retires a
+        // listening attempt under `mayflyd` within the test's bound (no data-plane source of
+        // `RunnerExited` yet, the online deadline is two minutes, and Ctrl-C spares a listening
+        // runner until RT-05b); CP-05's component tests pin P11
+        let delivered = |stdins: &[String]| {
+            github
+                .fake
+                .issued_tokens()
+                .iter()
+                .map(|t| sha256_hex(t))
+                .any(|digest| stdins.contains(&digest))
+        };
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            TO_LAUNCH,
+            "a config minted and delivered to the guest, at the fakes",
+            || github.fake.counts().jit_configs >= 1 && delivered(&guest_stdins(&world)),
+        );
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; counts: {:?}; delivered: {}; status: {}",
+                github.fake.counts(),
+                delivered(&guest_stdins(&world)),
+                world.try_status()
+            );
+        }
+        let exit = daemon.terminate();
+
+        // then: the offer recorded and acquired; one mint, recorded issued once, its config
+        // delivered to one guest's stdin once; no secret in what the daemon wrote or ran
+        assert_eq!(exit, Some(0));
+        assert_eq!(github.fake.counts().jit_configs, 1, "minted once (I19)");
+        let journal = open_journal(&world);
+        let set_events = scale_set_events(&journal, POOL);
+        for (what, seen) in [
+            (
+                "a message recorded",
+                set_events
+                    .iter()
+                    .any(|e| matches!(e, ScaleSetEvent::MessageRecorded(_))),
+            ),
+            (
+                "an acquire observed",
+                set_events
+                    .iter()
+                    .any(|e| matches!(e, ScaleSetEvent::AcquireObserved(_))),
+            ),
+        ] {
+            assert!(seen, "{what}: {set_events:?}");
+        }
+        let registrations: Vec<Vec<RegistrationEvent>> = reserved_attempts(&journal, &host)
+            .into_iter()
+            .map(|a| registration_events(&journal, a))
+            .filter(|events| !events.is_empty())
+            .collect();
+        assert_eq!(registrations.len(), 1, "{registrations:?}");
+        let issued = registrations[0]
+            .iter()
+            .filter(|e| matches!(e, RegistrationEvent::RegistrationIssued(_)))
+            .count();
+        assert_eq!(issued, 1, "{registrations:?}");
+        let stdins = guest_stdins(&world);
+        let deliveries = github
+            .fake
+            .issued_tokens()
+            .iter()
+            .map(|t| sha256_hex(t))
+            .map(|digest| stdins.iter().filter(|s| **s == digest).count())
+            .sum::<usize>();
+        assert_eq!(deliveries, 1, "one config reached one guest's stdin, once");
+        assert_no_secret(&daemon_output(&world), &github);
+        let tart_log = std::fs::read_to_string(world.tart_home().join("invocations.jsonl"))
+            .unwrap_or_default();
+        assert_no_secret(&tart_log, &github);
     }
 }

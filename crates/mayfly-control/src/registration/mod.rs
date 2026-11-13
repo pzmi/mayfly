@@ -45,7 +45,7 @@
 //! its second half, a finished attempt whose job completed retired `job_done`, is a step here
 //! (GH-04); and the
 //! daemon's wiring (the GitHub client, the consumer, the pass and sweep timers, the
-//! [`ScaleSetDirectory`]) is RT-07's.
+//! [`ScaleSetDirectory`]) is `mayfly_composition::github` (RT-07).
 //!
 //! [`ScaleSetApi::generate_jit_config`]: crate::github::ScaleSetApi::generate_jit_config
 
@@ -67,8 +67,8 @@ use sha2::{Digest, Sha256};
 pub const REGISTRATION_MANAGER: &str = "registration_manager";
 
 /// The scale set serving each pool, as the journal records it: the registration manager's
-/// read of the `ScaleSet` streams (composition builds it over the `scale_sets` projection,
-/// RT-07; tests give a fixed one).
+/// read of the `ScaleSet` streams (composition keeps it from each pool's stream, refreshed by
+/// the pool's listener, RT-07; tests give a fixed one).
 pub trait ScaleSetDirectory: Send + Sync {
     /// The scale set serving `pool` and its session's health, if one is journaled.
     fn scale_set(&self, pool: &PoolName) -> Option<(ScaleSetId, SessionHealth)>;

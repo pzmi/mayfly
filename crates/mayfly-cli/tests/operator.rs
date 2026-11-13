@@ -84,6 +84,8 @@ organisation = "example-org"
 app_client_id = "Iv1.0123456789abcdef"
 installation_id = 1
 private_key = "env:MAYFLY_APP_KEY"
+# loopback, where nothing serves: no test reaches GitHub (and the key never parses)
+api_url = "http://127.0.0.1:9"
 
 [host]
 vm_slots = 2

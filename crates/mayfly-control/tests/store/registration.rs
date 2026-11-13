@@ -437,6 +437,31 @@ fn should_find_the_runner_by_name_on_the_second_listing_when_the_first_lagged() 
 }
 
 #[test]
+fn should_skip_a_settled_registration_when_its_attempt_needs_nothing() {
+    // given: attempt 1's lost mint found by name and removed (settled, its attempt retiring),
+    // and attempt 2 minted (open)
+    let w = fixture();
+    let m = w.manager();
+    w.activating(1);
+    w.api.lose_next_jit_answer();
+    block_on(m.step(attempt(1))).unwrap_or_else(|e| panic!("{e}"));
+    w.api.catch_up_listings();
+    let settling = block_on(m.pass());
+    w.activating(2);
+    block_on(m.step(attempt(2))).unwrap_or_else(|e| panic!("{e}"));
+
+    // when
+    let pass = block_on(m.pass());
+
+    // then: the pass read the open registration only (RT-07's `open_registrations`)
+    assert_eq!(settling.moved, vec![attempt(1)], "{settling:?}");
+    assert_eq!(w.registration(1).phase, Phase::Deregistered);
+    assert_eq!(pass.visited, 1, "{pass:?}");
+    assert!(pass.failed.is_empty(), "{pass:?}");
+    assert!(!pass.moved.contains(&attempt(1)), "{pass:?}");
+}
+
+#[test]
 fn should_record_absent_only_after_a_second_empty_listing_when_the_grace_passed() {
     // given: a run that died after its mint was sent and before its answer was recorded, and
     // GitHub never registered the runner
@@ -837,6 +862,32 @@ fn should_list_at_most_once_an_hour_when_sweeps_follow_each_other() {
     );
     assert!(daily.is_ok(), "{daily:?}");
     assert_eq!(w.api.runner_listings(), listed + 1);
+}
+
+#[test]
+fn should_list_at_most_once_an_hour_when_a_new_manager_is_seeded() {
+    // given: a first run's manager listed; a second run's manager is seeded with that listing
+    let w = fixture();
+    let first = w.manager();
+    block_on(first.sweep(SweepTrigger::RunStarted)).unwrap_or_else(|e| panic!("{e:?}"));
+    let listed = w.api.runner_listings();
+    let at = first.last_listing();
+    let restarted = JitBroker::new();
+    let second = w.manager_with(&restarted);
+
+    // when
+    second.seed_listing(at);
+    let run_started = block_on(second.sweep(SweepTrigger::RunStarted));
+    second.seed_listing(None);
+
+    // then: refused by the budget, nothing listed, the budget never moved back
+    assert!(
+        matches!(run_started, Err(SweepError::BudgetSpent { .. })),
+        "{run_started:?}"
+    );
+    assert_eq!(w.api.runner_listings(), listed);
+    assert_eq!(at, Some(NOW));
+    assert_eq!(second.last_listing(), at);
 }
 
 #[test]

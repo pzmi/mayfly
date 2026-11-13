@@ -5,7 +5,8 @@ Date: 2026-11-12
 ## Status
 
 Proposed. Extended 2026-11-12 (OPS-02) by the section "Image manifests and pinning",
-proposed with it.
+proposed with it. Extended 2026-11-13 (RT-07) by the section "The GitHub side", whose
+configuration keys and scale-set names the owner agreed (2026-11-13); proposed with it.
 
 ## Context
 
@@ -189,3 +190,92 @@ Numbered on from the decisions above.
   control plane reads them.
 - Several repositories per deployment: the image store and its directives name one; a protocol
   change for a case no operator has asked for.
+
+## The GitHub side (RT-07, 2026-11-13)
+
+Proposed with this record. Decisions 11 and 12 are the owner's (2026-11-13).
+
+### Context
+
+GH-02 and GH-03 built the client, CP-05 the registration manager and the reaper, GH-04 the
+listener and the job facts, and `mayflyd` built none of them. `[github]` names the App, its
+installation and its key, but not where GitHub is: the client needs a REST base and a web base
+(`AppConfig`), GHES lives elsewhere, and a test must point the daemon at `mayfly-fake-github`.
+The listener needs each pool's scale-set name, runner group and labels, which no pool key gives.
+
+### Decisions
+
+Numbered on from the decisions above.
+
+11. **`[github]` takes two optional keys, `api_url` and `web_url`** (owner, 2026-11-13). Absent,
+    they are github.com's (`https://api.github.com`, `https://github.com`); GHES sets both
+    (`https://<host>/api/v3`, `https://<host>`); a test sets `api_url` to the fake's loopback
+    base. Each must be `https`, or plain `http` to a loopback host, with no query, fragment or
+    user info (`mayfly_adapter_github::parse_base`, the rule of `credential_base_problem`): the
+    App's credentials are sent there. A refused value is not repeated in the report. An older
+    build refuses the keys like any unknown key. The decision test (`doc/philosophy.md` §8)
+    holds: nothing is sent anywhere but where the operator points, and the default is the
+    service the operator already chose by installing the App there (ADR 0036).
+12. **No new pool key for the scale set** (owner, 2026-11-13): a pool's scale set is named after
+    the pool, in the runner group `Default`, with the pool's name as its one label
+    (`crate::github::spec_of`; ADR 0040: the name is the label workflows use).
+13. **The GitHub side never holds a run back.** One client serves every pool's listener, the
+    registration manager and the reaper. Each run starts, once its recovery reported: one
+    listener per pool under a local lease (closed on the run's end, bounded at 10 s), the job
+    facts and the registration manager as durable consumers on their own workers, the manager's
+    pass once a minute, and the reaper's sweeps (at run start once every pool's scale set is
+    journaled, daily, when a session opens after 15 minutes or more without one, and on
+    `doctor`), at most one listing an hour whatever asks (P14), counted across the process's
+    runs: each listing asked, answered or not, is kept beside the reaper's report and seeds the
+    next run's manager, so a link that flaps never lists once per run. The manager's busy
+    backoffs and online deadlines start afresh each run, on purpose (a new run waits anew). A
+    removal a sweep asks for, `doctor`'s included, is journaled under the automation actor
+    `registration_manager`. None of this is part of the ready line's promise, which names the
+    host side's consumers (the attempt saga, the directive relay, the placement relay). The
+    run's end drops a GitHub call in flight rather than wait out its deadline: every save is
+    one unit, an unacked message comes again, and an unanswered mint is an unknown issue, never
+    minted again (I19); a `handle` so dropped keeps its delivery claim until the lease lapses
+    (about four minutes), so the next run's manager consumer may lag that long.
+14. **The manager's handle outlasts a mint**: its worker's handle deadline is the call budget
+    (two minutes, `Retry-After` waits included) and a minute more, under a lease a third
+    longer (CP-05's note).
+15. **The pass reads only what may still need it**: the new `open_registrations` projection (a
+    row per registration until it is `Deregistered` or `Absent`) and the `attempts` rows in a
+    phase whose retirement may still wait on its registration, instead of folding every
+    registration stream ever written once a minute (CP-05's note). The sweep still reads every
+    registration stream, at most once an hour.
+16. **`doctor` asks the run for a sweep** over the operator socket (`reaper`, an additive request
+    of API 1; an older daemon answers `unknown_command`, which `doctor` reports), waits at most
+    15 s, and shows the last report: the runners of mayfly's name shape that no registration
+    recorded, never removed (ADR 0029).
+
+### Consequences
+
+- RT-07 implements it: `mayfly-composition::github`, `config` (`api_url`, `web_url`),
+  `daemon`, `operator` (`reaper`, the `doctor` check); `mayfly-control`'s
+  `open_registrations` and the pass's read of it. Pinned by `tests/config.rs`
+  (`should_accept_every_key_when_the_full_fixture_is_parsed`,
+  `should_not_echo_a_refused_base_url_when_it_may_carry_a_credential`), `tests/daemon.rs`
+  (`github::should_open_a_session_and_report_an_unrecognised_runner_when_github_serves_the_pool`,
+  `placement::should_mint_once_and_deliver_the_config_to_the_guest_when_an_acquired_job_activates_an_attempt`,
+  `github::should_list_once_when_a_second_run_starts_within_the_hour`),
+  `tests/operator.rs::should_answer_the_last_sweep_when_doctor_asks_and_no_run_answers` and
+  `mayfly-control`'s `tests/store/registration.rs`
+  (`should_skip_a_settled_registration_when_its_attempt_needs_nothing`,
+  `should_list_at_most_once_an_hour_when_a_new_manager_is_seeded`).
+- Left open: recovery is still handed no GitHub view (every runner `unreachable`, RT-08); on
+  github.com's direct flow nothing is granted until GH-08 and GH-10 classify assignments; the
+  runner's removal on retirement is pinned at the component level only (nothing retires a
+  listening attempt under `mayflyd` within a test's bound yet: DP-09 observes a runner's exit); the assigned-jobs gap and the
+  link's lost configs have no gauge until RT-04's metrics.
+
+### Alternatives considered
+
+- One `server_url` key, the API base derived from it (the runner's own convention): one key
+  fewer, but a loopback fake or a GHES with an unusual path needs a special case.
+- A test-only override in the daemon's options: reaches neither an end-to-end run of the binary
+  nor GHES.
+- Pool keys `scale_set`, `runner_group` and `labels`: no operator has asked; addable later as
+  optional keys.
+- The reaper's first sweep at once: before the listeners journal the scale sets, our own
+  runners would read as foreign.

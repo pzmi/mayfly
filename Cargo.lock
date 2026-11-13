@@ -1188,6 +1188,7 @@ dependencies = [
 name = "mayfly-composition"
 version = "0.1.0"
 dependencies = [
+ "mayfly-adapter-github",
  "mayfly-adapter-host",
  "mayfly-adapter-link",
  "mayfly-adapter-secrets",
@@ -1198,6 +1199,7 @@ dependencies = [
  "mayfly-data",
  "mayfly-data-domain",
  "mayfly-domain",
+ "mayfly-fake-github",
  "mayfly-fake-registry",
  "mayfly-protocol",
  "mayfly-testkit",

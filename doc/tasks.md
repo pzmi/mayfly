@@ -215,6 +215,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | CP-09 | Activation grant: P9's `GrantActivation` and `BeginActivation` from the reconciler | CP-05, CP-03, KER-06G | opus | |
 | CP-10 | Start reserved leases: P2's driver in the reconciler pass | CP-03, CP-07, CP-09, VER-09 | opus | |
 | DP-08 | Image listing on the link: resolve `Unknown` placements after a restart | CP-07, VER-09 | opus | |
+| DP-09 | Observe a runner's exit: `RunnerExited` from the guest's runner status | DP-05, LNK-02, RT-07 | opus | |
 | DP-01 | Data-plane executor and observer, resource ledger, fake provider | KER-08 | opus | |
 | DP-02 | In-process link transport and link contract suite | KER-02 | sonnet | |
 | DP-03 | `mayfly-fake-tart` binary with fault knobs (landed) | FND-02 | sonnet | |
@@ -235,7 +236,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-07 | `mayflyd`'s GitHub wiring: the client, the registration manager and the reaper | CP-05, GH-04, RT-02 | sonnet | |
 | RT-08 | Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter` | RT-03, RT-07 | opus | |
 | RT-09 | A journal query by `recorded_at` for `mayfly events --since` | RT-03, ES-09 | sonnet | |
-| E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09, CP-10 | opus | ⛳ |
+| E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09, CP-10, DP-09 | opus | ⛳ |
 | GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
 | GH-02 | GitHub App auth, HTTP client, rate limits | RT-01, SEC-02, DEC-03 | sonnet | |
@@ -248,7 +249,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | GH-10 | Workflow-run lookup of assigned jobs and the cancel of refused runs | GH-02, KER-06G | sonnet | |
 | GH-08 | Trust on github.com: the trust config, the start-up checks, refusals wired | GH-03, GH-10, KER-06G, RT-01 | opus | |
 | GH-09 | (Withdrawn by GH-00S) Operator release of a refusal and the release window | — | — | |
-| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, GH-08, CP-05, CP-09, LNK-02, RT-07, E2E-01 | sonnet | ⛳ |
+| E2E-02 | Scale-set end to end, 100-job backlog on 2 slots | GH-04, GH-08, CP-05, CP-09, LNK-02, RT-07, E2E-01, DP-09 | sonnet | ⛳ |
 | GH-07 | Several organisations: one scale set per pool per organisation, one App | E2E-02, GH-08 | opus | |
 | LNK-01 | UDS transport and split control/data roles | DP-02, RT-02 | sonnet | |
 | LNK-02 | The JIT config on the link: the broker to the data plane's `LaunchStore`, model first | CP-05, DP-05, DP-02 | opus | |
@@ -1412,6 +1413,24 @@ and the materialisation of a `Ready` base from the same digest and runner is don
 inventory-based resolution of CP-07 carries the same window; the model reaches it and claims no
 exactness for a not-applied outcome.
 
+#### DP-09 Observe a runner's exit: `RunnerExited` from the guest's runner status
+Cites: plan §3.2, §6, §8; dm P11, P12, I14, I21; ADRs 0038, 0082; `formal/lifecycle.qnt`. Found at
+RT-07's review (2026-11-13): `ObservationKind::RunnerExited { vm_name, code }` exists, but
+nothing in `mayfly-data` calls `GuestTransport::runner_status` (only the testkit fakes do), so no
+runner's exit is ever observed: a `Busy` attempt never reaches `Finished`, and a `Listening` one
+leaves only by its online deadline or a stop. The observer polls `runner_status` for each VM it
+launched a runner in (each launch's VM, kept with the ledger's leases) on its interval and
+reports `RunnerExited{vm_name, code}` once per launch when the runner ended, through the inbox as
+every observation; an answer that cannot be read is `Unknown`, never an exit (plan §6). After a
+restart the data plane polls the VMs whose launch it adopted (ADR 0082: the guest keeps the
+runner's status), so an exit during the outage is observed late, never lost. Model first if the
+lifecycle's `runnerExits` step or its observation changes; otherwise state why the model already
+covers it.
+Accept: under `mayflyd` over fake-tart and fake-github, a launch whose fake-tart rule sets
+`job_ms` ends, `RunnerExited` is observed once, the attempt finishes, its runner is deregistered
+by id before its VM stops (P11: the daemon path RT-07 could not drive), the VM is deleted and the
+slot released; an unreadable status records nothing; after a restart a runner that ended during
+the outage is observed.
 #### CP-08 Terms policy P4
 Cites: dm P4, §6.2, §6.3; ADR 0024. Issue `ApplyPoolTerms` (`pool::terms`) to every host serving
 the pool on any `Pool` event that bumps `terms_revision` (configuration, pin, pause, resume, drain,
@@ -1948,6 +1967,9 @@ the reaper's report in `doctor` (RT-07).
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint
 (socket or loopback), redaction test feeding secrets through every log path.
 Accept: metric names and labels golden-tested; no id-valued label.
+Note (RT-07): the assigned-jobs gap (GH-04's note, `Polled::gap`) still has no gauge; export it
+per pool here. The GitHub client's `RequestMetrics` (`ScaleSetClient::auth().metrics()`) are
+held by `mayfly_composition::github::GithubSide::client` for the endpoint.
 DEC-01: the metrics of dm §8 (loopback HTTP endpoint), the quarantine ERROR event, nothing sent
 anywhere (ADR 0036).
 Note (DEC-07, ADR 0066 amended): a counter of vanished VMs, `mayfly_vms_vanished_total{pool,
@@ -2106,6 +2128,41 @@ manager. LNK-02's daemon-level launch moves here: a daemon test over fake-github
 which an activating attempt's minted config crosses the link and reaches the guest launcher's
 stdin only (fake-tart's VM record shows its length and SHA-256), appears in no output, log,
 journal row, argv or child environment, and a resend launches nothing new.
+Note (RT-07, as built; ADR 0091 decisions 11 to 16): `[github]` gained the optional `api_url`
+and `web_url` (github.com when absent; `https`, or plain `http` to loopback only; owner
+2026-11-13), and a pool's scale set is named after the pool, in the runner group `Default`,
+with its name as its one label (owner 2026-11-13: no new pool keys). `mayfly_composition::github`
+builds one `ScaleSetClient` (the App key asked of the daemon's `UriSecretProvider`), the
+`Directory` (each pool's scale set and session health, refreshed by its listener after every
+tick) and the `ReaperDesk`; each run (`GithubRun`) drives, once recovery reported, one listener
+per pool under a local lease with the reconciler's kicks (closed on the run's end, bounded at
+10 s; a fenced one stops), `JobFacts` and the `RegistrationManager` as durable consumers on their
+own workers (the manager's handle deadline is the mint's call budget plus a minute, its lease a
+third longer), the pass once a minute, and the sweeps: at run start once every pool's scale set
+is journaled, daily, after a session opens following 15 minutes or more without one, and on
+`doctor` (a new additive `reaper` request; `doctor`'s `reaper` check lists unrecognised runners).
+At most one listing an hour across the process's runs: each listing asked is kept on the reaper's
+desk and seeds the next run's manager (`seed_listing`); the busy backoffs and online deadlines
+start afresh each run. None is in the ready line's promise (the host side's consumers only). The pass reads the new `open_registrations` projection and
+the live attempts' rows, not every registration stream. The daemon holds the broker as
+`Daemon::broker` (`Arc<JitBroker>`), which LNK-02's link end shares. Pinned by
+`tests/daemon.rs::github::should_open_a_session_and_report_an_unrecognised_runner_when_github_serves_the_pool`
+(ensure, session, close on stop; the reaper's one listing; `doctor`'s unrecognised runner; no
+secret in the daemon's output; no capacity is advertised in that world, so nothing is offered)
+and, on Linux,
+`placement::should_mint_once_and_deliver_the_config_to_the_guest_when_an_acquired_job_activates_an_attempt`
+(GHES's offer flow: a recorded message, an acquired job, a granted attempt, one mint, its config
+on one guest launcher's stdin once, by SHA-256, and in no output: LNK-02's daemon-level launch).
+Not driven by a daemon test: the runner's removal on retirement (P11, pinned by CP-05's
+component tests), since nothing retires a listening attempt under `mayflyd` within the test
+runner's 120 s bound: no data-plane source of `RunnerExited` exists yet (fake-tart's `job_ms`
+ends a runner nobody observes), the online deadline is two minutes, and Ctrl-C spares a listening
+runner until RT-05b (DP-09 observes the exit). Also pinned:
+`github::should_list_once_when_a_second_run_starts_within_the_hour` (a link cut within the hour
+lists nothing more). The link's `DirectiveSender::configs_lost()` still has no reader (status or
+doctor: left for RT-04's metrics). Left open: recovery's GitHub
+view (RT-08: every runner still `unreachable`); github.com's direct flow grants nothing until
+GH-08 and GH-10 classify assignments; the assigned-jobs gap's gauge (RT-04: no metrics yet).
 
 #### RT-08 Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter`
 Cites: plan §10, §11; dm P20, I31; ADRs 0025, 0034, 0043; `formal/recovery.qnt`. Found at RT-03's
@@ -2402,6 +2459,8 @@ Accept: model scenarios and the negative control; attempt rules for the new tran
 probe); one whose exit never comes is probed after G and retired, its runner deregistered by id
 first; a busy answer withdraws nothing it should not (I21).
 
+Note (RT-07's review): DP-09 observes a runner's exit from the guest's status; this grace is the
+fallback when that observation misses an exit (a lost status, a runner that lingers).
 #### GH-02H GitHub transport hardening
 Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:
 (1) when the API base is `https://api.github.com`, the Actions service URL and every queue URL
@@ -2498,6 +2557,9 @@ public allowed repository behind a group that does not admit public repositories
 `reason`, `run_id`, from the lookup's command), and the reconciler starts and mints a runner only
 while `ScaleSetState::runner_may_start(idle)` holds (a test for each); the pool's settings reach
 the stream as `ApplyTrustPolicy`.
+Note (RT-07): `mayflyd` now drives the listener and `JobFacts`, so what is left here runs under
+the daemon as soon as the classification is recorded; until then a `JobAssigned` on github.com
+is recorded and never granted (RT-07's daemon test uses GHES's offer flow for its mint).
 Note (CP-09): the reconciler's half is built: its grant reads `runner_may_start` from the
 `scale_sets` projection's `waiting` and `active`
 (`crates/mayfly-control/tests/store/activation.rs::should_grant_nothing_when_no_runner_may_start`),
@@ -2568,6 +2630,10 @@ that no log, error or ledger sees; the data-plane end puts it in `LaunchStore` w
 recorded instance id and the directive's deadline before the executor sees the directive. A
 protocol minor (the next free one) adds the frame; an older peer gets none and the launch fails
 definitely, as now.
+Note (RT-07): the registration manager mints into the daemon's one broker (`Daemon::broker`),
+and RT-07's Linux daemon test
+(`placement::should_mint_once_and_deliver_the_config_to_the_guest_when_an_acquired_job_activates_an_attempt`)
+is the daemon-level launch: one minted config on one guest launcher's stdin.
 Accept: the link model's scenarios and a negative control (a resend that carries the config
 twice); the link contract over inproc and UDS: one delivery per handle, no secret in any other
 encoded frame or in a transport error; an end-to-end launch over fake-tart with the config on

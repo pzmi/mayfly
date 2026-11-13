@@ -4,6 +4,7 @@
 
 use mayfly_control::delivery::{DeliveryConfig, DeliveryWorker, Kicks};
 use mayfly_control::journal::{Journal, StreamId};
+use mayfly_control::projection::control;
 use mayfly_control::saga::sent_of;
 use mayfly_control::sessions::{HostSession, HostSessions};
 use mayfly_control::store::{AggregateStore, decode_event};
@@ -40,7 +41,9 @@ pub fn harness() -> Harness {
         SeededRng::new(1),
         Kicks::new(64),
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| panic!("{e}"))
+    // the registration manager's pass reads the control projections (RT-07)
+    .with_projections(control().unwrap_or_else(|e| panic!("{e}")));
     let store_clock = FakeClock::at(Millis::new(5_000));
     let worker = DeliveryWorker::new(
         journal.clone(),

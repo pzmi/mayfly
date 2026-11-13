@@ -158,7 +158,7 @@ fn check_base(field: &'static str, base: &Url) -> Result<(), ConfigError> {
     match credential_base_problem(base) {
         None => Ok(()),
         Some(BaseProblem::Insecure) => Err(ConfigError::InsecureBase { field }),
-        Some(BaseProblem::Shape) => Err(ConfigError::BaseShape { field }),
+        Some(BaseProblem::Shape | BaseProblem::NotUrl) => Err(ConfigError::BaseShape { field }),
     }
 }
 
@@ -169,6 +169,26 @@ pub enum BaseProblem {
     Insecure,
     /// A query, a fragment or user info.
     Shape,
+    /// Not a URL at all ([`parse_base`] only).
+    NotUrl,
+}
+
+/// A configured base URL as text (`[github] api_url` or `web_url`, RT-07), parsed and held to
+/// the rule of [`credential_base_problem`]: the one place the composition root turns the
+/// operator's text into a [`Url`] a credential may be sent to. Pinned by
+/// `config::tests::should_parse_a_base_only_when_a_credential_may_be_sent_to_it`.
+///
+/// # Errors
+/// The [`BaseProblem`]; it never repeats the text.
+pub fn parse_base(text: &str) -> Result<Url, BaseProblem> {
+    let url = Url::parse(text).map_err(|_| BaseProblem::NotUrl)?;
+    if url.cannot_be_a_base() || url.host().is_none() {
+        return Err(BaseProblem::NotUrl);
+    }
+    match credential_base_problem(&url) {
+        None => Ok(url),
+        Some(problem) => Err(problem),
+    }
 }
 
 /// The one rule for every URL a credential is sent to: the configured bases and the URLs the
@@ -277,6 +297,34 @@ mod tests {
                 "https://github.com/acme",
             ]
         );
+    }
+
+    #[test]
+    fn should_parse_a_base_only_when_a_credential_may_be_sent_to_it() {
+        // given
+        let cases = [
+            ("https://api.github.com", None),
+            ("https://ghes.example/api/v3", None),
+            ("http://127.0.0.1:8080", None),
+            ("http://localhost:8080", None),
+            ("http://api.github.com", Some(BaseProblem::Insecure)),
+            ("ftp://api.github.com", Some(BaseProblem::Insecure)),
+            ("https://api.github.com/?a=b", Some(BaseProblem::Shape)),
+            ("https://user@api.github.com", Some(BaseProblem::Shape)),
+            ("api.github.com", Some(BaseProblem::NotUrl)),
+            ("mailto:a@example.com", Some(BaseProblem::NotUrl)),
+            ("", Some(BaseProblem::NotUrl)),
+        ];
+
+        // when
+        let got: Vec<Option<BaseProblem>> = cases
+            .iter()
+            .map(|(text, _)| parse_base(text).err())
+            .collect();
+
+        // then
+        let expected: Vec<Option<BaseProblem>> = cases.iter().map(|(_, e)| *e).collect();
+        assert_eq!(got, expected);
     }
 
     #[test]

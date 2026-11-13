@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+mayfly-adapter-github = { version = "0.1.0", path = "../mayfly-adapter-github" }
 mayfly-adapter-host = { version = "0.1.0", path = "../mayfly-adapter-host" }
 mayfly-adapter-link = { version = "0.1.0", path = "../mayfly-adapter-link" }
 mayfly-adapter-secrets = { version = "0.1.0", path = "../mayfly-adapter-secrets" }
@@ -32,6 +33,7 @@ toml = "1.2.1"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+mayfly-fake-github = { path = "../mayfly-fake-github" }
 mayfly-fake-registry = { path = "../mayfly-fake-registry" }
 mayfly-testkit = { path = "../mayfly-testkit" }
 mayfly-testkit-data = { path = "../mayfly-testkit-data" }

@@ -38,7 +38,8 @@ pub fn served(request: &Request, result: Option<&Value>, as_json: bool, out: &mu
         Request::PoolDrain { pool } => done(out, &format!("pool {pool} draining")),
         Request::HostDrain { .. } => done(out, "host draining"),
         Request::HostResume => done(out, "host resumed"),
-        Request::Events { .. } => None,
+        // `doctor` reads it; no command of the CLI's prints it alone
+        Request::Events { .. } | Request::Reaper => None,
     };
     if printed.is_none() {
         json(result, out);

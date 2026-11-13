@@ -179,6 +179,13 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
     );
     assert_eq!(config.github.installation_id, 12_345_678);
     assert_eq!(config.github.private_key.scheme(), "keychain");
+    assert_eq!(
+        (
+            config.github.api_url.as_str(),
+            config.github.web_url.as_str()
+        ),
+        ("https://ghes.example/api/v3", "https://ghes.example/")
+    );
     assert_eq!(config.host.reserve_memory_mib, Some(8192));
     assert_eq!(config.host.reserve_disk_bytes(), 100 * 1024 * 1024 * 1024);
     assert_eq!(config.host.reserve_cpus, Some(3));
@@ -309,6 +316,14 @@ fn should_apply_the_defaults_when_the_optional_keys_are_absent() {
         config.github.scope,
         GithubScope::Organisation { .. }
     ));
+    assert_eq!(
+        (
+            config.github.api_url.as_str(),
+            config.github.web_url.as_str()
+        ),
+        ("https://api.github.com/", "https://github.com/"),
+        "github.com when absent (owner, 2026-11-13)"
+    );
 }
 
 #[test]
@@ -349,6 +364,47 @@ fn should_not_echo_a_pasted_secret_when_the_reference_is_refused() {
         assert!(report.contains("github.private_key"), "{report}");
         assert!(!report.contains("SYNTHETIC"), "{report}");
     }
+}
+
+#[test]
+fn should_not_echo_a_refused_base_url_when_it_may_carry_a_credential() {
+    // given: URLs an operator might paste with a credential in them
+    let pasted = [
+        "https://user:SYNTHETIC@api.example.com",
+        "https://api.example.com/?token=SYNTHETIC",
+        "http://SYNTHETIC.example.com",
+    ];
+    for value in pasted {
+        let text = minimal().replacen(
+            "installation_id = 12345678",
+            &format!("installation_id = 12345678\napi_url = \"{value}\""),
+            1,
+        );
+        // when
+        let report = Config::parse(&text).unwrap_err().to_string();
+        // then
+        assert!(report.contains("github.api_url"), "{report}");
+        assert!(!report.contains("SYNTHETIC"), "{report}");
+    }
+}
+
+#[test]
+fn should_refuse_a_base_url_when_it_is_not_a_string() {
+    // given
+    let text = minimal().replacen(
+        "installation_id = 12345678",
+        "installation_id = 12345678\napi_url = 443",
+        1,
+    );
+
+    // when
+    let errors = errors_of(&text);
+
+    // then
+    assert_eq!(
+        errors,
+        [("github.api_url".to_owned(), ConfigErrorKind::WrongType)]
+    );
 }
 
 #[test]
@@ -513,6 +569,21 @@ fn should_refuse_each_bad_value_when_it_is_outside_its_range_or_shape() {
             "installation_id = 12345678",
             "installation_id = -5",
             "github.installation_id",
+        ),
+        (
+            "installation_id = 12345678",
+            "installation_id = 12345678\napi_url = \"http://api.example.com\"",
+            "github.api_url",
+        ),
+        (
+            "installation_id = 12345678",
+            "installation_id = 12345678\napi_url = \"https://api.example.com/?token=x\"",
+            "github.api_url",
+        ),
+        (
+            "installation_id = 12345678",
+            "installation_id = 12345678\nweb_url = \"ghes.example\"",
+            "github.web_url",
         ),
         (
             "tart_home = \"/var/lib/mayfly/tart\"",

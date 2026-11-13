@@ -78,6 +78,9 @@ pub enum Request {
         #[serde(default)]
         since_secs: Option<u64>,
     },
+    /// `mayfly doctor`'s ask of the reaper (RT-07): a sweep within P14's hourly budget, then
+    /// [`Reaper`]. An older daemon answers `unknown_command`.
+    Reaper,
 }
 
 /// The longest history `events --since` reads: seven days. Reading history enumerates every
@@ -112,6 +115,7 @@ pub const COMMANDS: &[&str] = &[
     "host_drain",
     "host_resume",
     "events",
+    "reaper",
 ];
 
 /// Why a request was not served.
@@ -203,9 +207,10 @@ pub struct RunStatus {
     /// aggregate's phase).
     pub phase: String,
     /// **The run's ready signal**: `true` once this run reported its ready line, with exactly
-    /// the ready line's promise (`mayfly_composition::daemon::Ready`: recovery finished, every
-    /// durable consumer caught up once, one terms pass completed); `false` before it and from
-    /// the start of every later run until that run's line. It is not derived from `phase`:
+    /// the ready line's promise (`mayfly_composition::daemon::Ready`: recovery finished, the
+    /// host side's consumers caught up once (the attempt saga, the directive relay and the
+    /// placement relay; not the GitHub side's), one terms pass completed); `false` before it and
+    /// from the start of every later run until that run's line. It is not derived from `phase`:
     /// `phase` reads `operating` as soon as recovery completed, before the consumers and the
     /// terms pass that `ready` also waits for, so wait on `ready`, never on `phase`.
     pub ready: bool,
@@ -421,4 +426,48 @@ pub fn pretty<T: Serialize>(value: &T) -> String {
 #[must_use]
 pub fn compact<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+/// `reaper`: the reaper's last sweep of GitHub's runners (P14, RT-07), kept across runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaper {
+    /// The last sweep that listed, if one did since the daemon started.
+    #[serde(default)]
+    pub last: Option<Sweep>,
+    /// The fixed code of the last listing that failed after it (`unavailable`, `credentials`,
+    /// ...): cleared by the next one that lists.
+    #[serde(default)]
+    pub failure: Option<String>,
+}
+
+/// One sweep's report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sweep {
+    /// What started it: `run_started`, `after_outage`, `daily` or `doctor`.
+    pub trigger: String,
+    /// When its listing was taken, Unix milliseconds.
+    pub at_ms: u64,
+    /// The runners listed.
+    pub listed: u64,
+    /// Recorded runners whose VM is gone, removed by their ids.
+    pub deregistered: u64,
+    /// Recorded runners whose VM is gone, whose removal GitHub has not settled yet.
+    pub pending: u64,
+    /// Runners of mayfly's name shape that no registration recorded: reported, never removed
+    /// (ADR 0029).
+    pub unrecognised: Vec<UnrecognisedRunner>,
+    /// Runners of another name shape or another scale set, left alone.
+    pub foreign: u64,
+}
+
+/// A runner of mayfly's name shape that no registration recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnrecognisedRunner {
+    /// GitHub's runner id.
+    pub id: u64,
+    /// Its name, as GitHub listed it.
+    pub name: String,
+    /// Its scale set's id, when the listing said.
+    #[serde(default)]
+    pub scale_set: Option<u64>,
 }

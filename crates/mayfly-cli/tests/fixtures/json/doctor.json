@@ -34,6 +34,11 @@
       "name": "desync",
       "verdict": "ok",
       "detail": "no VM vanished outside mayfly"
+    },
+    {
+      "name": "reaper",
+      "verdict": "warn",
+      "detail": "GitHub's runners have not been listed yet"
     }
   ]
 }

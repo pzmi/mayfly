@@ -8,6 +8,8 @@ repository = "example-repo"
 app_client_id = "Iv1.0123456789abcdef"
 installation_id = 12345678
 private_key = "keychain:mayfly/app-key"
+api_url = "https://ghes.example/api/v3"
+web_url = "https://ghes.example"
 
 [host]
 reserve_memory_mib = 8192

@@ -98,18 +98,24 @@
 //!
 //! # Seams left for later tasks
 //!
-//! GitHub (GH-02, GH-04, CP-05): the secrets are resolved by a provider built here
-//! ([`UriSecretProvider::from_process`], which withholds every `env:` name from children), and
-//! recovery is handed no GitHub view until a registration view exists, so every runner reads
-//! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
-//! by the link's data-plane end from the daemon's one [`JitBroker`] (LNK-02), empty until RT-07 mints. Image placement (CP-07): the
+//! GitHub (RT-07, `crate::github`): one client over `[github]`, its App key asked of a provider
+//! built here ([`UriSecretProvider::from_process`], which withholds every `env:` name from
+//! children); each run drives one listener per pool, the job facts and the registration manager
+//! as durable consumers, the manager's pass once a minute and the reaper's sweeps (at run start
+//! once the scale sets are journaled, daily, after a long outage, on `doctor`). Recovery is
+//! still handed no GitHub view, so every runner reads `unreachable` (never `absent`) and a held
+//! cleanup stays held (CP-04H; RT-08 draws it from the registrations and a listing); the data
+//! plane's [`LaunchStore`] is shared with the guest transport and filled by the link's
+//! data-plane end from the daemon's one [`JitBroker`] (LNK-02), which the registration manager
+//! mints into. Image placement (CP-07): the
 //! placement manager places every pool's pin (step 5) on this host and [`Placements`] follows
 //! its passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once
 //! the pool is active, pinned and its pin's breaker not tripped. The reconciler's pass is P2's
 //! driver (CP-10): it starts each reservation once its pin is materialised on this host, and
 //! the attempt saga then prepares its VM over the provider; a VM that becomes Prepared kicks a
 //! pass at once (`Notifier::prepared`), so a grant does not wait for the interval (nothing
-//! grants under `mayflyd` until a trusted job is recorded: GH-04, GH-10). Logging (RT-04),
+//! grants under `mayflyd` until a trusted job is recorded: on github.com's direct flow only
+//! once GH-08 and GH-10 classify assignments; an acquired GHES offer is one). Logging (RT-04),
 //! terminal mode over real jobs (deregistration and the Busy wait, RT-05b), the watchdog's
 //! `crash_loop` (OPS-05) and split roles (LNK-01) are separate tasks.
 
@@ -170,6 +176,7 @@ use crate::clocks::{AnchoredStoreClock, DataClock, OsRng, RandomObservationIds, 
 use crate::config::{Config, ConfigError, ConfigErrorKind, ConfigErrors, GuestOs, LoadError, Tier};
 use crate::details::{ConfigDetails, Placements};
 use crate::exit_code;
+use crate::github::{GithubRun, GithubSide, RunInputs};
 use crate::identity::{IdentityError, host_id, random_bytes};
 use crate::manifest::{self, Manifest};
 use crate::operator;
@@ -230,8 +237,9 @@ pub struct Options {
     pub env: PlatformEnv,
 }
 
-/// The ready report of a run: recovery completed (or safe mode reported), every consumer
-/// caught up once, and the terms policy (P4) passed once.
+/// The ready report of a run: recovery completed (or safe mode reported), the host side's
+/// consumers (the attempt saga, the directive relay and the placement relay) caught up once,
+/// and the terms policy (P4) passed once; the GitHub side's consumers are not waited for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ready {
     /// The host.
@@ -245,7 +253,9 @@ pub struct Ready {
 impl std::fmt::Display for Ready {
     /// The ready line: `mayflyd ready host=<id> epoch=<n> mode=<normal|safe>`. Its promise:
     /// start-up recovery of this run has finished (admission opened, or safe mode reported) and
-    /// every durable consumer has caught up once (its first `catch_up` returned), and then one
+    /// every durable consumer of the host's side (the attempt saga, the directive relay and the
+    /// placement relay) has caught up once (its first `catch_up` returned; the GitHub side's
+    /// consumers, RT-07, are not waited for: GitHub never holds a run back), and then one
     /// pass of the terms policy completed (CP-08, `TermsReport::complete`): every pool was read
     /// and every pool's terms due on this host were applied at the pool's revision as that pass
     /// last read it, or refused by `Host` (an older revision than it holds, for one); in safe
@@ -920,8 +930,11 @@ struct Daemon<'a> {
     /// `true` from just before a run's ready line until the next run starts: `status`'s
     /// `run.ready`.
     readied: watch::Sender<bool>,
+    /// The GitHub client, the scale-set directory, the reaper's desk and the listeners' leases,
+    /// kept across runs (RT-07).
+    github: GithubSide,
     /// The minted JIT configs held for their launch, which each run's control-plane link end
-    /// takes from (LNK-02); RT-07 shares it with the registration manager.
+    /// takes from (LNK-02) and the registration manager mints into (RT-07).
     broker: Arc<JitBroker>,
 }
 
@@ -987,10 +1000,12 @@ pub async fn run_with(
     .map_err(DaemonError::Socket)?;
     let journal_path = state_dir.join("journal.db");
     let host = host_id(state_dir, &journal_path).map_err(DaemonError::Identity)?;
-    let _secrets = UriSecretProvider::from_process(
+    let secrets = UriSecretProvider::from_process(
         std::slice::from_ref(&config.github.private_key),
         mayfly_adapter_secrets::DEFAULT_DEADLINE,
     );
+    let github = crate::github::client(&config.github, secrets)
+        .map_err(|_| DaemonError::Start("the GitHub client"))?;
     let journal = SqliteJournal::open(&journal_path, SqliteOptions::new(SystemClock.now()))
         .map_err(DaemonError::Journal)?;
     let (mut exec, floor, boot_id) = data_plane(&loaded, &options, &host).await?;
@@ -1031,6 +1046,7 @@ pub async fn run_with(
         store_clock: AnchoredStoreClock::now_anchored(),
         sizing,
         readied: watch::channel(false).0,
+        github: GithubSide::new(github),
         broker: Arc::new(JitBroker::new()),
     };
     let service = Service {
@@ -1041,6 +1057,7 @@ pub async fn run_with(
         ready: &daemon.readied,
         follow: &daemon.notifier.follow,
         operators: Operators::this_user(),
+        reaper: &daemon.github.reaper,
     };
     // the socket stops with the root (its post-stop wait is bounded like the runs', in
     // parallel with them) or once the runs ended for another reason
@@ -1481,6 +1498,25 @@ impl Daemon<'_> {
         let (planned_tx, planned) = watch::channel(false);
         let inbox = Inbox::new(&self.store, self.host.clone(), epoch).with_placements(index);
         let empty = BTreeMap::new();
+        // RT-07: the listeners, the job facts, the registration manager and the reaper
+        let github = GithubRun::new(RunInputs {
+            store: &self.store,
+            journal: &self.journal,
+            store_clock: self.store_clock,
+            notifier: &self.notifier,
+            side: &self.github,
+            broker: &self.broker,
+            host: &self.host,
+            pools: &self.config.pools,
+            sessions,
+            epoch,
+        })
+        .map_err(|_| DaemonError::Start("the random generator"))?;
+        let serve_github = {
+            let (recovered, cancel) = (recovered.clone(), run.signal());
+            let github = &github;
+            async move { github.serve(&recovered, &cancel).await }
+        };
 
         let forward = {
             let mut root = shutdown.signal();
@@ -1592,8 +1628,9 @@ impl Daemon<'_> {
                     }
                     saga_ok && relay_ok && placement_ok
                 };
-                // the ready line's promise: every consumer caught up once and, after them, one
-                // terms pass (P4) over the recovered journal
+                // the ready line's promise: the host side's consumers caught up once and, after
+                // them, one terms pass (P4) over the recovered journal (the GitHub side's
+                // consumers are not waited for)
                 let first = {
                     let catch_up = &catch_up;
                     move || async move {
@@ -1855,7 +1892,7 @@ impl Daemon<'_> {
             }
         };
 
-        let ((), ended, (), (), (), (), (), (), ()) = tokio::join!(
+        let ((), ended, (), (), (), (), (), (), (), ()) = tokio::join!(
             forward,
             observe,
             consume,
@@ -1864,7 +1901,8 @@ impl Daemon<'_> {
             place,
             apply_terms,
             terminal,
-            unknown
+            unknown,
+            serve_github
         );
         if matches!(ended, Ok(RunEnd::Shutdown)) {
             self.end_run(epoch).await;

@@ -42,6 +42,24 @@ impl FakeServer {
     /// When the port cannot be bound.
     pub async fn start_on(fake: FakeGithub, port: u16) -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+        Self::serve(listener, fake)
+    }
+
+    /// Binds a port the system picks on `127.0.0.1`, then serves the fake `build` makes from
+    /// its base URL (`http://127.0.0.1:<port>`), on the current runtime: a fake whose service
+    /// URL is its own base, so a client over a real socket reaches the Actions service through
+    /// it too (a daemon test, RT-07). Pinned by
+    /// `tests/wire/process.rs::should_serve_the_service_on_its_own_base_when_built_from_it`.
+    ///
+    /// # Errors
+    /// When the port cannot be bound.
+    pub async fn start_with(build: impl FnOnce(&str) -> FakeGithub) -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        Self::serve(listener, build(&base))
+    }
+
+    fn serve(listener: TcpListener, fake: FakeGithub) -> io::Result<Self> {
         let addr = listener.local_addr()?;
         let app = Router::new().fallback(serve).with_state(fake.clone());
         let (tx, rx) = oneshot::channel();
