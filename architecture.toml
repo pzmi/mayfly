@@ -168,8 +168,10 @@ mayfly-testkit = { serde = ["default", "derive"], serde_json = ["default"] }
 # ITF traces are JSON and the trace manifests TOML (ver section 6.2, VER-01).
 mayfly-conformance = { serde_json = ["default"], toml = ["default"] }
 # The link transports (plan section 3.3): bounded Tokio channels for inproc, JSON frames
-# (ADR 0010) encoded and decoded on every send, in process too.
-mayfly-adapter-link = { serde_json = ["default"], tokio = ["sync"] }
+# (ADR 0010) encoded and decoded on every send, in process too; serde derives the
+# deserialise-only reader of a launch frame's JIT config member (protocol 1.6, LNK-02), which
+# no Serialize type holds.
+mayfly-adapter-link = { serde = ["default", "derive"], serde_json = ["default"], tokio = ["sync"] }
 # The link contract suite (DP-02) runs each case on its own current-thread runtime with a paused
 # clock (rt, time, test-util), and reads and writes raw JSON frames (ADR 0010).
 mayfly-testkit-shared = { serde_json = ["default"], tokio = ["rt", "time", "test-util"] }

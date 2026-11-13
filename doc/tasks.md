@@ -2100,6 +2100,12 @@ metric: the control plane has none, so GH-04 reports it per poll and logs
 `assigned_jobs_gap_persists` once at WARN; export it as a gauge per pool (bounded labels: the
 pool, never a job id) with RT-04's metrics, so the operator's alarm is a metric rule, not a log
 search.
+Note (LNK-02, 2026-11-13): `mayflyd` already builds the one `JitBroker` (`Daemon::broker`) and
+hands it to each run's control-plane link end; give that same broker to the registration
+manager. LNK-02's daemon-level launch moves here: a daemon test over fake-github and fake-tart in
+which an activating attempt's minted config crosses the link and reaches the guest launcher's
+stdin only (fake-tart's VM record shows its length and SHA-256), appears in no output, log,
+journal row, argv or child environment, and a resend launches nothing new.
 
 #### RT-08 Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter`
 Cites: plan §10, §11; dm P20, I31; ADRs 0025, 0034, 0043; `formal/recovery.qnt`. Found at RT-03's
@@ -2542,6 +2548,11 @@ repository's job that runs (ADR 0090).
 Cites: plan §3.3. Length-prefixed JSON over a Unix socket; `mayflyd --role control|data`; link
 contract suite on UDS; e2e variant with two processes.
 Accept: killing the data-plane process alone is recovered by the control plane.
+Note (LNK-02): run the link contract's JIT config cases LK-17..19 over UDS too (the factory's
+`*_with_configs` methods); the config member is the endpoints', so the UDS wire carries it
+unchanged. Split roles read a directive's deadline through the handshake's clock offset, so the
+data plane's `LaunchStore` expiry (composition's `LAUNCH_EXPIRY_EVERY` tick, today on the
+control plane's clock, one host's clock under `--role all`) must read the same offset there.
 
 #### LNK-02 The JIT config on the link
 Cites: plan §3.1, §3.2 ("Secrets cross the link only as `SecretHandle`"); ADRs 0010, 0014,
@@ -2561,6 +2572,41 @@ Accept: the link model's scenarios and a negative control (a resend that carries
 twice); the link contract over inproc and UDS: one delivery per handle, no secret in any other
 encoded frame or in a transport error; an end-to-end launch over fake-tart with the config on
 the guest's stdin only.
+Amended at intake (2026-11-13, the orchestrator's choice): LNK-01's UDS wire is not on main and
+RT-07's minting is not either, so the link contract runs over inproc here and LNK-01 runs its
+config cases over UDS (its note); the end-to-end launch is a composition test over the in-process
+link, the Tart guest transport and fake-tart, and the daemon-level launch moves to RT-07 (its
+note).
+Note (LNK-02, as built): model first, `formal/link.qnt` gains the launch (id 3, held in safe
+mode), the broker (`cpMint`, single take in `relaySendWith`), the data plane's store (put in
+`dpDeliverWith` before anything else, only for its session's epoch, refused when used; keyed by
+the handle alone like `LaunchStore`; emptied when a session is entered and by `dpRestart`;
+`dpExpire`) and the 1.6 flag a hello offers; invariants `configSentOnce`,
+`configDeliveredOnce`, `configOnlyInItsEpoch`; scenarios `launchCarriesConfigOnceTest`,
+`resendAfterLostFrameCarriesNothingTest`, `duplicateConfigFramePutOnceTest`,
+`overtakenConfigExpiresTest`, `staleSessionConfigNeverDeliveredTest`,
+`heldConfigNeverCrossesSessionsTest`, `unsentConfigOfEarlierSessionDiscardedTest`, `olderPeerGetsNoConfigTest` and the negative control
+`resendCarryingConfigTwiceIsFlaggedTest` (`relaySendReplayingWith`, in no relation). Protocol 1.6
+(`LAUNCH_CONFIG`): the launch frame's `launch_config` member, written and read by
+`mayfly-adapter-link`'s codec by hand (a deserialise-only private struct, wrapped in `Secret` at
+once, read from directive frames only); the ports `LaunchConfigSource` (`JitBroker`) and
+`LaunchConfigSink` (`LaunchStore`, emptied by `discard_held` when a welcome opens a session);
+the endpoints' `with_launch_configs`; `Discards::configs`; the control plane takes only for a
+launch the data plane would put (an instance id, the session's epoch) and counts a config taken
+by a send that then failed or was cancelled (`DirectiveSender::configs_lost`; the launch then
+fails `no_config` and P13 deregisters); the data plane puts only from a frame written in 1.6 or
+newer. `LaunchStore` forgets a used handle `USED_GRACE` (10 min) after its deadline, so its
+memory is bounded. Link contract LK-17..19 over inproc: `ConfigStrippingLink` fails LK-17 and
+LK-18, `ConfigReplayingLink` LK-18, `ConfigLeakingLink` LK-19 alone (and the version-blind,
+lossy-close, deaf-close and corrupting doubles fail the config cases that need what they
+break). `mayflyd` holds one `JitBroker`
+(empty until RT-07) for each run's control-plane link end, gives the data-plane end the guest
+transport's `SharedLaunches`, and drops expired configs every 30 s on the control plane's clock
+(the planes' join is boxed beside that loop: inline, it overflowed a debug build's 2 MiB
+test-thread stack in three in-process daemon tests).
+`crates/mayfly-composition/tests/launch_link.rs` crosses a launch from the broker to fake-tart's
+launcher stdin. `mayfly-data-domain`'s `matrix/link.txt` regenerated deliberately (1.6 spoken,
+`welcome_e6_v1.7` the unspoken minor).
 
 ### Phase 5–6 — evidence
 

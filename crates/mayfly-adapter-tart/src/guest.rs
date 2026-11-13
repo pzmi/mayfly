@@ -139,6 +139,13 @@ impl<S: LaunchSecrets> TartGuestTransport<S> {
         }
     }
 
+    /// The JIT-config store this transport takes from: the one the link's data-plane end fills
+    /// (ADR 0082, LNK-02), which composition hands it.
+    #[must_use]
+    pub const fn secrets(&self) -> &S {
+        &self.secrets
+    }
+
     async fn exec(
         &self,
         vm: &OwnedVmName,

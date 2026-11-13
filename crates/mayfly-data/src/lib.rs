@@ -18,7 +18,7 @@ pub mod ports;
 pub mod redaction;
 
 pub use executor::{Config, EnterError, Executor, Ports, SessionEnd, StartError, Stats};
-pub use launch_store::{AlreadyHeld, LaunchBinding, LaunchStore};
+pub use launch_store::{AlreadyHeld, LaunchBinding, LaunchStore, USED_GRACE};
 /// The reading [`HostProbe::resources`] answers with, named apart from the port.
 pub use mayfly_data_domain::HostProbe as HostReading;
 pub use redaction::redact_log;

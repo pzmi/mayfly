@@ -28,7 +28,7 @@ impl ProtocolVersion {
 }
 
 /// The version this build writes when the session allows it.
-pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 5);
+pub const CURRENT: ProtocolVersion = ProtocolVersion::new(1, 6);
 
 /// The minor that added what the data plane cannot determine (ADR 0052: the refusal
 /// `capacity_unknown`, a capacity report's `unknown` dimensions, a listed VM's facts) and
@@ -67,6 +67,15 @@ pub const MEASURED_BASE_DISK: ProtocolVersion = ProtocolVersion::new(1, 4);
 /// resolves as before: a materialisation or an eviction only by its base's absence from the
 /// inventory, a pull only by its late answer.
 pub const IMAGE_LISTING: ProtocolVersion = ProtocolVersion::new(1, 5);
+
+/// The minor that added the JIT config on the link (LNK-02, ADR 0082): the frame of a
+/// `LaunchRunner` carries the config its handle names, taken once from the control plane's
+/// broker by the link's control-plane end and put into the data plane's store by its data-plane
+/// end before the directive is handed up. The member is written by the link adapter beside the
+/// frame's message, never through `Serialize`. A session below it carries none: the control plane
+/// takes nothing from its broker and the data plane, holding no config, fails the launch
+/// definitely, as before 1.6.
+pub const LAUNCH_CONFIG: ProtocolVersion = ProtocolVersion::new(1, 6);
 
 /// What this build speaks: the highest minor of each major, one entry per major.
 pub const SUPPORTED: &[ProtocolVersion] = &[CURRENT];

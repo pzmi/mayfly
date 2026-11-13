@@ -171,6 +171,21 @@ Versioned, transport-agnostic, serde-encoded messages. Every message carries
   that is not a listed `Ready` base resolves nothing. A 1.4 or older session gets the inventory
   alone, and the control plane resolves as before: a materialisation or an eviction only by its
   base's absence, a pull only by its late answer.
+- **Protocol 1.6 (LNK-02).** The JIT config on the link: the frame of a `LaunchRunner` carries
+  the config its handle names in one member, `launch_config`, beside `protocol_version` and
+  `message`, written and read by the link adapter by hand (no `Serialize` type holds it, ADR
+  0014). The control plane's link end takes it from the broker once, for the launch's attempt
+  and the epoch the frame is stamped with (a take for another epoch discards it), so a resend
+  carries nothing; the data plane's link end puts it into its `LaunchStore`, bound to the
+  launch's VM, instance id and deadline, before it hands the directive up, only for a launch of
+  its own session's epoch that names an instance id, once per handle, and empties the store when
+  a new session opens (the store is keyed by the handle alone); every other config is dropped
+  and counted. The control plane takes nothing for a launch the data plane would not put (no
+  instance id, another epoch than the session's), so a config never crosses for nothing. A send cut after the take loses the config: the launch then fails
+  definitely for want of it, the attempt retires and its registration is deregistered by id
+  (P11, P13). A config no launch takes (its frame overtaken by a resend that already failed) is
+  dropped at the directive's deadline. A 1.5 or older session carries none, as before.
+  `formal/link.qnt` (`configSentOnce`, `configDeliveredOnce`, `configOnlyInItsEpoch`).
 - **Secrets cross the link only as `SecretHandle`**, resolved by the link adapter at send time from
   the control plane's in-memory broker. The `DirectiveIssued` event stores a handle id, never a
   JIT config. A crash loses the secret; the attempt is retired and a new one minted (a possibly

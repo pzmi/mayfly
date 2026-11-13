@@ -99,7 +99,7 @@ then, a model's task records the one it tried.
 |:--|:--|:--|:--|:--|:--|:--|:--|
 | smoke | `formal/smoke.qnt` | nothing in mayfly: a bounded counter that exercises every stage of the toolchain | `withinLimit` | `step` | 6 steps | about 5 s (Apalache; 4-CPU sandbox, measured at FND-06) | FND-06 |
 | lifecycle | `formal/lifecycle.qnt` | the `Attempt` aggregate and its saga, the data plane's execution of its directives and the provider's inventory (plan §6, dm §6.4) | `i06CompletedNeverServesAgain`, `busyNeverWarm`, `i10UnknownLeavesOnlyOnObservation`, `i13NoDuplicateClones`, `i14OneJob`, `i21DeregisterBeforeStop`, `i22JitMintedOnceAfterGrantAndVerification`, `i30GuestNeverDecidesOwnership`, `quarantineTerminal`, `quarantineNeverAutoDeleted`, `mismatchStaysQuarantined`, `vanishedClosedForGood`, `noAbsenceFromIncomplete`, `retryKeepsNameAndGeneration` | `step`, `serveStep`, `activationStep` | 8 steps each (for `activationStep`, 8 steps after a one-step preparation: deeper into activation than 8 of `step`) | about 60 s for `step`, 32 s for `serveStep`, 87 s for `activationStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-04F); at DEC-04 67 s, 48 s and 97 s; at DEC-05, with `replyTargetAbsent`, 90 s, 53 s and 98 s (`formal-verify --model lifecycle`); at VER-01F, before CP-02's `relaySend`, 143 s, 86 s and 104 s (with another lane building alongside); at KER-04G, with `i21DeregisterBeforeStop`, 119 s, 56 s and 155 s; at DEC-06, with the quarantine stop's deregistration, 187 s, 101 s and 195 s (beside a simulation run); at DEC-07, with `listingIncomplete` and the three vanish invariants, 192 s, 73 s and 252 s (with quint simulations and a test build running alongside), and on top of DEC-06 246 s, 128 s and 254 s (beside conformance sweeps); at DEC-06F, with `runnerExited` in quarantine whatever the JIT, measured on DEC-06's model before DEC-07 was rebased in, 139 s, 67 s and 185 s | KER-04, KER-04F, DEC-04, DEC-05, VER-01F, KER-04G, DEC-06, DEC-07, DEC-06F |
-| link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02) | KER-02 |
+| link | `formal/link.qnt` | the CP↔DP protocol: handshake and version negotiation, run-epoch minting and the floor, at-least-once delivery with loss, duplicates and reordering, fencing, per-epoch idempotency, safe-mode held kinds, the inbox's epoch fence (plan §3.2, ADR 0042), and the JIT config on the link: the broker's single take into the launch's frame, the data plane's store, put only for its own session (LNK-02, protocol 1.6) | `i09NoStaleEpochExecutes`, `executesAtMostOncePerEpoch`, `refusedMeansNothingHappened`, `i17EpochsIncrease`, `i18InboxFence`, `i29SafeModeHoldsKinds`, `versionNegotiated`, `configSentOnce`, `configDeliveredOnce`, `configOnlyInItsEpoch` | `step`, `implStep` | 10 steps for `step`, 8 for `implStep` | about 85 s for `step`, 20 s for `implStep` (Apalache through `formal-verify`, run two at a time; 4-CPU sandbox, measured at KER-02); at LNK-02 (the launch, `cpMint`, `dpExpire`) not re-verified by Apalache in the lane (the weekly `formal.yml` run measures it), `quint test` of its 19 scenarios under a second and simulations of 5000 traces of 30 steps of each relation clean (about 26 s each) | KER-02, LNK-02 |
 | scheduling | `formal/scheduling.qnt` | one host's `Host` aggregate, the `Pool` terms it applies, the capacity policy, the data plane's resource ledger, and each pool's pin with the bases materialised on the host, which the reconciler's pass requires before it admits a pool there (plan §9, dm §6.2, §6.3, P17, ADR 0024; CP-07) | `i01OneSlotPerAttempt`, `i02NoSharedSlotGeneration`, `i03StartsWithinCapacity`, `i07NeverAdvertiseMore`, `i08NothingAfterDrain`, `i13NoDuplicateClones`, `i24CarveOutsFitTheHost`, `i26NoAdmissionWhileClosed`, `noGrantWhileClosed`, `grantsWithinDemand`, `i27BreakerBounded`, `i28QuarantineNeverAutoDeleted`, `i33DataPlaneNeverOvercommits`, `noVmWithoutLease`, `noStartWhileCapacityUnknown`, `generationsMonotonic`, `macosGuestsAtMostTwo`, `externalConsumptionShrinksAdmissible`, `quarantineHoldsCapacity`, `allocationWithinReport`, `carveOutAdmissible`, `leasesKeepTheirBase` | `step`, `admitStep` | 8 steps each | about 7 min for `step`, 3.5 min for `admitStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-05; depth 6 took 100 s and 56 s); at DEC-04, with `vmFactsChange`, about 7.7 min and 4 min (two at a time beside another lane's runs); KER-05D's carve ran Apalache out of memory before it checked anything; at DEC-06, the state machine in `scheduling_machine` with the plan carved from counts and both capacity policies chosen by `init`, 489 s and 293 s (`formal-verify --model scheduling`); simulation about 3 min per seed and relation; at CP-07 (placement: `materialise`, `repin`, `evict`), not re-verified by Apalache in the lane (the weekly `formal.yml` run measures it), `quint test` of the 27 scenarios took about 5 min; at CP-09 (`host.jobs`, `grantsWithinDemand`), not re-verified by Apalache in the lane, `quint test` of the 34 scenarios took about 3.6 min | KER-05, DEC-04, DEC-06, CP-07, CP-08, CP-09 |
 | recovery | `formal/recovery.qnt` | one host's startup use case across restarts (lock, open with backup, verify, `StartRun`, `MintEpoch`, handshake with the floor, inventory, classification, `CompleteRecovery`), the recovery decision table, the saga's and the data plane's effects after it, the GitHub listener's record-before-ack, safe mode and the recovery plan; crashes at every await, restores, incomplete inventories, stale frames and a provider that changes behind the journal; terminal mode's graceful stop (the first Ctrl-C: idle records retired and deleted with proof, the exit only once every record is settled, P24 as a crash; RT-05a, ADR 0031 amended 2026-11-12) (plan §10, dm §11.3, ADRs 0025, 0026, 0031, 0037) | `i04UnrecognisedNeverDeleted`, `i05BaseNeverDeletable`, `i09NoStaleEpochExecutes`, `i10UnknownLeavesOnlyOnObservation`, `i11RecoveryCompletes`, `i12RecordBeforeAck`, `i17EpochsIncrease`, `i25IncompleteNeverAbsence`, `i29SafeModeNoEffects`, `i31PlanBound`, `safeModeNoDestructiveAction`, `deleteNeedsProof`, `noAssertion`, `quarantineNeverDeleted`, `busyNeverRetiredWhileRunning`, `gracefulStopSettles` | `step`, `restartStep`, `repairStep` | 12 steps each | about 8 min for `step`, 3.5 min for `restartStep`, 3.5 min for `repairStep` (Apalache, run two at a time; 4-CPU sandbox, measured at KER-07F with eleven phases and seven GitHub views; KER-07 measured 6, 3 and 2.5 min; depth 8 took about 40 s); simulation about 1.5 min per seed and relation; at RT-05a (`ctrlC`, `stopRetire`, `gracefulExit` in `step` and `restartStep`) not re-verified by Apalache in the lane (the weekly `formal.yml` run measures it), `quint test` of its 40 scenarios in 5 s and simulations of 3000 traces of 30 steps of `step` and `restartStep` clean | KER-07, RT-05a |
 
@@ -487,8 +487,9 @@ event issues nothing the model's `issueNext` would not (`crates/mayfly-control/t
 ### link
 
 One control plane (`cp`), one data plane (`dp`), a network (`net`: two sets of frames, so no
-order) and history for the invariants (`g`, read by no guard). Two directives stand for the
-kinds: id 1 is a `CloneVm` (held in safe mode), id 2 a `ReportInventory` (never held). Each
+order) and history for the invariants (`g`, read by no guard). Three directives stand for the
+kinds: id 1 is a `CloneVm` (held in safe mode), id 2 a `ReportInventory` (never held), id 3 a
+`LaunchRunner` (held in safe mode) whose JIT config the control plane's broker holds (LNK-02). Each
 action is one stimulus of the protocol: `dpHello` (start or reconnect, offering major 1 or 2),
 `dpRestart` (memory lost, floor kept), `dpWelcome` (enter a session strictly above the floor),
 `dpDeliver` (fence, repeat, hold or execute one frame, possibly leaving a duplicate behind;
@@ -497,7 +498,17 @@ an execution ends applied, refused for resources, or Unknown with the effect app
 (`DirectiveIssued`), `relaySend` (re-send under the current session until the answer is
 definite), `cpReceive` (the inbox, fenced by epoch), `loseToDp`, `loseToCp` and
 `foreignMajor` (a frame of another major). `step` is every behaviour plan §3.2 allows;
-`implStep` is what the composition can do (its control plane never writes another major). The
+`implStep` is what the composition can do (its control plane never writes another major).
+LNK-02 adds `cpMint` (the registration manager mints the launch's config once, under the current
+session, into the broker), a launch's frame that carries the config (`secret`: the relay's
+`relaySendWith` takes it once, only in a session whose hello offered 1.6, only when it was
+minted under that session's epoch, and a take for another epoch discards it), the data plane's
+store, keyed by the handle alone as `mayfly_data::LaunchStore` is (`dpDeliverWith` puts a
+carried config first, whatever the executor then does with the frame, only for its own
+session's epoch and major, once per handle; executing the launch takes whatever is held for its
+id, delivered or not, and a launch with none held is refused `no_config`, nothing happened;
+`dpWelcomeWith` empties it when a new session is entered), `dpExpire` (a config no launch took
+dropped at its deadline) and `dpRestart` emptying it; the hello's `v16` flag stands for an older peer that speaks 1.5 at most. The
 Rust published language is `mayfly_protocol`; its pure rules `negotiate`, `admit_frame`,
 `mint_epoch`, `enters_session`, `check_epoch` and `DirectiveTag::held_in_safe_mode` are this
 model's guards. Safety only: liveness (a session eventually opens) is not claimed.
@@ -511,17 +522,31 @@ model's guards. Safety only: liveness (a session eventually opens) is not claime
 | `i18InboxFence` | the inbox applies no answer older than the newest it applied | `formal-verify`; `olderAnswerIgnoredTest`; the `Attempt` epoch fence (KER-04) |
 | `i29SafeModeHoldsKinds` | in a safe session no held kind executes | `formal-verify`; `directive.rs::should_hold_exactly_the_effect_kinds_when_in_safe_mode`; `crates/mayfly-data-domain/tests/data_plane/executor.rs::should_refuse_held_kinds_and_run_the_rest_when_the_session_is_safe` |
 | `versionNegotiated` | a session exists only in a major both peers speak; no frame of another major executes | `formal-verify`; `version.rs` tests; `tests/golden.rs::should_refuse_every_fixture_when_its_major_is_unknown` |
+| `configSentOnce` | the relay builds at most one frame that carries the launch's config; every resend carries nothing | `formal-verify`; `resendAfterLostFrameCarriesNothingTest`, the negative control `resendCarryingConfigTwiceIsFlaggedTest`; `crates/mayfly-control/src/registration/broker.rs::tests::should_hand_the_config_to_the_link_once_when_its_launch_is_sent_in_its_epoch`; the link contract's LK-17 and LK-18 (`ConfigReplayingLink` fails LK-18) |
+| `configDeliveredOnce` | the config reaches a launcher at most once, in any epoch (I22) | `formal-verify`; `duplicateConfigFramePutOnceTest`, `overtakenConfigExpiresTest`; `crates/mayfly-data/src/launch_store.rs::tests::should_hold_a_config_from_the_link_bound_to_its_launch_when_it_is_put_once`; LK-17; `crates/mayfly-composition/tests/launch_link.rs` |
+| `configOnlyInItsEpoch` | a config is carried, put by the data plane or delivered only in the session it was minted under | `formal-verify`; `staleSessionConfigNeverDeliveredTest` (without the data plane's epoch check the stale frame's config is held by its handle and the next session's launch delivers it, which breaks this invariant), `heldConfigNeverCrossesSessionsTest` (without the store emptied at the welcome it fails), `unsentConfigOfEarlierSessionDiscardedTest`; LK-19 (`ConfigLeakingLink` fails it alone) |
 
 Tests (`quint test`, stage `formal-test`, all deterministic): `handshakeAndExecuteTest`,
 `unsupportedMajorRefusedTest`, `duplicateExecutesOnceTest`, `staleFrameIsNeverRefusedTest`,
 `oldWelcomeAfterRestartIgnoredTest`, `epochMintedAboveFloorTest`, `safeModeHoldsCreateTest`,
-`foreignMajorDiscardedTest`, `frameBeforeWelcomeDiscardedTest`, `olderAnswerIgnoredTest`.
+`foreignMajorDiscardedTest`, `frameBeforeWelcomeDiscardedTest`, `olderAnswerIgnoredTest`, and
+LNK-02's `launchCarriesConfigOnceTest`, `resendAfterLostFrameCarriesNothingTest`,
+`duplicateConfigFramePutOnceTest`, `overtakenConfigExpiresTest`,
+`staleSessionConfigNeverDeliveredTest`, `heldConfigNeverCrossesSessionsTest`,
+`unsentConfigOfEarlierSessionDiscardedTest`, `olderPeerGetsNoConfigTest` and the negative control
+`resendCarryingConfigTwiceIsFlaggedTest`.
 Negative controls tried: answering a stale frame `refused` (the rule of plan §3.2 before
 ADR 0042) violates `refusedMeansNothingHappened` on the reconnect path of
 `staleFrameIsNeverRefusedTest` (a directed run; uniform simulation of 20 000 traces does not
 reach the 12-step path); entering a welcome at the floor (`>=` for `>`) makes Apalache report
 `[violation]` of `i17EpochsIncrease` at 5 steps; dropping the safe-mode hold makes simulation
-and Apalache report `[violation]` of `i29SafeModeHoldsKinds`.
+and Apalache report `[violation]` of `i29SafeModeHoldsKinds`. LNK-02's: a relay whose take
+leaves the config in the broker (`relaySendReplayingWith`) violates `configSentOnce`, in the
+named control and within 55 traces of uniform simulation of `step`; a data plane that puts a
+config without checking its epoch delivers a stale session's config in the next one and so
+violates `configOnlyInItsEpoch` on the directed path of `staleSessionConfigNeverDeliveredTest`
+(uniform simulation of 3 × 20 000 traces of 30 steps does not reach that nine-step path); a
+data plane that keeps its store across a welcome fails `heldConfigNeverCrossesSessionsTest`.
 
 **The data plane's executor (KER-08)** implements this model's `dpWelcome` and `dpDeliver` in
 `mayfly-data-domain` (`link::step`, `DataPlane::receive`): discard a frame of another version

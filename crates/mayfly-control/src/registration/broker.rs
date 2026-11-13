@@ -4,8 +4,10 @@
 //!
 //! The registration manager puts a config here right after the mint answered and records its
 //! handle on the attempt (`RecordJitHandle`); the journal and the delivery ledger see only the
-//! handle. The link's control-plane end takes it at send time into the frame that carries it to
-//! the data plane's `LaunchStore` (ADR 0082; LNK-02 builds that frame). A take for another
+//! handle. The link's control-plane end takes it at send time, through the broker's
+//! [`LaunchConfigSource`] (the launch's attempt and the epoch its frame is stamped with), into
+//! the one frame that carries it to the data plane's `LaunchStore` (protocol 1.6, LNK-02; ADR
+//! 0082); a resend finds nothing and carries nothing. A take for another
 //! attempt or epoch is refused and discards the config, a second put for a handle held or
 //! already taken is refused, and a restart empties the broker: the attempt's handle is then
 //! orphaned and its registration presumed leaked (P13), never minted again (I19, I22).
@@ -15,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use mayfly_domain::{AttemptId, Epoch, Secret, SecretHandleId};
+use mayfly_protocol::{LaunchConfigSource, SecretHandle};
 
 /// What a held config is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +124,20 @@ impl JitBroker {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// The link's control-plane end takes a launch's config here (LNK-02): once, for the launch's
+/// attempt and the run epoch its frame is stamped with ([`JitBroker::take`]). Pinned by
+/// `tests::should_hand_the_config_to_the_link_once_when_its_launch_is_sent_in_its_epoch`.
+impl LaunchConfigSource for JitBroker {
+    fn take(
+        &self,
+        handle: SecretHandle,
+        attempt: AttemptId,
+        epoch: Epoch,
+    ) -> Option<Secret<String>> {
+        Self::take(self, handle.handle_id, JitScope { attempt, epoch })
     }
 }
 
@@ -232,5 +249,40 @@ mod tests {
         // then
         assert!(!shown.contains(config().expose().as_str()), "{shown}");
         assert!(shown.contains("held: 1"), "{shown}");
+    }
+
+    #[test]
+    fn should_hand_the_config_to_the_link_once_when_its_launch_is_sent_in_its_epoch() {
+        // given
+        let broker = JitBroker::new();
+        let link: &dyn LaunchConfigSource = &broker;
+        let handle = SecretHandle {
+            handle_id: SecretHandleId::from_u128(6),
+        };
+        let stale = SecretHandle {
+            handle_id: SecretHandleId::from_u128(7),
+        };
+        for held in [handle, stale] {
+            broker
+                .put(held.handle_id, scope(1, 2), config())
+                .unwrap_or_else(|_| panic!("the first put"));
+        }
+
+        // when
+        let sent = link.take(handle, AttemptId::from_u128(1), Epoch::new(2));
+        let resent = link.take(handle, AttemptId::from_u128(1), Epoch::new(2));
+        let next_session = link.take(stale, AttemptId::from_u128(1), Epoch::new(3));
+
+        // then
+        assert_eq!(
+            sent.map(|c| c.expose().clone()),
+            Some(config().expose().clone())
+        );
+        assert!(resent.is_none());
+        assert!(next_session.is_none());
+        assert!(
+            broker.is_empty(),
+            "a take for another epoch discards the config"
+        );
     }
 }

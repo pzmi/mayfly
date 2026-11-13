@@ -2,14 +2,17 @@
 //! the data plane (plan §3.2, dm §4).
 //!
 //! Plain data (ADR 0022): the handshake (`Hello`, `Welcome`), `Directive`, `Observation`, the
-//! `SecretHandle` that stands for a secret on the link, the `OwnershipProof` of destructive
-//! directives, the version rules and the epoch rules as pure functions, and the link port
-//! traits. Messages are serde data; the encoding (JSON, ADR 0010) belongs to the transports.
-//! Pure: no clock, randomness or I/O. The rules are those of `formal/link.qnt`.
+//! `SecretHandle` that stands for a secret on the link, the stores the link's ends take a
+//! launch's JIT config from and put it into (`LaunchConfigSource`, `LaunchConfigSink`), the
+//! `OwnershipProof` of destructive directives, the version rules and the epoch rules as pure
+//! functions, and the link port traits. Messages are serde data; the encoding (JSON, ADR 0010)
+//! belongs to the transports. Pure: no clock, randomness or I/O. The rules are those of
+//! `formal/link.qnt`.
 
 mod directive;
 mod frame;
 mod handshake;
+mod launch;
 mod link;
 mod observation;
 mod version;
@@ -23,6 +26,7 @@ pub use handshake::{
     EpochCheck, HandshakeRefusal, HandshakeRefused, Hello, Mode, Welcome, check_epoch,
     enters_session, mint_epoch,
 };
+pub use launch::{LaunchConfigSink, LaunchConfigSource, LaunchTarget, PutRefused};
 pub use link::{
     DirectiveSink, DirectiveSource, HandshakeInitiator, HandshakeResponder, LinkError,
     ObservationSink, ObservationSource,
@@ -34,6 +38,6 @@ pub use observation::{
     UnknownReason, VmObservation,
 };
 pub use version::{
-    CURRENT, GUEST_IDENTITY, IMAGE_LISTING, MEASURED_BASE_DISK, ProtocolVersion, SUPPORTED,
-    UNKNOWN_FACTS, VersionRefusal, admit_frame, handshake_version, negotiate,
+    CURRENT, GUEST_IDENTITY, IMAGE_LISTING, LAUNCH_CONFIG, MEASURED_BASE_DISK, ProtocolVersion,
+    SUPPORTED, UNKNOWN_FACTS, VersionRefusal, admit_frame, handshake_version, negotiate,
 };

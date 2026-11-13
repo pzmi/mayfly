@@ -102,7 +102,7 @@
 //! ([`UriSecretProvider::from_process`], which withholds every `env:` name from children), and
 //! recovery is handed no GitHub view until a registration view exists, so every runner reads
 //! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
-//! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
+//! by the link's data-plane end from the daemon's one [`JitBroker`] (LNK-02), empty until RT-07 mints. Image placement (CP-07): the
 //! placement manager places every pool's pin (step 5) on this host and [`Placements`] follows
 //! its passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once
 //! the pool is active, pinned and its pin's breaker not tripped. The reconciler's pass is P2's
@@ -142,6 +142,7 @@ use mayfly_control::reconciler::{Reconciler, ReconcilerConfig};
 use mayfly_control::recovery::{
     Recovery, Startup, StartupConfig, StartupError, enter_safe_mode, session_ended,
 };
+use mayfly_control::registration::JitBroker;
 use mayfly_control::saga::{AttemptSaga, SagaConfig};
 use mayfly_control::sessions::HostSessions;
 use mayfly_control::store::{AggregateStore, Clock as _, Outcome, SaveError, SaveRequest};
@@ -159,7 +160,8 @@ use mayfly_domain::{
     ProviderInstanceId, Resources, Secret,
 };
 use mayfly_protocol::{
-    Directive, DirectiveKind, DirectiveSink as _, Mode, ObservationKind, SUPPORTED, SecretHandle,
+    Directive, DirectiveKind, DirectiveSink as _, LaunchConfigSink, LaunchTarget, Mode,
+    ObservationKind, PutRefused, SUPPORTED, SecretHandle,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::sync::watch;
@@ -459,9 +461,25 @@ type Exec = Executor<
 >;
 
 /// The data plane's JIT store, shared between the guest transport and the link's data-plane
-/// end (ADR 0082), which fills it once the control plane mints configs (CP-05).
+/// end (ADR 0082, LNK-02), which fills it with the configs the control plane's broker hands the
+/// link (CP-05).
 #[derive(Debug, Clone, Default)]
 pub struct SharedLaunches(Arc<LaunchStore>);
+
+impl LaunchConfigSink for SharedLaunches {
+    fn put(
+        &self,
+        handle: SecretHandle,
+        target: LaunchTarget,
+        config: Secret<String>,
+    ) -> Result<(), PutRefused> {
+        LaunchConfigSink::put(&*self.0, handle, target, config)
+    }
+
+    fn discard_held(&self) {
+        self.0.discard_held();
+    }
+}
 
 impl LaunchSecrets for SharedLaunches {
     fn take(
@@ -705,6 +723,9 @@ async fn data_plane(
     Ok((exec, floor, boot_id))
 }
 
+/// How often the data plane's JIT store drops the configs whose launch's deadline passed.
+const LAUNCH_EXPIRY_EVERY: Millis = Millis::new(30_000);
+
 /// The first wait after a failed start-up `catch_up`; it doubles up to [`CATCH_UP_BACKOFF_MAX`].
 const CATCH_UP_BACKOFF_FIRST: Duration = Duration::from_millis(500);
 
@@ -899,6 +920,9 @@ struct Daemon<'a> {
     /// `true` from just before a run's ready line until the next run starts: `status`'s
     /// `run.ready`.
     readied: watch::Sender<bool>,
+    /// The minted JIT configs held for their launch, which each run's control-plane link end
+    /// takes from (LNK-02); RT-07 shares it with the registration manager.
+    broker: Arc<JitBroker>,
 }
 
 /// The opened session one run's control plane serves.
@@ -1007,6 +1031,7 @@ pub async fn run_with(
         store_clock: AnchoredStoreClock::now_anchored(),
         sizing,
         readied: watch::channel(false).0,
+        broker: Arc::new(JitBroker::new()),
     };
     let service = Service {
         store: &daemon.store,
@@ -1119,11 +1144,14 @@ impl Daemon<'_> {
                 crash_loop: false,
             },
         );
-        let (mut dp_link, cp_link) = inproc::link(
+        let (dp_link, cp_link) = inproc::link(
             inproc::DEFAULT_CAPACITY,
             SUPPORTED.to_vec(),
             SUPPORTED.to_vec(),
         );
+        let launches = exec.ports().guest.secrets().clone();
+        let mut dp_link = dp_link.with_launch_configs(Arc::new(launches.clone()));
+        let cp_link = cp_link.with_launch_configs(self.broker.clone());
         let opening = async {
             let mut cp_link = cp_link;
             let opened = startup
@@ -1177,12 +1205,29 @@ impl Daemon<'_> {
             graceful,
             ready,
         );
-        let (served, ended) = tokio::join!(data, control);
+        // boxed: the run's two planes are a large future, and polling it beside the expiry
+        // inline overflows a debug build's 2 MiB test-thread stack
+        let planes = Box::pin(async { tokio::join!(data, control) });
+        let (served, ended) = tokio::select! {
+            both = planes => both,
+            never = self.expire_launches(&launches) => match never {},
+        };
         session_ended(&sessions, &self.host);
         if !matches!(ended, Ok(RunEnd::Shutdown)) {
             tracing::warn!(end = ?served, "data_plane_serve_ended");
         }
         ended
+    }
+
+    /// Drops the JIT configs no launch took once their directive's deadline passed (ADR 0082),
+    /// every [`LAUNCH_EXPIRY_EVERY`], read on the control plane's clock, the one the deadlines
+    /// are written in (both planes read one host's clock under `--role all`; split roles will
+    /// read it through the handshake's offset, LNK-01). Never returns: the run's end drops it.
+    async fn expire_launches(&self, launches: &SharedLaunches) -> std::convert::Infallible {
+        loop {
+            self.store.clock().sleep(LAUNCH_EXPIRY_EVERY).await;
+            launches.0.expire(self.store.clock().now());
+        }
     }
 
     /// Applies each configured pool to its `Pool` stream when it changed (`ConfigurePool` at

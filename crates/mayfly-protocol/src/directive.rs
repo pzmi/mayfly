@@ -88,7 +88,9 @@ pub enum DirectiveKind {
     /// Launch the runner with the JIT config behind `launch`, over the launcher's stdin
     /// (ADR 0038). The stored and sent form names only the handle; the link adapter resolves it
     /// from the control plane's broker at send time into a frame that is not `Serialize`
-    /// (ADR 0014, R14), and the data plane takes the config by the handle (ADR 0082).
+    /// (ADR 0014, R14; from protocol 1.6, [`crate::LAUNCH_CONFIG`], through
+    /// [`crate::LaunchConfigSource`] and [`crate::LaunchConfigSink`]), and the data plane takes
+    /// the config by the handle (ADR 0082).
     LaunchRunner {
         /// The VM.
         vm_name: OwnedVmName,

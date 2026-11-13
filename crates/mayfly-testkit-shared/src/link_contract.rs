@@ -39,6 +39,15 @@
 //! wait ([`crate::poll::within`]) turns a hang into a failure with a reason, at once under the
 //! paused clock. Nothing is spawned: concurrent halves are polled together on the case's task.
 //!
+//! **The JIT config of a launch** (protocol 1.6, LNK-02, `formal/link.qnt`'s `configSentOnce`,
+//! `configDeliveredOnce` and `configOnlyInItsEpoch`). LK-17 to LK-19 wire the ends to the
+//! suite's own broker and store ([`SuiteBroker`], [`SuiteStore`], through the factory's
+//! `*_with_configs` methods) and check that a launch's config crosses once, in the one frame of
+//! its first send, into the store bound to the launch, that no other frame and no error carries
+//! a byte of it, and that the data plane puts none for another epoch, another kind, a launch
+//! without an instance id, a session below 1.6 or a handle already used. Every config is built
+//! at run time.
+//!
 //! [`check_link_contract`] returns a report of failed cases instead of panicking: the suite's
 //! own tests use it to show deliberately broken transports failing named cases (ver §5:
 //! `SilentDropLink`, `NoVersionCheckLink`, `ReorderingNoVersionCheckLink`, `DeafCloseLink`,
@@ -50,19 +59,25 @@ use std::fmt::{self, Debug, Display};
 use std::future::{Future, poll_fn};
 use std::path::Path;
 use std::pin::{Pin, pin};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
 use mayfly_domain::{Deadline, DirectiveId, Epoch, HostId, Millis, ObservationId};
 use mayfly_protocol::{
     CURRENT, Directive, DirectiveKind, DirectiveRef, DirectiveSink, DirectiveSource, Frame,
-    HandshakeInitiator, HandshakeRefusal, HandshakeRefused, HandshakeResponder, Hello, LinkError,
-    Message, Mode, Observation, ObservationKind, ObservationSink, ObservationSource,
-    ProtocolVersion, RefusalReason, ResourceDimension, SUPPORTED, Welcome, admit_frame, negotiate,
+    HandshakeInitiator, HandshakeRefusal, HandshakeRefused, HandshakeResponder, Hello,
+    LaunchConfigSink, LaunchConfigSource, LinkError, Message, Mode, Observation, ObservationKind,
+    ObservationSink, ObservationSource, ProtocolVersion, RefusalReason, ResourceDimension,
+    SUPPORTED, Welcome, admit_frame, negotiate,
 };
 
 use crate::fixtures::read_tree;
 use crate::poll::within;
+
+mod launch;
+
+pub use launch::{SuiteBroker, SuiteStore};
 
 /// How long a case waits for one step before it calls it a hang. Under the paused clock it
 /// costs nothing; under a real clock it bounds a socket transport's slowest step.
@@ -97,6 +112,8 @@ pub struct DiscardCounts {
     pub malformed: u64,
     /// Admitted frames of a kind the end does not take at that point.
     pub unexpected: u64,
+    /// JIT configs read and dropped unread, or refused by the store (LK-19).
+    pub configs: u64,
 }
 
 /// Makes the links the suite runs against.
@@ -138,6 +155,33 @@ pub trait LinkFactory {
         dp: &[ProtocolVersion],
         cp: &[ProtocolVersion],
     ) -> impl Future<Output = (Self::DpLink, Self::CpLink)>;
+
+    /// A connected pair as [`LinkFactory::connect`] makes it, the control plane taking each
+    /// launch's JIT config from `broker` and the data plane putting the configs it reads into
+    /// `store` (LK-17).
+    fn connect_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> impl Future<Output = (Self::DpLink, Self::CpLink)>;
+
+    /// A data plane speaking `dp` that puts the configs it reads into `store`, connected to a
+    /// raw control-plane peer (LK-19).
+    fn data_plane_facing_raw_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> impl Future<Output = (Self::DpLink, Self::Raw)>;
+
+    /// A control plane speaking `cp` that takes launch configs from `broker`, connected to a raw
+    /// data-plane peer (LK-18).
+    fn control_plane_facing_raw_with_configs(
+        &self,
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+    ) -> impl Future<Output = (Self::CpLink, Self::Raw)>;
 
     /// A data plane speaking `dp`, connected to a raw control-plane peer.
     fn data_plane_facing_raw(
@@ -257,11 +301,30 @@ pub enum LinkCase {
     /// session a duplicate `Welcome`, a `Hello` and a message of the other direction are
     /// discarded as unexpected, on both ends, and the link stays open.
     DiscardsCounted,
+    /// LK-17: a launch's JIT config is delivered once per handle: sent three times (the relay's
+    /// resends) over a transport that may duplicate frames, it reaches the data plane's store
+    /// exactly once, bound to the launch's VM, instance id and deadline, and the broker holds
+    /// it no more; every copy of the launch is handed up.
+    ConfigDeliveredOnce,
+    /// LK-18: no other frame carries a byte of a config, nor does an error: of the frames the
+    /// control plane writes, only the first send of a launch whose config the broker holds for
+    /// its attempt and epoch carries it, in one member beside the message, the frame otherwise
+    /// the plain one; a resend, another directive, a launch of another attempt (whose config
+    /// the take discards) and any launch of a session below 1.6 carry none, and a launch
+    /// without an instance id or of another epoch than the session's takes nothing (the data
+    /// plane would put neither); a send that fails names none.
+    ConfigOnlyInItsFrame,
+    /// LK-19: the data plane empties its store when a session opens, and puts a config only for
+    /// a launch of its session's epoch that names an instance id, in a session of 1.6 or newer,
+    /// once per handle; a config carried by a launch of another epoch, by another kind or by a
+    /// launch without an instance id, or read in a 1.5 session, is dropped and counted, and
+    /// every directive is still handed up.
+    ConfigPutOnlyForItsSession,
 }
 
 impl LinkCase {
     /// Every case, in id order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 19] = [
         Self::Handshake,
         Self::MixedMinors,
         Self::HandshakeRefused,
@@ -278,6 +341,9 @@ impl LinkCase {
         Self::CloseReportsInFlight,
         Self::EveryEpochHandedUp,
         Self::DiscardsCounted,
+        Self::ConfigDeliveredOnce,
+        Self::ConfigOnlyInItsFrame,
+        Self::ConfigPutOnlyForItsSession,
     ];
 
     /// The case's id, `LK-01` …
@@ -300,6 +366,9 @@ impl LinkCase {
             Self::CloseReportsInFlight => "LK-14",
             Self::EveryEpochHandedUp => "LK-15",
             Self::DiscardsCounted => "LK-16",
+            Self::ConfigDeliveredOnce => "LK-17",
+            Self::ConfigOnlyInItsFrame => "LK-18",
+            Self::ConfigPutOnlyForItsSession => "LK-19",
         }
     }
 }
@@ -402,6 +471,9 @@ async fn run_case<F: LinkFactory>(f: &F, case: LinkCase) -> Check {
         LinkCase::CloseReportsInFlight => close_reports_in_flight(f).await,
         LinkCase::EveryEpochHandedUp => every_epoch_handed_up(f).await,
         LinkCase::DiscardsCounted => discards_counted(f).await,
+        LinkCase::ConfigDeliveredOnce => launch::config_delivered_once(f).await,
+        LinkCase::ConfigOnlyInItsFrame => launch::config_only_in_its_frame(f).await,
+        LinkCase::ConfigPutOnlyForItsSession => launch::config_put_only_for_its_session(f).await,
     }
 }
 
@@ -663,6 +735,7 @@ fn at_least(what: &str, got: DiscardCounts, want: DiscardCounts) -> Check {
     if got.version >= want.version
         && got.malformed >= want.malformed
         && got.unexpected >= want.unexpected
+        && got.configs >= want.configs
     {
         Ok(())
     } else {
@@ -675,6 +748,7 @@ const fn counts(version: u64, malformed: u64, unexpected: u64) -> DiscardCounts 
         version,
         malformed,
         unexpected,
+        configs: 0,
     }
 }
 
@@ -898,7 +972,17 @@ async fn open_session<F: LinkFactory>(
     dp: &[ProtocolVersion],
     cp: &[ProtocolVersion],
 ) -> Result<(Session<F>, Welcome), String> {
-    let (mut dp_link, mut cp_link) = step("connecting", f.connect(dp, cp)).await?;
+    let links = step("connecting", f.connect(dp, cp)).await?;
+    open_session_over(f, dp, cp, links).await
+}
+
+/// Opens a session over a connected pair, as [`open_session`] does.
+async fn open_session_over<F: LinkFactory>(
+    f: &F,
+    dp: &[ProtocolVersion],
+    cp: &[ProtocolVersion],
+    (mut dp_link, mut cp_link): (F::DpLink, F::CpLink),
+) -> Result<(Session<F>, Welcome), String> {
     let sent = hello(dp, "boot-1")?;
     let (welcomed, heard) = step(
         "the handshake",
@@ -930,7 +1014,18 @@ async fn data_plane_session_against_raw<F: LinkFactory>(
     dp: &[ProtocolVersion],
     accepted: ProtocolVersion,
 ) -> Result<(F::DpDirectives, F::DpObservations, F::Raw), String> {
-    let (mut dp_link, mut raw) = step("connecting", f.data_plane_facing_raw(dp)).await?;
+    let links = step("connecting", f.data_plane_facing_raw(dp)).await?;
+    data_plane_session_against_raw_over(f, dp, accepted, links).await
+}
+
+/// A data plane in a session opened by a raw control plane at `accepted`, over a connected
+/// pair.
+async fn data_plane_session_against_raw_over<F: LinkFactory>(
+    f: &F,
+    dp: &[ProtocolVersion],
+    accepted: ProtocolVersion,
+    (mut dp_link, mut raw): (F::DpLink, F::Raw),
+) -> Result<(F::DpDirectives, F::DpObservations, F::Raw), String> {
     let (welcomed, sent) = step(
         "the handshake against a raw control plane",
         join2(dp_link.hello(hello(dp, "boot-1")?), async {
@@ -960,7 +1055,17 @@ async fn control_plane_session_against_raw<F: LinkFactory>(
     cp: &[ProtocolVersion],
     accepted: ProtocolVersion,
 ) -> Result<(F::CpDirectives, F::CpObservations, F::Raw), String> {
-    let (mut cp_link, mut raw) = step("connecting", f.control_plane_facing_raw(cp)).await?;
+    let links = step("connecting", f.control_plane_facing_raw(cp)).await?;
+    control_plane_session_against_raw_over(f, accepted, links).await
+}
+
+/// A control plane in a session it opened at `accepted` for a raw data plane, over a connected
+/// pair.
+async fn control_plane_session_against_raw_over<F: LinkFactory>(
+    f: &F,
+    accepted: ProtocolVersion,
+    (mut cp_link, mut raw): (F::CpLink, F::Raw),
+) -> Result<(F::CpDirectives, F::CpObservations, F::Raw), String> {
     ok(
         "the raw hello",
         step(

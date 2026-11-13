@@ -70,6 +70,7 @@ fn should_define_every_pair_when_each_session_state_meets_each_stimulus() {
         ("welcome_e6_v1.4", LinkStimulus::Welcome(welcome(6, 1, 4))),
         ("welcome_e6_v1.5", LinkStimulus::Welcome(welcome(6, 1, 5))),
         ("welcome_e6_v1.6", LinkStimulus::Welcome(welcome(6, 1, 6))),
+        ("welcome_e6_v1.7", LinkStimulus::Welcome(welcome(6, 1, 7))),
         ("welcome_e6_v2.0", LinkStimulus::Welcome(welcome(6, 2, 0))),
         ("floor_raised_e5", LinkStimulus::FloorRaised(Epoch::new(5))),
         ("floor_raised_e6", LinkStimulus::FloorRaised(Epoch::new(6))),

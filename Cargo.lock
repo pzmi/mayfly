@@ -1125,6 +1125,7 @@ dependencies = [
  "mayfly-domain",
  "mayfly-protocol",
  "mayfly-testkit-shared",
+ "serde",
  "serde_json",
  "tokio",
 ]

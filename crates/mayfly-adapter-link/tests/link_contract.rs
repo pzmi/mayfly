@@ -9,6 +9,12 @@
 //! cannot hide what it puts on the wire. Each broken test pins the exact set of failed cases: a
 //! change that lets a broken transport through, or makes it fail for an unrelated reason,
 //! shows here.
+//!
+//! The JIT config cases (LK-17 to LK-19, protocol 1.6) have three doubles of their own: a wire
+//! that strips the config member from what it sends (`ConfigStrippingLink`), one that
+//! remembers it and adds it to every directive frame it sends after (`ConfigReplayingLink`),
+//! and one that puts every config a launch's frame carries into the data plane's store itself,
+//! whatever its session (`ConfigLeakingLink`).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,7 +25,16 @@ use mayfly_adapter_link::{
     ControlPlaneLink, DataPlaneLink, DirectiveReceiver, DirectiveSender, Discards,
     ObservationReceiver, ObservationSender,
 };
-use mayfly_protocol::{LinkError, ProtocolVersion};
+use mayfly_domain::{
+    AttemptId, Deadline, DirectiveId, Epoch, Generation, HostId, Millis, OwnedVmName, PoolName,
+    ProviderInstanceId, Sample, Secret, SecretHandleId, Slot,
+};
+use mayfly_protocol::{
+    AttemptRef, CURRENT, Directive, DirectiveKind, DirectiveSink as _, Frame,
+    HandshakeResponder as _, Hello, LaunchConfigSink, LaunchConfigSource, LaunchTarget, LinkError,
+    Message, Mode, ProtocolVersion, SecretHandle, Welcome,
+};
+use mayfly_testkit_shared::link_contract::SuiteBroker;
 use mayfly_testkit_shared::link_contract::{
     DiscardCounts, LinkCase, LinkFactory, RawWire, check_link_contract, run_link_contract,
 };
@@ -62,6 +77,7 @@ const fn counts(d: Discards) -> DiscardCounts {
         version: d.version,
         malformed: d.malformed,
         unexpected: d.unexpected,
+        configs: d.configs,
     }
 }
 
@@ -88,6 +104,38 @@ impl LinkFactory for InprocFactory {
         cp: &[ProtocolVersion],
     ) -> (Self::DpLink, Self::CpLink) {
         inproc::link(self.capacity, dp.to_vec(), cp.to_vec())
+    }
+
+    async fn connect_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> (Self::DpLink, Self::CpLink) {
+        let (dp_link, cp_link) = inproc::link(self.capacity, dp.to_vec(), cp.to_vec());
+        (
+            dp_link.with_launch_configs(store),
+            cp_link.with_launch_configs(broker),
+        )
+    }
+
+    async fn data_plane_facing_raw_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> (Self::DpLink, ChannelRaw) {
+        let (link, raw) = self.data_plane_facing_raw(dp).await;
+        (link.with_launch_configs(store), raw)
+    }
+
+    async fn control_plane_facing_raw_with_configs(
+        &self,
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+    ) -> (Self::CpLink, ChannelRaw) {
+        let (link, raw) = self.control_plane_facing_raw(cp).await;
+        (link.with_launch_configs(broker), raw)
     }
 
     async fn data_plane_facing_raw(&self, dp: &[ProtocolVersion]) -> (Self::DpLink, ChannelRaw) {
@@ -200,7 +248,20 @@ enum Fault {
     /// `CorruptingLink`: puts every frame on the wire with each byte flipped and flips it back
     /// on receipt, so two doubles understand each other and nothing else does.
     Corrupting,
+    /// `ConfigStrippingLink`: sends every frame without its JIT config member, so a launch
+    /// arrives without the config it carried.
+    StripConfig,
+    /// `ConfigReplayingLink`: remembers the JIT config member of a frame it sends and adds it to
+    /// every directive frame it sends after, so a resend carries the config again.
+    ReplayConfig,
+    /// `ConfigLeakingLink`: on receipt, puts the config of every launch frame that carries one
+    /// (and names an instance id) into the data plane's store itself, whatever the frame's
+    /// session or version, before the endpoint sees it.
+    LeakConfig,
 }
+
+/// The member a launch's frame carries its JIT config in (protocol 1.6).
+const CONFIG_MEMBER: &str = "launch_config";
 
 const FLIP: u8 = 0x5a;
 
@@ -222,12 +283,17 @@ struct DoubleWire {
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
     kept: Kept,
+    /// The data plane's store, which `LeakConfig` puts into.
+    store: Option<Arc<dyn LaunchConfigSink>>,
 }
 
 #[derive(Clone)]
 struct DoubleTx {
     fault: Fault,
     tx: mpsc::Sender<Vec<u8>>,
+    /// The config member `ReplayConfig` saw last, which it adds to every directive frame it
+    /// sends after that carries none.
+    remembered: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 struct DoubleRx {
@@ -237,6 +303,7 @@ struct DoubleRx {
     held: Vec<(Vec<u8>, bool)>,
     fresh: u64,
     kept: Kept,
+    store: Option<Arc<dyn LaunchConfigSink>>,
 }
 
 impl Wire for DoubleWire {
@@ -251,6 +318,7 @@ impl Wire for DoubleWire {
             DoubleTx {
                 fault: self.fault,
                 tx: self.tx,
+                remembered: Arc::default(),
             },
             DoubleRx {
                 fault: self.fault,
@@ -258,6 +326,7 @@ impl Wire for DoubleWire {
                 held: Vec::new(),
                 fresh: 0,
                 kept: self.kept,
+                store: self.store,
             },
         )
     }
@@ -274,12 +343,86 @@ impl WireTx for DoubleTx {
                 let flipped = frame.into_iter().map(|b| b ^ FLIP).collect();
                 self.tx.send(flipped).await.map_err(|_| LinkError::Closed)
             }
+            Fault::StripConfig => {
+                let stripped = with_member(frame, |member| *member = None);
+                self.tx.send(stripped).await.map_err(|_| LinkError::Closed)
+            }
+            Fault::ReplayConfig => {
+                let replayed = with_member(frame, |member| {
+                    let mut remembered = self
+                        .remembered
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if member.is_some() {
+                        remembered.clone_from(member);
+                    } else {
+                        member.clone_from(&remembered);
+                    }
+                });
+                self.tx.send(replayed).await.map_err(|_| LinkError::Closed)
+            }
             Fault::Reorder
             | Fault::NoVersionCheck
             | Fault::ReorderNoVersionCheck
             | Fault::DeafClose
-            | Fault::LossyClose => self.tx.send(frame).await.map_err(|_| LinkError::Closed),
+            | Fault::LossyClose
+            | Fault::LeakConfig => self.tx.send(frame).await.map_err(|_| LinkError::Closed),
         }
+    }
+}
+
+/// A directive frame with its config member (`None` when absent) changed by `change`, which
+/// may take it out or put one in; any other frame unchanged.
+fn with_member(frame: Vec<u8>, change: impl FnOnce(&mut Option<serde_json::Value>)) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&frame) else {
+        return frame;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return frame;
+    };
+    if object
+        .get("message")
+        .and_then(|m| m.get("directive"))
+        .is_none()
+    {
+        return frame;
+    }
+    let mut member = object.remove(CONFIG_MEMBER);
+    change(&mut member);
+    if let Some(member) = member {
+        object.insert(CONFIG_MEMBER.to_owned(), member);
+    }
+    serde_json::to_vec(&value).unwrap_or(frame)
+}
+
+/// Puts the config `frame` carries into `store` when the frame is a launch's that names an
+/// instance id, whatever its session: what no transport may do (`LeakConfig`).
+fn leak(store: &dyn LaunchConfigSink, frame: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(frame) else {
+        return;
+    };
+    let Some(config) = value.get(CONFIG_MEMBER).and_then(|c| c.as_str()) else {
+        return;
+    };
+    let Some(Ok(directive)) = value
+        .get("message")
+        .and_then(|m| m.get("directive"))
+        .map(|d| serde_json::from_value::<Directive>(d.clone()))
+    else {
+        return;
+    };
+    if let DirectiveKind::LaunchRunner {
+        vm_name,
+        launch,
+        instance_id: Some(instance_id),
+    } = directive.kind
+    {
+        let target = LaunchTarget {
+            vm_name,
+            instance_id,
+            deadline: directive.deadline,
+        };
+        let _ = store.put(launch, target, Secret::new(config.to_owned()));
     }
 }
 
@@ -330,7 +473,18 @@ impl WireRx for DoubleRx {
                 .recv()
                 .await
                 .map(|frame| frame.into_iter().map(|b| b ^ FLIP).collect()),
-            Fault::SilentDrop | Fault::DeafClose | Fault::LossyClose => self.rx.recv().await,
+            Fault::SilentDrop
+            | Fault::DeafClose
+            | Fault::LossyClose
+            | Fault::StripConfig
+            | Fault::ReplayConfig => self.rx.recv().await,
+            Fault::LeakConfig => {
+                let frame = self.rx.recv().await?;
+                if let Some(store) = &self.store {
+                    leak(store.as_ref(), &frame);
+                }
+                Some(frame)
+            }
         }
     }
 
@@ -396,6 +550,7 @@ impl DoubleFactory {
             tx,
             rx,
             kept: self.kept.clone(),
+            store: None,
         }
     }
 
@@ -435,6 +590,43 @@ impl LinkFactory for DoubleFactory {
             DataPlaneLink::new(dp_wire, dp.to_vec()),
             ControlPlaneLink::new(cp_wire, cp.to_vec()),
         )
+    }
+
+    async fn connect_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> (Self::DpLink, Self::CpLink) {
+        let (mut dp_wire, cp_wire) = self.pair();
+        dp_wire.store = Some(Arc::clone(&store));
+        (
+            DataPlaneLink::new(dp_wire, dp.to_vec()).with_launch_configs(store),
+            ControlPlaneLink::new(cp_wire, cp.to_vec()).with_launch_configs(broker),
+        )
+    }
+
+    async fn data_plane_facing_raw_with_configs(
+        &self,
+        dp: &[ProtocolVersion],
+        store: Arc<dyn LaunchConfigSink>,
+    ) -> (Self::DpLink, PlainRaw) {
+        let (mut wire, raw) = self.facing_raw();
+        wire.store = Some(Arc::clone(&store));
+        (
+            DataPlaneLink::new(wire, dp.to_vec()).with_launch_configs(store),
+            raw,
+        )
+    }
+
+    async fn control_plane_facing_raw_with_configs(
+        &self,
+        cp: &[ProtocolVersion],
+        broker: Arc<dyn LaunchConfigSource>,
+    ) -> (Self::CpLink, PlainRaw) {
+        let (link, raw) = self.control_plane_facing_raw(cp).await;
+        (link.with_launch_configs(broker), raw)
     }
 
     async fn data_plane_facing_raw(&self, dp: &[ProtocolVersion]) -> (Self::DpLink, PlainRaw) {
@@ -541,12 +733,15 @@ fn should_fail_the_version_cases_when_a_link_does_not_check_versions() {
     let failed = failed_cases(fault);
 
     // then
+    // A frame read as 1.0 carries no config the data plane may put (LK-17, LK-19).
     assert_eq!(
         failed,
         BTreeSet::from([
             LinkCase::UnknownMajorDiscarded,
             LinkCase::SessionVersionHeld,
             LinkCase::DiscardsCounted,
+            LinkCase::ConfigDeliveredOnce,
+            LinkCase::ConfigPutOnlyForItsSession,
         ])
     );
 }
@@ -560,12 +755,15 @@ fn should_fail_the_version_cases_when_a_reordering_link_does_not_check_versions(
     let failed = failed_cases(fault);
 
     // then
+    // A frame read as 1.0 carries no config the data plane may put (LK-17, LK-19).
     assert_eq!(
         failed,
         BTreeSet::from([
             LinkCase::UnknownMajorDiscarded,
             LinkCase::SessionVersionHeld,
             LinkCase::DiscardsCounted,
+            LinkCase::ConfigDeliveredOnce,
+            LinkCase::ConfigPutOnlyForItsSession,
         ])
     );
 }
@@ -579,12 +777,14 @@ fn should_fail_the_close_cases_when_a_link_does_not_report_its_close() {
     let failed = failed_cases(fault);
 
     // then
+    // LK-17 closes the control plane to drain every copy of the launch to `Closed`.
     assert_eq!(
         failed,
         BTreeSet::from([
             LinkCase::CloseSeenByDataPlane,
             LinkCase::CloseSeenByControlPlane,
             LinkCase::CloseReportsInFlight,
+            LinkCase::ConfigDeliveredOnce,
         ])
     );
 }
@@ -598,6 +798,7 @@ fn should_fail_the_drain_cases_when_a_close_drops_what_was_queued() {
     let failed = failed_cases(fault);
 
     // then
+    // LK-17 and LK-19 drain to `Closed` too.
     assert_eq!(
         failed,
         BTreeSet::from([
@@ -607,6 +808,8 @@ fn should_fail_the_drain_cases_when_a_close_drops_what_was_queued() {
             LinkCase::CloseSeenByDataPlane,
             LinkCase::CloseSeenByControlPlane,
             LinkCase::DiscardsCounted,
+            LinkCase::ConfigDeliveredOnce,
+            LinkCase::ConfigPutOnlyForItsSession,
         ])
     );
 }
@@ -620,6 +823,8 @@ fn should_fail_the_wire_cases_when_a_link_corrupts_its_encoding() {
     let failed = failed_cases(fault);
 
     // then
+    // LK-18 and LK-19 read and write raw frames; LK-17 runs between two doubles, which
+    // understand each other.
     assert!(failed.contains(&LinkCase::WireEncoding), "{failed:?}");
     assert_eq!(
         failed,
@@ -631,6 +836,146 @@ fn should_fail_the_wire_cases_when_a_link_corrupts_its_encoding() {
             LinkCase::WireEncoding,
             LinkCase::MalformedDiscarded,
             LinkCase::DiscardsCounted,
+            LinkCase::ConfigOnlyInItsFrame,
+            LinkCase::ConfigPutOnlyForItsSession,
         ])
     );
+}
+
+#[test]
+fn should_fail_the_config_cases_when_a_link_strips_the_config() {
+    // given
+    let fault = Fault::StripConfig;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    assert_eq!(
+        failed,
+        BTreeSet::from([
+            LinkCase::ConfigDeliveredOnce,
+            LinkCase::ConfigOnlyInItsFrame
+        ])
+    );
+}
+
+#[test]
+fn should_fail_the_config_cases_when_a_link_carries_the_config_on_every_send() {
+    // given
+    let fault = Fault::ReplayConfig;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    // The store refuses a second put (LK-17 still sees one delivery); what the wire carries
+    // again is a frame no transport may write (LK-18).
+    assert_eq!(failed, BTreeSet::from([LinkCase::ConfigOnlyInItsFrame]));
+}
+
+#[test]
+fn should_fail_only_the_session_case_when_a_link_puts_every_carried_config() {
+    // given
+    let fault = Fault::LeakConfig;
+
+    // when
+    let failed = failed_cases(fault);
+
+    // then
+    // The data plane's own launch is put once either way (the store refuses the endpoint's
+    // second put); a launch of another epoch or a 1.5 session's is what it may not hold.
+    assert_eq!(
+        failed,
+        BTreeSet::from([LinkCase::ConfigPutOnlyForItsSession])
+    );
+}
+
+#[test]
+fn should_count_a_config_lost_when_its_send_fails() {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(async {
+            // given
+            let broker = Arc::new(SuiteBroker::default());
+            let (ours, theirs) = inproc::wire(4);
+            let mut link = ControlPlaneLink::new(ours, mayfly_protocol::SUPPORTED.to_vec())
+                .with_launch_configs(broker.clone());
+            let mut peer = raw(theirs);
+            let directive = lost_launch(&broker);
+            peer.send(hello_frame()).await.expect("the hello");
+            link.next_hello().await.expect("a hello");
+            link.welcome(welcome_at(directive.epoch))
+                .await
+                .expect("the welcome");
+            let (directives, _observations) = link.split().expect("a session");
+            drop(peer);
+
+            // when
+            let sent = directives.send(directive).await;
+
+            // then
+            assert_eq!(sent, Err(LinkError::Closed));
+            assert_eq!(directives.configs_lost(), 1);
+        });
+}
+
+/// A launch whose config `broker` holds for it, in epoch 5.
+fn lost_launch(broker: &SuiteBroker) -> Directive {
+    let attempt = AttemptId::from_u128(0xe1);
+    let handle = SecretHandle {
+        handle_id: SecretHandleId::from_u128(0xe1),
+    };
+    let epoch = Epoch::new(5);
+    broker.hold(
+        handle,
+        attempt,
+        epoch,
+        ["lost", "launch", "config"].join("-"),
+    );
+    Directive {
+        directive_id: DirectiveId::from_u128(0xe1),
+        epoch,
+        attempt: Some(AttemptRef {
+            attempt_id: attempt,
+            generation: Generation::FIRST,
+        }),
+        deadline: Deadline::at(Millis::new(1_700_000_060_000)),
+        kind: DirectiveKind::LaunchRunner {
+            vm_name: OwnedVmName::new(
+                PoolName::sample(),
+                HostId::sample(),
+                Slot::new(1),
+                Generation::FIRST,
+                attempt,
+            ),
+            launch: handle,
+            instance_id: ProviderInstanceId::new("7e:0b:14:52:9a:c1").ok(),
+        },
+    }
+}
+
+fn hello_frame() -> Vec<u8> {
+    serde_json::to_vec(&Frame {
+        protocol_version: CURRENT,
+        message: Message::Hello(Hello {
+            host_id: HostId::sample(),
+            boot_id: "boot-1".to_owned(),
+            dp_version: "0.1.0".to_owned(),
+            supported: mayfly_protocol::SUPPORTED.to_vec(),
+            capabilities: BTreeSet::new(),
+            epoch_floor: Epoch::new(4),
+        }),
+    })
+    .expect("a hello encodes")
+}
+
+const fn welcome_at(epoch: Epoch) -> Welcome {
+    Welcome {
+        epoch,
+        mode: Mode::Normal,
+        accepted_version: CURRENT,
+        cp_clock: None,
+    }
 }

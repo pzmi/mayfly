@@ -10,7 +10,8 @@
 //!     the JIT config through [`ScaleSetApi::generate_jit_config`] once, never again, and
 //!     records the answer: `RecordIssued{runner_id}`, a definite refusal as `RecordAbsent`, any
 //!     other failure as `RecordIssueUnknown`. The config goes to the [`JitBroker`] and only its
-//!     handle to the attempt (`RecordJitHandle`): no journal, ledger or log sees it.
+//!     handle to the attempt (`RecordJitHandle`): no journal, ledger or log sees it. The link's
+//!     control-plane end takes it from there into the launch's frame (LNK-02).
 //!   - **P13, presumed leaked**: a handle orphaned by a restart, a launch of unknown outcome, a
 //!     mint whose config never reached a handle (a crash between the two: F32), or a delivered
 //!     runner GitHub does not show online by [`RegistrationConfig::online_deadline`] (ADR 0038)
@@ -39,8 +40,7 @@
 //! list (I20); a mint whose outcome is unknown is never retried under the same name (I19).
 //!
 //! **What this module does not do yet.** The grant that starts an activation (P9's first half)
-//! is CP-09's; the frame that carries a config from the broker to the data plane's
-//! `LaunchStore` is LNK-02's; P12's first half (job facts to `BindJob`, `RecordConsumed` and
+//! is CP-09's; P12's first half (job facts to `BindJob`, `RecordConsumed` and
 //! `RecordCompleted`) is the listener's [`JobFacts`](crate::listener::JobFacts) consumer, and
 //! its second half, a finished attempt whose job completed retired `job_done`, is a step here
 //! (GH-04); and the

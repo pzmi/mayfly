@@ -12,17 +12,37 @@
 //! link; at-least-once delivery re-sends what was lost (plan §3.2). Link contract case LK-16
 //! sends each of these to both ends and reads the counts back.
 //!
+//! **The JIT config of a launch** (protocol 1.6, LNK-02, `formal/link.qnt`). The control
+//! plane's sending half, given a [`LaunchConfigSource`] (`ControlPlaneLink::with_launch_configs`),
+//! takes a `LaunchRunner`'s config from it when it sends the launch, in a session of 1.6 or
+//! newer, for a launch that names an instance id and is stamped with the session's epoch (what
+//! the data plane admits), for the directive's attempt and that epoch, into that one frame;
+//! once taken, a resend carries nothing. The data plane's receiving half, given a
+//! [`LaunchConfigSink`], empties it when a welcome opens a session, and puts a config it reads
+//! into it before it hands the launch up, bound to the launch's VM, instance id and deadline,
+//! only for a launch of its own session's epoch that names an instance id, in a frame of 1.6
+//! or newer; every other config it reads (another epoch, another kind, no sink, a session or
+//! frame below 1.6, a handle already used) is dropped unread and counted in
+//! [`Discards::configs`]. This is the one epoch the endpoints judge, and only for the config: the
+//! directive itself is handed up whatever its epoch, for the executor to fence. No error or count
+//! names a byte of a config. Link contract cases LK-17 to LK-19.
+//!
 //! Pinned by: `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
 //! (LK-16), and `should_fail_the_version_cases_when_a_link_does_not_check_versions` for the
 //! version count.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use mayfly_domain::{Epoch, Secret};
 use mayfly_protocol::{
-    Directive, DirectiveSink, DirectiveSource, Frame, HandshakeInitiator, HandshakeRefused,
-    HandshakeResponder, Hello, LinkError, Message, Observation, ObservationSink, ObservationSource,
-    ProtocolVersion, Welcome, handshake_version,
+    Directive, DirectiveKind, DirectiveSink, DirectiveSource, Frame, HandshakeInitiator,
+    HandshakeRefused, HandshakeResponder, Hello, LAUNCH_CONFIG, LaunchConfigSink,
+    LaunchConfigSource, LaunchTarget, LinkError, Message, Observation, ObservationSink,
+    ObservationSource, ProtocolVersion, Welcome, handshake_version,
 };
 
-use crate::codec::{self, Discard};
+use crate::codec::{self, Decoded, Discard};
 use crate::wire::{Wire, WireRx, WireTx};
 
 /// What a receiving end discarded instead of handing up, by cause. Each count is a lower bound
@@ -38,6 +58,10 @@ pub struct Discards {
     pub malformed: u64,
     /// Admitted frames of a kind this end does not take at that point.
     pub unexpected: u64,
+    /// JIT configs read and dropped unread: carried by a frame this end puts none from (another
+    /// epoch, another kind, a session below 1.6, no store), or refused by the store (a handle
+    /// already used). Link contract case LK-19.
+    pub configs: u64,
 }
 
 /// The receiving side shared by every end: decode, admit, count.
@@ -48,17 +72,37 @@ struct Reader<R> {
 }
 
 impl<R: WireRx> Reader<R> {
-    /// The next admitted message. Cancel-safe when the wire's `recv` is: nothing awaits after a
-    /// frame was taken.
-    async fn next(&mut self, session: Option<ProtocolVersion>) -> Result<Message, LinkError> {
+    /// The next admitted message, the version its frame was written in and the config it
+    /// carried. Cancel-safe when the wire's `recv` is: nothing awaits after a frame was taken.
+    async fn next_carrying(
+        &mut self,
+        session: Option<ProtocolVersion>,
+    ) -> Result<(Message, ProtocolVersion, Option<Secret<String>>), LinkError> {
         loop {
             let bytes = self.rx.recv().await.ok_or(LinkError::Closed)?;
             match codec::decode(&bytes, session, &self.supported) {
-                Ok(frame) => return Ok(frame.message),
+                Ok(Decoded { frame, config }) => {
+                    return Ok((frame.message, frame.protocol_version, config));
+                }
                 Err(Discard::Version(_)) => self.discards.version += 1,
                 Err(Discard::Malformed) => self.discards.malformed += 1,
             }
         }
+    }
+
+    /// The next admitted message; a config its frame carried is dropped and counted, as no end
+    /// but the data plane's directive half takes one.
+    async fn next(&mut self, session: Option<ProtocolVersion>) -> Result<Message, LinkError> {
+        let (message, _, config) = self.next_carrying(session).await?;
+        if config.is_some() {
+            self.dropped_config();
+        }
+        Ok(message)
+    }
+
+    /// Counts a config dropped unread (LK-19).
+    fn dropped_config(&mut self) {
+        self.discards.configs += 1;
     }
 
     /// Counts an admitted message of the wrong kind for the phase, which the caller then drops
@@ -113,7 +157,8 @@ pub type ControlPlaneSession<W> = (
 pub struct DataPlaneLink<W: Wire> {
     tx: W::Tx,
     reader: Reader<W::Rx>,
-    session: Option<ProtocolVersion>,
+    session: Option<(ProtocolVersion, Epoch)>,
+    configs: Option<Arc<dyn LaunchConfigSink>>,
 }
 
 impl<W: Wire> DataPlaneLink<W> {
@@ -129,13 +174,29 @@ impl<W: Wire> DataPlaneLink<W> {
                 discards: Discards::default(),
             },
             session: None,
+            configs: None,
+        }
+    }
+
+    /// This end, putting the JIT config a launch's frame carries into `store` before it hands
+    /// the launch up (the data plane's `LaunchStore`, ADR 0082), and emptying `store` when a
+    /// welcome opens a session. Without it, every config read is dropped and counted
+    /// ([`Discards::configs`]).
+    #[must_use]
+    pub fn with_launch_configs(self, store: Arc<dyn LaunchConfigSink>) -> Self {
+        Self {
+            configs: Some(store),
+            ..self
         }
     }
 
     /// The version of the session the last `Welcome` opened, if any.
     #[must_use]
     pub const fn session(&self) -> Option<ProtocolVersion> {
-        self.session
+        match self.session {
+            Some((version, _)) => Some(version),
+            None => None,
+        }
     }
 
     /// What this end discarded so far (link contract case LK-16).
@@ -151,11 +212,13 @@ impl<W: Wire> DataPlaneLink<W> {
     /// # Errors
     /// [`LinkError::Transport`] when no welcome opened a session; the link is dropped (closed).
     pub fn split(self) -> Result<DataPlaneSession<W>, LinkError> {
-        let version = self.session.ok_or_else(no_session)?;
+        let (version, epoch) = self.session.ok_or_else(no_session)?;
         Ok((
             DirectiveReceiver {
                 reader: self.reader,
                 version,
+                epoch,
+                configs: self.configs,
             },
             ObservationSender {
                 tx: self.tx,
@@ -188,7 +251,11 @@ impl<W: Wire> HandshakeInitiator for DataPlaneLink<W> {
                 Message::Welcome(welcome) => {
                     codec::speaks(welcome.accepted_version, &self.reader.supported)
                         .map_err(LinkError::Version)?;
-                    self.session = Some(welcome.accepted_version);
+                    self.session = Some((welcome.accepted_version, welcome.epoch));
+                    // no config held was put for this session (LNK-02)
+                    if let Some(store) = &self.configs {
+                        store.discard_held();
+                    }
                     return Ok(welcome);
                 }
                 Message::HandshakeRefused(refused) => return Err(LinkError::Refused(refused)),
@@ -204,6 +271,8 @@ impl<W: Wire> HandshakeInitiator for DataPlaneLink<W> {
 pub struct DirectiveReceiver<R> {
     reader: Reader<R>,
     version: ProtocolVersion,
+    epoch: Epoch,
+    configs: Option<Arc<dyn LaunchConfigSink>>,
 }
 
 impl<R: WireRx> DirectiveReceiver<R> {
@@ -232,15 +301,75 @@ impl<R: WireRx> DirectiveReceiver<R> {
     }
 }
 
+impl<R: WireRx> DirectiveReceiver<R> {
+    /// Puts `config`, carried by `directive`'s frame written in `written`, into the store when
+    /// the directive is a launch of this session's epoch that names an instance id, in a session
+    /// and a frame of 1.6 or newer; drops and counts it otherwise, or when the store refuses it
+    /// (a handle already used).
+    /// `formal/link.qnt`'s `dpDeliverWith` (`configOnlyInItsEpoch`, `configDeliveredOnce`).
+    ///
+    /// Pinned by:
+    /// `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc`
+    /// (LK-17, LK-19), `should_fail_the_config_cases_when_a_link_strips_the_config` and
+    /// `should_fail_only_the_session_case_when_a_link_puts_every_carried_config`.
+    fn hold(&mut self, directive: &Directive, written: ProtocolVersion, config: Secret<String>) {
+        let put = match (&directive.kind, &self.configs) {
+            (
+                DirectiveKind::LaunchRunner {
+                    vm_name,
+                    launch,
+                    instance_id: Some(instance_id),
+                },
+                Some(store),
+            ) if self.version >= LAUNCH_CONFIG
+                && written >= LAUNCH_CONFIG
+                && directive.epoch == self.epoch =>
+            {
+                store
+                    .put(
+                        *launch,
+                        LaunchTarget {
+                            vm_name: vm_name.clone(),
+                            instance_id: instance_id.clone(),
+                            deadline: directive.deadline,
+                        },
+                        config,
+                    )
+                    .is_ok()
+            }
+            _ => false,
+        };
+        if !put {
+            self.reader.dropped_config();
+        }
+    }
+}
+
 impl<R: WireRx> DirectiveSource for DirectiveReceiver<R> {
+    /// The next directive; a launch's config its frame carries is put into the store first
+    /// ([`DirectiveReceiver::hold`]), so the executor never sees a launch before its config.
     async fn recv(&mut self) -> Result<Directive, LinkError> {
         loop {
-            match self.reader.next(Some(self.version)).await? {
-                Message::Directive(directive) => return Ok(directive),
-                Message::Hello(_)
-                | Message::Welcome(_)
-                | Message::HandshakeRefused(_)
-                | Message::Observation(_) => self.reader.unexpected(),
+            match self.reader.next_carrying(Some(self.version)).await? {
+                (Message::Directive(directive), written, config) => {
+                    if let Some(config) = config {
+                        self.hold(&directive, written, config);
+                    }
+                    return Ok(directive);
+                }
+                (
+                    Message::Hello(_)
+                    | Message::Welcome(_)
+                    | Message::HandshakeRefused(_)
+                    | Message::Observation(_),
+                    _,
+                    config,
+                ) => {
+                    if config.is_some() {
+                        self.reader.dropped_config();
+                    }
+                    self.reader.unexpected();
+                }
             }
         }
     }
@@ -275,7 +404,8 @@ impl<T: WireTx> ObservationSink for ObservationSender<T> {
 pub struct ControlPlaneLink<W: Wire> {
     tx: W::Tx,
     reader: Reader<W::Rx>,
-    session: Option<ProtocolVersion>,
+    session: Option<(ProtocolVersion, Epoch)>,
+    configs: Option<Arc<dyn LaunchConfigSource>>,
 }
 
 impl<W: Wire> ControlPlaneLink<W> {
@@ -290,13 +420,27 @@ impl<W: Wire> ControlPlaneLink<W> {
                 discards: Discards::default(),
             },
             session: None,
+            configs: None,
+        }
+    }
+
+    /// This end, taking each launch's JIT config from `broker` when it sends the launch (the
+    /// control plane's `JitBroker`, plan §3.1). Without it, no frame carries a config.
+    #[must_use]
+    pub fn with_launch_configs(self, broker: Arc<dyn LaunchConfigSource>) -> Self {
+        Self {
+            configs: Some(broker),
+            ..self
         }
     }
 
     /// The version of the session the last `welcome` opened, if any.
     #[must_use]
     pub const fn session(&self) -> Option<ProtocolVersion> {
-        self.session
+        match self.session {
+            Some((version, _)) => Some(version),
+            None => None,
+        }
     }
 
     /// What this end discarded so far (link contract case LK-16).
@@ -312,11 +456,14 @@ impl<W: Wire> ControlPlaneLink<W> {
     /// # Errors
     /// [`LinkError::Transport`] when no welcome opened a session; the link is dropped (closed).
     pub fn split(self) -> Result<ControlPlaneSession<W>, LinkError> {
-        let version = self.session.ok_or_else(no_session)?;
+        let (version, epoch) = self.session.ok_or_else(no_session)?;
         Ok((
             DirectiveSender {
                 tx: self.tx,
                 version,
+                epoch,
+                configs: self.configs,
+                lost: Arc::default(),
             },
             ObservationReceiver {
                 reader: self.reader,
@@ -354,7 +501,7 @@ impl<W: Wire> HandshakeResponder for ControlPlaneLink<W> {
         codec::speaks(welcome.accepted_version, &self.reader.supported)
             .map_err(LinkError::Version)?;
         let version = handshake_frame_version(&self.reader.supported)?;
-        let accepted = welcome.accepted_version;
+        let accepted = (welcome.accepted_version, welcome.epoch);
         send_frame(&self.tx, version, Message::Welcome(welcome)).await?;
         self.session = Some(accepted);
         Ok(())
@@ -372,18 +519,99 @@ impl<W: Wire> HandshakeResponder for ControlPlaneLink<W> {
 pub struct DirectiveSender<T> {
     tx: T,
     version: ProtocolVersion,
+    epoch: Epoch,
+    configs: Option<Arc<dyn LaunchConfigSource>>,
+    lost: Arc<AtomicU64>,
+}
+
+impl<T> DirectiveSender<T> {
+    /// The config `directive` carries: a launch's, taken from the broker for its attempt and
+    /// epoch, in a session of 1.6 or newer, only when the data plane would put it (the launch
+    /// names an instance id and is stamped with this session's epoch), so a config never
+    /// crosses for nothing; `None` otherwise, and on every send after the first (the take is
+    /// single). `formal/link.qnt`'s `relaySendWith` (`configSentOnce`).
+    fn carried(&self, directive: &Directive) -> Option<Secret<String>> {
+        if self.version < LAUNCH_CONFIG || directive.epoch != self.epoch {
+            return None;
+        }
+        let (
+            DirectiveKind::LaunchRunner {
+                launch,
+                instance_id: Some(_),
+                ..
+            },
+            Some(attempt),
+            Some(broker),
+        ) = (&directive.kind, directive.attempt, &self.configs)
+        else {
+            return None;
+        };
+        broker.take(*launch, attempt.attempt_id, directive.epoch)
+    }
+
+    /// How many configs this session's sends took from the broker but may not have handed to
+    /// the wire: the send failed or was cancelled after the take (its launch then fails
+    /// definitely for want of the config, and P13 deregisters the runner by id). Clones share
+    /// the count.
+    ///
+    /// Pinned by: `tests/link_contract.rs::should_count_a_config_lost_when_its_send_fails`.
+    #[must_use]
+    pub fn configs_lost(&self) -> u64 {
+        self.lost.load(Ordering::Relaxed)
+    }
+}
+
+/// Counts a taken config as lost unless the send that carries it is accepted: dropped by a
+/// failed or cancelled send, it counts.
+struct Taken<'a> {
+    lost: &'a AtomicU64,
+    accepted: bool,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        if !self.accepted {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<T: WireTx> DirectiveSink for DirectiveSender<T> {
     /// Writes `directive` down to the session's version
     /// (`mayfly_protocol::DirectiveKind::written_in`: a launch's instance id from 1.3, ADR 0082)
-    /// and sends it stamped with that version.
+    /// and sends it stamped with that version; a launch's frame carries its JIT config when the
+    /// broker still holds it for this attempt and epoch (1.6, [`DirectiveSender::carried`]). The
+    /// config is taken before the send: a send cancelled or failed after the take loses it
+    /// ([`DirectiveSender::configs_lost`]), and the launch then fails definitely for want of it
+    /// (single take, plan §3.2). Link contract cases LK-17 and LK-18.
+    ///
+    /// Pinned by:
+    /// `tests/link_contract.rs::should_pass_the_link_contract_when_the_transport_is_inproc` and
+    /// `should_fail_the_config_cases_when_a_link_carries_the_config_on_every_send`.
     async fn send(&self, directive: Directive) -> Result<(), LinkError> {
         let directive = Directive {
             kind: directive.kind.written_in(self.version),
             ..directive
         };
-        send_frame(&self.tx, self.version, Message::Directive(directive)).await
+        let config = self.carried(&directive);
+        let mut taken = config.as_ref().map(|_| Taken {
+            lost: &self.lost,
+            accepted: false,
+        });
+        let frame = Frame {
+            protocol_version: self.version,
+            message: Message::Directive(directive),
+        };
+        let bytes = match &config {
+            Some(config) => codec::encode_carrying(&frame, config)?,
+            None => codec::encode(&frame)?,
+        };
+        drop(config);
+        self.tx.send(bytes).await?;
+        if let Some(taken) = &mut taken {
+            taken.accepted = true;
+        }
+        Ok(())
     }
 }
 
