@@ -125,8 +125,9 @@ pub struct VmUse {
 /// One materialised base, as counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseUse {
-    /// The guest its clones run; `None` until the image store's listing names it (a
-    /// `MaterialiseImage`'s answer does not).
+    /// The guest its clones run; `None` until the image store's listing names it: the listing
+    /// the executor reads right after a `MaterialiseImage` it applied ([`Ledger::learn_base_guest`],
+    /// CP-10), or any later one ([`Ledger::apply_images`]). A clone inherits it.
     pub guest: Option<GuestOs>,
     /// Its disk ceiling; `None` while not measured (ADR 0052).
     pub disk_bytes: Option<u64>,
@@ -633,6 +634,19 @@ impl Ledger {
             | DirectiveKind::ReportInventory
             | DirectiveKind::ReportCapacity
             | DirectiveKind::ReportHostFacts => None,
+        }
+    }
+
+    /// Records the guest OS that clones of `base` run, as the image store's listing read right
+    /// after the base was made names it (the store's record of the base, checked by its clone
+    /// proof, and the provider's report of the VM: the same source as [`Ledger::apply_images`]).
+    /// It changes only a base the ledger holds whose guest is not known yet. Without it a clone made
+    /// before the next listing would carry no guest, and its `StartVm` would be refused
+    /// `capacity_unknown{macos_guests}` (CP-10). Pinned by
+    /// `tests/data_plane/ledger.rs::should_admit_the_start_of_a_clone_when_its_base_was_just_materialised`.
+    pub fn learn_base_guest(&mut self, base: &BaseName, guest: GuestOs) {
+        if let Some(entry) = self.bases.get_mut(base) {
+            entry.guest.get_or_insert(guest);
         }
     }
 

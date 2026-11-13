@@ -1517,7 +1517,8 @@ and refused `already_activated`; a grace that retires it could reuse an existing
 grant follows a preparation by up to the reconciler's interval (a minute) unless a host, pool,
 scale-set or placement stream kicks a pass first (attempt streams do not), CP-10's item (1); and
 under `mayflyd` nothing grants yet, since nothing drives P2's `start_attempt` there (CP-10) and
-nothing records a trusted or acquired job (GH-04, GH-10, GH-08).
+nothing records a trusted or acquired job (GH-04, GH-10, GH-08). (CP-10 closed both of its
+parts: P2 is driven by the pass, and an `AttemptPrepared` kicks one.)
 
 #### CP-10 Start reserved leases: P2's driver
 Cites: dm P2, P5, P17; CP-03 and CP-03F (start grace, `attempt_never_started`), CP-07's note
@@ -1539,6 +1540,70 @@ waits for them; decide the rule and fix it here, with a test.
 Accept: a component test that a reserved lease is started by the next pass and a `NotPlaced` one
 is started once its placement materialises; a Linux daemon test under `mayflyd` over fake-tart
 with VER-09's registry in which an attempt reaches Prepared; tests for (1) and (2).
+Note (CP-10, as built): model first, `formal/scheduling.qnt`'s `startAttempt` was already P2's
+step (the pin placed, a read of the host and placement streams); its documentation now names the
+pass as its driver, which plans a start more strictly than the guard, and two scenarios pin the
+waiting: `unplacedStartWaitsForItsBaseTest` (no start until the new pin's base is materialised,
+then on it) and `unplacedLeaseReleasedAfterTheGraceTest` (never placed: released
+`attempt_never_started`, the start disabled after). The fleet simulation now checks that the
+pass starts only a lease its host held, on a host admitting when read fresh, and counts the starts
+that appended. The pure pass plans `PassCommand::Start` for each lease
+with no `AttemptStarted` on a host that would admit for its pool now (gate open, no drain, terms
+open, the pool active: a VM is not cloned where nothing new would be admitted) whose pin is
+placed there, not on a host held by a data-plane refusal until a newer report (each start
+would spend its tries on the same refusal at once;
+`should_start_no_reservation_on_a_host_when_a_refusal_holds_it_until_a_newer_report`), never for a
+lease the same pass releases, never in safe mode
+(`crates/mayfly-control-domain/tests/reconcile.rs::should_start_a_reserved_lease_only_when_its_host_admits_and_its_pin_is_placed`,
+a property over random inputs); the driver calls `start::start_attempt`, whose guards, retry and
+ids stay the only ones: started by the next pass
+(`crates/mayfly-control/tests/store/reconciler.rs::should_start_a_reserved_lease_when_the_next_pass_runs`),
+once over a stale read (`should_start_once_when_a_stale_read_plans_the_start_again`, the
+receipt), `NotPlaced` at the save reported `failed`/`not_placed` with the lease held and
+started by the pass after its placement
+(`should_start_a_lease_once_its_placement_materialises_when_its_pin_was_not_placed`), and
+released after the start grace when its pin is never placed
+(`should_release_a_lease_after_the_start_grace_when_its_pin_is_never_placed`). The two CP-03F
+release tests now pause the pool so the pass leaves the reservation unstarted. **Deviation:** the
+retry budget is `ReconcilerConfig::retry_budget` (2, `formal/lifecycle.qnt`'s `BUDGET`), not the
+pool's configuration, which carries none; a per-pool budget is a configuration change for later.
+(1) `Committed` (the store's after-commit notification, in memory only) now names the kinds the
+unit appended; `reconciler::kick_prepared` kicks the reconciler's own `prepared` set for an
+attempt stream that appended `attempt_prepared`, and `Reconciler::with_prepared` passes on it,
+so the grant follows the preparation at once; the prefix rule for every other kick is unchanged
+(`should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked` as it was;
+`should_pass_at_once_when_an_attempt_becomes_prepared_and_not_on_its_other_events`;
+`mayfly-composition`'s `supervise::tests::should_kick_the_prepared_wake_only_when_an_attempt_becomes_prepared`).
+(2) The rule: the surplus counts prepared VMs alone, beyond the shortfall and `min_prepared`; a
+VM still preparing never makes a prepared one surplus (it may fail or take long, and the job it
+was counted for would wait while a ready VM was retired); `waiting` still counts both, so
+nothing more is reserved
+(`crates/mayfly-control-domain/tests/reconcile.rs::should_retire_no_prepared_vm_as_surplus_when_a_job_waits_and_others_are_preparing`).
+No model change for (1) and (2): one is timing, the other which of the pass's retirements of a
+Prepared VM (always safe in `formal/lifecycle.qnt`) it plans. **Data-plane prerequisite, fixed
+here (a production bug the daemon test found):** the ledger recorded a materialised base with no
+guest OS until the image store's next listing (the observer's pass, every 30 s), so a clone made
+before it carried none and its `StartVm` was refused `capacity_unknown{macos_guests}`; the
+attempt spent its boot budget in milliseconds and retired `stage_failed`. The executor already
+lists the store right after a `MaterialiseImage` it applied (for the base's disk); it now also
+takes the base's guest from that listing (the store's own record of the base, checked by its
+clone proof, and the provider's report of the VM: the source every listing uses) and records it
+(`Ledger::learn_base_guest`, after the commit, only for a base the ledger holds and whose guest
+it does not know), so a clone inherits it
+(`crates/mayfly-data-domain/tests/data_plane/ledger.rs::should_admit_the_start_of_a_clone_when_its_base_was_just_materialised`,
+which also shows the old refusal;
+`crates/mayfly-data/tests/executor/effects.rs::should_boot_a_clone_at_once_when_its_base_was_just_materialised`,
+which fails without the fix); a base known only from a listing still gives its clones the
+listing's guest (`should_give_a_clone_its_bases_guest_when_the_base_is_known_from_the_image_listing_only`).
+No model covers the ledger's knowledge of a guest OS (`formal/scheduling.qnt` abstracts unknown
+facts as unknown memory, `noStartWhileCapacityUnknown`, which still holds: the guest is learned
+from the listing, never assumed). Under `mayflyd`, an attempt is
+started and Prepared over fake-tart with VER-09's registry
+(`crates/mayfly-composition/tests/daemon.rs`, `mod placement`,
+`should_prepare_an_attempt_for_the_pool_when_its_reservation_is_started`, a bounded poll of
+`mayfly status --json` for `attempts.by_phase.prepared`); the placement tests now stop the VMs the daemon leaves
+running and reap their shims (`placement::Reaped`), and their pool asks 1 GiB per VM so the
+data plane's real memory gate admits the clone.
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,

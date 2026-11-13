@@ -37,6 +37,11 @@ pub struct Committed {
     pub command_id: CommandId,
     /// What it appended, per stream: the streams a consumer's worker is kicked for.
     pub appended: Appended,
+    /// The kinds of the events it appended to its aggregate's stream, in order: what a reader
+    /// that wakes on one kind of event alone filters on (the reconciler's pass on an
+    /// `attempt_prepared`, CP-10). Pinned by
+    /// `tests/store/save.rs::should_kick_once_after_commit_and_never_when_a_receipt_answers`.
+    pub kinds: Vec<StoredKind>,
 }
 
 /// Notifications `AggregateStore` gives, each **at most once** and carrying no obligation

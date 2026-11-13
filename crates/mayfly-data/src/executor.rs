@@ -47,7 +47,7 @@ use mayfly_data_domain::{
 };
 use mayfly_domain::{Deadline, DirectiveId, Epoch, HostId, ImageDigest, Millis, OwnedVmName};
 use mayfly_protocol::{
-    BaseName, CapacityReport, Directive, DirectiveKind, DirectiveRef, DirectiveSource,
+    BaseName, CapacityReport, Directive, DirectiveKind, DirectiveRef, DirectiveSource, GuestOs,
     HandshakeInitiator, Hello, ImageStoreListing, InventoryGap, LinkError, ListedBase, Observation,
     ObservationKind, ObservationSink, ProtocolVersion, ResourceDimension, SUPPORTED, UnknownReason,
 };
@@ -256,6 +256,8 @@ enum Work {
     Effect {
         key: Key,
         stimulus: Stimulus,
+        /// The guest of a base the effect made, as the image store listed it (CP-10).
+        base_guest: Option<(BaseName, GuestOs)>,
         gated: bool,
     },
     Observed(Pass),
@@ -745,15 +747,19 @@ fn beside(observed: ObservationKind, listing: Option<&ImageListing>) -> Observat
     }
 }
 
-/// Runs the effect of `kind`, answering what was observed.
-async fn effect<V, I, G, H, C, D>(ports: &Ports<V, I, G, H, C, D>, kind: DirectiveKind) -> Stimulus
+/// Runs the effect of `kind`, answering what was observed and, for a `MaterialiseImage` that
+/// was applied, the guest the store lists for the base it made (CP-10).
+async fn effect<V, I, G, H, C, D>(
+    ports: &Ports<V, I, G, H, C, D>,
+    kind: DirectiveKind,
+) -> (Stimulus, Option<(BaseName, GuestOs)>)
 where
     V: VmProvider,
     I: ImageStore,
     G: GuestTransport,
     H: HostProbe,
 {
-    match kind {
+    let stimulus = match kind {
         DirectiveKind::PullImage { digest } => outcome(ports.images.pull(&digest).await, |()| {
             ObservationKind::ImagePulled { digest }
         }),
@@ -766,24 +772,30 @@ where
                 .images
                 .materialise(&digest, &base_name, &runner_version)
                 .await;
-            // the base's measured disk, as the store lists it (ADR 0052's amendment): the
-            // control plane plans its clones at it (CP-07); a listing that fails or a base
-            // that did not measure answers none, never a default
-            let disk_bytes = if made.is_ok() {
-                ports
-                    .images
-                    .list()
-                    .await
-                    .ok()
-                    .and_then(|listing| listing.disks.bases.get(&base_name).copied())
+            // the base's measured disk and its guest, as the store lists it (ADR 0052's
+            // amendment): the control plane plans its clones at the disk (CP-07), and the
+            // ledger counts them as the guest (CP-10); a listing that fails, a base that did
+            // not measure or that it does not list answers none, never a default
+            let listing = if made.is_ok() {
+                ports.images.list().await.ok()
             } else {
                 None
             };
-            outcome(made, |()| ObservationKind::ImageMaterialised {
-                digest,
-                base_name,
-                disk_bytes,
-            })
+            let disk_bytes = listing
+                .as_ref()
+                .and_then(|listing| listing.disks.bases.get(&base_name).copied());
+            let guest = listing
+                .as_ref()
+                .and_then(|listing| listing.bases.get(&base_name).copied())
+                .map(|guest| (base_name.clone(), guest));
+            return (
+                outcome(made, |()| ObservationKind::ImageMaterialised {
+                    digest,
+                    base_name,
+                    disk_bytes,
+                }),
+                guest,
+            );
         }
         DirectiveKind::EvictImage { base_name } => {
             outcome(ports.images.evict(&base_name).await, |()| {
@@ -844,7 +856,8 @@ where
         },
         // Answered by the executor itself before any effect would start.
         DirectiveKind::ReportInventory | DirectiveKind::ReportCapacity => Stimulus::Failed,
-    }
+    };
+    (stimulus, None)
 }
 
 impl Core {
@@ -1075,10 +1088,11 @@ impl Core {
                     },
                 );
                 run.in_flight.push(Box::pin(async move {
-                    let stimulus = effect(ports, kind).await;
+                    let (stimulus, base_guest) = effect(ports, kind).await;
                     Work::Effect {
                         key,
                         stimulus,
+                        base_guest,
                         gated,
                     }
                 }));
@@ -1116,6 +1130,7 @@ impl Core {
             Work::Effect {
                 key,
                 stimulus,
+                base_guest,
                 gated,
             } => {
                 run.jobs -= 1;
@@ -1125,6 +1140,10 @@ impl Core {
                 let overdue = run.running.remove(&key).is_some_and(|r| r.overdue);
                 if !overdue {
                     let progress = self.plane.finish(key.0, key.1, stimulus);
+                    // after the commit that recorded the base: its clones inherit the guest
+                    if let Some((base, guest)) = base_guest {
+                        self.plane.ledger.learn_base_guest(&base, guest);
+                    }
                     self.answer(run, progress);
                 }
                 run.release(key);

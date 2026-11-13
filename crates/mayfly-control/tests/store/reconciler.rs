@@ -1,18 +1,21 @@
 //! The reconciler over the in-memory store (component level, CP-03): a pass reads the fleet
 //! through the projections and issues its commands through `AggregateStore`; its timer and
-//! kicks, its idempotent ids, its hysteresis, its reading of a data-plane refusal, and the
-//! seeded simulation that checks the invariants it must keep.
+//! kicks, its idempotent ids, its hysteresis, its reading of a data-plane refusal, P2's starts
+//! (CP-10), and the seeded simulation that checks the invariants it must keep.
 
 use mayfly_control::delivery::Kicks;
+use mayfly_control::journal::{Appended, AppendedStream, Journal as _, StoredKind, StreamRevision};
 use mayfly_control::projection::views::Attempts;
 use mayfly_control::queries;
-use mayfly_control::reconciler::{Reconciler, ReconcilerConfig};
-use mayfly_control::store::{Clock, stream_of};
-use mayfly_control_domain::attempt::{GuestOs, Phase, RefusalReason, RetireReason};
+use mayfly_control::reconciler::{Reconciler, ReconcilerConfig, kick_prepared};
+use mayfly_control::store::{Clock, Committed, stream_of};
+use mayfly_control_domain::Actor;
+use mayfly_control_domain::attempt::{Attempt, GuestOs, Phase, RefusalReason, RetireReason};
 use mayfly_control_domain::demand::WireMode;
 use mayfly_control_domain::host::{Host, ReleaseEvidence};
+use mayfly_control_domain::pool::{Pool, PoolCommand};
 use mayfly_control_domain::reconcile::{Pass, PassCommand, PassInputs, plan_pass};
-use mayfly_domain::{AttemptId, HostId, Millis, PoolName};
+use mayfly_domain::{AttemptId, CommandId, EventId, HostId, ImageDigest, Millis, PoolName, Sample};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::FakeClock;
 use mayfly_testkit::fleet::{
@@ -68,6 +71,64 @@ fn retired(commands: &[PassCommand]) -> Vec<RetireReason> {
             _ => None,
         })
         .collect()
+}
+
+/// The image the pool is repinned to, materialised on no host until placed.
+fn other_image() -> ImageDigest {
+    ImageDigest::new(&format!("sha256:{}", "b".repeat(64))).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Pins the pool to [`other_image`] (its base on no host) and applies its terms.
+fn repin_unplaced(world: &mut World<'_>) {
+    let _ = world.command::<Pool>(
+        lin().as_str(),
+        Actor::Automation { policy: "image" },
+        PoolCommand::PinImage {
+            digest: other_image(),
+            verified_ref: Some(EventId::from_u128(8)),
+        },
+    );
+    world.apply_terms(&lin());
+}
+
+/// Pauses the pool, so a pass starts none of its reservations (CP-10), and applies its terms.
+fn pause(world: &mut World<'_>) {
+    let _ = world.command::<Pool>(
+        lin().as_str(),
+        Actor::Operator { uid: 501 },
+        PoolCommand::PausePool,
+    );
+    world.apply_terms(&lin());
+}
+
+fn started(commands: &[PassCommand]) -> Vec<AttemptId> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::Start { attempt_id, .. } => Some(*attempt_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn released(commands: &[PassCommand]) -> Vec<AttemptId> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::ReleaseSlot { attempt_id, .. } => Some(*attempt_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `AttemptStarted` the attempt's stream holds.
+fn starts_recorded(journal: &MemoryJournal, attempt: AttemptId) -> usize {
+    let stream = stream_of::<Attempt>(&attempt.to_string()).unwrap_or_else(|e| panic!("{e}"));
+    block_on(journal.read_stream(&stream, None, None))
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e.kind.event_type == "attempt_started")
+        .count()
 }
 
 /// Starts every reservation and drives each attempt to `Prepared` (P2, P6 and the data
@@ -191,6 +252,215 @@ fn should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked() {
 }
 
 #[test]
+fn should_pass_at_once_when_an_attempt_becomes_prepared_and_not_on_its_other_events() {
+    // given: a reconciler woken by its prepared kicks, fed as the composition root feeds them
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let _world = fleet(&store, 0);
+    let kicks = Kicks::new(8);
+    let prepared = Kicks::new(8);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        kicks.clone(),
+    )
+    .with_prepared(prepared.clone());
+    let attempt = stream_of::<Attempt>(&AttemptId::from_u128(10).to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let commit = |kind: &str| Committed {
+        command_id: CommandId::from_u128(1),
+        appended: Appended {
+            streams: vec![AppendedStream {
+                stream: attempt.clone(),
+                first: StreamRevision::FIRST,
+                last: StreamRevision::FIRST,
+                event_ids: vec![EventId::from_u128(1)],
+            }],
+        },
+        kinds: vec![StoredKind {
+            event_type: kind.to_owned(),
+            schema_version: 1,
+        }],
+    };
+    let first = block_on(reconciler.tick()).unwrap_or_else(|e| panic!("{e}"));
+
+    // when: an attempt records a directive, then becomes Prepared
+    let issued = commit("directive_issued");
+    kicks.kick(&attempt);
+    kick_prepared(&prepared, &issued);
+    let on_directive = block_on(reconciler.tick()).unwrap_or_else(|e| panic!("{e}"));
+    let became_prepared = commit("attempt_prepared");
+    kicks.kick(&attempt);
+    kick_prepared(&prepared, &became_prepared);
+    let on_prepared = block_on(reconciler.tick()).unwrap_or_else(|e| panic!("{e}"));
+    let after = block_on(reconciler.tick()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: only the Prepared event makes a pass due before the interval, once
+    assert!(first.is_some());
+    assert!(on_directive.is_none());
+    assert!(on_prepared.is_some());
+    assert!(after.is_none());
+}
+
+#[test]
+fn should_start_a_reserved_lease_when_the_next_pass_runs() {
+    // given: one job, reserved by a pass
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        Kicks::new(8),
+    );
+    let reserving = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let (_, attempt) = world.unstarted()[0].clone();
+
+    // when
+    let next = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let again = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: started from the host's lease on the pool's pin with the configured retry budget,
+    // once; the pass that reserved it did not start it (it read no lease), the one after it
+    // plans nothing more
+    assert!(started(&reserving.pass.commands).is_empty());
+    assert_eq!(started(&next.accepted), vec![attempt]);
+    assert!(
+        next.refused.is_empty() && next.failed.is_empty(),
+        "{next:?}"
+    );
+    let identity = world
+        .attempt(attempt)
+        .identity
+        .unwrap_or_else(|| panic!("not started"));
+    assert_eq!(
+        (
+            identity.host_id,
+            identity.image_digest,
+            identity.retry_budget
+        ),
+        (h1(), ImageDigest::sample(), 2)
+    );
+    assert!(started(&again.pass.commands).is_empty());
+    assert!(world.unstarted().is_empty());
+    assert_eq!(starts_recorded(&journal, attempt), 1);
+}
+
+#[test]
+fn should_start_once_when_a_stale_read_plans_the_start_again() {
+    // given: a reservation the reconciler reads unstarted through projections it refreshes only
+    // when told, started by a pass
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reads = LaggedReads::new(&journal, 1);
+    let reconciler = Reconciler::new(&store, &reads, ReconcilerConfig::new(EPOCH), Kicks::new(8));
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    reads.capture();
+    let (_, attempt) = world.unstarted()[0].clone();
+    let first = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // when: a pass over the same stale read plans the start again
+    let again = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: the receipt answers it; the attempt started once
+    assert_eq!(started(&first.accepted), vec![attempt]);
+    assert_eq!(started(&again.pass.commands), vec![attempt]);
+    assert_eq!(started(&again.accepted), vec![attempt]);
+    assert_eq!(starts_recorded(&journal, attempt), 1);
+}
+
+#[test]
+fn should_start_a_lease_once_its_placement_materialises_when_its_pin_was_not_placed() {
+    // given: a reservation read unstarted on the pin then placed, and the pool repinned to an
+    // image whose base is on no host before the pass that would start it
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reads = LaggedReads::new(&journal, 1);
+    let reconciler = Reconciler::new(&store, &reads, ReconcilerConfig::new(EPOCH), Kicks::new(8));
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    reads.capture();
+    let (_, attempt) = world.unstarted()[0].clone();
+    repin_unplaced(&mut world);
+
+    // when: a pass plans the start from the stale read, a pass reads the new pin unplaced, and
+    // a pass runs after the new pin's base is materialised
+    let stale = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    reads.capture();
+    let unplaced = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    world.place(&other_image());
+    reads.capture();
+    let placed = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: P2 started nothing on the unplaced pin and the lease was neither released nor
+    // retried; the pass after the placement started it on the new pin
+    let start = PassCommand::Start {
+        host_id: h1(),
+        attempt_id: attempt,
+    };
+    assert!(
+        stale.failed.contains(&(start.clone(), "not_placed")),
+        "{stale:?}"
+    );
+    assert!(started(&unplaced.pass.commands).is_empty());
+    for pass in [&stale, &unplaced] {
+        assert!(released(&pass.pass.commands).is_empty(), "{pass:?}");
+    }
+    assert!(placed.accepted.contains(&start), "{placed:?}");
+    assert_eq!(
+        world.attempt(attempt).identity.map(|i| i.image_digest),
+        Some(other_image())
+    );
+    assert!(world.host(&h1()).leases.contains_key(&attempt));
+}
+
+#[test]
+fn should_release_a_lease_after_the_start_grace_when_its_pin_is_never_placed() {
+    // given: a reservation, then the pool repinned to an image whose base is on no host
+    let journal = MemoryJournal::new();
+    let clock = FakeClock::at(T0);
+    let store = store(&journal, &clock);
+    let mut world = fleet(&store, 0);
+    world.statistics(&lin(), 1, 0, false);
+    let reconciler = Reconciler::new(
+        &store,
+        &journal,
+        ReconcilerConfig::new(EPOCH),
+        Kicks::new(8),
+    );
+    block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    let (_, attempt) = world.unstarted()[0].clone();
+    repin_unplaced(&mut world);
+
+    // when: a pass within the start grace, and one past it
+    let within = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    clock.advance(Millis::new(3 * MINUTE));
+    let past = block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+
+    // then: never started; held within the grace, released `attempt_never_started` after it
+    assert!(started(&within.pass.commands).is_empty());
+    assert!(released(&within.pass.commands).is_empty());
+    assert!(past.accepted.contains(&PassCommand::ReleaseSlot {
+        host_id: h1(),
+        attempt_id: attempt,
+        evidence: ReleaseEvidence::AttemptNeverStarted,
+    }));
+    assert!(started(&past.pass.commands).is_empty());
+    assert!(!world.host(&h1()).leases.contains_key(&attempt));
+    assert_eq!(starts_recorded(&journal, attempt), 0);
+}
+
+#[test]
 fn should_retire_a_prepared_surplus_only_after_the_hysteresis_when_demand_drops() {
     // given: one job, its VM prepared, then the job is gone
     let journal = MemoryJournal::new();
@@ -281,6 +551,8 @@ fn should_keep_the_slot_when_the_attempt_starts_between_the_read_and_the_release
     let reads = LaggedReads::new(&journal, 1);
     let reconciler = Reconciler::new(&store, &reads, ReconcilerConfig::new(EPOCH), Kicks::new(8));
     block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
+    // the pool paused, so the passes do not start the reservation themselves (CP-10)
+    pause(&mut world);
     reads.capture();
     block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
     clock.advance(Millis::new(3 * MINUTE));
@@ -323,6 +595,8 @@ fn should_release_an_unstarted_lease_and_refuse_its_late_start_when_the_release_
     block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
     let (host, attempt) = world.unstarted()[0].clone();
     world.statistics(&lin(), 0, 0, false);
+    // the pool paused, so the passes do not start the reservation themselves (CP-10)
+    pause(&mut world);
     block_on(reconciler.run_pass()).unwrap_or_else(|e| panic!("{e}"));
     clock.advance(Millis::new(3 * MINUTE));
 

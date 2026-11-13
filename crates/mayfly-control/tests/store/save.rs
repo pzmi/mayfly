@@ -461,6 +461,10 @@ fn should_kick_once_after_commit_and_never_when_a_receipt_answers() {
         [Notification::Committed(Committed {
             command_id: CommandId::from_u128(1),
             appended,
+            kinds: vec![StoredKind {
+                event_type: "counter_incremented".to_owned(),
+                schema_version: 1,
+            }],
         })]
     );
 }

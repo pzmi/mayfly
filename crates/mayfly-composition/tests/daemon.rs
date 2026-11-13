@@ -12,13 +12,18 @@
 //! The placement tests (`mod placement`, VER-09, Linux only) do pull: `mayfly-fake-registry`
 //! serves a synthetic Tart image over HTTPS under a CA made for the test, handed to `mayflyd` as
 //! `SSL_CERT_FILE` (ver §7.5), and the same image is seeded in fake-tart's registry, so the
-//! daemon pulls, verifies and materialises the pinned image's base and the reconciler reserves
-//! for the pool. The ready line promises no placement, so these tests poll `mayfly status --json`
-//! (RT-03) with a bound for the pool's documented place on the host (`pools[].hosts[]`), and
-//! read the journal once the daemon exited.
+//! daemon pulls, verifies and materialises the pinned image's base, the reconciler reserves
+//! for the pool and starts the reservation (P2, CP-10), and the attempt's VM is cloned from the
+//! base, booted under its shim and its guest verified until it is Prepared. The ready line
+//! promises no placement, so these tests poll `mayfly status --json` (RT-03) with a bound for
+//! the documented fact they wait for (the pool's place on the host, `pools[].hosts[]`; an
+//! attempt Prepared, `attempts.by_phase`), and read the journal once the daemon exited. A VM
+//! they made is stopped with `tart stop` once the daemon exited, and its shim waited for
+//! (`placement::Reaped`): the daemon leaves VMs running under their shims by design (ADR 0037).
 //!
 //! The binaries are found next to this test executable's directory, where a workspace build
-//! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least).
+//! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least: `mayfly` runs each VM's
+//! shim).
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -1018,13 +1023,62 @@ fn should_refuse_to_start_when_a_pool_manifest_names_a_tag() {
 /// cannot write without the owner. CI runs these on Linux.
 #[cfg(target_os = "linux")]
 mod placement {
-    use mayfly_control_domain::attempt::{GuestOs, RefusalReason};
+    use mayfly_adapter_tart::shim::{self, RunRecord};
+    use mayfly_control_domain::attempt::{Attempt, AttemptEvent, GuestOs, RefusalReason};
     use mayfly_control_domain::image::{RunnerVersion, base_name};
     use mayfly_control_domain::placement::{ImagePlacement, PlacementEvent, placement_instance};
-    use mayfly_domain::HostId;
+    use mayfly_data::Shim;
+    use mayfly_domain::{AttemptId, HostId};
     use mayfly_fake_registry::{FakeRegistry, Images, Served, TartImage, seed_tart_home};
 
     use super::*;
+
+    /// How long the reaping waits for a shim to let go of its lock after its VM stopped.
+    const RELEASE: Duration = Duration::from_secs(20);
+
+    /// Stops every VM the daemon left running in the world's `TART_HOME` with `tart stop` and
+    /// waits for each shim to exit when dropped (declared before the daemon, so dropped after
+    /// it); a `tart run` that does not end is killed by the pid its shim recorded, a process
+    /// this test's daemon started. The test support that keeps a child alive stops it.
+    struct Reaped<'w>(&'w World);
+
+    impl Drop for Reaped<'_> {
+        fn drop(&mut self) {
+            let listed = self.0.tart(&["list", "--format", "json"]);
+            let entries: Vec<Value> = serde_json::from_slice(&listed.stdout).unwrap_or_default();
+            for entry in entries.iter().filter(|e| e["Running"] == true) {
+                if let Some(name) = entry["Name"].as_str() {
+                    let _stopped = self.0.tart(&["stop", name, "--timeout", "5"]);
+                }
+            }
+            let Ok(dirs) = std::fs::read_dir(self.0.state().join("shims")) else {
+                return;
+            };
+            for dir in dirs.filter_map(Result::ok).map(|e| e.path()) {
+                let released = || shim::read(&dir).shim != Shim::Alive;
+                let waited = mayfly_testkit_shared::poll::try_wait_until(
+                    RELEASE,
+                    "a shim to exit after its VM stopped",
+                    released,
+                );
+                if waited.is_ok() {
+                    continue;
+                }
+                if let Some(record) = shim::read_json::<RunRecord>(&dir.join(shim::RECORD))
+                    && let Some(pid) = i32::try_from(record.child_pid)
+                        .ok()
+                        .and_then(rustix::process::Pid::from_raw)
+                {
+                    let _killed = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                    let _ = mayfly_testkit_shared::poll::try_wait_until(
+                        RELEASE,
+                        "a shim to exit after its run was killed",
+                        released,
+                    );
+                }
+            }
+        }
+    }
 
     /// The repository path the registry publishes the image under.
     const IMAGE_NAME: &str = "mayfly/runner";
@@ -1058,6 +1112,15 @@ mod placement {
     fn serving(registry: &FakeRegistry, image: &TartImage, trusted: bool) -> World {
         let repository = format!("{}/{IMAGE_NAME}", registry.host());
         let mut world = World::build(true, true, Some((&repository, HOST)));
+        // a VM of 1 GiB, the least a pool may configure, so the data plane's gate (I33), which
+        // measures the machine's real available memory, admits the clone beside a busy build
+        let config = std::fs::read_to_string(world.config()).expect("the config");
+        assert!(config.contains("memory_mib = 4096"), "{config}");
+        std::fs::write(
+            world.config(),
+            config.replace("memory_mib = 4096", "memory_mib = 1024"),
+        )
+        .expect("the config");
         private_dir(&world.state());
         private_dir(&world.tart_home());
         world.write_manifest(&format!("{repository}@{}", image.digest()));
@@ -1088,6 +1151,57 @@ mod placement {
                 },
             )
             .collect()
+    }
+
+    /// The attempts the host reserved a slot for, in order.
+    fn reserved_attempts(journal: &SqliteJournal, host: &HostId) -> Vec<AttemptId> {
+        let stream = stream_of::<Host>(host.as_str()).expect("the host's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .expect("the host's events")
+            .iter()
+            .filter_map(
+                |e| match decode_event::<HostEvent>(e).expect("a host event") {
+                    HostEvent::SlotReserved(r) => Some(r.attempt_id),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Whether the host released the lease of `attempt`.
+    fn released(journal: &SqliteJournal, host: &HostId, attempt: AttemptId) -> bool {
+        let stream = stream_of::<Host>(host.as_str()).expect("the host's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .expect("the host's events")
+            .iter()
+            .any(
+                |e| match decode_event::<HostEvent>(e).expect("a host event") {
+                    HostEvent::SlotReleased(r) => r.attempt_id == attempt,
+                    _ => false,
+                },
+            )
+    }
+
+    /// The events of `attempt`'s stream (none before it started).
+    fn attempt_events(journal: &SqliteJournal, attempt: AttemptId) -> Vec<AttemptEvent> {
+        let stream = stream_of::<Attempt>(&attempt.to_string()).expect("the attempt's stream");
+        block_on(journal.read_stream(&stream, None, None))
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|e| decode_event::<AttemptEvent>(e).expect("an attempt event"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The first reserved attempt that became Prepared, if any.
+    fn prepared(journal: &SqliteJournal, host: &HostId) -> Option<AttemptId> {
+        reserved_attempts(journal, host).into_iter().find(|a| {
+            attempt_events(journal, *a)
+                .iter()
+                .any(|e| matches!(e, AttemptEvent::AttemptPrepared(_)))
+        })
     }
 
     /// The events of `digest`'s placement on `host`.
@@ -1124,6 +1238,7 @@ mod placement {
         let (image, registry) = registry();
         let digest = ImageDigest::new(image.digest()).expect("a digest");
         let world = serving(&registry, &image, true);
+        let _reaped = Reaped(&world);
         let (daemon, host) = pinned_run(&world);
 
         // when: the placement manager places the pin and the reconciler reserves. A bounded poll
@@ -1199,6 +1314,78 @@ mod placement {
         );
         let commands = world.commands();
         for command in ["pull", "clone", "exec"] {
+            assert!(
+                commands.iter().any(|c| c == command),
+                "{command}: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_prepare_an_attempt_for_the_pool_when_its_reservation_is_started() {
+        // given: the registry serves the pool's pinned image (as above), and the pool holds one
+        // VM prepared ahead of demand (`min_prepared = 1`)
+        let (image, registry) = registry();
+        let digest = ImageDigest::new(image.digest()).expect("a digest");
+        let world = serving(&registry, &image, true);
+        let _reaped = Reaped(&world);
+        let (daemon, host) = pinned_run(&world);
+
+        // when: the base is materialised, the reconciler reserves and starts (P2, CP-10), and
+        // the saga clones, boots and verifies over fake-tart. A bounded poll of `mayfly status
+        // --json` (RT-03) for an attempt in phase `prepared` (`attempts.by_phase`, the attempts
+        // projection's phase counts: `mayfly_composition::operator::wire::AttemptStatus`). A
+        // poll, because the ready line promises recovery and one terms pass, never a placement
+        // or a preparation, and both take a pull and a boot of unknown length.
+        let mut last = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "an attempt prepared, in mayfly status",
+            || {
+                last = world.try_status();
+                last["attempts"]["by_phase"]["prepared"]
+                    .as_u64()
+                    .is_some_and(|n| n >= 1)
+            },
+        );
+        if let Err(timed_out) = waited {
+            // Name where it stopped: the placement, then each reserved attempt's events.
+            let journal = open_journal(&world);
+            let attempts: Vec<_> = reserved_attempts(&journal, &host)
+                .into_iter()
+                .map(|a| (a, attempt_events(&journal, a)))
+                .collect();
+            panic!(
+                "{timed_out}; status: {last}; the placement: {:?}; the attempts: {attempts:?}",
+                placement(&journal, &host, &digest)
+            );
+        }
+        let exit = daemon.terminate();
+
+        // then: started by the reconciler on the pool's pin, prepared, its VM cloned from the
+        // base and running, its lease still held
+        assert_eq!(exit, Some(0));
+        let journal = open_journal(&world);
+        let attempt = prepared(&journal, &host).expect("a prepared attempt in the journal");
+        let events = attempt_events(&journal, attempt);
+        let started: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AttemptEvent::AttemptStarted(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), 1, "{events:?}");
+        assert_eq!(started[0].image_digest, digest);
+        assert_eq!(started[0].pool.as_str(), POOL);
+        assert!(!released(&journal, &host, attempt));
+        assert!(
+            world.names().contains(&started[0].vm_name.to_string()),
+            "{:?}",
+            world.names()
+        );
+        let commands = world.commands();
+        for command in ["clone", "run", "exec"] {
             assert!(
                 commands.iter().any(|c| c == command),
                 "{command}: {commands:?}"

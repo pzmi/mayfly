@@ -41,13 +41,27 @@
 //! - `RequestRetirement`: prepared and listening attempts in a drained scope (`drain`), prepared
 //!   ones of an image no longer pinned (`image_replaced`), and prepared ones beyond the shortfall
 //!   and `min_prepared` once that surplus has lasted the **hysteresis** ([`Settings::hysteresis`],
-//!   `tests/reconcile.rs::should_retire_a_surplus_only_after_the_hysteresis_when_prepared_vms_exceed_demand`). A
+//!   `tests/reconcile.rs::should_retire_a_surplus_only_after_the_hysteresis_when_prepared_vms_exceed_demand`).
+//!   The surplus counts prepared VMs alone: a VM still preparing never makes a prepared one
+//!   surplus, so a job that waits (its runner not granted yet) keeps the prepared VM that would
+//!   serve it however many are on their way (CP-10,
+//!   `tests/reconcile.rs::should_retire_no_prepared_vm_as_surplus_when_a_job_waits_and_others_are_preparing`). A
 //!   reservation is never delayed: an idle VM costs capacity, a waiting job costs time. The
 //!   hysteresis reads the surplus at each pass only: a surplus that dips and comes back between
 //!   two passes is seen as lasting (memory holds when it was first seen, not every reading), so
 //!   it times a surplus by the passes, never by the instants in between.
 //!   An attempt whose retirement is already requested (`LeaseView::retiring`) is neither
 //!   retired again nor counted as a runner or a prepared VM.
+//! - `Start` (P2's driver, CP-10): every reservation with no `AttemptStarted` yet, on a host
+//!   that would admit for its pool now (the gate open, no drain, the pool's terms open there, the
+//!   pool active), not held by a data-plane refusal (below), and whose pin's base is materialised
+//!   there ([`HostView::placed`]).
+//!   The driver calls `mayfly_control::start::start_attempt`, which decides again under its
+//!   own reads of the host and placement streams. A lease whose pin is not placed is not
+//!   started: the next pass after its placement moves (a placement kick) starts it, and the
+//!   start grace releases one that never starts; nothing retries it in between. A lease the pass
+//!   releases is not also started (pinned by
+//!   `tests/reconcile.rs::should_start_a_reserved_lease_only_when_its_host_admits_and_its_pin_is_placed`).
 //! - `Activate` (P9, CP-09): the pool's prepared attempts of its current pin, the oldest first,
 //!   are granted (`Host`'s `GrantActivation`) and their activation begun (`Attempt`'s
 //!   `BeginActivation`), as many as the fewest of: the shortfall (`totalAssignedJobs` beyond
@@ -93,7 +107,9 @@
 //!
 //! The pass composes actions `formal/scheduling.qnt` already models: a reservation within
 //! `planOf`'s carve (`reserve`, `carveOutAdmissible`), a release on evidence (`release`),
-//! `completeDrain`, a grant within the pool's jobs (`grant`, `canGrant`, CP-09); its retirement
+//! `completeDrain`, a start once the pin is placed (`startAttempt`, CP-10: planned only where the
+//! host would admit, stricter than its guard), a grant within the pool's jobs (`grant`,
+//! `canGrant`, CP-09); its retirement
 //! of a Prepared attempt is `formal/lifecycle.qnt`'s retirement, and its `BeginActivation` that
 //! model's `beginActivation`.
 //! The hysteresis and the start grace are timing choices: they delay, and never add, a command.
@@ -323,6 +339,14 @@ pub enum PassCommand {
         /// The terms revision the plan read.
         terms_revision: u64,
     },
+    /// P2: `StartAttempt` for a reservation not started yet (CP-10); the driver decides it
+    /// through `mayfly_control::start::start_attempt`.
+    Start {
+        /// The host holding the lease.
+        host_id: HostId,
+        /// The attempt the reservation minted.
+        attempt_id: AttemptId,
+    },
     /// P9: `GrantActivation` on the host for the lease of a prepared attempt, then
     /// `BeginActivation` on the attempt with the grant's event (CP-09).
     Activate {
@@ -373,7 +397,7 @@ pub struct PoolNeed {
     /// The new VMs it waits for: the shortfall beyond prepared and preparing VMs, plus the
     /// `min_prepared` deficit; 0 while it may not admit.
     pub waiting: u32,
-    /// Prepared VMs beyond the shortfall and `min_prepared`.
+    /// Prepared VMs beyond the shortfall and `min_prepared`, preparing VMs not counted.
     pub surplus: u32,
 }
 
@@ -488,6 +512,9 @@ fn need_of(pool: &PoolView, tally: Tally, safe_mode: bool) -> PoolNeed {
     let for_jobs = shortfall.saturating_sub(in_flight);
     let spare = in_flight.saturating_sub(shortfall);
     let deficit = pool.min_prepared.saturating_sub(spare);
+    // only prepared VMs are spare for a retirement: one still preparing may fail or take long,
+    // and the job it was counted for would wait for it while a ready VM was retired (CP-10)
+    let spare_prepared = tally.prepared_current.saturating_sub(shortfall);
     let open = admits(pool.mode) && !safe_mode;
     PoolNeed {
         runners,
@@ -500,9 +527,7 @@ fn need_of(pool: &PoolView, tally: Tally, safe_mode: bool) -> PoolNeed {
             0
         },
         surplus: if open {
-            tally
-                .prepared_current
-                .min(spare.saturating_sub(pool.min_prepared))
+            spare_prepared.saturating_sub(pool.min_prepared)
         } else {
             0
         },
@@ -627,6 +652,7 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
         commands.extend(reservations);
     } else {
         let (releases, completions) = cleanup(&hosts, &pools, now, inputs.settings, &mut memory);
+        let starts = starts(&hosts, &pool_of, &releases, &memory.held);
         let activations = activations(&hosts, &pool_of, &needs);
         let granted: BTreeSet<AttemptId> = activations
             .iter()
@@ -634,6 +660,7 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
                 PassCommand::Activate { attempt_id, .. } => Some(*attempt_id),
                 PassCommand::ApplyCapacity { .. }
                 | PassCommand::ReserveSlot { .. }
+                | PassCommand::Start { .. }
                 | PassCommand::Retire { .. }
                 | PassCommand::ReleaseSlot { .. }
                 | PassCommand::CompleteHostDrain { .. }
@@ -642,6 +669,7 @@ pub fn plan_pass(inputs: &PassInputs) -> Pass {
             .collect();
         commands.extend(releases);
         commands.extend(reservations);
+        commands.extend(starts);
         commands.extend(activations);
         commands.extend(retirements(
             &hosts,
@@ -876,12 +904,61 @@ fn trusted_room(pool: &PoolView, need: &PoolNeed) -> u32 {
 /// Whether `host` would grant a lease of `pool` now, as `Host` decides it (I08, I26): its gate
 /// open (no drain, no closing cause) and the pool's terms open there, and the pool admitting.
 /// The pass plans no grant the host would refuse; a grant the host refuses after all (its
-/// read was behind) leaves the attempt Prepared for the next pass.
+/// read was behind) leaves the attempt Prepared for the next pass. A reservation is started
+/// only where this holds too (CP-10): a VM is not cloned where nothing new would be admitted.
 fn grantable(host: &HostView, pool: &PoolView) -> bool {
     !host.draining
         && host.admission_open
         && host.terms.get(&pool.pool).is_some_and(|t| t.open)
         && admits(pool.mode)
+}
+
+/// P2's driver (CP-10): every lease with no `AttemptStarted` yet whose host would admit for its
+/// pool now ([`grantable`]), that no data-plane refusal holds (`held`: each start there would
+/// spend its attempt's tries on the same refusal in milliseconds), and whose pin's base is
+/// materialised there ([`placed_on`]), unless this pass releases it. Anything else waits: a
+/// newer report or a placement that moves kicks the next pass, and the start grace releases a
+/// lease that never starts. Pinned by
+/// `tests/reconcile.rs::should_start_no_reservation_on_a_host_when_a_refusal_holds_it_until_a_newer_report`.
+fn starts(
+    hosts: &[HostView],
+    pool_of: &BTreeMap<&PoolName, &PoolView>,
+    releases: &[PassCommand],
+    held: &BTreeMap<HostId, u64>,
+) -> Vec<PassCommand> {
+    let released: BTreeSet<AttemptId> = releases
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::ReleaseSlot { attempt_id, .. } => Some(*attempt_id),
+            PassCommand::ApplyCapacity { .. }
+            | PassCommand::ReserveSlot { .. }
+            | PassCommand::Start { .. }
+            | PassCommand::Activate { .. }
+            | PassCommand::Retire { .. }
+            | PassCommand::CompleteHostDrain { .. }
+            | PassCommand::CompletePoolDrain { .. } => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for host in hosts.iter().filter(|h| !held.contains_key(&h.host_id)) {
+        for lease in &host.leases {
+            let Some(pool) = pool_of.get(&lease.pool) else {
+                continue;
+            };
+            if lease.stage == RunnerStage::NotStarted
+                && !lease.quarantined
+                && !released.contains(&lease.attempt_id)
+                && grantable(host, pool)
+                && placed_on(pool, host)
+            {
+                out.push(PassCommand::Start {
+                    host_id: host.host_id.clone(),
+                    attempt_id: lease.attempt_id,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A prepared attempt a pass may grant: when it became Prepared, the attempt, its host.

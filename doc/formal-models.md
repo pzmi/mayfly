@@ -609,6 +609,10 @@ Tests (`quint test`, stage `formal-test`, all deterministic so each runs once):
 `staleReportIgnoredTest`, `drainAdmitsNothingTest`, `quarantineHoldsCapacityTest`,
 `quarantineConsumesPoolTest`, `breakerTripsTest`, `pauseReportsLiveOnlyTest`,
 `termsFollowEveryBumpTest` (CP-08: P4's terms after each bump, never a revision twice),
+`unplacedStartWaitsForItsBaseTest` and `unplacedLeaseReleasedAfterTheGraceTest` (CP-10: the
+reconciler's pass drives `startAttempt`, planning it only where the host would admit and the pin
+is placed, stricter than its guard; a lease whose pin is not placed waits, and one never placed
+is released after the start grace),
 `racingGrantKeepsTheBoundTest`, `grantOnlyAStartedAttemptTest`,
 `jobLeavingBeforeTheGrantKeepsTheBoundTest` and the negative controls
 `grantOnStaleReadViolatesTest` and `grantOnStaleScaleSetReadViolatesTest` (CP-09: `host.jobs`,

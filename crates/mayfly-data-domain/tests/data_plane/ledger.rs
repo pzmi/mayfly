@@ -936,3 +936,75 @@ fn should_measure_only_a_fresh_admissible_pull_when_its_disk_is_unknown() {
     assert!(!sized, "a configured ceiling");
     assert!(!repeat, "a duplicate already in the table");
 }
+
+#[test]
+fn should_admit_the_start_of_a_clone_when_its_base_was_just_materialised() {
+    // given: an image pulled and its base materialised; the image store's listing right after
+    // names the base's guest (CP-10), in one ledger and not in the other (the behaviour before)
+    let key = |n: u128| (EPOCH, DirectiveId::from_u128(n));
+    let mut before = ledger(roomy());
+    before.commit(key(1), &DirectiveKind::PullImage { digest: digest() });
+    before.commit(
+        key(2),
+        &DirectiveKind::MaterialiseImage {
+            digest: digest(),
+            base_name: base(),
+            runner_version: "2.330.0".to_owned(),
+        },
+    );
+    let mut told = before.clone();
+    told.learn_base_guest(&base(), GuestOs::Linux);
+    let other = base_named("mfb-bbbbbbbbbbbb-r2-330-0");
+    told.learn_base_guest(&other, GuestOs::Macos);
+    told.learn_base_guest(&base(), GuestOs::Macos);
+    let clone = DirectiveKind::CloneVm {
+        base_name: base(),
+        vm_name: vm(1),
+    };
+
+    // when: the clone is made at once, before any later listing, and then started
+    before.commit(key(3), &clone);
+    told.commit(key(3), &clone);
+    let without = before.admits(&start(1));
+    let with = told.admits(&start(1));
+
+    // then: the clone inherits the guest and its start is admitted; without it the start is
+    // refused capacity_unknown{macos_guests}; a base the ledger does not hold is not added, and
+    // a guest already known is kept
+    assert_eq!(told.vms[&vm(1)].guest, Some(GuestOs::Linux));
+    assert!(with.is_ok(), "{with:?}");
+    assert_eq!(
+        without,
+        Err(RefusalReason::CapacityUnknown {
+            dimension: ResourceDimension::MacosGuests
+        })
+    );
+    assert!(!told.bases.contains_key(&other));
+    assert_eq!(told.bases[&base()].guest, Some(GuestOs::Linux));
+}
+
+#[test]
+fn should_give_a_clone_its_bases_guest_when_the_base_is_known_from_the_image_listing_only() {
+    // given: a restart: the base is known from the image store's listing alone, which names
+    // its guest
+    let mut ledger = ledger(roomy());
+    ledger.apply_images(
+        &BTreeSet::from([digest()]),
+        &BTreeMap::from([(base(), GuestOs::Linux)]),
+        &MeasuredDisks::default(),
+    );
+
+    // when
+    ledger.commit(
+        (EPOCH, DirectiveId::from_u128(3)),
+        &DirectiveKind::CloneVm {
+            base_name: base(),
+            vm_name: vm(1),
+        },
+    );
+    let started = ledger.admits(&start(1));
+
+    // then
+    assert_eq!(ledger.vms[&vm(1)].guest, Some(GuestOs::Linux));
+    assert!(started.is_ok(), "{started:?}");
+}

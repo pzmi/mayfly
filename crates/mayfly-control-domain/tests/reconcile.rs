@@ -10,8 +10,8 @@ use mayfly_control_domain::demand::{Capacity, WireMode};
 use mayfly_control_domain::host::ReleaseEvidence;
 use mayfly_control_domain::pool::PoolMode;
 use mayfly_control_domain::reconcile::{
-    HostReport, HostTerms, HostView, LeaseView, PassCommand, PassInputs, PassMemory, PoolView,
-    RunnerStage, ScaleSetView, Settings, exact, plan_pass,
+    HostReport, HostTerms, HostView, LeaseView, Pass, PassCommand, PassInputs, PassMemory,
+    PoolView, RunnerStage, ScaleSetView, Settings, exact, plan_pass,
 };
 use mayfly_domain::{AttemptId, HostId, ImageDigest, Millis, PoolName, Resources, Sample};
 use proptest::prelude::*;
@@ -604,16 +604,41 @@ fn should_plan_nothing_more_when_a_pass_is_repeated_on_its_own_result() {
     let pools = vec![linux("a", Some(4)), linux("b", Some(2))];
     let mut state = inputs(hosts, pools);
 
-    // when: the first pass's commands are applied as the aggregates would, then a pass again
+    // when: each pass's commands are applied as the aggregates would, then a pass again: the
+    // reservations, then their starts (P2, CP-10), then nothing
     let first = plan_pass(&state);
-    let mut n = 100;
-    for command in &first.commands {
+    apply(&mut state, &first);
+    let second = plan_pass(&state);
+    apply(&mut state, &second);
+    let third = plan_pass(&state);
+
+    // then
+    assert_eq!(reserves(&first.commands).len(), 6);
+    assert!(started(&first.commands).is_empty());
+    assert_eq!(started(&second.commands).len(), 6);
+    assert_eq!(second.commands.len(), 6, "{:?}", second.commands);
+    assert!(third.commands.is_empty(), "{:?}", third.commands);
+}
+
+/// Applies `pass` to `state` as the aggregates would: a reservation is a lease not started yet
+/// (numbered from 101), a start makes it preparing, a capacity input is the scale set's.
+fn apply(state: &mut PassInputs, pass: &Pass) {
+    let leased = state.hosts.iter().map(|h| h.leases.len()).sum::<usize>();
+    let mut n = 100 + u128::try_from(leased).unwrap_or(0);
+    for command in &pass.commands {
         match command {
             PassCommand::ReserveSlot { host_id, pool, .. } => {
                 n += 1;
                 if let Some(h) = state.hosts.iter_mut().find(|h| &h.host_id == host_id) {
                     h.leases
                         .push(lease(n, pool.as_str(), RunnerStage::NotStarted));
+                }
+            }
+            PassCommand::Start { attempt_id, .. } => {
+                for l in state.hosts.iter_mut().flat_map(|h| h.leases.iter_mut()) {
+                    if &l.attempt_id == attempt_id {
+                        l.stage = RunnerStage::Preparing;
+                    }
                 }
             }
             PassCommand::ApplyCapacity { pool, capacity } => {
@@ -627,12 +652,147 @@ fn should_plan_nothing_more_when_a_pass_is_repeated_on_its_own_result() {
             _ => {}
         }
     }
-    state.memory = first.memory.clone();
-    let second = plan_pass(&state);
+    state.memory = pass.memory.clone();
+}
 
-    // then
-    assert_eq!(reserves(&first.commands).len(), 6);
-    assert!(second.commands.is_empty(), "{:?}", second.commands);
+fn started(commands: &[PassCommand]) -> Vec<u128> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            PassCommand::Start { attempt_id, .. } => Some(attempt_id.as_u128()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn should_start_a_reserved_lease_only_when_its_host_admits_and_its_pin_is_placed() {
+    // given: a reservation not started yet on an open host whose pin is placed, and the same
+    // reservation where the pin has no base, the pool is paused, the host drains, its gate or
+    // the pool's terms there are closed, in safe mode, and past the start grace
+    let mut open = host("h1", &[("lin", 4)]);
+    open.leases = vec![lease(1, "lin", RunnerStage::NotStarted)];
+    let mut unplaced = open.clone();
+    unplaced.placed.clear();
+    let mut draining = open.clone();
+    draining.draining = true;
+    let mut closed = open.clone();
+    closed.admission_open = false;
+    let mut terms_closed = open.clone();
+    if let Some(t) = terms_closed.terms.get_mut(&pool("lin")) {
+        t.open = false;
+    }
+    let mut paused = linux("lin", Some(1));
+    paused.mode = PoolMode::Paused;
+    let mut safe = inputs(vec![open.clone()], vec![linux("lin", Some(1))]);
+    safe.safe_mode = true;
+    let mut late = inputs(vec![open.clone()], vec![linux("lin", Some(1))]);
+    late.memory.unstarted_since.insert(
+        AttemptId::from_u128(1),
+        Millis::new(late.now.get() - 2 * MINUTE),
+    );
+
+    // when
+    let pass = plan_pass(&inputs(vec![open.clone()], vec![linux("lin", Some(1))]));
+    let waiting = [
+        plan_pass(&inputs(vec![unplaced], vec![linux("lin", Some(1))])),
+        plan_pass(&inputs(vec![open], vec![paused])),
+        plan_pass(&inputs(vec![draining], vec![linux("lin", Some(1))])),
+        plan_pass(&inputs(vec![closed], vec![linux("lin", Some(1))])),
+        plan_pass(&inputs(vec![terms_closed], vec![linux("lin", Some(1))])),
+        plan_pass(&safe),
+    ];
+    let released = plan_pass(&late);
+
+    // then: started where it would be admitted; elsewhere it waits, neither started nor
+    // released before the grace; past the grace it is released, not started
+    assert_eq!(started(&pass.commands), vec![1]);
+    for other in &waiting {
+        assert!(started(&other.commands).is_empty(), "{:?}", other.commands);
+        assert!(
+            !other
+                .commands
+                .iter()
+                .any(|c| matches!(c, PassCommand::ReleaseSlot { .. })),
+            "{:?}",
+            other.commands
+        );
+    }
+    assert!(started(&released.commands).is_empty());
+    assert!(released.commands.contains(&PassCommand::ReleaseSlot {
+        host_id: host_id("h1"),
+        attempt_id: AttemptId::from_u128(1),
+        evidence: ReleaseEvidence::AttemptNeverStarted,
+    }));
+}
+
+#[test]
+fn should_start_no_reservation_on_a_host_when_a_refusal_holds_it_until_a_newer_report() {
+    // given: two jobs; one attempt's clone was refused insufficient_resources on h1, and a
+    // second reservation there is not started yet
+    let mut h = host("h1", &[("lin", 8)]);
+    let mut refused = lease(1, "lin", RunnerStage::Preparing);
+    refused.refusal = Some(7);
+    h.leases = vec![refused, lease(2, "lin", RunnerStage::NotStarted)];
+    let first = inputs(vec![h], vec![linux("lin", Some(2))]);
+
+    // when: a pass reads the refusal, another runs on the same report, then on a newer one
+    let held = plan_pass(&first);
+    let mut again = first.clone();
+    again.memory = held.memory.clone();
+    let still = plan_pass(&again);
+    let mut newer = again.clone();
+    newer.hosts[0].report = Some(report(2, 64, 8));
+    newer.memory = still.memory.clone();
+    let reread = plan_pass(&newer);
+
+    // then: the held host starts nothing (each start would spend its tries on the same
+    // refusal); once a newer report is applied, the reservation is started
+    assert!(started(&held.commands).is_empty(), "{:?}", held.commands);
+    assert!(started(&still.commands).is_empty(), "{:?}", still.commands);
+    assert_eq!(started(&reread.commands), vec![2]);
+}
+
+#[test]
+fn should_retire_no_prepared_vm_as_surplus_when_a_job_waits_and_others_are_preparing() {
+    // given: one job assigned that no runner may start for yet (no trusted job), its prepared
+    // VM and two more preparing, the surplus by the old count seen long ago
+    let mut h = host("h1", &[("lin", 4)]);
+    h.leases = vec![
+        prepared(1, "lin", 1),
+        lease(2, "lin", RunnerStage::Preparing),
+        lease(3, "lin", RunnerStage::Preparing),
+    ];
+    let mut state = inputs(vec![h.clone()], vec![trusted(1, 0)]);
+    state
+        .memory
+        .surplus_since
+        .insert(pool("lin"), Millis::new(0));
+    let mut ready = h;
+    ready.leases = vec![
+        prepared(1, "lin", 1),
+        prepared(2, "lin", 2),
+        prepared(3, "lin", 3),
+    ];
+    let mut later = inputs(vec![ready], vec![trusted(1, 0)]);
+    later
+        .memory
+        .surplus_since
+        .insert(pool("lin"), Millis::new(0));
+
+    // when
+    let pass = plan_pass(&state);
+    let once_prepared = plan_pass(&later);
+
+    // then: the prepared VM the job waits for is kept; once the others are prepared too, the
+    // two beyond the job are the surplus
+    let need = pass.needs.get(&pool("lin")).copied().unwrap_or_default();
+    assert_eq!((need.shortfall, need.surplus, need.waiting), (1, 0, 0));
+    assert!(retired(&pass.commands).is_empty(), "{:?}", pass.commands);
+    assert_eq!(
+        retired(&once_prepared.commands),
+        vec![(3, RetireReason::Surplus), (2, RetireReason::Surplus)]
+    );
 }
 
 fn activated(commands: &[PassCommand]) -> Vec<u128> {
@@ -955,6 +1115,36 @@ proptest! {
                 *stage == RunnerStage::Granted || (*stage == RunnerStage::Prepared && !draining)
             });
             prop_assert!(planned, "{n} activated from another stage");
+        }
+    }
+
+    #[test]
+    fn should_start_only_unstarted_leases_where_the_host_admits_when_inputs_are_random((inputs, _seed) in generated()) {
+        // given: random hosts, leases (some not started) and pools
+
+        // when
+        let pass = plan_pass(&inputs);
+
+        // then: a start is planned only for a lease not started yet, on a host that is open,
+        // not draining and holds the pool's pin, and never for a lease the pass releases
+        let released: Vec<AttemptId> = pass
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                PassCommand::ReleaseSlot { attempt_id, .. } => Some(*attempt_id),
+                _ => None,
+            })
+            .collect();
+        for command in &pass.commands {
+            let PassCommand::Start { host_id, attempt_id } = command else {
+                continue;
+            };
+            let host = inputs.hosts.iter().find(|h| &h.host_id == host_id);
+            let lease = host.and_then(|h| h.leases.iter().find(|l| &l.attempt_id == attempt_id));
+            prop_assert!(lease.is_some_and(|l| l.stage == RunnerStage::NotStarted), "{attempt_id}");
+            prop_assert!(host.is_some_and(|h| h.admission_open && !h.draining), "{host_id}");
+            prop_assert!(!released.contains(attempt_id), "{attempt_id} started and released");
+            prop_assert!(!inputs.safe_mode);
         }
     }
 

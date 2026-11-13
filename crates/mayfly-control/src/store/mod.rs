@@ -315,6 +315,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
         };
         let unit = UnitOfWork::new(self.clock.now(), self.epochs.clone());
         let decided = A::decide(&state, request.command);
+        let mut kinds = Vec::new();
         let (unit, refusal) = match decided {
             Ok(events) => {
                 let events = events
@@ -328,6 +329,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                         stream: stream.clone(),
                         what: "event_payload",
                     })?;
+                kinds = events.iter().map(|e| e.kind.clone()).collect();
                 let unit = if events.is_empty() {
                     unit.with_read(stream.clone(), expected)
                 } else {
@@ -368,6 +370,7 @@ impl<J: Journal, C: Clock, R: Rng, N: StoreNotifier> AggregateStore<J, C, R, N> 
                     self.notifier.committed(&Committed {
                         command_id,
                         appended: appended.clone(),
+                        kinds,
                     });
                 }
                 Ok(match refusal {

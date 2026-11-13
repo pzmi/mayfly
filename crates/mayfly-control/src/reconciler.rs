@@ -5,9 +5,22 @@
 //! inside a command; commands never read projections, and the query takes the read port only.
 //!
 //! **When.** At most once per [`ReconcilerConfig::interval`] (a minute) by the control plane's
-//! clock, and at once when a host, pool or scale-set stream moved ([`Reconciler::tick`] reads
-//! the [`Kicks`] the store fills after each commit). A lost kick costs at most the interval: the
-//! pass is level-triggered.
+//! clock, and at once when a host, pool, scale-set or placement stream moved ([`Reconciler::tick`]
+//! reads the [`Kicks`] the store fills after each commit), or when an attempt became Prepared
+//! ([`kick_prepared`], [`Reconciler::with_prepared`]: it may be granted now, CP-10). Any other
+//! commit of an attempt stream starts no pass. A lost kick costs at most the interval: the pass
+//! is level-triggered.
+//!
+//! **P2's driver (CP-10).** `PassCommand::Start` is decided by
+//! [`start_attempt`](crate::start::start_attempt) itself, with its own reads of the host and
+//! placement streams, its revision retry and its ids, so the pass adds no guard of its own and
+//! takes none away: a start repeated over the same host revision is answered by its receipt
+//! (pinned by `tests/store/reconciler.rs::should_start_once_when_a_stale_read_plans_the_start_again`),
+//! a pin not materialised on the host starts nothing and leaves the lease held for the next pass
+//! (`failed` with `not_placed`, never a release or a retry within the pass:
+//! `should_start_a_lease_once_its_placement_materialises_when_its_pin_was_not_placed`), and a
+//! lease that never starts is released after the start grace (`attempt_never_started`, below).
+//! The attempt's stage retry budget is [`ReconcilerConfig::retry_budget`].
 //!
 //! **Idempotent.** Each command's id is derived from what it is about: a reservation from the
 //! revisions the pass read and its ordinal (P5's `hash(input stream versions, ordinal)`) and its
@@ -80,9 +93,35 @@ use crate::journal::{Appended, ExpectedRevision, Journal, StreamId, StreamRevisi
 use crate::projection::ProjectionStore;
 use crate::projection::views::{AttemptRow, SlotRow};
 use crate::queries::{self, FleetView, QueryError};
+use crate::start::{StartRequest, Started, start_attempt};
 use crate::store::{
-    AggregateStore, Clock, Outcome, Rng, SaveError, SaveRequest, StoreNotifier, stream_of,
+    AggregateStore, Clock, Committed, Outcome, Rng, SaveError, SaveRequest, StoreNotifier,
+    stream_of,
 };
+
+/// The event type whose commit makes a pass due at once: an attempt that became Prepared may be
+/// granted now (CP-10).
+pub const PREPARED: &str = "attempt_prepared";
+
+/// The default stage retry budget of the attempts the reconciler starts: `formal/lifecycle.qnt`'s
+/// `BUDGET`, the depth its invariants are checked at.
+pub const RETRY_BUDGET: u32 = 2;
+
+/// Kicks `prepared` with every attempt stream `commit` appended an `attempt_prepared` to, and
+/// nothing for any other commit: the reconciler's own wake for a VM that became Prepared
+/// ([`Reconciler::with_prepared`]), which the stream kicks do not give, since a pass on every
+/// attempt event would pass on every directive's reply. Pinned by
+/// `tests/store/reconciler.rs::should_pass_at_once_when_an_attempt_becomes_prepared_and_not_on_its_other_events`.
+pub fn kick_prepared(prepared: &Kicks, commit: &Committed) {
+    if !commit.kinds.iter().any(|k| k.event_type == PREPARED) {
+        return;
+    }
+    for appended in &commit.appended.streams {
+        if appended.stream.as_str().starts_with("attempt-") {
+            prepared.kick(&appended.stream);
+        }
+    }
+}
 
 /// The `placements` phase code of a placement clones may be made from.
 const MATERIALISED: &str = "materialised";
@@ -101,6 +140,9 @@ pub struct ReconcilerConfig {
     pub interval: Millis,
     /// The run epoch its commands are issued under.
     pub run_epoch: Epoch,
+    /// The stage retry budget of every attempt it starts (P2): [`RETRY_BUDGET`]. Not per pool
+    /// yet: a pool's configuration carries none (CP-10's note).
+    pub retry_budget: u32,
     /// Each pool's capacity policy (the composition root maps `capacity_policy` through
     /// `mayfly_composition::config::plan_policy`); a pool not listed is `exact`.
     pub policies: BTreeMap<PoolName, PolicyOf>,
@@ -118,6 +160,7 @@ impl ReconcilerConfig {
             settings: Settings::default(),
             interval: Millis::new(60_000),
             run_epoch,
+            retry_budget: RETRY_BUDGET,
             policies: BTreeMap::new(),
             plan: plan_pass,
         }
@@ -168,6 +211,7 @@ pub struct Reconciler<'s, J, C, R, N, P> {
     projections: &'s P,
     config: ReconcilerConfig,
     kicks: Kicks,
+    prepared: Option<Kicks>,
     timing: Mutex<Timing>,
 }
 
@@ -195,8 +239,18 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
             projections,
             config,
             kicks,
+            prepared: None,
             timing: Mutex::new(Timing::default()),
         }
+    }
+
+    /// Also passes at once when `prepared` was kicked: the composition root feeds it with
+    /// [`kick_prepared`] from the store's notifier, so a VM that became Prepared is granted
+    /// without waiting for the interval (CP-10).
+    #[must_use]
+    pub fn with_prepared(mut self, prepared: Kicks) -> Self {
+        self.prepared = Some(prepared);
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Timing> {
@@ -219,8 +273,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
 
     /// Runs a pass when one is due: a host, pool, scale-set or placement stream (a base
     /// materialised or evicted admits or closes a pool on its host, CP-07) was kicked since the last
-    /// look, or the interval passed by the clock. `None` when nothing was due. Pinned by
-    /// `tests/store/reconciler.rs::should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked`.
+    /// look, an attempt became Prepared ([`Reconciler::with_prepared`]), or the interval passed by
+    /// the clock. `None` when nothing was due. Pinned by
+    /// `tests/store/reconciler.rs::should_pass_at_most_once_an_interval_when_no_relevant_stream_is_kicked`
+    /// and `should_pass_at_once_when_an_attempt_becomes_prepared_and_not_on_its_other_events`.
     ///
     /// # Errors
     /// [`ReconcileError`] when the read side cannot be read.
@@ -232,7 +288,11 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
                 || s.starts_with("scaleset-")
                 || s.starts_with("placement-")
         });
-        if !kicked && self.store.clock().now() < self.next_due() {
+        let prepared = self
+            .prepared
+            .as_ref()
+            .is_some_and(|kicks| !kicks.take().is_empty());
+        if !kicked && !prepared && self.store.clock().now() < self.next_due() {
             return Ok(None);
         }
         self.run_pass().await.map(Some)
@@ -356,6 +416,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
                 )
                 .await
             }
+            PassCommand::Start {
+                host_id,
+                attempt_id,
+            } => self.start(host_id, *attempt_id).await,
             PassCommand::Activate {
                 host_id,
                 attempt_id,
@@ -445,6 +509,35 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, P: ProjectionStore>
     {
         let request = SaveRequest::new(instance, self.command(id, body));
         saved_of(self.store.execute::<A>(request).await)
+    }
+
+    /// P2 through [`start_attempt`], its guards, retry and ids unchanged (see the module docs).
+    async fn start(&self, host_id: &HostId, attempt_id: AttemptId) -> Saved {
+        let request = StartRequest {
+            host: host_id.clone(),
+            attempt: attempt_id,
+            retry_budget: self.config.retry_budget,
+            run_epoch: self.config.run_epoch,
+        };
+        match start_attempt(self.store, &request).await {
+            Ok(Started::Started { appended, replayed }) => Saved {
+                code: Answer::Accepted,
+                appended: (!replayed).then_some(appended),
+            },
+            Ok(Started::Refused(rejection)) => Saved {
+                code: Answer::Refused(rejection.code()),
+                appended: None,
+            },
+            // the host holds no lease for it any more: a definite no
+            Ok(Started::NoLease) => Saved {
+                code: Answer::Refused("no_lease"),
+                appended: None,
+            },
+            // nothing to start from yet: the lease waits for a pin or a placement kick
+            Ok(Started::NoImage) => Saved::failed("no_image"),
+            Ok(Started::NotPlaced) => Saved::failed("not_placed"),
+            Err(error) => failed_of(&error),
+        }
     }
 
     /// P9: `GrantActivation` with the reads of what the pass read, then `BeginActivation` with
@@ -601,9 +694,16 @@ fn saved_of<R: Rejection>(saved: Result<Outcome<R>, SaveError>) -> Saved {
             code: Answer::Refused(rejection.code()),
             appended: None,
         },
-        Err(SaveError::CommandIdReused { .. }) => Saved::failed("command_id_reused"),
-        Err(error) if error.is_retryable() => Saved::failed("conflict"),
-        Err(_) => Saved::failed("save_failed"),
+        Err(error) => failed_of(&error),
+    }
+}
+
+/// A save that did not decide: the next pass plans again.
+fn failed_of(error: &SaveError) -> Saved {
+    match error {
+        SaveError::CommandIdReused { .. } => Saved::failed("command_id_reused"),
+        e if e.is_retryable() => Saved::failed("conflict"),
+        _ => Saved::failed("save_failed"),
     }
 }
 

@@ -517,6 +517,16 @@ impl<'s> World<'s> {
         out
     }
 
+    /// Counts `attempt` as started by someone else (the reconciler's pass, CP-10), so the
+    /// world's data plane and checks see its VM; once. `true` when it was not counted yet.
+    pub fn record_started(&mut self, attempt: AttemptId) -> bool {
+        if self.started.contains(&attempt) {
+            return false;
+        }
+        self.started.push(attempt);
+        true
+    }
+
     /// P2: `StartAttempt` for the lease of `attempt` on `host`, with the pool's pinned image,
     /// saved with a read of the host stream at the revision whose lease it starts from: a
     /// release that commits in between refuses the start (CP-03F), and an attempt is never
@@ -567,7 +577,7 @@ impl<'s> World<'s> {
             .with_read(placement_stream, ExpectedRevision::of(placed_head));
         match block_on(self.store.save::<Attempt>(request)) {
             Ok(Outcome::Accepted { .. }) => {
-                self.started.push(attempt);
+                let _ = self.record_started(attempt);
                 true
             }
             Ok(Outcome::Refused { .. }) | Err(SaveError::Conflict { .. }) => false,
@@ -929,6 +939,8 @@ pub struct Simulation {
     pub refusals: u32,
     /// Prepared attempts the passes granted and activated (P9).
     pub activated: u32,
+    /// Reservations the passes started (P2, CP-10).
+    pub started: u32,
 }
 
 /// What the checker keeps between steps.
@@ -1271,6 +1283,7 @@ fn check_pass(
             }
             PassCommand::ReserveSlot { .. }
             | PassCommand::ApplyCapacity { .. }
+            | PassCommand::Start { .. }
             | PassCommand::Activate { .. }
             | PassCommand::Retire { .. }
             | PassCommand::ReleaseSlot { .. }
@@ -1307,6 +1320,29 @@ fn check_pass(
                 if !proven {
                     out.push(format!(
                         "step {step}: I04 released {attempt_id} without evidence"
+                    ));
+                }
+            }
+            // P2 (CP-10): a start only of a lease the host held, unquarantined; on a host whose
+            // gate was open when the pass read the journal's own rows
+            PassCommand::Start {
+                host_id,
+                attempt_id,
+            } => {
+                let host = before.hosts.get(host_id);
+                let leased = host.is_some_and(|h| {
+                    h.leases
+                        .get(attempt_id)
+                        .is_some_and(|l| !l.is_quarantined())
+                });
+                if !leased {
+                    out.push(format!(
+                        "step {step}: P2 started {attempt_id} with no lease on {host_id}"
+                    ));
+                }
+                if fresh && !host.is_some_and(|h| h.gate.is_open()) {
+                    out.push(format!(
+                        "step {step}: P2 started {attempt_id} on {host_id}, not admitting"
                     ));
                 }
             }
@@ -1624,6 +1660,12 @@ pub fn simulate_with(seed: u64, steps: usize, options: SimOptions) -> Simulation
                     PassCommand::ReleaseSlot { .. } => sim.released += 1,
                     PassCommand::ApplyCapacity { .. } => sim.capacities += 1,
                     PassCommand::Activate { .. } => sim.activated += 1,
+                    // only a start that appended (a receipt answers a repeat of one counted)
+                    PassCommand::Start { attempt_id, .. } => {
+                        if world.record_started(*attempt_id) {
+                            sim.started += 1;
+                        }
+                    }
                     PassCommand::CompleteHostDrain { .. }
                     | PassCommand::CompletePoolDrain { .. } => {}
                 }

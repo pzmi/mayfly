@@ -415,6 +415,59 @@ fn should_answer_the_bases_measured_disk_when_a_materialisation_is_applied() {
 }
 
 #[test]
+fn should_boot_a_clone_at_once_when_its_base_was_just_materialised() {
+    run(async {
+        // given: a base materialised in this session, cloned and started right after, before
+        // any later listing of the image store (CP-10: before, the clone carried no guest and
+        // its start was refused `capacity_unknown{macos_guests}`; the ledger's half is
+        // `mayfly-data-domain`'s `should_admit_the_start_of_a_clone_when_its_base_was_just_materialised`)
+        let fakes = Fakes::new(probe(4));
+        fakes.images.manifest(&digest(), 40 * GIB);
+        let mut exec = fakes.open(2).await;
+        let made = BaseName::new("mfb-two").expect("a valid base name");
+        let materialise = DirectiveKind::MaterialiseImage {
+            digest: digest(),
+            base_name: made.clone(),
+            runner_version: "2.330.0".to_owned(),
+        };
+        let clone = DirectiveKind::CloneVm {
+            base_name: made,
+            vm_name: vm(1),
+        };
+        let start = DirectiveKind::StartVm {
+            vm_name: vm(1),
+            run_options: run_options(),
+        };
+
+        // when
+        let (_, seen) = session(&mut exec, |feed, mut tap| async move {
+            feed.send(directive(1, materialise)).await;
+            tap.wait_for(answers(1)).await;
+            feed.send(directive(2, clone)).await;
+            tap.wait_for(answers(2)).await;
+            feed.send(directive(3, start)).await;
+            tap.wait_for(answers(3)).await;
+            tap
+        })
+        .await;
+
+        // then: the clone inherits the base's listed guest, and its start is admitted
+        assert!(
+            matches!(
+                answers_to(&seen, 2).as_slice(),
+                [ObservationKind::VmCloned { .. }]
+            ),
+            "{seen:?}"
+        );
+        assert_eq!(
+            answers_to(&seen, 3),
+            [ObservationKind::VmBooted],
+            "{seen:?}"
+        );
+    });
+}
+
+#[test]
 fn should_answer_no_disk_when_the_listing_fails_after_a_materialisation() {
     run(async {
         // given: the image measures, but the store's listing fails once the session is open

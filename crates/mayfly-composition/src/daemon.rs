@@ -80,7 +80,12 @@
 //! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
 //! placement manager places every pool's pin (step 5) on this host and [`Placements`] follows
 //! its passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once
-//! the pool is active, pinned and its pin's breaker not tripped. Logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
+//! the pool is active, pinned and its pin's breaker not tripped. The reconciler's pass is P2's
+//! driver (CP-10): it starts each reservation once its pin is materialised on this host, and
+//! the attempt saga then prepares its VM over the provider; a VM that becomes Prepared kicks a
+//! pass at once (`Notifier::prepared`), so a grant does not wait for the interval (nothing
+//! grants under `mayflyd` until a trusted job is recorded: GH-04, GH-10). Logging (RT-04),
+//! Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
 //! (OPS-05) and split roles (LNK-01) are separate tasks.
 
 use std::collections::BTreeMap;
@@ -1255,7 +1260,8 @@ impl Daemon<'_> {
                 ..ReconcilerConfig::new(epoch)
             },
             self.notifier.reconciler.clone(),
-        );
+        )
+        .with_prepared(self.notifier.prepared.clone());
         let terms = TermsPolicy::new(
             &self.store,
             &self.journal,
@@ -1487,6 +1493,7 @@ impl Daemon<'_> {
                     tokio::select! {
                         () = cancel.cancelled() => return,
                         () = self.notifier.reconciler.wait() => {}
+                        () = self.notifier.prepared.wait() => {}
                         () = tokio::time::sleep(wait) => {}
                     }
                 }

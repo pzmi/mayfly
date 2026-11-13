@@ -25,6 +25,10 @@
 //! The command id is derived from the attempt and the host revision read, so a call repeated
 //! over the same host revision is answered by its receipt and starts nothing twice, and a retry
 //! after the host moved is a new decision.
+//!
+//! **Its driver** is the reconciler's pass (CP-10): it plans `PassCommand::Start` for each
+//! reservation not started yet where its host would admit and its pin is placed, and calls this
+//! function, whose guards and ids stay the only ones (`crate::reconciler`'s module docs).
 
 use mayfly_control_domain::attempt::{Attempt, AttemptCommand, AttemptRejection, StartAttempt};
 use mayfly_control_domain::host::Host;
@@ -93,7 +97,8 @@ pub enum Started {
     NoImage,
     /// The pinned image's base is not materialised on the host (P17): nothing to clone from.
     /// The caller waits for a placement kick (the placement stream moving) and starts again
-    /// then; it neither releases the lease nor retries at once.
+    /// then; it neither releases the lease nor retries at once (the reconciler reports it
+    /// `failed` with `not_placed` and plans no start until its read shows the pin placed).
     NotPlaced,
     /// The attempt refused (`already_started`, `stale_run`).
     Refused(AttemptRejection),

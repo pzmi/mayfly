@@ -756,6 +756,14 @@ module scheduling_machine {
   /// `StartAttempt` with a read of the placement stream at the revision showing it
   /// `Materialised`: an eviction (or any write) to that placement between the read and the
   /// commit refuses the start, and the retry reads the pin and the placement again.
+  ///
+  /// CP-10: the reconciler's pass is P2's driver. It plans a start for a reserved lease only
+  /// where it would admit one (the gate open, no drain, the pool's terms open, the pool active)
+  /// and only once the pin is placed there; the start itself is this action, its guard
+  /// unchanged. The plan is stricter than the guard, so it reaches no state the relation
+  /// cannot. A lease whose pin is not placed waits (no start, no release, no retry until the
+  /// placement moves: `unplacedStartWaitsForItsBaseTest`), and one that never starts is
+  /// released after the start grace (`unplacedLeaseReleasedAfterTheGraceTest`).
   action startAttempt(a: int): bool = {
     val l = leases.get(a)
     all {
@@ -1915,6 +1923,37 @@ module scheduling {
       .expect(canEvict(host, leases, LINUX, 1))
       .then(evict(LINUX, 1))
       .then(dpCreate(1)).expect(vms.get(1) == RUNNING and allInvariants)
+  }
+
+  // CP-10 (P2's driver): a reservation whose pool is repinned to an image with no base on the
+  // host before its start is not started (the pass plans no start, and P2 reading the new pin
+  // finds it not placed: `NotPlaced`); it starts on the new pin once that base is
+  // materialised, and only then may the data plane clone for it.
+  run unplacedStartWaitsForItsBaseTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(repin(LINUX))
+      // `startAttempt(1)` is disabled here (its guard `placedOn` fails); shown by the guard,
+      // since a `.fail()` step leaves the state unset for the steps after it
+      .expect(canStart(leases, 1) and not(placedOn(host, LINUX)))
+      .expect(not(leases.get(1).started) and allInvariants)
+      .then(materialise(LINUX))
+      .expect(canStart(leases, 1) and placedOn(host, LINUX))
+      .then(startAttempt(1)).expect(leases.get(1).started and leases.get(1).img == 2)
+      .then(dpCreate(1)).expect(vms.get(1) == RUNNING and allInvariants)
+  }
+
+  // CP-10: a reservation whose pin never gets its base on the host is released after the start
+  // grace (`attempt_never_started`); a start after the release finds no lease, and nothing is
+  // ever created for it.
+  run unplacedLeaseReleasedAfterTheGraceTest = {
+    initWith(0, 0).then(ready)
+      .then(reserve(1, LINUX)).then(repin(LINUX))
+      .expect(canReleaseUnstarted(leases, 1))
+      .then(releaseUnstarted(1))
+      .expect(leases.get(1).phase == RELEASED and not(canStart(leases, 1)))
+      .then(materialise(LINUX))
+      .expect(not(canStart(leases, 1)) and vms.get(1) == ABSENT and allInvariants)
+      .then(startAttempt(1).fail())
   }
 
   /// Negative control of `leasesKeepTheirBase`: a start that takes the pin without the placement

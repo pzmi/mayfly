@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use mayfly_control::delivery::Kicks;
 use mayfly_control::journal::{StoredKind, StreamId};
+use mayfly_control::reconciler::kick_prepared;
 use mayfly_control::store::{Committed, StoreNotifier};
 use mayfly_protocol::{Directive, DirectiveSource, LinkError};
 use tokio::sync::{Notify, broadcast, watch};
@@ -104,6 +105,9 @@ pub struct Notifier {
     pub relay: Kicks,
     /// The reconciler.
     pub reconciler: Kicks,
+    /// The reconciler's wake for an attempt that became Prepared (CP-10): only the attempt
+    /// streams a commit appended `attempt_prepared` to ([`kick_prepared`]).
+    pub prepared: Kicks,
     /// The image placement manager (CP-07).
     pub placement: Kicks,
     /// The placement relay's worker (CP-07).
@@ -138,6 +142,7 @@ impl Notifier {
             saga: Kicks::new(KICK_CAPACITY),
             relay: Kicks::new(KICK_CAPACITY),
             reconciler: Kicks::new(KICK_CAPACITY),
+            prepared: Kicks::new(KICK_CAPACITY),
             placement: Kicks::new(KICK_CAPACITY),
             placement_relay: Kicks::new(KICK_CAPACITY),
             terms: Kicks::new(KICK_CAPACITY),
@@ -166,10 +171,13 @@ impl Notifier {
 }
 
 impl StoreNotifier for Notifier {
-    /// Pinned by `tests::should_kick_every_reader_when_a_unit_commits`.
+    /// Pinned by `tests::should_kick_every_reader_when_a_unit_commits` and
+    /// `tests::should_kick_the_prepared_wake_only_when_an_attempt_becomes_prepared`.
     fn committed(&self, commit: &Committed) {
         self.saga.committed(commit);
         self.relay.committed(commit);
+        // before the reconciler's own kick, which wakes its loop: the tick then finds it
+        kick_prepared(&self.prepared, commit);
         self.reconciler.committed(commit);
         self.placement.committed(commit);
         self.placement_relay.committed(commit);
@@ -263,6 +271,7 @@ mod tests {
                     event_ids: Vec::new(),
                 }],
             },
+            kinds: Vec::new(),
         };
 
         // when
@@ -278,6 +287,39 @@ mod tests {
             std::slice::from_ref(&stream)
         );
         assert_eq!(notifier.terms.take(), [stream]);
+        assert!(notifier.prepared.take().is_empty());
+    }
+
+    #[test]
+    fn should_kick_the_prepared_wake_only_when_an_attempt_becomes_prepared() {
+        // given
+        let notifier = Notifier::new();
+        let attempt = StreamId::new("attempt-1").unwrap_or_else(|e| panic!("{e}"));
+        let commit = |kind: &str| Committed {
+            command_id: CommandId::from_u128(1),
+            appended: Appended {
+                streams: vec![AppendedStream {
+                    stream: attempt.clone(),
+                    first: StreamRevision::FIRST,
+                    last: StreamRevision::FIRST,
+                    event_ids: Vec::new(),
+                }],
+            },
+            kinds: vec![StoredKind {
+                event_type: kind.to_owned(),
+                schema_version: 1,
+            }],
+        };
+
+        // when
+        notifier.committed(&commit("vm_cloned"));
+        let on_clone = notifier.prepared.take();
+        notifier.committed(&commit("attempt_prepared"));
+        let on_prepared = notifier.prepared.take();
+
+        // then
+        assert!(on_clone.is_empty());
+        assert_eq!(on_prepared, [attempt]);
     }
 
     #[test]
