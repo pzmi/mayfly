@@ -223,7 +223,8 @@ pub struct PoolConfig {
     pub name: PoolName,
     /// The trust tier (ADR 0027).
     pub tier: Tier,
-    /// The image manifest, an absolute path (read by `mayfly image verify`, OPS-02).
+    /// The image manifest, an absolute path: read and checked against the deployment by
+    /// `mayflyd` at start (`crate::manifest`, OPS-02), only its shape here.
     pub image_manifest: PathBuf,
     /// The guest OS.
     pub guest_os: GuestOs,
@@ -317,6 +318,27 @@ pub enum GuestOs {
     Macos,
     /// A Linux guest.
     Linux,
+}
+
+impl GuestOs {
+    /// The name the configuration and the image manifest write it as.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+        }
+    }
+
+    /// The runner package platform a guest of this OS installs ([`RUNNER_PLATFORMS`]; the
+    /// image store selects the pin by the base's guest the same way, HW-01X).
+    #[must_use]
+    pub const fn runner_platform(self) -> &'static str {
+        match self {
+            Self::Macos => "osx-arm64",
+            Self::Linux => "linux-arm64",
+        }
+    }
 }
 
 /// A pool's breaker: `failures` stage failures within `window` trip it (dm I27).
@@ -508,7 +530,7 @@ impl Config {
     }
 }
 
-fn syntax_error(text: &str, error: &toml::de::Error) -> ConfigErrors {
+pub(crate) fn syntax_error(text: &str, error: &toml::de::Error) -> ConfigErrors {
     let field = error.span().map_or_else(
         || "line 1, column 1".to_owned(),
         |span| {
@@ -551,7 +573,7 @@ fn schema_version_error(table: &Table) -> Option<ConfigError> {
     })
 }
 
-fn describe(value: &Value) -> &'static str {
+pub(crate) fn describe(value: &Value) -> &'static str {
     match value {
         Value::String(_) => "a string",
         Value::Integer(_) => "an integer",
@@ -563,30 +585,42 @@ fn describe(value: &Value) -> &'static str {
     }
 }
 
-fn enum_text(text: &str) -> String {
+pub(crate) fn enum_text(text: &str) -> String {
     let shown: String = text.chars().take(32).collect();
     format!("{shown:?}")
 }
 
-/// One table being read: the keys not yet taken, and the problems found so far.
-struct Reader {
+/// Keys a schema once had and a decision removed: the problem and the fix of each.
+type Refusals = fn(&str) -> Option<(&'static str, &'static str)>;
+
+/// One table being read: the keys not yet taken, and the problems found so far. Shared with
+/// the image manifest's reader (`crate::manifest`), which has its own keys and no refusals.
+pub(crate) struct Reader {
     path: String,
     table: Table,
     known: &'static [&'static str],
     errors: Vec<ConfigError>,
+    refusals: Refusals,
 }
 
 impl Reader {
-    fn new(path: String, table: Table, known: &'static [&'static str]) -> Self {
+    pub(crate) fn new(path: String, table: Table, known: &'static [&'static str]) -> Self {
         Self {
             path,
             table,
             known,
             errors: Vec::new(),
+            refusals: refusal,
         }
     }
 
-    fn field(&self, key: &str) -> String {
+    /// This reader with no refused keys: every key outside `known` is unknown.
+    pub(crate) fn without_refusals(mut self) -> Self {
+        self.refusals = |_| None;
+        self
+    }
+
+    pub(crate) fn field(&self, key: &str) -> String {
         if self.path.is_empty() {
             key.to_owned()
         } else {
@@ -594,7 +628,7 @@ impl Reader {
         }
     }
 
-    fn push(&mut self, key: &str, kind: ConfigErrorKind, problem: String, fix: &str) {
+    pub(crate) fn push(&mut self, key: &str, kind: ConfigErrorKind, problem: String, fix: &str) {
         let field = self.field(key);
         self.errors.push(ConfigError {
             field,
@@ -604,11 +638,11 @@ impl Reader {
         });
     }
 
-    fn invalid(&mut self, key: &str, problem: &str, fix: &str) {
+    pub(crate) fn invalid(&mut self, key: &str, problem: &str, fix: &str) {
         self.push(key, ConfigErrorKind::Invalid, problem.to_owned(), fix);
     }
 
-    fn value(&mut self, key: &str, example: &str, required: bool) -> Option<Value> {
+    pub(crate) fn value(&mut self, key: &str, example: &str, required: bool) -> Option<Value> {
         let value = self.table.remove(key);
         if value.is_none() && required {
             self.push(
@@ -621,7 +655,7 @@ impl Reader {
         value
     }
 
-    fn string(&mut self, key: &str, example: &str, required: bool) -> Option<String> {
+    pub(crate) fn string(&mut self, key: &str, example: &str, required: bool) -> Option<String> {
         match self.value(key, example, required)? {
             Value::String(text) => Some(text),
             other => {
@@ -631,7 +665,7 @@ impl Reader {
         }
     }
 
-    fn wrong_type(&mut self, key: &str, expected: &str, found: &Value, example: &str) {
+    pub(crate) fn wrong_type(&mut self, key: &str, expected: &str, found: &Value, example: &str) {
         self.push(
             key,
             ConfigErrorKind::WrongType,
@@ -640,7 +674,7 @@ impl Reader {
         );
     }
 
-    fn uint(
+    pub(crate) fn uint(
         &mut self,
         key: &str,
         range: &RangeInclusive<u64>,
@@ -731,9 +765,23 @@ impl Reader {
     }
 
     fn section(&mut self, key: &str, required: bool) -> Option<Self> {
+        self.section_with(key, required, section_keys(key))
+    }
+
+    /// The table `key` read with its own `known` keys and this reader's refusals.
+    fn section_with(
+        &mut self,
+        key: &str,
+        required: bool,
+        known: &'static [&'static str],
+    ) -> Option<Self> {
         let example = format!("[{key}]");
         match self.value(key, &example, required)? {
-            Value::Table(table) => Some(Self::new(self.field(key), table, section_keys(key))),
+            Value::Table(table) => {
+                let mut child = Self::new(self.field(key), table, known);
+                child.refusals = self.refusals;
+                Some(child)
+            }
             other => {
                 self.wrong_type(key, "a table", &other, &example);
                 None
@@ -741,7 +789,21 @@ impl Reader {
         }
     }
 
-    fn absorb(&mut self, child: Self) {
+    /// [`Reader::read_section`] with the section's own `known` keys.
+    pub(crate) fn read_section_with<T>(
+        &mut self,
+        key: &str,
+        required: bool,
+        known: &'static [&'static str],
+        read: impl FnOnce(&mut Self) -> Option<T>,
+    ) -> Option<T> {
+        let mut child = self.section_with(key, required, known)?;
+        let value = read(&mut child);
+        self.absorb(child);
+        value
+    }
+
+    pub(crate) fn absorb(&mut self, child: Self) {
         let errors = child.finish();
         self.errors.extend(errors);
     }
@@ -759,11 +821,11 @@ impl Reader {
     }
 
     /// The problems found, with every key not taken reported as refused or unknown.
-    fn finish(mut self) -> Vec<ConfigError> {
+    pub(crate) fn finish(mut self) -> Vec<ConfigError> {
         let leftover: Vec<String> = self.table.keys().cloned().collect();
         for key in leftover {
             let known = self.known.join(", ");
-            let (kind, problem, fix) = match refusal(&key) {
+            let (kind, problem, fix) = match (self.refusals)(&key) {
                 Some((problem, fix)) => {
                     (ConfigErrorKind::Refused, problem.to_owned(), fix.to_owned())
                 }
@@ -1000,7 +1062,7 @@ fn read_host(reader: &mut Reader) -> HostConfig {
     }
 }
 
-fn image_repository_ok(text: &str) -> bool {
+pub(crate) fn image_repository_ok(text: &str) -> bool {
     let mut parts = text.split('/');
     let host = parts.next().unwrap_or("");
     let host_ok = !host.is_empty()
@@ -1021,7 +1083,7 @@ fn image_repository_ok(text: &str) -> bool {
         })
 }
 
-fn runner_version_ok(text: &str) -> bool {
+pub(crate) fn runner_version_ok(text: &str) -> bool {
     let parts: Vec<&str> = text.split('.').collect();
     parts.len() == 3
         && parts.iter().all(|part| {
@@ -1058,7 +1120,7 @@ fn runner_pins(value: &Value) -> Option<BTreeMap<String, String>> {
     }
 }
 
-fn sha256_ok(text: &str) -> bool {
+pub(crate) fn sha256_ok(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

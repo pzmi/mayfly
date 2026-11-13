@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  labels: unknown key; unknown keys are refused, never ignored (fix: remove it, or use one of: schema, provider, os, arch, source, revision, runner, launcher, capabilities)

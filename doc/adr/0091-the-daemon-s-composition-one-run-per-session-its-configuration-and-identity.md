@@ -4,7 +4,8 @@ Date: 2026-11-12
 
 ## Status
 
-Proposed
+Proposed. Extended 2026-11-12 (OPS-02) by the section "Image manifests and pinning",
+proposed with it.
 
 ## Context
 
@@ -86,3 +87,95 @@ by the plan and the ADRs it builds on:
   over an injected environment instead.
 - `TART_HOME` inside the Linux state directory: simpler, but VM disks are large user data, which
   XDG puts in the data directory, and the floor needs no change either way.
+
+## Image manifests and pinning (OPS-02, 2026-11-12)
+
+Proposed with this record: the owner accepts these decisions with it.
+
+### Context
+
+Each pool names an image manifest (`image_manifest`, plan §11), and the control plane pins a
+pool only to a digest whose `Image` stream is `Verified` (`doc/domain-model.md` §6.2, §6.6).
+OPS-02 writes the manifest's schema, `mayfly image verify` and the path from a pool's manifest
+to its pin under `mayflyd`. The documents leave open:
+
+- **What "Verified" means.** The timeline (dm §2.1, steps 7 and 10) verifies an image before
+  any host pulls it, and the data plane already verifies the content at the pull against the
+  OCI manifest fetched by digest (ADR 0087 decision 7). A rejection is permanent for its digest
+  (`ImageRejected`: never verified again).
+- **Where a runner pin comes from.** DEC-01 puts the runner version and its SHA-256 in the
+  manifest; decision 2 above put the pins in `[images.runners]`, optional in the schema, and
+  the image store refuses a platform with no pin (HW-01X). The owner asked for reasonable defaults out of
+  the box (2026-11-12).
+- **What the journal records of a manifest.** KER-11 left the launcher hash and the required
+  host to OPS-02 "as optional fields" of `ImageRegistered`'s manifest.
+- **The repository.** The image store pulls from one repository per deployment
+  (`[images] repository`, decision 2); a manifest names its image's own.
+
+### Decisions
+
+Numbered on from the decisions above.
+
+6. **The manifest is a TOML file of schema 1**, read like the configuration (unknown keys
+   refused, every problem named with its field and its fix): `schema`, `provider = "tart"`,
+   `os`, `arch = "arm64"` (the host requirement of schema 1: Tart runs arm64 guests on Apple
+   silicon), `source = "<repository>@sha256:<64 hex>"`, `revision`, `[runner] version sha256`,
+   `[launcher] sha256`, `[capabilities] guest_agent = true`. A tag-only source, a tag beside the
+   digest and any other digest form are refused (ADR 0039: never by tag); an image without the
+   guest agent is refused (ADR 0038). A later requirement is a new key, which an older build
+   refuses.
+7. **Verified means the manifest passed this build's checks against this deployment**:
+   `mayflyd` reads every pool's manifest at start and refuses to start (exit 78, each problem
+   named under its pool) when one does not read, comes from another repository than
+   `[images] repository`, names another guest than the pool's `guest_os`, pins a runner package
+   otherwise than another pin of it, or describes a digest otherwise than another pool's
+   manifest. Every run then registers each pool's image, records `RecordVerification{passed}`
+   and pins the pool (`mayfly_control::images`). A problem of the deployment is a start-up
+   refusal the operator fixes, never a permanent `ImageRejected`. The content is verified by the
+   data plane at the pull: a drifted pull fails there (the placement `Failed`, the pool not
+   admissible on that host); recording `ImageRejected` on a drift is P17's pending branch
+   (planned, no task yet).
+8. **A manifest's runner pin joins the data plane's pin table** for its guest's platform
+   (`osx-arm64` or `linux-arm64`), so a manifest is enough to run its image and
+   `[images.runners]` stays optional; a configured pin of the same package must agree.
+   Manifests are operator-owned files with the configuration's trust, and their integrity now
+   carries the runner checksum. **Open question for the owner:** whether `mayflyd` should refuse
+   a manifest that is writable by group or others (today it is read whatever its mode, as the
+   configuration is).
+9. **The journal records `{os, runner_version, revision}`** (`ImageRegistered` v1, unchanged):
+   what the control plane decides with. The rest stays in the file: the runner's checksum joins
+   the data plane's pin table, which checks the package at the materialisation (ADR 0087
+   decision 10); the architecture is checked at every start; the launcher's checksum is
+   recorded and format-checked only, and comparing it with the image's launcher is planned (no
+   task yet). Recording them in the journal would be a new event version that nothing reads.
+10. **A refusal at run time leaves the pin as it was**: a digest registered with another
+    manifest (`manifest_immutable`), a rejected or withdrawn image. It is logged at ERROR for
+    the operator (`image_registration_refused`, `image_pin_refused`), and the run goes on. The
+    levels differ on purpose from `ConfigurePool`'s refusal (WARNING, `pool_configuration_refused`):
+    a refused pin leaves the pool on an image the operator did not ask for, which needs their
+    attention, while a store fault in any of these steps is WARNING (`image_pin_failed` and the
+    like), handled by the next run.
+
+### Consequences
+
+- OPS-02 implements it: `mayfly-composition::manifest`, `mayfly_control::images`,
+  `mayfly-composition::daemon`'s `load` and `pin_images`, `mayfly image verify`. Pinned by
+  `mayfly-composition`'s `tests/manifest.rs` (valid and invalid fixtures with golden reports,
+  the deployment checks), `tests/daemon.rs::should_pin_each_pool_to_its_manifest_image_when_the_daemon_starts`
+  and `should_refuse_to_start_when_a_pool_manifest_names_a_tag`, `mayfly-control`'s
+  `tests/store/images.rs`, and `mayfly-cli`'s `tests/image_verify.rs`.
+- Every configuration's pools now need a readable manifest under `mayflyd`; `config validate`
+  (RT-03) still checks the path's shape only.
+- The pin reads the image stream and refuses a withdrawn image, narrowing the window
+  `withdraw_image` leaves; a pin that commits first, of a pool created after the withdrawal
+  listed the pools, is not refused (OPS-02's card records the two-step withdrawal that would).
+
+### Alternatives considered
+
+- Verification as a boot of the image (a canary): needs a placement, which needs the pin; the
+  data plane's materialisation already boots the base and checks the runner and the guest.
+- `[images.runners]` required for every manifest's runner: the same checksum written twice.
+- Recording the launcher hash and the host requirement in `ImageRegistered` v2: nothing in the
+  control plane reads them.
+- Several repositories per deployment: the image store and its directives name one; a protocol
+  change for a case no operator has asked for.

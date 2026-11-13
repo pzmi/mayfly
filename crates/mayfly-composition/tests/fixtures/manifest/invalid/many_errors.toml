@@ -1,0 +1,13 @@
+schema = 1
+provider = "orchard"
+os = "windows"
+arch = "x86_64"
+source = "ghcr.io/acme/runner-macos:latest"
+revision = -1
+
+[runner]
+version = "2.330"
+sha256 = "abc"
+
+[capabilities]
+guest_agent = "yes"

@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  source: names a tag beside its digest: the digest alone pins the image (fix: remove the tag and keep `@sha256:<digest>`)

@@ -134,25 +134,54 @@ pub fn version_line(name: &str, version: &str) -> String {
 pub enum MayflyCommand {
     /// `mayfly vm-shim <args>`: run as a VM's shim (ADR 0037), the arguments after `vm-shim`.
     VmShim(Vec<OsString>),
+    /// `mayfly image verify <manifest>`: check an image manifest (plan §11, OPS-02).
+    ImageVerify(PathBuf),
+    /// A command line that does not parse: the usage message, for exit [`USAGE`].
+    Usage(String),
     /// Anything else, for now: print the version.
     Version,
 }
 
+/// The usage of `mayfly image`.
+const IMAGE_USAGE: &str = "usage: mayfly image verify <manifest>";
+
 impl MayflyCommand {
-    /// Reads the arguments after the program name.
+    /// Reads the arguments after the program name. Pinned by
+    /// `tests::should_read_the_manifest_path_when_the_command_is_image_verify`.
     #[must_use]
     pub fn parse(args: Vec<OsString>) -> Self {
         let mut args = args.into_iter();
         match args.next() {
             Some(first) if first == "vm-shim" => Self::VmShim(args.collect()),
+            Some(first) if first == "image" => {
+                let rest: Vec<OsString> = args.collect();
+                match rest.as_slice() {
+                    [verb, path] if verb == "verify" => Self::ImageVerify(PathBuf::from(path)),
+                    _ => Self::Usage(IMAGE_USAGE.to_owned()),
+                }
+            }
             _ => Self::Version,
         }
     }
 }
 
+/// `mayfly image verify <manifest>`: the manifest read and checked alone, offline (no registry,
+/// no configuration): `Ok` with the line to print, or the exit code (78, an invalid
+/// configuration's) and the report. Its checks against a deployment (the repository, the
+/// pool's guest, the runner pins) are `mayflyd`'s at start (ADR 0091). Pinned by
+/// `tests/image_verify.rs`.
+///
+/// # Errors
+/// The exit code and the report, every problem named with its field and its fix.
+pub fn image_verify(path: &std::path::Path) -> Result<String, (u8, String)> {
+    mayfly_composition::manifest::Manifest::load(path)
+        .map(|manifest| format!("image manifest valid: {}", manifest.summary()))
+        .map_err(|error| (error.exit_code(), error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DaemonArgs, MayflyCommand, Role, find_on_path, version_line};
+    use super::{DaemonArgs, IMAGE_USAGE, MayflyCommand, Role, find_on_path, version_line};
 
     #[test]
     fn should_join_name_and_version_when_formatting_the_version_line() {
@@ -180,6 +209,40 @@ mod tests {
             MayflyCommand::VmShim(vec!["--vm".into(), "x".into()])
         );
         assert_eq!(MayflyCommand::parse(Vec::new()), MayflyCommand::Version);
+    }
+
+    #[test]
+    fn should_read_the_manifest_path_when_the_command_is_image_verify() {
+        // given
+        let verify = vec![
+            "image".into(),
+            "verify".into(),
+            "/etc/mayfly/mac.toml".into(),
+        ];
+
+        // when
+        let command = MayflyCommand::parse(verify);
+
+        // then
+        assert_eq!(
+            command,
+            MayflyCommand::ImageVerify("/etc/mayfly/mac.toml".into())
+        );
+        let usage = MayflyCommand::Usage(IMAGE_USAGE.to_owned());
+        assert_eq!(MayflyCommand::parse(vec!["image".into()]), usage);
+        assert_eq!(
+            MayflyCommand::parse(vec!["image".into(), "pull".into(), "x".into()]),
+            usage
+        );
+        assert_eq!(
+            MayflyCommand::parse(vec![
+                "image".into(),
+                "verify".into(),
+                "a".into(),
+                "b".into()
+            ]),
+            usage
+        );
     }
 
     #[test]

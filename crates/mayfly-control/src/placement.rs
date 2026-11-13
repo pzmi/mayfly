@@ -771,10 +771,13 @@ impl std::error::Error for WithdrawError {}
 /// `tests/store/placement.rs::should_refuse_a_withdrawal_when_a_pool_pins_the_image` and
 /// `tests/store/placement.rs::should_refuse_a_withdrawal_when_a_pin_commits_between_the_check_and_the_save`.
 ///
-/// What a read condition cannot cover: a pool stream that did not exist at the last listing and
-/// is created and pinned before the save (there is no global order to read it under, ES-I3).
-/// Closing that needs the pin itself to read the image stream and refuse a withdrawn image,
-/// which is the pin's use case (OPS-02), not this one.
+/// What a read condition here cannot cover: a pool stream that did not exist at the last
+/// listing and is created and pinned before the save (there is no global order to read it
+/// under, ES-I3). The pin narrows it: [`crate::images::pin_image`] reads the image stream,
+/// refuses a withdrawn image and saves with that read, so a withdrawal that commits first
+/// refuses such a pin. A pin of such a pool that commits first, before this withdrawal's save,
+/// still leaves a withdrawn image pinned, since neither unit reads a stream the other writes
+/// (the limitation recorded on OPS-02's card).
 ///
 /// # Errors
 /// [`WithdrawError`].

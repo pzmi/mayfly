@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  capabilities.guest_agent: is false: mayfly reaches a guest only through `tart exec` (ADR 0038), so an image without the guest agent is refused (fix: bake the Tart guest agent into the image and set `guest_agent = true`)

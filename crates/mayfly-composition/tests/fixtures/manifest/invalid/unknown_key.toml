@@ -1,0 +1,17 @@
+schema = 1
+provider = "tart"
+os = "macos"
+arch = "arm64"
+source = "ghcr.io/acme/runner-macos@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+revision = 1
+labels = ["macos"]
+
+[runner]
+version = "2.330.0"
+sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+[launcher]
+sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+[capabilities]
+guest_agent = true

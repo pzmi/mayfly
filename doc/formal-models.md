@@ -120,7 +120,11 @@ the pin's base is materialised there and eviction only of a base no live lease r
 `leasesKeepTheirBase` with two negative controls (`startWithoutPlacementViolatesTest`, a start
 without the placement check after a repin; `evictWhileReferencedViolatesTest`, an eviction that
 does not count leases); withdrawal refused while pinned is a read of every pool
-stream at the save (`mayfly_control::placement::withdraw_image`), not modelled.
+stream at the save (`mayfly_control::placement::withdraw_image`), and a pin refused for a
+withdrawn image a read of the image stream at the pin's save (`mayfly_control::images::pin_image`,
+OPS-02), neither modelled: each is one unit's read condition, pinned by its component test, and
+together they still let a pin of a pool created after the withdrawal's listing commit first
+(OPS-02's card records it and the two-step withdrawal that would close it).
 
 **The data plane's image store** (DP-07, ADR 0087) is modelled in `formal/image_store.qnt`: no
 model covered it, and its safety rests on the order of durable writes and effects across crashes,

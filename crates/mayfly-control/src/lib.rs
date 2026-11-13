@@ -11,6 +11,9 @@
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
 //!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
 //!   over the link (`doc/event-store.md` §3.4, §5).
+//! - [`images`]: the image catalog's use cases: an image registered and its verification
+//!   recorded, and a pool pinned to a verified image under a read of its stream, so a withdrawal
+//!   that commits first refuses the pin (OPS-02).
 //! - [`placement`]: the image placement manager (P17, P18): pins placed on every host, bases
 //!   materialised and evicted, runner-version expiry tripping the breaker, withdrawal refused
 //!   while pinned (CP-07).
@@ -34,6 +37,7 @@
 pub mod delivery;
 pub mod github;
 mod ids;
+pub mod images;
 pub mod inbox;
 pub mod journal;
 pub mod placement;

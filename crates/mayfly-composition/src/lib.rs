@@ -2,6 +2,8 @@
 //! sequence and roles.
 //!
 //! - [`config`]: the configuration schema and its validation (plan §11).
+//! - [`manifest`]: mayfly's image manifest, its validation and its checks against the
+//!   deployment (OPS-02, ADR 0091).
 //! - [`state_dir`]: the state-dir lock, the store's owner lease on SQLite (plan §13).
 //! - [`daemon`]: `mayflyd --role all`, both planes wired over the in-process link, the
 //!   start-up sequence of plan §10 and the P24 stop (RT-02, ADR 0091).
@@ -20,6 +22,7 @@ pub mod daemon;
 pub mod details;
 pub mod exit_code;
 pub mod identity;
+pub mod manifest;
 pub mod paths;
 pub mod sizing;
 pub mod state_dir;

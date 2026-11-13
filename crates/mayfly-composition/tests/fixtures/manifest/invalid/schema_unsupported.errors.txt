@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  schema: schema 2 is not readable by this build, which reads 1 (fix: start the file with `schema = 1`)

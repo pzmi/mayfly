@@ -959,6 +959,18 @@ Quarantined --case resolved--> Deleting;  Quarantined --observed absence--> Lost
   (`already_rejected`, `withdrawn`). `WithdrawImage` is an operator's (`operator_only`) and records
   the uid; the expiry is recorded once, only below the minimum (`runner_not_expired`), with the
   command's instant. A newer run epoch is recorded as `ImageEpochAdvanced` (I18).
+- **As built (OPS-02, ADR 0091):** the manifest recorded stays `{os, runner_version, revision}`:
+  the runner's checksum (which joins the data plane's pin table, checked at the
+  materialisation), the architecture (checked by `mayflyd` at start) and the launcher hash
+  (recorded and format-checked; comparing it with the image's launcher is planned, no task yet)
+  stay in mayfly's manifest file, since nothing in the control plane reads them.
+  `RecordVerification{passed}` means the manifest passed `mayflyd`'s checks against its
+  deployment; a mismatch refuses the start, never a permanent rejection. The content is
+  verified at the pull: a drifted pull fails at the data plane (the placement `Failed`, the pool
+  not admissible on that host); recording `ImageRejected` on a drift is P17's pending branch
+  (planned, no task yet). The pin (`mayfly_control::images::pin_image`)
+  is refused unless the image is `Verified`, names its `ImageVerified` event and is saved with a
+  read of the image stream, so a withdrawal that commits first refuses it.
 
 ### 6.7 `ImagePlacement` [Image]
 

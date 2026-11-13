@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  source: does not end in a digest of `sha256:` and 64 lowercase hex digits (fix: write `<repository>@sha256:<64 lowercase hex digits>`, the digest the registry gives the image)

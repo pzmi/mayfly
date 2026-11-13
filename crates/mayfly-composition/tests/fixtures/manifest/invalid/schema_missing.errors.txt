@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  schema: missing (fix: start the file with `schema = 1`)

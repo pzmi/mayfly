@@ -1,0 +1,10 @@
+invalid image manifest: 9 errors
+  provider: "orchard" is not a provider (fix: use `provider = "tart"`, the only provider)
+  os: "windows" is not a guest OS (fix: use `os = "macos"` or `os = "linux"`)
+  arch: "x86_64" is not supported: Tart runs arm64 guests on Apple silicon (fix: use `arch = "arm64"`)
+  source: is a tag-only reference: a tag can move, and mayfly pulls only by digest (ADR 0039) (fix: write `<repository>@sha256:<64 lowercase hex digits>`, the digest the registry gives the image)
+  revision: -1 is below 0 (fix: use 0 or more)
+  runner.version: is not a runner version (fix: write `X.Y.Z`, like `version = "2.330.0"`)
+  runner.sha256: is not a SHA-256 of 64 lowercase hex digits (fix: write the SHA-256 of the runner package for the image's guest)
+  launcher: required, but absent (fix: add `[launcher]`)
+  capabilities.guest_agent: expected a boolean, found a string (fix: write it as `guest_agent = true`)

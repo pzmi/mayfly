@@ -1,0 +1,2 @@
+invalid image manifest: 1 error
+  source: names no digest: mayfly pulls only by digest (ADR 0039) (fix: write `<repository>@sha256:<64 lowercase hex digits>`, the digest the registry gives the image)

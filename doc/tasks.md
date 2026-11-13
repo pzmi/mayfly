@@ -75,7 +75,7 @@ Accepted. The owner's answers to `doc/domain-model.md` §10 (OD1–OD20) and `do
 | [ADR 0076](adr/0076-quarantine-stops-deregister-first.md) | The automatic stop of a quarantined VM whose runner may be registered waits for P11's deregistration (I21): confirmed, it stops; busy, the VM runs until the runner exits; unanswered, it waits. Amends 0025. | Accepted (owner, 2026-11-10) |
 | [ADR 0087](adr/0087-service-owned-image-bases-a-durable-record-a-booted-base-and-pull-verification.md) | Service-owned image bases: mayfly's own private `TART_HOME`; a durable, fail-closed registry of the bases it made, kept on the data plane as host evidence; the Reserved → … → Ready → Retiring state machine with recovery by observation; clone only from a revalidated Ready base, never delete a quarantined one; full verification from a raw manifest fetched by digest; signature policy recorded. Amends 0039. | Accepted (owner, 2026-11-11) |
 | [ADR 0090](adr/0090-trust-on-github-com-every-assigned-job-s-run-looked-up-before-a-runner.md) | Trust on github.com, where jobs are assigned with no offer: any plan, public repositories allowed, no runner group required; every assigned job's repository must be configured and its workflow run is looked up ("Actions: Read"), and a runner starts only for a job classified trusted (the pool's `allowed_events`, a default list); the hard boundary is every image's in-guest job-started hook, which fails an untrusted job before any step; refusals are journaled and logged (`job_refused`); a refused job holds nothing and goes to a refusal sink (a disposable Linux VM whose hook fails it, `maxCapacity` pinned meanwhile) or, with `cancel_refused_runs`, is cancelled; `check_fork_pr_setting` is an option; GHES keeps 0027. Partly supersedes 0027. | Accepted (owner, 2026-11-11 and 2026-11-12) |
-| [ADR 0091](adr/0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition (RT-02): the host id generated once and never replaced, `[images]` required by `mayflyd`, a link that ends is a run that ends (a new run mints the new epoch), the start-up `ReportInventory` sent outside the journal (an exception to ADR 0034), the platform's standard places when the configuration names none (owner, 2026-11-12). | Proposed |
+| [ADR 0091](adr/0091-the-daemon-s-composition-one-run-per-session-its-configuration-and-identity.md) | The daemon's composition (RT-02): the host id generated once and never replaced, `[images]` required by `mayflyd`, a link that ends is a run that ends (a new run mints the new epoch), the start-up `ReportInventory` sent outside the journal (an exception to ADR 0034), the platform's standard places when the configuration names none (owner, 2026-11-12); and (OPS-02) the image manifest, a TOML file of schema 1, digest-pinned only, the guest agent required; `Verified` means the manifest passed `mayflyd`'s checks against its deployment (a mismatch refuses the start, never a permanent rejection; the content is verified at the pull); a manifest's runner pin joins the data plane's pin table; the journal's manifest stays `{os, runner_version, revision}`. | Proposed |
 
 Decided by the owner on 2026-11-09 after the rows above: **OD2** upgrade and rollback (ADR 0043),
 **P1/P3** Homebrew and `mayfly uninstall --purge` (ADR 0044), **P4** the published App permission
@@ -1319,6 +1319,10 @@ the policy's own loop, on its kicks (`Notifier::terms`), starts only after the r
 two never race on the host stream
 (`tests/daemon.rs::should_apply_the_pools_terms_to_its_host_when_the_pool_is_pinned`).
 "Opens and reserves after a real materialisation under `mayflyd`" is VER-09's.
+Note (OPS-02): `mayflyd` now pins every pool from its manifest at each run's start
+(`daemon::pin_images`, after `configure_pools`), so the test above pins through the manifest, not
+the store; the tests' World writes a manifest whose repository is a loopback address nothing
+serves, so a placement fails at once, offline (a materialisation under `mayflyd` is VER-09's).
 
 #### DP-01 Data-plane executor and observer
 Cites: plan §3.1, §8.1, §9; ADR 0024. `mayfly-data`: ports `VmProvider`, `ImageStore`,
@@ -2129,7 +2133,53 @@ DEC-01: manifest fields runner version and its SHA, launcher hash, guest-agent r
 without it refused, ADR 0038); `image withdraw` with CP-07.
 Note (CP-07): the pin use case saves `PinImage` with a read of the image's `Image` stream and
 refuses a withdrawn image. That closes the one window `withdraw_image` cannot: a pool stream
-created and pinned after the withdrawal's last listing of the pools.
+created and pinned after the withdrawal's last listing of the pools. *(Superseded by OPS-02's
+correction below: the read narrows that window without closing it.)*
+As built (OPS-02, ADR 0091's OPS-02 section, Proposed): the manifest is `mayfly-composition::manifest`, a TOML
+file of schema 1 (`schema`, `provider = "tart"`, `os`, `arch = "arm64"`, `source =
+"<repository>@sha256:<64 hex>"`, `revision`, `[runner] version sha256`, `[launcher] sha256`,
+`[capabilities] guest_agent = true`) read like the configuration: a tag-only source, a tag beside
+the digest and any other digest form are refused, and so is an image without the guest agent
+(golden reports under `tests/fixtures/manifest/`, `tests/manifest.rs`). `mayfly image verify
+<manifest>` checks one file alone, offline: 0 and a summary line, 78 and the report, 64 for a
+command line that does not parse (`mayfly-cli`'s `tests/image_verify.rs`). `mayflyd` reads every
+pool's manifest at start (`daemon::load`, `manifest::resolve`) and refuses to start (78, each
+problem under its pool, `pools[0].image_manifest (source)`) when one does not read or disagrees
+with the deployment: another repository than `[images] repository`, another guest than the
+pool's `guest_os`, a runner pin other than another pin of the same package, or another manifest
+for a digest another pool names; each manifest's runner pin joins the data plane's pin table, so
+`[images.runners]` stays optional. Every run, after `ConfigurePool`, registers each pool's image
+(`ImageRegistered{digest, manifest: {os, runner_version, revision}}`, unchanged v1: the
+checksums and the architecture stay in the file), records its verification and pins the pool
+(`mayfly_control::images::{register_image, record_verification, pin_image}`), each idempotent by
+a derived command id, the pin's including the pool's revision read, so pinning back to an earlier
+image is a new command (`tests/store/images.rs::should_record_each_move_when_a_pool_is_pinned_back_to_an_earlier_image`).
+The pin is refused unless the image is `Verified`, names the stream's `ImageVerified` event as
+`verified_ref`, and is saved with a read of the image stream, so a withdrawal committed between
+its read and its save refuses it
+(`should_refuse_the_pin_at_commit_when_the_image_is_withdrawn_after_the_read`). A refusal at run
+time (`manifest_immutable`, a rejected or withdrawn image) leaves the pin as it was, logged at
+ERROR (`image_registration_refused`, `image_pin_refused`). Pinned under `mayflyd` by
+`tests/daemon.rs::should_pin_each_pool_to_its_manifest_image_when_the_daemon_starts` (a, then b
+after a restart with `previous`) and `should_refuse_to_start_when_a_pool_manifest_names_a_tag`.
+**Correction to CP-07's note (found at OPS-02):** the pin's read narrows the window without
+closing it. When a pin of a pool created after the withdrawal's listing commits *first*, the
+withdrawal still commits after it (it never read that pool's stream, and the pin wrote none it
+reads), leaving a withdrawn image pinned. Closing it needs a stream both units touch, for
+example a two-step withdrawal (`WithdrawalRequested` on the image stream before the listing, a
+pin refused while it stands, `ImageWithdrawn` saved with the reads of the pools listed after it):
+an `Image` change, model and decision first, for the task that gives `mayfly image withdraw` its
+caller (RT-03; nothing withdraws under `mayflyd` today).
+Needs VER-09: no daemon test pulls an image (the daemon tests' repository is a loopback address
+nothing serves, so the pin's placement fails at once, offline); a `mayflyd` test that takes a
+pool's manifest through pull and materialisation to an admissible pool (with CP-08's terms)
+waits for the local OCI registry harness.
+Planned, no task yet: comparing `[launcher] sha256` with the image's launcher (today it is
+recorded and format-checked only), and recording `ImageRejected` when a pull drifts (today the
+drifted pull fails at the data plane: the placement `Failed`, the pool not admissible there).
+Deferred: a minimum host OS version as a host requirement (no probe reads it yet; a new key of
+the schema) and a `--config` check in `mayfly image verify` against a deployment (`mayflyd`
+makes those checks at start).
 
 #### OPS-03 ⛳ Release workflow
 Cites: fnd §7. Tag-triggered release: macOS arm64 (and Linux) archives, `SHA256SUMS`, build

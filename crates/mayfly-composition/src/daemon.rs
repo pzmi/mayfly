@@ -18,7 +18,10 @@
 //!    prepared, `StartRun`, the data plane's hello, `MintEpoch` above the journal and the floor,
 //!    admission closed, the welcome; the data plane raises its floor (fsync) and enters.
 //! 5. The pools of the configuration are applied (`ConfigurePool` when one changed): the
-//!    static demand (`min_prepared`, `max_running`) the reconciler reads.
+//!    static demand (`min_prepared`, `max_running`) the reconciler reads. Then each pool's
+//!    image, from its manifest ([`crate::manifest`], read and checked against the deployment
+//!    at [`load`]), is registered, its verification recorded and the pool pinned to it
+//!    (`mayfly_control::images`, OPS-02, ADR 0091), which the placement manager then places.
 //! 6. An inventory is asked for at once (`ReportInventory`, sent on the link outside the
 //!    journal: a read with no effect, ADR 0091 decision 4), and every inventory goes to
 //!    [`Startup::recover`] (the same `Startup` for every pass of the run, CP-04) until it
@@ -64,11 +67,9 @@
 //! recovery is handed no GitHub view until a registration view exists, so every runner reads
 //! `unreachable` (never `absent`) and a held cleanup stays held (CP-04H); the data plane's [`LaunchStore`] is shared with the guest transport and filled
 //! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
-//! placement manager places every pool's pin on this host and [`Placements`] follows its
-//! passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once the
-//! pool is active, pinned and its pin's breaker not tripped; but nothing in `mayflyd` registers,
-//! verifies or pins an image yet (OPS-02's manifest and pin), so no pool is open under
-//! `mayflyd` until OPS-02 lands. The operator socket
+//! placement manager places every pool's pin (step 5) on this host and [`Placements`] follows
+//! its passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once
+//! the pool is active, pinned and its pin's breaker not tripped. The operator socket
 //! (RT-03), logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
 //! (OPS-05) and split roles (LNK-01) are separate tasks.
 
@@ -93,6 +94,7 @@ use mayfly_control::delivery::{
     DeliveryConfig, DeliveryWorker, DirectiveRelay, LinkSink, PlacementRelay, PlacementRelayConfig,
     SinkConfig,
 };
+use mayfly_control::images::{self, CatalogError, PinError};
 use mayfly_control::inbox::Inbox;
 use mayfly_control::placement::{PlacementConfig, PlacementIndex, PlacementManager};
 use mayfly_control::projection::{self, BuildId};
@@ -105,14 +107,15 @@ use mayfly_control::sessions::HostSessions;
 use mayfly_control::store::{AggregateStore, Clock as _, Outcome, SaveError, SaveRequest};
 use mayfly_control::terms::{TermsConfig, TermsPolicy};
 use mayfly_control_domain::attempt::GuestOs as DomainOs;
+use mayfly_control_domain::image::Verification;
 use mayfly_control_domain::operations::hostrun::{HostRun, HostRunCommand, SafeModeReason};
 use mayfly_control_domain::pool::{ConfigurePool, Pool, PoolCommand, PoolConfig, TrustTier};
 use mayfly_control_domain::{Actor, Command, ControlAggregates};
 use mayfly_data::{Config as DataConfig, Executor, Inventory, LaunchSecrets, LaunchStore, Ports};
 use mayfly_data_domain::Sizing;
 use mayfly_domain::{
-    CommandId, Deadline, DirectiveId, Epoch, HostId, Millis, OwnedVmName, ProviderInstanceId,
-    Resources, Secret,
+    CommandId, Deadline, DirectiveId, Epoch, HostId, Millis, OwnedVmName, PoolName,
+    ProviderInstanceId, Resources, Secret,
 };
 use mayfly_protocol::{
     Directive, DirectiveKind, DirectiveSink as _, Mode, ObservationKind, SUPPORTED, SecretHandle,
@@ -125,6 +128,7 @@ use crate::config::{Config, ConfigError, ConfigErrorKind, ConfigErrors, GuestOs,
 use crate::details::{ConfigDetails, Placements};
 use crate::exit_code;
 use crate::identity::{IdentityError, host_id, random_bytes};
+use crate::manifest::{self, Manifest};
 use crate::paths::{self, Places, PlatformEnv};
 use crate::state_dir::{StateDirError, StateDirLock};
 use crate::supervise::{Cuttable, Notifier, SessionCut, Shutdown, ShutdownSignal};
@@ -312,8 +316,10 @@ impl std::error::Error for DaemonError {}
 pub struct Loaded {
     /// The whole file.
     pub config: Config,
-    /// `[images]`.
+    /// `[images]`, its runner pins joined by every pool manifest's ([`manifest::resolve`]).
     pub images: crate::config::ImagesConfig,
+    /// Each pool's image manifest, checked against the deployment.
+    pub manifests: BTreeMap<PoolName, Manifest>,
     /// The state directory and `TART_HOME`: the configuration's, else the platform's standard
     /// places (ADR 0091 decision 5, [`crate::paths`]).
     pub places: Places,
@@ -328,11 +334,14 @@ fn missing(field: &str, problem: &str, fix: &str) -> ConfigError {
     }
 }
 
-/// The daemon's configuration: the file valid and `[images]` present, each missing one named
-/// (exit 78). `[host]`'s sizing keys are optional: absent, each is measured, read from the
-/// image's manifest or Apple's limit ([`crate::sizing`], ADR 0052's amendment of 2026-11-12).
-/// Pinned by
-/// `tests/daemon.rs::should_refuse_to_start_when_the_role_or_the_images_are_missing`.
+/// The daemon's configuration: the file valid, `[images]` present and every pool's image
+/// manifest valid and consistent with the deployment ([`manifest::resolve`], ADR 0091), each
+/// problem named (exit 78). Without `[images]` the manifests are not read, so that one problem
+/// is reported alone: their checks need the repository it names. `[host]`'s sizing keys are optional: absent, each is measured, read
+/// from the image's OCI manifest or Apple's limit ([`crate::sizing`], ADR 0052's amendment of
+/// 2026-11-12). Pinned by
+/// `tests/daemon.rs::should_refuse_to_start_when_the_role_or_the_images_are_missing` and
+/// `should_refuse_to_start_when_a_pool_manifest_names_a_tag`.
 ///
 /// # Errors
 /// [`LoadError`] when the file does not load or lacks what the daemon needs.
@@ -358,11 +367,20 @@ pub fn load(path: &Path, env: &PlatformEnv) -> Result<Loaded, LoadError> {
             "add `[images]` with `repository = \"ghcr.io/acme/runner-macos\"`",
         ));
     }
-    match (places, config.images.clone()) {
-        (Some(places), Some(images)) if errors.is_empty() => Ok(Loaded {
+    let resolved = config.images.as_ref().and_then(|images| {
+        manifest::resolve(&config.pools, images, Manifest::load)
+            .map_err(|found| errors.extend(found))
+            .ok()
+    });
+    match (places, config.images.clone(), resolved) {
+        (Some(places), Some(images), Some(resolved)) if errors.is_empty() => Ok(Loaded {
             config,
             places,
-            images,
+            images: crate::config::ImagesConfig {
+                runners: resolved.runners,
+                ..images
+            },
+            manifests: resolved.manifests,
         }),
         _ => Err(LoadError::Invalid(ConfigErrors(errors))),
     }
@@ -708,6 +726,8 @@ where
 /// Everything a run borrows.
 struct Daemon<'a> {
     config: &'a Config,
+    /// Each pool's image manifest, checked at [`load`].
+    manifests: &'a BTreeMap<PoolName, Manifest>,
     /// The operator reserve in effect at start: configured, or measured by the probe.
     reserves: Resources,
     host: HostId,
@@ -808,6 +828,7 @@ pub async fn run_with(
     let placements = Placements::default();
     let daemon = Daemon {
         config,
+        manifests: &loaded.manifests,
         reserves: reading.reserve.resources,
         boot_id,
         host,
@@ -893,6 +914,7 @@ impl Daemon<'_> {
             .split()
             .map_err(|e| DaemonError::Session(e.to_string()))?;
         self.configure_pools(opened.epoch).await;
+        self.pin_images(opened.epoch).await;
         let inventory = Directive {
             directive_id: DirectiveId::from_u128(derive(&[
                 b"report_inventory",
@@ -1008,6 +1030,87 @@ impl Daemon<'_> {
                 Err(_) => {
                     tracing::warn!(pool = pool.name.as_str(), "pool_not_configured");
                 }
+            }
+        }
+    }
+
+    /// Registers each pool's image from its manifest, records its verification and pins the pool
+    /// to it (OPS-02, ADR 0091): the manifest passed [`load`]'s checks against this deployment,
+    /// which is what `Verified` means here; the content is verified by the data plane at its
+    /// pull (ADR 0087 decision 7). Each step is idempotent, so every run repeats them, and a
+    /// manifest whose digest changed moves the pin (`ImagePinned{previous}`). A refusal (the
+    /// digest registered with another manifest, a rejected or withdrawn image) leaves the pool's
+    /// pin as it was and is logged for the operator; the run goes on. Pinned by
+    /// `tests/daemon.rs::should_pin_each_pool_to_its_manifest_image_when_the_daemon_starts`.
+    async fn pin_images(&self, epoch: Epoch) {
+        for (pool, manifest) in self.manifests {
+            let digest = &manifest.source.digest;
+            let registered = images::register_image(
+                &self.store,
+                digest,
+                manifest.recorded(),
+                Actor::Startup,
+                epoch,
+            )
+            .await;
+            match &registered {
+                Ok(()) => {}
+                Err(error @ CatalogError::Save(_)) => tracing::warn!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_registration_failed"
+                ),
+                Err(error @ CatalogError::Refused(_)) => tracing::error!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_registration_refused"
+                ),
+            }
+            if registered.is_err() {
+                continue;
+            }
+            let verified = images::record_verification(
+                &self.store,
+                digest,
+                Verification::Passed,
+                Actor::Startup,
+                epoch,
+            )
+            .await;
+            match &verified {
+                Ok(()) => {}
+                Err(error @ CatalogError::Save(_)) => tracing::warn!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_verification_failed"
+                ),
+                Err(error @ CatalogError::Refused(_)) => tracing::error!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_verification_refused"
+                ),
+            }
+            if verified.is_err() {
+                continue;
+            }
+            match images::pin_image(&self.store, pool, digest, Actor::Startup, epoch).await {
+                Ok(_) => {}
+                Err(error @ PinError::Save(_)) => tracing::warn!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_pin_failed"
+                ),
+                Err(error) => tracing::error!(
+                    pool = pool.as_str(),
+                    digest = digest.as_str(),
+                    code = error.code(),
+                    "image_pin_refused"
+                ),
             }
         }
     }

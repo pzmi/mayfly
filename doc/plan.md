@@ -731,6 +731,15 @@ directory. Service mode configures `/Library/Application Support/mayfly` (macOS)
 pinned runners, realm hosts) and `[host]`'s `vm_slots`, `macos_guests` (at most 2),
 `image_disk_gib` and `clone_disk_gib` (ADR 0052: no default for a fact of the host); each is
 optional for `config validate`.
+As built (OPS-02, ADR 0091): a pool's `image_manifest` is mayfly's image manifest, a TOML file
+of schema 1 (`provider`, `os`, `arch = "arm64"`, `source = "<repository>@sha256:<64 hex>"`, never
+a tag, `revision`, `[runner] version sha256`, `[launcher] sha256`, `[capabilities] guest_agent =
+true`), distinct from the OCI manifest the data plane verifies at the pull. `mayfly image verify
+<manifest>` checks one file offline. `mayflyd` refuses to start (78) when a pool's manifest does
+not read or disagrees with the deployment (another repository than `[images] repository`, another
+guest than `guest_os`, a runner pin that contradicts another pin of the package, two manifests for
+one digest), adds each manifest's runner pin to the data plane's pin table (so `[images.runners]`
+is optional), and at every run registers each pool's image, records it verified and pins the pool.
 
 ---
 

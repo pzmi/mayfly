@@ -1,5 +1,6 @@
-//! `mayfly` binary of `mayfly-cli` (shared plane): `mayfly vm-shim` runs a VM's shim (ADR 0037);
-//! anything else prints the version until the operator commands land.
+//! `mayfly` binary of `mayfly-cli` (shared plane): `mayfly vm-shim` runs a VM's shim (ADR 0037),
+//! `mayfly image verify <manifest>` checks an image manifest (OPS-02); anything else prints the
+//! version until the operator commands land.
 
 use std::process::ExitCode;
 
@@ -10,6 +11,20 @@ fn main() -> ExitCode {
         MayflyCommand::VmShim(args) => {
             let code = mayfly_composition::vm_shim::run(&args);
             ExitCode::from(u8::try_from(code).unwrap_or(1))
+        }
+        MayflyCommand::ImageVerify(path) => match mayfly_cli::image_verify(&path) {
+            Ok(line) => {
+                println!("{line}");
+                ExitCode::SUCCESS
+            }
+            Err((code, report)) => {
+                eprintln!("{report}");
+                ExitCode::from(code)
+            }
+        },
+        MayflyCommand::Usage(usage) => {
+            eprintln!("{usage}");
+            ExitCode::from(mayfly_cli::USAGE)
         }
         MayflyCommand::Version => {
             println!(

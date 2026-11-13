@@ -1,12 +1,15 @@
 //! `mayflyd --role all` as a process (integration level, RT-02): the built daemon over
 //! `mayfly-fake-tart` (first on its `PATH`), a SQLite journal and a static demand (one pool
-//! with `min_prepared = 1`) in a tempdir state directory. The test waits only on the daemon's
+//! with `min_prepared = 1`, its image manifest beside the config) in a tempdir state directory.
+//! The configured repository is a loopback address nothing serves, so the placement of the
+//! pool's pin (CP-07) fails at once, offline: no test here pulls an image (a local registry is
+//! VER-09's). The test waits only on the daemon's
 //! documented ready line (`mayfly_composition::daemon::Ready`), read from its stdout through a
 //! channel with a bound, and reads the journal and the fake's state once the daemon exited.
 //!
-//! The terms policy (P4, CP-08) is pinned here as far as `mayflyd` can take it before OPS-02
-//! pins images and VER-09 serves one to pull: a pool pinned through the store is open on its
-//! host after the next run's ready line.
+//! The terms policy (P4, CP-08) is pinned here as far as `mayflyd` can take it before VER-09
+//! serves an image to pull: a pool pinned from its manifest (OPS-02) is open on its host after
+//! the run's ready line, at the pool's current terms revision.
 //!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least).
@@ -23,14 +26,15 @@ use mayfly_composition::daemon::{DaemonError, Options, Ready, child_environment,
 use mayfly_composition::paths::{self, Places, PlatformEnv};
 use mayfly_composition::supervise::{SessionCut, Shutdown};
 use mayfly_control::journal::Journal as _;
-use mayfly_control::store::{
-    AggregateStore, NoNotifier, Outcome, SaveRequest, decode_event, stream_of,
-};
+use mayfly_control::placement::image_instance;
+use mayfly_control::store::{AggregateStore, NoNotifier, decode_event, stream_of};
+use mayfly_control_domain::ControlAggregates;
+use mayfly_control_domain::attempt::GuestOs;
 use mayfly_control_domain::host::{Host, HostEvent};
+use mayfly_control_domain::image::{Image, ImageEvent, ImageManifest, ImageStatus, RunnerVersion};
 use mayfly_control_domain::operations::hostrun::{HostRun, HostRunEvent, RunPhase};
-use mayfly_control_domain::pool::{Pool, PoolCommand, terms};
-use mayfly_control_domain::{Actor, Command as DomainCommand, ControlAggregates};
-use mayfly_domain::{CommandId, Epoch, EventId, ImageDigest, Millis, Sample};
+use mayfly_control_domain::pool::{Pool, PoolEvent, terms};
+use mayfly_domain::{Epoch, EventId, ImageDigest, Millis};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use serde_json::Value;
@@ -76,6 +80,39 @@ struct World {
 
 const POOL: &str = "lin";
 
+/// The repository the world's config and manifest name: loopback, where nothing serves.
+const REPOSITORY: &str = "127.0.0.1/mayfly/runner";
+
+fn digest(hex: char) -> String {
+    format!("sha256:{}", hex.to_string().repeat(64))
+}
+
+/// A valid manifest of a Linux image `source` (`tests/fixtures/manifest/valid/linux.toml`'s
+/// shape).
+fn manifest_text(source: &str) -> String {
+    format!(
+        r#"schema = 1
+provider = "tart"
+os = "linux"
+arch = "arm64"
+source = "{source}"
+revision = 1
+
+[runner]
+version = "2.330.0"
+sha256 = "{runner}"
+
+[launcher]
+sha256 = "{launcher}"
+
+[capabilities]
+guest_agent = true
+"#,
+        runner = "c".repeat(64),
+        launcher = "d".repeat(64),
+    )
+}
+
 impl World {
     /// A world whose config has `[images]` and `[host]`'s sizing when `complete`, and names
     /// its state directory and `TART_HOME`, made `0700` here.
@@ -112,7 +149,7 @@ impl World {
             .expect("the fake tart on PATH");
         let (images, host) = if complete {
             (
-                "[images]\nrepository = \"registry.example/mayfly/runner\"\n",
+                "[images]\nrepository = \"127.0.0.1/mayfly/runner\"\n",
                 "[host]\nvm_slots = 2\nmacos_guests = 0\nimage_disk_gib = 50\nclone_disk_gib = 60\n",
             )
         } else {
@@ -129,6 +166,8 @@ impl World {
         } else {
             (String::new(), String::new())
         };
+        world.write_manifest(&format!("{REPOSITORY}@{}", digest('a')));
+        let manifest = world.manifest().display().to_string();
         let config = format!(
             r#"schema_version = 1
 {state}
@@ -145,7 +184,7 @@ private_key = "env:MAYFLY_APP_KEY"
 [[pools]]
 name = "{POOL}"
 tier = "trusted"
-image_manifest = "/etc/mayfly/images/lin.toml"
+image_manifest = "{manifest}"
 guest_os = "linux"
 cpu = 2
 memory_mib = 4096
@@ -171,6 +210,15 @@ max_running = 2
 
     fn config(&self) -> PathBuf {
         self.path("config.toml")
+    }
+
+    fn manifest(&self) -> PathBuf {
+        self.path("lin.toml")
+    }
+
+    /// Writes the pool's manifest with the image `source`.
+    fn write_manifest(&self, source: &str) {
+        std::fs::write(self.manifest(), manifest_text(source)).expect("the manifest");
     }
 
     /// The fake run directly, as an operator's own `tart` with this home would.
@@ -701,64 +749,195 @@ fn applied_terms(journal: &SqliteJournal, host: &str) -> Vec<(u64, bool)> {
 
 #[test]
 fn should_apply_the_pools_terms_to_its_host_when_the_pool_is_pinned() {
-    // given: a first run configures the pool (no image pinned: its terms are closed), then,
-    // with the daemon stopped, the pool is pinned through the store as OPS-02's pin use case
-    // will (its manifest read and verification are OPS-02's; the image is not registered here,
-    // so the placement manager places nothing and no pull is attempted: a real materialisation
-    // under mayflyd is VER-09's)
+    // given: a run pins the pool from its manifest (OPS-02) before its ready line; the image is
+    // on no registry, so the placement fails at once and no pull happens (a real
+    // materialisation under mayflyd is VER-09's). The pin precedes the run's first terms pass,
+    // so the closed terms of an unpinned pool are never applied here: that is
+    // `mayfly-control`'s `tests/store/terms.rs`.
     let world = World::new(true);
     let first = world.start();
-    let epoch = first.ready();
+    first.ready();
     assert_eq!(first.terminate(), Some(0));
     let host = std::fs::read_to_string(world.state().join("host-id")).expect("the host id");
     let host = host.trim_end().to_owned();
-    let stored = SqliteJournal::open(
-        &world.state().join("journal.db"),
-        SqliteOptions::new(Millis::new(1)),
-    )
-    .expect("the journal");
-    let before = applied_terms(&stored, &host);
-    let store = AggregateStore::new::<ControlAggregates>(
-        stored.clone(),
-        FakeClock::at(Millis::new(1)),
-        SeededRng::new(1),
-        NoNotifier,
-    )
-    .expect("a store")
-    .with_projections(mayfly_control::projection::control().expect("the projections"));
-    let pin = DomainCommand::new(
-        CommandId::from_u128(0x0915),
-        Millis::new(1),
-        epoch,
-        Actor::Operator { uid: 501 },
-        PoolCommand::PinImage {
-            digest: ImageDigest::sample(),
-            verified_ref: Some(EventId::from_u128(0x0915)),
-        },
-    );
-    let pinned = block_on(store.execute::<Pool>(SaveRequest::new(POOL, pin))).expect("the pin");
-    assert!(matches!(pinned, Outcome::Accepted { .. }), "{pinned:?}");
-    drop(store);
-    drop(stored);
+    let (_, pool, _) = journal(&world);
+    let before = applied_terms(&open_journal(&world), &host);
+    let pinned = terms(&pool).expect("the pool's terms");
 
-    // when: the next run's ready line (its promise includes one terms pass)
+    // when: the next run moves the pin to another image (a terms bump)
+    world.write_manifest(&format!("{REPOSITORY}@{}", digest('b')));
     let second = world.start();
     second.ready();
     let exit = second.terminate();
 
-    // then: closed before the pin; open after it, at the pool's current terms revision
+    // then: open at the pinned pool's terms revision after each run's ready line
     assert_eq!(exit, Some(0));
     let (_, pool, _) = journal(&world);
-    let stored = SqliteJournal::open(
+    let after = applied_terms(&open_journal(&world), &host);
+    let repinned = terms(&pool).expect("the pool's terms");
+    assert!(
+        pinned.open && repinned.open,
+        "a configured, active, pinned pool is open"
+    );
+    assert!(
+        repinned.revision > pinned.revision,
+        "the repin bumped the terms"
+    );
+    assert!(
+        before.iter().all(|(_, open)| *open),
+        "the pin precedes the first terms pass, so no closed terms were applied: {before:?}"
+    );
+    assert_eq!(before.last(), Some(&(pinned.revision, true)), "{before:?}");
+    assert_eq!(after.last(), Some(&(repinned.revision, true)), "{after:?}");
+    assert_eq!(after.first(), before.first(), "{after:?}");
+}
+
+fn open_journal(world: &World) -> SqliteJournal {
+    SqliteJournal::open(
+        &world.state().join("journal.db"),
+        SqliteOptions::new(Millis::new(1)),
+    )
+    .expect("the journal")
+}
+
+/// An image stream's events with their ids.
+type ImageEvents = Vec<(EventId, ImageEvent)>;
+
+/// Every `ImagePinned` of the pool as (digest, previous, verified_ref).
+type Pins = Vec<(ImageDigest, Option<ImageDigest>, EventId)>;
+
+/// The events of `digest`'s image stream and the pool's pins, read from the journal once the
+/// daemon exited.
+fn catalog(world: &World, digest: &ImageDigest) -> (ImageEvents, Pins) {
+    let journal = SqliteJournal::open(
         &world.state().join("journal.db"),
         SqliteOptions::new(Millis::new(1)),
     )
     .expect("the journal");
-    let after = applied_terms(&stored, &host);
-    let current = terms(&pool).expect("the pool's terms");
-    assert!(current.open, "a configured, active, pinned pool is open");
-    assert_eq!(before.len(), 1, "{before:?}");
-    assert!(!before[0].1, "closed before the pin: {before:?}");
-    assert_eq!(after.last(), Some(&(current.revision, true)), "{after:?}");
-    assert_eq!(after.first(), before.first(), "{after:?}");
+    let image = stream_of::<Image>(image_instance(digest)).expect("the image's stream");
+    let images = block_on(journal.read_stream(&image, None, None))
+        .expect("the image's events")
+        .iter()
+        .map(|e| {
+            (
+                e.event_id,
+                decode_event::<ImageEvent>(e).expect("an image event"),
+            )
+        })
+        .collect();
+    let pool = stream_of::<Pool>(POOL).expect("the pool's stream");
+    let pins = block_on(journal.read_stream(&pool, None, None))
+        .expect("the pool's events")
+        .iter()
+        .filter_map(
+            |e| match decode_event::<PoolEvent>(e).expect("a pool event") {
+                PoolEvent::ImagePinned(p) => Some((p.digest, p.previous, p.verified_ref)),
+                _ => None,
+            },
+        )
+        .collect();
+    (images, pins)
+}
+
+fn verified_id(events: &[(EventId, ImageEvent)]) -> EventId {
+    events
+        .iter()
+        .find_map(|(id, e)| matches!(e, ImageEvent::ImageVerified(_)).then_some(*id))
+        .expect("the image is verified")
+}
+
+#[test]
+fn should_pin_each_pool_to_its_manifest_image_when_the_daemon_starts() {
+    // given
+    let world = World::new(true);
+    let (a, b) = (
+        ImageDigest::new(&digest('a')).expect("a digest"),
+        ImageDigest::new(&digest('b')).expect("a digest"),
+    );
+
+    // when: a start with the manifest of image a, then one with image b, then one more with b
+    let first = world.start();
+    first.ready();
+    assert_eq!(first.terminate(), Some(0));
+    world.write_manifest(&format!("{REPOSITORY}@{b}"));
+    let second = world.start();
+    second.ready();
+    assert_eq!(second.terminate(), Some(0));
+    let (image_b_then, pins_then) = catalog(&world, &b);
+    let third = world.start();
+    third.ready();
+    assert_eq!(third.terminate(), Some(0));
+
+    // then: each image registered from its manifest and verified, the pool pinned to a, then
+    // moved to b, each pin naming its image's verification
+    let (image_a, pins) = catalog(&world, &a);
+    let (image_b, _) = catalog(&world, &b);
+    let registered: Vec<&ImageManifest> = image_a
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ImageEvent::ImageRegistered(r) => Some(&r.manifest),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        registered,
+        [&ImageManifest {
+            os: GuestOs::Linux,
+            runner_version: RunnerVersion::new(2, 330, 0),
+            revision: 1,
+        }]
+    );
+    assert_eq!(
+        pins,
+        [
+            (a.clone(), None, verified_id(&image_a)),
+            (b.clone(), Some(a.clone()), verified_id(&image_b)),
+        ],
+        "one pin per manifest change"
+    );
+    assert_eq!(pins, pins_then, "an unchanged manifest pins nothing again");
+    assert_eq!(
+        image_b, image_b_then,
+        "an unchanged manifest registers and verifies nothing again"
+    );
+    let store = AggregateStore::new::<ControlAggregates>(
+        SqliteJournal::open(
+            &world.state().join("journal.db"),
+            SqliteOptions::new(Millis::new(1)),
+        )
+        .expect("the journal"),
+        FakeClock::at(Millis::new(1)),
+        SeededRng::new(1),
+        NoNotifier,
+    )
+    .expect("a store");
+    let image = block_on(store.load::<Image>(image_instance(&b))).expect("image b");
+    assert_eq!(image.status, ImageStatus::Verified);
+    let pool = block_on(store.load::<Pool>(POOL)).expect("the pool");
+    assert_eq!(pool.image_pin, Some(b));
+}
+
+#[test]
+fn should_refuse_to_start_when_a_pool_manifest_names_a_tag() {
+    // given
+    let world = World::new(true);
+    world.write_manifest(&format!("{REPOSITORY}:latest"));
+
+    // when
+    let started = world
+        .mayflyd(&["--config", &world.config().display().to_string()])
+        .output()
+        .expect("mayflyd");
+
+    // then
+    assert_eq!(started.status.code(), Some(78));
+    let report = String::from_utf8_lossy(&started.stderr);
+    assert!(
+        report.contains("pools[0].image_manifest (source): is a tag-only reference"),
+        "{report}"
+    );
+    assert!(
+        !world.state().join("journal.db").exists(),
+        "nothing was started"
+    );
 }
