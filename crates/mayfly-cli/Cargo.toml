@@ -21,3 +21,8 @@ workspace = true
 
 [dependencies]
 mayfly-composition = { version = "0.1.0", path = "../mayfly-composition" }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
+tempfile = "3.27.0"

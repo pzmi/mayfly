@@ -222,6 +222,9 @@ rules! {
     ProjectionLocality => "ARCH-projection-locality", "ES-04",
         "Production code of a control-plane or both-planes crate names a stream, a projection write, the journal or the store inside an impl ProjectionSpec block (also in macro tokens), or builds a ProjectionWrite or RowWrite struct outside the inline fold, the journal module and the testkit contract suites (ES-I10).",
         ["projection-spec-names-stream", "projection-write-outside-fold"];
+    OperatorActor => "ARCH-operator-actor", "RT-03",
+        "Production code of a production crate other than mayfly-control-domain names Actor::Operator (by any path, alias or re-export) outside mayfly-composition's src/operator/server.rs: only the operator socket builds an operator actor, from the connection's peer uid (KER-10F).",
+        ["policy-builds-operator-actor"];
     FixturesLock => "ARCH-fixtures-lock", "ES-03R",
         "A golden fixture (tests/fixtures/**) differs from its fixtures.lock line, a listed fixture is gone, a fixture is not listed, or the lock is malformed or missing.",
         ["frozen-fixture-changed"];

@@ -1,0 +1,81 @@
+{
+  "attempts": {
+    "by_phase": {},
+    "desync": [],
+    "unknown_effects": 0
+  },
+  "host": "<host>",
+  "hosts": [
+    {
+      "admission_open": true,
+      "drain": "open",
+      "host": "<host>",
+      "leases": 0
+    }
+  ],
+  "pools": [
+    {
+      "hosts": [
+        {
+          "host": "<host>",
+          "leases": 0,
+          "placement": "failed",
+          "terms_open": true
+        }
+      ],
+      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "max_running": 2,
+      "min_prepared": 1,
+      "mode": "active",
+      "name": "lin",
+      "tripped": []
+    }
+  ],
+  "run": {
+    "epoch": 1,
+    "number": 1,
+    "phase": "operating",
+    "ready": true,
+    "safe_mode": null
+  },
+  "sizing": [
+    {
+      "key": "vm_slots",
+      "reason": null,
+      "source": "configured",
+      "value": "2"
+    },
+    {
+      "key": "macos_guests",
+      "reason": null,
+      "source": "configured",
+      "value": "0"
+    },
+    {
+      "key": "reserve_memory_mib",
+      "reason": null,
+      "source": "configured",
+      "value": "512"
+    },
+    {
+      "key": "reserve_cpus",
+      "reason": null,
+      "source": "configured",
+      "value": "1"
+    },
+    {
+      "key": "image_disk_gib",
+      "reason": null,
+      "source": "configured",
+      "value": "50"
+    },
+    {
+      "key": "clone_disk_gib",
+      "reason": null,
+      "source": "configured",
+      "value": "60"
+    }
+  ],
+  "unmeasured_images": [],
+  "version": "<version>"
+}

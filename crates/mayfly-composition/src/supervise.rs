@@ -23,7 +23,7 @@ use mayfly_control::delivery::Kicks;
 use mayfly_control::journal::{StoredKind, StreamId};
 use mayfly_control::store::{Committed, StoreNotifier};
 use mayfly_protocol::{Directive, DirectiveSource, LinkError};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 /// The root cancellation of the supervision tree; clones share it.
 #[derive(Debug, Clone)]
@@ -110,8 +110,15 @@ pub struct Notifier {
     pub placement_relay: Kicks,
     /// The terms policy, P4 (CP-08).
     pub terms: Kicks,
+    /// `mayfly events --follow` (RT-03, `doc/event-store.md` §5.6): every committed unit, best
+    /// effort. A follower that falls more than [`FOLLOW_CAPACITY`] units behind is told how
+    /// many it lost; nothing decides from it.
+    pub follow: broadcast::Sender<Committed>,
     unknown: Arc<(AtomicBool, Notify)>,
 }
+
+/// Committed units a follower may lag behind before it loses the oldest.
+pub const FOLLOW_CAPACITY: usize = 1024;
 
 /// Streams one reader may hold pending before a kick is dropped (a dropped kick costs only
 /// latency: the mark stays in the ledger for the next `catch_up`).
@@ -134,6 +141,7 @@ impl Notifier {
             placement: Kicks::new(KICK_CAPACITY),
             placement_relay: Kicks::new(KICK_CAPACITY),
             terms: Kicks::new(KICK_CAPACITY),
+            follow: broadcast::channel(FOLLOW_CAPACITY).0,
             unknown: Arc::new((AtomicBool::new(false), Notify::new())),
         }
     }
@@ -166,6 +174,10 @@ impl StoreNotifier for Notifier {
         self.placement.committed(commit);
         self.placement_relay.committed(commit);
         self.terms.committed(commit);
+        if self.follow.receiver_count() > 0 {
+            // no follower is not an error: the send only reaches those subscribed now
+            let _ = self.follow.send(commit.clone());
+        }
     }
 
     fn unknown_kind(&self, _stream: &StreamId, _kind: &StoredKind) {

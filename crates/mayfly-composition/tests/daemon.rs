@@ -13,11 +13,9 @@
 //! serves a synthetic Tart image over HTTPS under a CA made for the test, handed to `mayflyd` as
 //! `SSL_CERT_FILE` (ver §7.5), and the same image is seeded in fake-tart's registry, so the
 //! daemon pulls, verifies and materialises the pinned image's base and the reconciler reserves
-//! for the pool. The ready line promises no placement, so these tests read the journal while
-//! the daemon runs, through a second handle that only reads (a second handle on one file is
-//! the journal contract's two-handle mode,
-//! `mayfly-adapter-sqlite`'s `tests/journal_contract.rs::should_pass_journal_contract_when_sqlite_has_two_handles_on_one_file`),
-//! polling with a bound for the fact they assert.
+//! for the pool. The ready line promises no placement, so these tests poll `mayfly status --json`
+//! (RT-03) with a bound for the pool's documented place on the host (`pools[].hosts[]`), and
+//! read the journal once the daemon exited.
 //!
 //! The binaries are found next to this test executable's directory, where a workspace build
 //! puts them (`cargo build -p mayfly-cli -p mayfly-fake-tart` at least).
@@ -275,6 +273,48 @@ max_running = 2
             .collect()
     }
 
+    /// `mayfly --config <config> status --json` against the running daemon (RT-03): the
+    /// documented status, parsed; `Null` when the CLI did not answer one (exit not 0, output
+    /// not JSON), so a poll can try again.
+    fn try_status(&self) -> Value {
+        let output = Command::new(sibling("mayfly"))
+            .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
+            .args([
+                "--config",
+                &self.config().display().to_string(),
+                "status",
+                "--json",
+            ])
+            .output()
+            .expect("run mayfly");
+        if output.status.code() != Some(0) {
+            return Value::Null;
+        }
+        serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
+    }
+
+    /// [`World::try_status`], which must answer.
+    fn status(&self) -> Value {
+        let status = self.try_status();
+        assert_ne!(status, Value::Null, "mayfly status --json answered nothing");
+        status
+    }
+
+    /// The pool's entry on `host` in [`World::try_status`] (`pools[].hosts[]`, VER-09's signal),
+    /// `Null` while there is none.
+    #[cfg(target_os = "linux")]
+    fn pool_on(&self, host: &str) -> Value {
+        let status = self.try_status();
+        status["pools"]
+            .as_array()
+            .and_then(|pools| pools.iter().find(|p| p["name"] == POOL))
+            .and_then(|pool| pool["hosts"].as_array())
+            .and_then(|hosts| hosts.iter().find(|h| h["host"] == host))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
     fn mayflyd(&self, args: &[&str]) -> Command {
         let mut command = Command::new(sibling("mayflyd"));
         command
@@ -287,16 +327,12 @@ max_running = 2
         command
     }
 
+    /// Starts `mayflyd`.
     fn start(&self) -> Daemon {
-        self.start_with(Stdio::null())
-    }
-
-    /// Starts `mayflyd` with its stderr going to `stderr`.
-    fn start_with(&self, stderr: Stdio) -> Daemon {
         let mut child = self
             .mayflyd(&["--config", &self.config().display().to_string()])
             .stdout(Stdio::piped())
-            .stderr(stderr)
+            .stderr(Stdio::null())
             .spawn()
             .expect("start mayflyd");
         let stdout = child.stdout.take().expect("stdout");
@@ -723,30 +759,44 @@ fn should_start_and_report_each_sizing_source_when_no_sizing_key_is_configured()
     );
     assert_ne!(text, without_sizing, "the sizing keys were removed");
     std::fs::write(world.config(), without_sizing).expect("the config");
-    let log = world.path("stderr.log");
-    let stderr = std::fs::File::create(&log).expect("the stderr file");
 
-    // when
-    let daemon = world.start_with(Stdio::from(stderr));
+    // when: the status read once the ready line is out (RT-03 took the start-up report over
+    // from stderr, RT-06's note)
+    let daemon = world.start();
     daemon.ready();
+    let status = world.status();
     let code = daemon.terminate();
 
-    // then: it starts, and the start-up report names every value's source
+    // then: it starts, and the status names every value's source
     assert_eq!(code, Some(0));
-    let report = std::fs::read_to_string(&log).expect("the stderr log");
+    let sizing: Vec<String> = status["sizing"]
+        .as_array()
+        .expect("the sizing")
+        .iter()
+        .map(|v| {
+            format!(
+                "{}={} source={}",
+                v["key"].as_str().unwrap_or_default(),
+                v["value"].as_str().unwrap_or_default(),
+                v["source"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
     for line in [
-        "mayflyd sizing vm_slots=",
-        "mayflyd sizing macos_guests=2 source=apple_limit",
-        "mayflyd sizing reserve_cpus=2 source=default",
-        "mayflyd sizing image_disk_gib=per_image source=manifest",
-        "mayflyd sizing clone_disk_gib=per_image source=manifest",
+        "macos_guests=2 source=apple_limit",
+        "reserve_cpus=2 source=default",
+        "image_disk_gib=per_image source=manifest",
+        "clone_disk_gib=per_image source=manifest",
     ] {
-        assert!(report.contains(line), "{line} in {report}");
+        assert!(sizing.iter().any(|l| l == line), "{line} in {sizing:?}");
     }
     assert!(
-        report.contains("vm_slots=") && report.contains("source=measured"),
-        "{report}"
+        sizing
+            .iter()
+            .any(|l| l.starts_with("vm_slots=") && l.ends_with("source=measured")),
+        "{sizing:?}"
     );
+    assert_eq!(status["run"]["ready"], Value::Bool(true));
 }
 
 /// The terms of pool `lin` that host `host` applied, in order, as `(revision, open)`.
@@ -1077,24 +1127,31 @@ mod placement {
         let (daemon, host) = pinned_run(&world);
 
         // when: the placement manager places the pin and the reconciler reserves. A bounded poll
-        // of the journal for the reservation itself, because the ready line promises recovery
-        // and one terms pass, never a placement; RT-03's status socket will give a documented
-        // signal to wait on instead (noted on RT-03's card).
-        let journal = open_journal(&world);
+        // of `mayfly status --json` (RT-03) for the pool on this host, admitted (its terms open,
+        // its base materialised) and holding a lease: the documented signal of
+        // `pools[].hosts[]` (`mayfly_composition::operator::wire::PoolOnHost`). A poll, because
+        // the ready line promises recovery and one terms pass, never a placement, and a
+        // placement takes a pull of unknown length.
+        let mut last = Value::Null;
         let waited = mayfly_testkit_shared::poll::try_wait_until(
             BOUND,
-            "a reservation for the pool once its base is materialised",
-            || !reservations(&journal, &host).is_empty(),
+            "the pool admitted on the host with a lease, in mayfly status",
+            || {
+                last = world.pool_on(host.as_str());
+                last["terms_open"] == Value::Bool(true)
+                    && last["placement"] == "materialised"
+                    && last["leases"].as_u64().is_some_and(|n| n >= 1)
+            },
         );
         if let Err(timed_out) = waited {
             // Name what the placement ended in: a refusal `insufficient_resources` means the
             // test machine has less free disk than `HOST` needs (ver §7.5).
+            let journal = open_journal(&world);
             panic!(
-                "{timed_out}; the placement: {:?}",
+                "{timed_out}; status: {last}; the placement: {:?}",
                 placement(&journal, &host, &digest)
             );
         }
-        drop(journal);
         let exit = daemon.terminate();
 
         // then: the manifest was fetched over HTTPS by digest, Tart pulled and the base was
@@ -1159,19 +1216,14 @@ mod placement {
         host: &HostId,
         digest: &ImageDigest,
     ) {
-        // A bounded poll of the journal for the refusal, because the ready line promises no
-        // placement; RT-03's status socket will replace it.
-        let journal = open_journal(world);
+        // A bounded poll of `mayfly status --json` (RT-03) for the placement `failed`, which a
+        // refused pull records in the same unit as its refusal (`pools[].hosts[].placement`),
+        // because the ready line promises no placement.
         mayfly_testkit_shared::poll::wait_until(
             BOUND,
-            "the data plane's refusal of the pull",
-            || {
-                placement(&journal, host, digest)
-                    .iter()
-                    .any(|e| matches!(e, PlacementEvent::PlacementDirectiveRefused(_)))
-            },
+            "the placement failed by the data plane's refusal, in mayfly status",
+            || world.pool_on(host.as_str())["placement"] == "failed",
         );
-        drop(journal);
         assert_eq!(daemon.terminate(), Some(0));
         let journal = open_journal(world);
         let events = placement(&journal, host, digest);

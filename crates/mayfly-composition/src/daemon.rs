@@ -33,6 +33,17 @@
 //!    to this host; once all of that succeeded, one ready line is reported ([`Ready`]), and the
 //!    terms policy's own loop starts.
 //!
+//! # The operator socket (RT-03)
+//!
+//! Right after the state-dir lock, the socket is opened at [`paths::socket`] (`0600`, in a
+//! directory private to the daemon's user: [`Listener`]), and it is served for the daemon's
+//! whole life, across runs, beside them ([`crate::operator::server`]); it stops accepting when
+//! the root is cancelled (or the last run ended), lets commands in flight finish for at most
+//! [`SHUTDOWN_DEADLINE`], in parallel with the runs' own stop, and removes its file. `mayfly status` reads the run from the `HostRun`
+//! stream, its `ready` field from this daemon's ready signal (set just before each ready line,
+//! cleared when a run starts) and the sizing measured at start-up, which `mayflyd` wrote to
+//! stderr before RT-03 (RT-06's note).
+//!
 //! While the run lasts: every observation goes through the inbox (P8); every later inventory
 //! also goes to [`Startup::resume_held`] while an attempt's cleanup is held (CP-04); each
 //! consumer drains its kicks, and all catch up on a coarse timer ([`COARSE`]); a stored kind
@@ -69,8 +80,7 @@
 //! by nothing until the control plane mints JIT configs. Image placement (CP-07): the
 //! placement manager places every pool's pin (step 5) on this host and [`Placements`] follows
 //! its passes; the terms policy (P4, CP-08) applies each pool's terms to this host, open once
-//! the pool is active, pinned and its pin's breaker not tripped. The operator socket
-//! (RT-03), logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
+//! the pool is active, pinned and its pin's breaker not tripped. Logging (RT-04), Ctrl-C's terminal mode (RT-05), the watchdog's `crash_loop`
 //! (OPS-05) and split roles (LNK-01) are separate tasks.
 
 use std::collections::BTreeMap;
@@ -129,6 +139,8 @@ use crate::details::{ConfigDetails, Placements};
 use crate::exit_code;
 use crate::identity::{IdentityError, host_id, random_bytes};
 use crate::manifest::{self, Manifest};
+use crate::operator;
+use crate::operator::server::{Listener, Operators, Service};
 use crate::paths::{self, Places, PlatformEnv};
 use crate::state_dir::{StateDirError, StateDirLock};
 use crate::supervise::{Cuttable, Notifier, SessionCut, Shutdown, ShutdownSignal};
@@ -254,19 +266,22 @@ pub enum DaemonError {
     Startup(StartupError),
     /// The data plane did not enter the session the control plane opened.
     Session(String),
+    /// The operator socket could not be opened.
+    Socket(crate::operator::server::BindError),
     /// The link ended before the run's recovery completed.
     SessionLost,
 }
 
 impl DaemonError {
     /// The exit code (ADR 0031, ADR 0046): the configuration 78, the lock 69, the state
-    /// directory or `TART_HOME` unusable 73, anything else [`exit_code::FAILED`].
+    /// directory, `TART_HOME` or the operator socket unusable 73, anything else
+    /// [`exit_code::FAILED`].
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::Config(e) => e.exit_code(),
             Self::StateDir(e) => e.exit_code(),
-            Self::Places(_) => exit_code::STATE_DIR_UNUSABLE,
+            Self::Places(_) | Self::Socket(_) => exit_code::STATE_DIR_UNUSABLE,
             Self::Identity(_)
             | Self::Journal(_)
             | Self::Floor(_)
@@ -304,6 +319,7 @@ impl std::fmt::Display for DaemonError {
             Self::Start(what) => write!(f, "cannot start: {what}"),
             Self::Startup(e) => write!(f, "start-up failed: {e}"),
             Self::Session(why) => write!(f, "the data plane did not enter the session: {why}"),
+            Self::Socket(e) => e.fmt(f),
             Self::SessionLost => f.write_str("the link ended before recovery completed"),
         }
     }
@@ -743,6 +759,11 @@ struct Daemon<'a> {
     build: BuildId,
     delivery: DeliveryConfig,
     store_clock: AnchoredStoreClock,
+    /// The sizing in effect at start-up, which `mayfly status` returns (RT-06, RT-03).
+    sizing: crate::sizing::SizingReport,
+    /// `true` from just before a run's ready line until the next run starts: `status`'s
+    /// `run.ready`.
+    readied: watch::Sender<bool>,
 }
 
 /// The opened session one run's control plane serves.
@@ -797,6 +818,12 @@ pub async fn run_with(
     private_dir(state_dir)?;
     private_dir(&loaded.places.tart_home)?;
     let _owner = StateDirLock::acquire(state_dir).map_err(DaemonError::StateDir)?;
+    let listener = Listener::bind(&paths::socket(
+        config.state_dir.as_deref(),
+        &loaded.places,
+        &options.env,
+    ))
+    .map_err(DaemonError::Socket)?;
     let journal_path = state_dir.join("journal.db");
     let host = host_id(state_dir, &journal_path).map_err(DaemonError::Identity)?;
     let _secrets = UriSecretProvider::from_process(
@@ -807,11 +834,11 @@ pub async fn run_with(
         .map_err(DaemonError::Journal)?;
     let (mut exec, floor, boot_id) = data_plane(&loaded, &options, &host).await?;
     let reading = exec.ledger().probe.clone();
-    report_sizing(&crate::sizing::report(
+    let sizing = crate::sizing::report(
         &config.host,
         Some(&reading),
         &exec.ledger().unmeasured_listed(),
-    ));
+    );
     let notifier = Notifier::new();
     let rng = OsRng::seeded().map_err(|_| DaemonError::Start("the random generator"))?;
     let projections =
@@ -841,33 +868,80 @@ pub async fn run_with(
         build: BuildId::new(&options.version).map_err(|_| DaemonError::Start("the build id"))?,
         delivery: DeliveryConfig::default(),
         store_clock: AnchoredStoreClock::now_anchored(),
+        sizing,
+        readied: watch::channel(false).0,
     };
-    loop {
-        if shutdown.is_cancelled() {
-            return Ok(());
+    let service = Service {
+        store: &daemon.store,
+        host: &daemon.host,
+        version: &daemon.version,
+        sizing: &daemon.sizing,
+        ready: &daemon.readied,
+        follow: &daemon.notifier.follow,
+        operators: Operators::this_user(),
+    };
+    // the socket stops with the root (its post-stop wait is bounded like the runs', in
+    // parallel with them) or once the runs ended for another reason
+    let stop_serving = Shutdown::new();
+    let serving = operator::server::serve(&listener, &service, stop_serving.signal());
+    let forward = async {
+        let (mut root, mut done) = (shutdown.signal(), stop_serving.signal());
+        tokio::select! {
+            () = root.cancelled() => stop_serving.cancel(),
+            () = done.cancelled() => {}
         }
-        let mut root = shutdown.signal();
-        let bounded = async {
-            root.cancelled().await;
-            tokio::time::sleep(SHUTDOWN_DEADLINE).await;
-        };
-        let ended = tokio::select! {
-            ended = daemon.run_once(&mut exec, &floor, &shutdown, ready, cut) => ended?,
-            () = bounded => {
-                tracing::error!("shutdown_deadline_passed");
-                RunEnd::Shutdown
-            }
-        };
-        match ended {
-            RunEnd::Shutdown => return Ok(()),
-            RunEnd::SessionEnded => {
-                tracing::warn!("data_plane_session_ended");
-            }
-        }
-    }
+    };
+    let runs = async {
+        let ended = daemon.runs(&mut exec, &floor, &shutdown, ready, cut).await;
+        stop_serving.cancel();
+        ended
+    };
+    let ((), (), ended) = tokio::join!(serving, forward, runs);
+    ended
 }
 
 impl Daemon<'_> {
+    /// Runs until `shutdown` is cancelled or a run fails: one run per data-plane session.
+    async fn runs(
+        &self,
+        exec: &mut Exec,
+        floor: &FloorFile,
+        shutdown: &Shutdown,
+        ready: &(dyn Fn(&Ready) + Sync),
+        cut: &SessionCut,
+    ) -> Result<(), DaemonError> {
+        let readied = &self.readied;
+        // the flag is set before the line is out, so a reader of the line sees it set
+        let report = |line: &Ready| {
+            readied.send_replace(true);
+            ready(line);
+        };
+        loop {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            self.readied.send_replace(false);
+            let mut root = shutdown.signal();
+            let bounded = async {
+                root.cancelled().await;
+                tokio::time::sleep(SHUTDOWN_DEADLINE).await;
+            };
+            let ended = tokio::select! {
+                ended = self.run_once(exec, floor, shutdown, &report, cut) => ended?,
+                () = bounded => {
+                    tracing::error!("shutdown_deadline_passed");
+                    RunEnd::Shutdown
+                }
+            };
+            match ended {
+                RunEnd::Shutdown => return Ok(()),
+                RunEnd::SessionEnded => {
+                    tracing::warn!("data_plane_session_ended");
+                }
+            }
+        }
+    }
+
     async fn run_once(
         &self,
         exec: &mut Exec,
@@ -1567,15 +1641,6 @@ impl Daemon<'_> {
             }
         }
     }
-}
-
-/// Writes the start-up sizing report to stderr, flushed: each value and its source. stdout
-/// carries only the ready line, whose promise its readers rely on.
-fn report_sizing(report: &crate::sizing::SizingReport) {
-    use std::io::Write as _;
-    let mut err = std::io::stderr().lock();
-    let _ = write!(err, "{report}");
-    let _ = err.flush();
 }
 
 /// Runs `mayflyd --role all` on its own runtime until SIGTERM or SIGINT: the binary's whole

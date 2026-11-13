@@ -338,7 +338,7 @@ fn should_refuse_a_withdrawal_when_a_pool_pins_the_image() {
         &store,
         &journal,
         &ImageDigest::sample(),
-        501,
+        Actor::Operator { uid: 501 },
         CommandId::from_u128(0x3d01),
         EPOCH,
     ));
@@ -354,7 +354,7 @@ fn should_refuse_a_withdrawal_when_a_pool_pins_the_image() {
         &store,
         &journal,
         &ImageDigest::sample(),
-        501,
+        Actor::Operator { uid: 501 },
         CommandId::from_u128(0x3d02),
         EPOCH,
     ));
@@ -1343,7 +1343,7 @@ fn should_refuse_a_withdrawal_when_a_pin_commits_between_the_check_and_the_save(
         &kit.store,
         &kit.memory,
         &ImageDigest::sample(),
-        501,
+        Actor::Operator { uid: 501 },
         CommandId::from_u128(0x3d03),
         EPOCH,
     ));

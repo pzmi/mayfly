@@ -408,8 +408,9 @@ fake-tart's `TART_HOME/registry/`, so Tart's pull and the data plane's fetch rea
   CI runs them on Linux, and the registry's own tests run on both.
 - **Waiting.** The ready line promises recovery and one terms pass, not a placement, so those
   tests poll the journal (bounded, `mayfly-testkit-shared::poll`) for the fact they assert (the
-  pool's `SlotReserved`, or the placement's refusal) before stopping the daemon; RT-03's status
-  socket will give them a documented signal instead.
+  pool's `SlotReserved`, or the placement's refusal) before stopping the daemon. Since RT-03
+  they poll `mayfly status --json` instead, the documented signal of `pools[].hosts[]` (the
+  pool's terms open, its placement `materialised` or `failed`, its leases on the host).
 - **Free disk.** The data plane's resource gate (I33) measures the machine's real free disk, so
   the placement worlds size the host small (1 GiB for the image, a clone and the disk reserve,
   512 MiB of memory reserve) and need about 3 GiB free where the tests' tempdirs live; with less,

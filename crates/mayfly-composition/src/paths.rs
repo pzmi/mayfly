@@ -11,9 +11,11 @@
 //! user-owned files, and the bookkeeping to the state directory. The epoch floor stays in
 //! `TART_HOME` (ADR 0026: beside the VMs it fences, so it travels with them), which the split
 //! does not complicate: it reads one file in whichever `TART_HOME` is in use. Nothing goes in
-//! a cache directory, which the system may purge. Logs and the operator socket are RT-04's and
-//! RT-03's (seam: the socket at `$XDG_RUNTIME_DIR/mayfly.sock` on Linux, `<state>/mayfly.sock`
-//! on macOS). Service mode under launchd or systemd configures `/Library/Application
+//! a cache directory, which the system may purge. Logs are RT-04's. The operator socket
+//! ([`socket`], RT-03) is `<state_dir>/mayfly.sock` when the configuration names `state_dir`;
+//! otherwise `$XDG_RUNTIME_DIR/mayfly.sock` on Linux when that variable is absolute (the
+//! per-user runtime directory XDG provides for sockets), else `<state>/mayfly.sock`, and
+//! `<state>/mayfly.sock` on macOS (ADR 0091 decision 5). Service mode under launchd or systemd configures `/Library/Application
 //! Support/mayfly` or `/var/lib/mayfly` explicitly (OPS-01).
 //!
 //! An XDG variable is used only when absolute (the XDG specification: a relative one is
@@ -43,12 +45,15 @@ pub struct PlatformEnv {
     pub xdg_state_home: Option<PathBuf>,
     /// `XDG_DATA_HOME`.
     pub xdg_data_home: Option<PathBuf>,
+    /// `XDG_RUNTIME_DIR`: where the operator socket goes on Linux when the configuration names
+    /// no state directory ([`socket`]).
+    pub xdg_runtime_dir: Option<PathBuf>,
 }
 
 impl PlatformEnv {
-    /// Read from this process's environment: called once, by the `mayflyd` binary at its entry
-    /// point (`mayfly-cli`'s `bin/mayflyd.rs`); everything below takes the value it read, so the
-    /// library never reads the process environment for its places.
+    /// Read from this process's environment: called once, by the `mayflyd` and `mayfly`
+    /// binaries at their entry points (`mayfly-cli`'s `bin/`); everything below takes the value
+    /// it read, so the library never reads the process environment for its places.
     #[must_use]
     pub fn from_process() -> Self {
         let var = |name| std::env::var_os(name).map(PathBuf::from);
@@ -56,6 +61,7 @@ impl PlatformEnv {
             home: var("HOME"),
             xdg_state_home: var("XDG_STATE_HOME"),
             xdg_data_home: var("XDG_DATA_HOME"),
+            xdg_runtime_dir: var("XDG_RUNTIME_DIR"),
         }
     }
 }
@@ -144,6 +150,38 @@ pub fn resolve(
     })
 }
 
+/// The operator socket's file name.
+pub const SOCKET: &str = "mayfly.sock";
+
+/// The operator socket's place (RT-03, ADR 0091 decision 5): `<state_dir>/mayfly.sock` when the
+/// configuration names `state_dir` (`configured`), so one setting moves everything and two
+/// daemons of one user with their own state directories never share a socket; otherwise, on
+/// Linux, `$XDG_RUNTIME_DIR/mayfly.sock` when that variable is absolute, else
+/// `<state>/mayfly.sock` in the places in use (`places`); on macOS always
+/// `<state>/mayfly.sock`. `mayflyd` and `mayfly` both use this rule, the CLI with the
+/// configuration it is given or none. Pinned by
+/// `tests::should_put_the_socket_in_the_configured_state_dir_when_one_is_named` and
+/// `tests::should_put_the_socket_in_the_runtime_dir_when_linux_names_one`.
+#[must_use]
+pub fn socket(configured: Option<&Path>, places: &Places, env: &PlatformEnv) -> PathBuf {
+    if let Some(state_dir) = configured {
+        return state_dir.join(SOCKET);
+    }
+    runtime_socket(env).unwrap_or_else(|| places.state_dir.join(SOCKET))
+}
+
+/// The socket in the runtime directory, where the platform has one for it.
+#[cfg(target_os = "macos")]
+const fn runtime_socket(_env: &PlatformEnv) -> Option<PathBuf> {
+    None
+}
+
+/// The socket in the runtime directory, where the platform has one for it.
+#[cfg(not(target_os = "macos"))]
+fn runtime_socket(env: &PlatformEnv) -> Option<PathBuf> {
+    absolute(env.xdg_runtime_dir.as_ref()).map(|dir| dir.join(SOCKET))
+}
+
 /// Makes `dir` a private directory of the daemon's user, safely (ADR 0087's layout rule, the
 /// one `TART_HOME` is held to, applied to every directory the daemon writes in):
 ///
@@ -195,6 +233,7 @@ mod tests {
             home: home.map(PathBuf::from),
             xdg_state_home: state.map(PathBuf::from),
             xdg_data_home: data.map(PathBuf::from),
+            xdg_runtime_dir: None,
         }
     }
 
@@ -343,5 +382,55 @@ mod tests {
 
         // then
         assert_eq!(prepared, Err(UnsafeLayout::Symlink(link)));
+    }
+
+    #[test]
+    fn should_put_the_socket_in_the_configured_state_dir_when_one_is_named() {
+        // given: a runtime directory, and a configuration that names the state directory
+        let env = PlatformEnv {
+            xdg_runtime_dir: Some("/run/user/501".into()),
+            ..env(Some("/home/u"), None, None)
+        };
+        let places = Places {
+            state_dir: "/var/lib/mayfly".into(),
+            tart_home: "/var/lib/mayfly/tart".into(),
+        };
+
+        // when
+        let configured = socket(Some(Path::new("/var/lib/mayfly")), &places, &env);
+
+        // then
+        assert_eq!(configured, PathBuf::from("/var/lib/mayfly/mayfly.sock"));
+    }
+
+    #[test]
+    fn should_put_the_socket_in_the_runtime_dir_when_linux_names_one() {
+        // given
+        let places = Places {
+            state_dir: "/home/u/.local/state/mayfly".into(),
+            tart_home: "/home/u/.local/share/mayfly/tart".into(),
+        };
+        let with = PlatformEnv {
+            xdg_runtime_dir: Some("/run/user/501".into()),
+            ..env(Some("/home/u"), None, None)
+        };
+        let relative = PlatformEnv {
+            xdg_runtime_dir: Some("run".into()),
+            ..env(Some("/home/u"), None, None)
+        };
+
+        // when
+        let (with, relative) = (
+            socket(None, &places, &with),
+            socket(None, &places, &relative),
+        );
+
+        // then: Linux uses an absolute runtime directory; macOS keeps it in the state directory
+        let in_state = PathBuf::from("/home/u/.local/state/mayfly/mayfly.sock");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(with, PathBuf::from("/run/user/501/mayfly.sock"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(with, in_state);
+        assert_eq!(relative, in_state);
     }
 }

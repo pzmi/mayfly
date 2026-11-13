@@ -1,0 +1,39 @@
+{
+  "checks": [
+    {
+      "name": "config",
+      "verdict": "ok",
+      "detail": "valid"
+    },
+    {
+      "name": "tart",
+      "verdict": "ok",
+      "detail": "found on PATH"
+    },
+    {
+      "name": "daemon",
+      "verdict": "ok",
+      "detail": "mayflyd <version> answers: run 1, epoch 1, operating"
+    },
+    {
+      "name": "ready",
+      "verdict": "ok",
+      "detail": "the run reported ready"
+    },
+    {
+      "name": "safe_mode",
+      "verdict": "ok",
+      "detail": "not in safe mode"
+    },
+    {
+      "name": "breakers",
+      "verdict": "ok",
+      "detail": "no breaker tripped"
+    },
+    {
+      "name": "desync",
+      "verdict": "ok",
+      "detail": "no VM vanished outside mayfly"
+    }
+  ]
+}

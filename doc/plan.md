@@ -749,6 +749,16 @@ not read or disagrees with the deployment (another repository than `[images] rep
 guest than `guest_os`, a runner pin that contradicts another pin of the package, two manifests for
 one digest), adds each manifest's runner pin to the data plane's pin table (so `[images.runners]`
 is optional), and at every run registers each pool's image, records it verified and pins the pool.
+As built (RT-03): `mayfly` reaches `mayflyd` over its socket: `<state_dir>/mayfly.sock` when
+`state_dir` is configured, else ADR 0091 decision 5's place (`<state>/mayfly.sock` on Linux
+without an absolute `$XDG_RUNTIME_DIR`); `--socket <path>` or `--config <path>` tell the CLI.
+The socket is `0600` in a directory private to the daemon's user, its peers limited to the
+daemon's own uid, its wire NDJSON at API 1 (unknown fields ignored, unknown commands answered
+`unknown_command`). Served now: `status`, `pool list|pause|resume|drain|reset-breaker`, `host
+drain|resume`, `vm list`, `events [--follow] [--since]`, a basic `doctor` and, offline, `config
+validate`; exit codes 0, 1 (refused), 64, 69 (no daemon answers), 78. `quarantine` arrives with
+CP-06, `recover` and `safe-mode enter` with RT-08, `image withdraw` once its withdrawal is two-step
+(OPS-02's note); the rest of the list above with their tasks.
 
 ---
 

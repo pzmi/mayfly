@@ -767,8 +767,9 @@ impl std::fmt::Display for WithdrawError {
 
 impl std::error::Error for WithdrawError {}
 
-/// `WithdrawImage` of `digest` by operator `uid` under `command_id`, refused while a pool pins
-/// it (P17). On every try the pools are listed from the `pools` projection, each pool's stream
+/// `WithdrawImage` of `digest` by `actor` under `command_id`, refused while a pool pins it
+/// (P17). The aggregate refuses any actor but an operator, and only the operator socket builds
+/// one (`ARCH-operator-actor`, RT-03), so this use case takes the actor it is given. On every try the pools are listed from the `pools` projection, each pool's stream
 /// is read for its pin, and the withdrawal is saved with a read of every one at that revision,
 /// so a pin committed after the check refuses the unit (`conflict`), and the retry lists and
 /// reads again, then refuses the withdrawal as pinned. Pinned by
@@ -789,7 +790,7 @@ pub async fn withdraw_image<J, C, R, N, P>(
     store: &AggregateStore<J, C, R, N>,
     projections: &P,
     digest: &ImageDigest,
-    uid: u32,
+    actor: Actor,
     command_id: CommandId,
     run_epoch: Epoch,
 ) -> Result<(), WithdrawError>
@@ -831,7 +832,7 @@ where
                 command_id,
                 store.clock().now(),
                 run_epoch,
-                Actor::Operator { uid },
+                actor,
                 ImageCommand::WithdrawImage,
             );
             let mut request = SaveRequest::new(image_instance(digest), command);

@@ -1,0 +1,3 @@
+rule: ARCH-operator-actor
+at: crates/mayfly-control/src/lib.rs:4
+contains: mayfly-control names Actor::Operator outside the operator socket

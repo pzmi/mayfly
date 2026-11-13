@@ -895,7 +895,10 @@ const POOL_KEYS: &[&str] = &[
     "capacity_policy",
 ];
 
-fn parse_duration(text: &str) -> Option<Duration> {
+/// A duration as the configuration writes one: a whole number and one unit of `s`, `m`, `h` or
+/// `d` (`90s`, `30m`, `6h`, `1d`); `mayfly`'s `--since` and `--deadline` take the same form.
+#[must_use]
+pub fn parse_duration(text: &str) -> Option<Duration> {
     let unit = text.chars().last()?;
     let number = text.get(..text.len() - unit.len_utf8())?;
     if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {

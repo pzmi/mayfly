@@ -7,6 +7,8 @@
 //! - [`projection`]: projection specs, their inline folds, the `ProjectionStore` and
 //!   `ProjectionRebuild` ports, the offline rebuild and the first read models (`doc/event-store.md`
 //!   §3.6).
+//! - [`commands`]: the operator's use cases (RT-03): a pool paused, resumed or drained, its
+//!   breakers reset, a host drained or resumed, each by the actor its caller names.
 //! - [`queries`]: cross-stream views computed at query time over projection rows.
 //! - [`delivery`]: durable delivery: the `DeliveryLedger` port, the `Consumer` trait, the
 //!   `DeliveryWorker` with `catch_up` and kicks, the `directive_relay` consumer and its sink
@@ -38,6 +40,7 @@
 //!   deregistered by its journaled id before its VM stops, and the runners no journal record
 //!   explains reported, never removed (CP-05).
 
+pub mod commands;
 pub mod delivery;
 pub mod github;
 mod ids;

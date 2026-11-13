@@ -12,6 +12,8 @@
 //! - [`clocks`], [`identity`], [`details`]: the production clocks and randomness, the host's
 //!   persisted identity, and what a directive needs from the configuration.
 //! - [`paths`]: the platform's standard places when the configuration names none.
+//! - [`operator`]: the operator socket, its wire format, server and client, and `doctor`
+//!   (RT-03).
 //! - [`sizing`]: the host's sizing in effect and each value's source (RT-06).
 //! - [`vm_shim`]: the per-VM shim's entry (ADR 0037).
 //! - [`exit_code`]: the daemon's distinct exit codes (ADR 0031).
@@ -23,6 +25,7 @@ pub mod details;
 pub mod exit_code;
 pub mod identity;
 pub mod manifest;
+pub mod operator;
 pub mod paths;
 pub mod sizing;
 pub mod state_dir;

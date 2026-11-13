@@ -23,9 +23,11 @@ mayfly-data = { version = "0.1.0", path = "../mayfly-data" }
 mayfly-data-domain = { version = "0.1.0", path = "../mayfly-data-domain" }
 mayfly-domain = { version = "0.1.0", path = "../mayfly-domain" }
 mayfly-protocol = { version = "0.1.0", path = "../mayfly-protocol" }
-rustix = { version = "1.1.6", features = ["fs", "process"] }
+rustix = { version = "1.1.6", features = ["fs", "net", "process"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 sha2 = "0.11.1"
-tokio = { version = "1.54.1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util"] }
 toml = "1.2.1"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
@@ -34,5 +36,5 @@ mayfly-fake-registry = { path = "../mayfly-fake-registry" }
 mayfly-testkit = { path = "../mayfly-testkit" }
 mayfly-testkit-data = { path = "../mayfly-testkit-data" }
 mayfly-testkit-shared = { path = "../mayfly-testkit-shared" }
-serde_json = "1.0.154"
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["test-util"] }

@@ -441,6 +441,7 @@ the same table). Path rules read production code unless the row says otherwise.
 | `ARCH-migration-frozen` | a store migration (`crates/*/src/migrations/**.sql`) whose SHA-256 differs from its `migrations.lock` line, a listed migration gone, a migration not listed, a malformed or missing lock; a migration is released once listed | ES-03R |
 | `ARCH-fixtures-lock` | a golden fixture (`crates/*/tests/fixtures/**`) whose SHA-256 differs from its `fixtures.lock` line, a listed fixture gone, a fixture not listed, a malformed or missing lock (verification.md §4) | ES-03R |
 | `ARCH-macro-export` | a `#[macro_export]` in a production crate without an `[[exceptions.lints]]` row (`lint = "macro_export"`) citing an ADR: an exported macro's body is checked under its own crate's rules but expands in another (composition's spawn in the CLI); `event_set!` is approved by ADR 0018 | ARCH-02 |
+| `ARCH-operator-actor` | production code of a production crate other than `mayfly-control-domain` naming `Actor::Operator` (any path, alias or re-export) outside `mayfly-composition/src/operator/server.rs`: only the operator socket builds an operator actor, from the connection's peer uid (KER-10F) | RT-03 |
 
 Catalog completeness is part of every run, not a rule id: each rule names at least one
 negative fixture whose `expected.txt` names it, and each fixture belongs to a rule.

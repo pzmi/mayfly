@@ -6,8 +6,8 @@
 //! ceilings), or Apple's documented limit (macOS guests). What cannot be measured is reported
 //! unknown and the data plane refuses `capacity_unknown`; nothing is guessed.
 //!
-//! [`SizingReport`] is what `mayflyd` writes to stderr at start-up, one line per value with its
-//! source; it is a plain value so the operator socket's status (RT-03) can return it too.
+//! [`SizingReport`] is what `mayfly status` returns (RT-03; `mayflyd` wrote it to stderr at
+//! start-up until then), one value per key with its source.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -38,7 +38,9 @@ pub enum Source {
 }
 
 impl Source {
-    const fn as_str(self) -> &'static str {
+    /// The source's `snake_case` name, as the report and `status` show it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Configured => "configured",
             Self::CappedAtAppleLimit => "configured_capped_at_apple_limit",

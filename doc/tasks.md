@@ -233,6 +233,8 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | RT-05b | Terminal mode over real jobs: deregistration on stop and the Busy wait | RT-05a, GH-04, GH-08, GH-10, RT-07, LNK-02 | opus | |
 | RT-06 | Measured host sizing | RT-02, DP-06, DP-07 | opus | |
 | RT-07 | `mayflyd`'s GitHub wiring: the client, the registration manager and the reaper | CP-05, GH-04, RT-02 | sonnet | |
+| RT-08 | Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter` | RT-03, RT-07 | opus | |
+| RT-09 | A journal query by `recorded_at` for `mayfly events --since` | RT-03, ES-09 | sonnet | |
 | E2E-01 | Walking skeleton: static demand, fake-tart, one job end to end | RT-03, DP-05, VER-09, CP-10 | opus | ⛳ |
 | GH-00R | Settle the scale-set spec from public evidence | DEC-03 | opus | |
 | GH-01 | `mayfly-fake-github`: Scale Set and REST fake server | FND-02, GH-00R, DEC-03 | opus | |
@@ -936,6 +938,13 @@ Cites: plan §5.4. `commands` and `queries` modules of `mayfly-control`; the CQR
 xtask selects them (commands name no query/projection type and return no read DTO; queries take no
 write port). Operator use cases: drain, resume, pause, status, attempt timeline.
 Accept: architecture fixtures for both directions; component tests with `MemoryJournal`.
+Note (RT-03, pre-empted): RT-03 created `mayfly_control::commands` (the operator's pool
+pause/resume/drain, breaker reset and host drain/resume, each taking the caller's `Actor`) and
+serves status, `pool list` and `vm list` from the existing `queries::fleet` and
+`queries::pending_effects` (the mapping to the wire is composition's
+`operator::status`). Left to CP-01: setting `CQRS_SELECTORS_REQUIRED` with its
+`missing-query-selector` fixture, "queries take no write port", and the attempt timeline
+(`mayfly vm inspect`).
 
 #### CP-02 Attempt saga and directive relay
 Cites: plan §5.4, §6, §3.2; event-store §5.2–§5.3; ADR 0034. Both are durable consumers on ES-05. The
@@ -1218,6 +1227,14 @@ that it is a complete inventory (never `InventoryIncomplete`, I25), taken after 
 falls back to the attempt's recorded one. Accept adds: a component test of each refusal (an
 incomplete inventory, one older than the case, one that lists the VM) and one in which the
 `DeleteVm` proof equals the resolved instance id.
+Note (RT-03, deferred here): `mayfly quarantine list|inspect|resolve` lands with this task, since
+nothing opens a `QuarantineCase` before it and `resolve` must pass the checks above. Add each as a
+request of the operator socket's wire (`mayfly_composition::operator::wire::Request`, API 1: a
+new command an older daemon answers `unknown_command`), served in
+`mayfly-composition/src/operator/server.rs` under the peer's `Actor::Operator` (the only place
+one is built, `ARCH-operator-actor`), with a `--json` golden in
+`crates/mayfly-cli/tests/fixtures/json/` and the `vm_vanished_externally`/desync wording of
+DEC-05/DEC-07.
 
 #### CP-07 Image placement manager
 Cites: dm P17, P18; ADRs 0030, 0039. Pin → placement on every host serving the pool; the pool is
@@ -1797,6 +1814,47 @@ peer's uid, and that a non-socket caller (a policy, startup) cannot obtain an op
 Note (RT-02, ADR 0091 decision 5): the socket's default place, when the configuration names
 none, is `$XDG_RUNTIME_DIR/mayfly.sock` on Linux and `<state dir>/mayfly.sock` on macOS
 (`mayfly_composition::paths` holds the other defaults).
+Size: LARGE (found at intake, 2026-11-13: the socket, a compatibility surface, production code in
+`mayfly-control`, `mayfly-composition` and `mayfly-cli`, and an architecture rule).
+As built (RT-03; scope agreed 2026-11-13: the commands whose use cases exist): `mayfly status
+[--json]`, `pool list [--json]|pause|resume|drain <pool>`, `pool reset-breaker <pool> [--digest
+<d>]` (every tripped breaker without `--digest`), `host drain [--deadline <duration>]|resume`
+(default deadline 6h; past it P23 alerts, never forces), `vm list [--json]`, `events [--follow]
+[--since <duration>] [--json]` (with `--follow` a documented first line, `{"following":true}`,
+once subscribed; history by enumerating streams, a page at a time, the newest 10 000 kept in a
+bounded heap, `--since` capped at 7 days, RT-09; the follow from the store notifier, best
+effort, a lag reported), `doctor [--json]`
+(basic: config, `tart` on PATH, the daemon, ready, safe mode, breakers, desync) and `config
+validate <path>`, each taking `--socket <path>` or `--config <path>` (`doctor` reports an
+invalid configuration as its `config` check and runs the rest). Exit codes: 0, 1 refused (the
+aggregate's code on stderr; with `--json` the failure document on stdout) or a doctor failure,
+64 usage, 69 no daemon answers, 75 `busy` (all 16 connection slots taken), 78 invalid
+configuration. The CLI talks only to a socket served by its own user or root. The socket (`mayfly_composition::operator`): NDJSON, `{"api":1,"command":..}`,
+unknown fields ignored both ways, an unknown command answered `unknown_command`, a higher API
+`unsupported_api`; `0600` in a directory private to the daemon's user; at
+`<state_dir>/mayfly.sock` when `state_dir` is configured, else per ADR 0091 decision 5 (Linux
+without an absolute `$XDG_RUNTIME_DIR`: `<state>/mayfly.sock`; at most 103 bytes); a stale
+socket of this user that nothing answers on is replaced, anything else at the path (a live
+daemon's socket included, since the lock does not cover the runtime directory) refuses the
+start (73). Every answer line must be written within 10 s and every `events` send races the
+stop; on stop the server waits at most `SHUTDOWN_DEADLINE` for commands in flight, so a client
+that stops reading cannot keep the daemon from exiting. Peer
+allowlist: the daemon's own effective uid only (root refused unless the daemon is root; no
+configuration key, OD20's item stays a planner default). Every mutating command is one
+`mayfly_control::commands` use case saved through `AggregateStore` (journaled before it acts)
+under `Actor::Operator { uid: <peer> }`, built only in
+`mayfly-composition/src/operator/server.rs` (`ARCH-operator-actor`, with
+`policy-builds-operator-actor`; `placement::withdraw_image` now takes its actor). Signals:
+`status`'s `run.ready` has the ready line's promise; `pools[].hosts[]` (`terms_open`,
+`placement`, `leases`) is VER-09's, and the placement tests poll it; the sizing report moved
+from stderr to `status` (RT-06's note). Pinned by `crates/mayfly-cli/tests/operator.rs`
+(`assert_cmd`, goldens in `tests/fixtures/json/`), `crates/mayfly-composition/tests/operator.rs`
+(peer refused, a body claiming an operator decided under the peer's uid, unknown fields and
+commands, the socket `0600`, the follow) and `crates/mayfly-control/tests/store/operator.rs`.
+Deferred: `quarantine list|inspect|resolve` (CP-06's card), `recover --dry-run|--apply` and
+`safe-mode enter` (RT-08), `image withdraw` (OPS-02's note: model first), `vm list
+--owned-only` and `vm inspect|logs` (no provider listing or timeline on the control plane yet),
+the reaper's report in `doctor` (RT-07).
 
 #### RT-04 Observability
 Cites: plan §12. tracing JSON subscriber in composition, event naming rule, metrics endpoint
@@ -1861,7 +1919,8 @@ summed), unknown until measured (`capacity_unknown`); `vm_slots` is derived from
 RAM and CPUs less a reserve (`reserve_memory_mib`, measured as max(25 % of RAM, 8 GiB) when
 absent; the new `reserve_cpus`, default 2), divided by the largest memory and the most CPUs of
 any pool (the safer divisors: the ledger does not track CPUs) and bounded by both; a probe that cannot read them leaves the value unknown. The start-up report
-shows each value and its source until RT-03's status takes it.
+shows each value and its source until RT-03's status takes it (done: RT-03 moved it to `mayfly
+status`'s `sizing`, and `mayflyd` no longer writes it to stderr).
 Accept: unit tests of the measured slots on a scripted probe (64 GiB / 10 CPUs with 8 GiB,
 2-CPU VMs → 4), the reserve configured, unreadable CPUs → `vm_slots` unknown, manifest-derived
 disk ceilings and a pull measured before admission, configured values overriding,
@@ -1910,6 +1969,33 @@ issue every time.
 Accept: daemon tests over fake-github: an activating attempt minted once and its runner
 deregistered on retirement; the reaper runs at start and lists at most once an hour; `doctor`
 lists an unrecognised runner; no secret in the daemon's output or logs.
+
+#### RT-08 Recovery plan drawer, `mayfly recover` and `mayfly safe-mode enter`
+Cites: plan §10, §11; dm P20, I31; ADRs 0025, 0034, 0043; `formal/recovery.qnt`. Found at RT-03's
+intake (2026-11-13): in safe mode `Startup::recover` returns each attempt's and name's proposal
+and writes nothing, and nothing issues `ProposePlan`, so no plan reaches `Approved` for
+`recovery::repair::apply` (CP-04, KER-10G). Draw the plan from those proposals with its bindings
+(the bound streams' heads, the complete inventory's digest, GitHub's runner listing, which needs
+RT-07's view: until then `unreachable`), under the run's epoch; serve `mayfly recover --dry-run`
+(the drawn plan, `--json` golden) and `--apply <plan-id>` (`ApprovePlan` under the peer's
+operator actor, then P20) as requests of the operator socket (RT-03's wire, API 1). `mayfly
+safe-mode enter` needs an operator reason, which `SafeModeReason` lacks: an older build that met
+a new variant of `SafeModeEntered`'s stored enum could not decode it, so it is a new event type
+(or a prepare-then-activate pair of releases, `doc/event-store.md` §6), model first.
+Accept: F35 and F45 at the component level; a dry run that writes nothing; an apply refused
+`stale` after the world moved; `safe-mode enter` recorded under the peer's uid and left only by a
+plan or a verified restart.
+
+#### RT-09 A journal query by `recorded_at` for `mayfly events --since`
+Cites: `doc/event-store.md` §3.3, §5.6; ES-I17. Found at RT-03's review (2026-11-13): `events
+--since` enumerates every stream and reads each whole (`streams`, `read_stream`), keeping the
+newest 10 000 in a bounded heap and capping the window at 7 days, which costs a read of the
+whole journal per call. Give the `Journal` port a display-only read of the events recorded in
+a time window (an index on `recorded_at` in both adapters, a new contract case; ordered for
+display, never read by a decision, so ES-I17's "no global order" for decisions stands), and
+serve `--since` from it.
+Accept: the contract case on memory, SQLite and PostgreSQL; `events --since` reads no stream
+outside the window.
 
 #### E2E-01 ⛳ Walking skeleton
 Cites: plan §14 phase 3, ver §2. Black-box: `mayflyd` (static demand 1) + `mayfly-fake-tart` +

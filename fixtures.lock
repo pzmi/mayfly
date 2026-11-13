@@ -485,3 +485,7 @@ e7dce7b0c6db2874600ab0ab5059281d46e81b7f5854d1a2c0faf270c06cf50c  crates/mayfly-
 40603685722995932ff8019ac3dd2f0d48dbf729c1e548d6f47aef743fb3774f  crates/mayfly-control-domain/tests/fixtures/matrix/placement.txt
 ffa514cd8f193575b975d604cd35999e281b86388af865bcd13e5b71edd72c69  crates/mayfly-control/tests/fixtures/intents/image.txt
 fe9dadd4e42d76b5aeba8a2dea810c563008713c7008dad3633d265d684874d1  crates/mayfly-control/tests/fixtures/intents/placement.txt
+b1b11f262e8d7238cab3c43cdf55bdfce824dfa80604f9bd887ba3a7d391cdac  crates/mayfly-cli/tests/fixtures/json/doctor.json
+879e9b72fc8b15b7d5210005b933ddac4ce78d510dd89f0dbaae91921aea36fb  crates/mayfly-cli/tests/fixtures/json/pool-list.json
+4a88fdd8282565f8908c7f2c1dd4631c0d35237bcbf153a8bbcacdf12d34255a  crates/mayfly-cli/tests/fixtures/json/status.json
+c0c7fbdfb88949e5f580a3974f9b995c157d4379b4521853562738e44cf0463d  crates/mayfly-cli/tests/fixtures/json/vm-list.json

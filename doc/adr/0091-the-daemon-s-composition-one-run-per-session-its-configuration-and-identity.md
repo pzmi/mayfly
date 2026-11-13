@@ -62,9 +62,13 @@ by the plan and the ADRs it builds on:
    overrides every path. Nothing goes in a cache directory, which the system may purge. With no
    absolute `HOME` there is no default, and `mayflyd` asks for `state_dir` (exit 78). Service mode
    (launchd or systemd) sets `/Library/Application Support/mayfly` or `/var/lib/mayfly` in its
-   configuration (OPS-01). The socket's default (RT-03) is `$XDG_RUNTIME_DIR/mayfly.sock` on
-   Linux and `<state>/mayfly.sock` on macOS; logs' (RT-04) are `~/Library/Logs/mayfly` and
-   `$XDG_STATE_HOME/mayfly/logs`.
+   configuration (OPS-01). The operator socket (RT-03, as built 2026-11-13) is
+   `<state_dir>/mayfly.sock` when the configuration names `state_dir`, so one setting moves it
+   with everything else and two daemons with their own state directories never share one; with
+   no `state_dir`, it is `$XDG_RUNTIME_DIR/mayfly.sock` on Linux when that variable is absolute,
+   else `<state>/mayfly.sock`, and `<state>/mayfly.sock` on macOS. A live socket already at the
+   path (another daemon answering) refuses the start; only a stale one of the same user is
+   replaced. Logs' (RT-04) are `~/Library/Logs/mayfly` and `$XDG_STATE_HOME/mayfly/logs`.
 
 ## Consequences
 

@@ -1,0 +1,20 @@
+{
+  "pools": [
+    {
+      "hosts": [
+        {
+          "host": "<host>",
+          "leases": 0,
+          "placement": "failed",
+          "terms_open": true
+        }
+      ],
+      "image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "max_running": 2,
+      "min_prepared": 1,
+      "mode": "active",
+      "name": "lin",
+      "tripped": []
+    }
+  ]
+}

@@ -23,13 +23,14 @@
 //! their file, line and context (production or test code); `rules_purity`, `rules_include`,
 //! `rules_runtime`, `rules_types`, `rules_events`, `rules_hygiene`, `rules_cqrs`,
 //! `rules_transition`, `rules_seams`, `rules_store`, `rules_append`, `rules_projection`, `rules_order`,
-//! `rules_journal_sql` and `rules_locks` turn facts into diagnostics, and
+//! `rules_journal_sql`, `rules_locks` and `rules_actor` turn facts into diagnostics, and
 //! `rules_clippy` checks the pure crates' Clippy configuration, the
 //! semantic layer behind these syntactic rules.
 
 mod collect;
 mod flow;
 mod paths;
+mod rules_actor;
 mod rules_append;
 mod rules_clippy;
 mod rules_cqrs;
@@ -453,6 +454,7 @@ pub fn check(
         out.extend(rules_cqrs::check(facts, policy));
         out.extend(rules_store::check(root, facts));
         out.extend(rules_append::check(facts, policy));
+        out.extend(rules_actor::check(facts, policy));
         out.extend(rules_projection::check(facts, policy));
         out.extend(rules_order::check(root, facts, policy));
         out.extend(rules_journal_sql::check(root, facts, policy));
@@ -479,6 +481,8 @@ fn selector_crates() -> BTreeSet<String> {
             &rules_hygiene::POLL_HELPER.0,
             &rules_cqrs::APPLICATION,
             &rules_seams::DEFINER,
+            &rules_actor::DEFINER,
+            &rules_actor::SOCKET.0,
             &rules_store::ADAPTER,
             &rules_types::AGGREGATES.0,
             &rules_events::EVENTS_CRATE,
