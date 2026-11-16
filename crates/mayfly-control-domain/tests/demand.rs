@@ -295,6 +295,45 @@ fn should_trust_only_an_allowed_event_of_an_allowed_repository_when_an_assignmen
     assert_eq!(without_policy, refused(RefusalReason::RepositoryNotAllowed));
 }
 
+/// GitHub's repository names are case-insensitive: the message, the run, the head and the
+/// pool's list may each spell one differently, and it is still the same repository; a fork
+/// stays a fork whatever its case.
+#[test]
+fn should_compare_repositories_ignoring_case_when_an_assignment_is_classified() {
+    // given: the pool lists `octo-org/app`
+    let policy = policy();
+    let cases = [
+        (
+            assignment(Some("Octo-Org/App"), EventName::Push, "mayfly-linux"),
+            found("octo-org/APP", Some("OCTO-ORG/app"), EventName::Push),
+        ),
+        (
+            assignment(Some("Octo-Org/App"), EventName::PullRequest, "mayfly-linux"),
+            found("octo-org/app", Some("Fork/App"), EventName::PullRequest),
+        ),
+        (
+            assignment(Some("Octo-Org/Other"), EventName::Push, "mayfly-linux"),
+            found("octo-org/other", Some("octo-org/other"), EventName::Push),
+        ),
+    ];
+
+    // when
+    let classes: Vec<Classification> = cases
+        .iter()
+        .map(|(job, lookup)| demand::classify_assigned(Some(&policy), job, lookup))
+        .collect();
+
+    // then
+    assert_eq!(
+        classes,
+        [
+            Classification::Trusted,
+            Classification::Refused(RefusalReason::Fork),
+            Classification::Refused(RefusalReason::RepositoryNotAllowed),
+        ]
+    );
+}
+
 /// `allowed_events` is the pool's (ADR 0090, amended 2026-11-12): an event it does not list is
 /// refused even if the default lists it, and `Unknown` is never trusted, listed or not.
 #[test]

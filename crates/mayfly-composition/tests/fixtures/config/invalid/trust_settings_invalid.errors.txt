@@ -1,0 +1,9 @@
+invalid configuration: 8 errors
+  github.check_fork_pr_setting: expected a boolean, found a string (fix: write it as `check_fork_pr_setting = true`)
+  pools[0].allowed_repositories: is empty: every job of the pool would be refused (fix: list the repositories this pool serves, like `allowed_repositories = ["example-org/app"]`)
+  pools[0].allowed_events: is empty: every job of the pool would be refused (fix: remove it for the default list, or name the events this pool runs)
+  pools[1].allowed_repositories: holds an entry that is not a full name `owner/name` (fix: write each as GitHub names it, owner and name, like `allowed_repositories = ["example-org/app"]`)
+  pools[1].allowed_repositories: lists a repository twice (fix: list each repository once)
+  pools[1].allowed_events: holds an event, outside ADR 0090's list: adding an event is a new decision (ADR 0090 point 2) (fix: use events from: push, pull_request, workflow_dispatch, schedule, merge_group, release)
+  pools[1].allowed_events: lists push twice (fix: list each event once)
+  pools[1].cancel_refused_runs: expected a boolean, found an integer (fix: write it as `cancel_refused_runs = true`)

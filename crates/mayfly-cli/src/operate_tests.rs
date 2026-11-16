@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use mayfly_composition::operator::wire::{
     self, Answer, AttemptStatus, Desync, EventLine, Following, HostStatus, Lagged, PoolList,
     PoolOnHost, PoolStatus, Reaper, Request, Reset, RunStatus, SizingValue, Status, Sweep, Tripped,
-    UnrecognisedRunner, Value, Vm, VmList,
+    Trust, UnrecognisedRunner, Value, Vm, VmList,
 };
 use mayfly_composition::paths::PlatformEnv;
 
@@ -368,8 +368,9 @@ fn should_exit_with_the_matching_code_when_the_daemon_cannot_serve() {
 
 #[test]
 fn should_report_each_check_when_doctor_meets_a_daemon_in_trouble() {
-    // given: a daemon in safe mode, not ready, a breaker tripped, a desync and an unrecognised
-    // runner; then an older daemon that knows no `reaper`
+    // given: a daemon in safe mode, not ready, a breaker tripped, a desync, an unrecognised
+    // runner and its pools refused for the fork-PR setting (GH-08); then an older daemon that
+    // knows no `reaper` and no `trust`
     let reaper = Reaper {
         last: Some(Sweep {
             trigger: "run_started".to_owned(),
@@ -386,10 +387,17 @@ fn should_report_each_check_when_doctor_meets_a_daemon_in_trouble() {
         }),
         failure: None,
     };
+    let trust = Trust {
+        fork_pr_setting: "refused".to_owned(),
+        permissions_read: true,
+        ..Trust::default()
+    };
     let canned = Canned::new(vec![
         vec![served!(status())],
         vec![served!(reaper)],
+        vec![served!(trust)],
         vec![served!(status())],
+        vec![failed("unknown_command")],
         vec![failed("unknown_command")],
         vec![failed("unauthorised")],
     ]);
@@ -439,11 +447,20 @@ fn should_report_each_check_when_doctor_meets_a_daemon_in_trouble() {
          warn desync: 1 VM(s) vanished outside mayfly: a desync; send the diagnostics bundle\n\
          warn reaper: 1 runner(s) of mayfly's name shape that no registration recorded: \
          mf-h0123456789abcde-lin-1 (id 41); mayfly never removes them: check each and remove it \
-         by hand\n"
+         by hand\n\
+         FAIL github_trust: the organisation runs workflows from fork pull requests in private \
+         repositories, so `check_fork_pr_setting` started no listener this run: no pool is served; \
+         turn that setting off, then restart mayflyd\n"
     );
     assert!(json.1.contains(r#""verdict": "fail""#), "{}", json.1);
     assert!(
         json.1.contains("this mayflyd does not report the reaper"),
+        "{}",
+        json.1
+    );
+    assert!(
+        json.1
+            .contains("this mayflyd does not report its trust checks"),
         "{}",
         json.1
     );

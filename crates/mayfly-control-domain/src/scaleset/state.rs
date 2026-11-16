@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::aggregate::{CommandBody, Rejection};
 use crate::attempt::RunnerRequestId;
 use crate::demand::{
-    AssignedJob, Capacity, JobKey, Offer, RunLookup, RunnerGate, Statistics, TrustPolicy, WireMode,
+    AssignedJob, Capacity, JobKey, Offer, RepositoryName, RunLookup, RunnerGate, Statistics,
+    TrustPolicy, WireMode,
 };
 use crate::pool::TrustTier;
 use crate::registration::{JobResult, RunnerId, ScaleSetId};
@@ -267,6 +268,10 @@ pub struct ScaleSetState {
     /// Assigned directly and refused (`AssignedJobRefused`), until a job fact, a new assignment
     /// of it or a re-created scale set shows it gone. Holds nothing.
     pub refused: BTreeSet<JobKey>,
+    /// The repository each refused job's assignment named, kept so that a cancel asked after a
+    /// restart still names it (GH-08: the refused set holds keys only). A refused job missing
+    /// here named none: its cancel can never be sent.
+    pub refused_repositories: BTreeMap<JobKey, RepositoryName>,
     /// Refused jobs whose cancel was answered: never asked again.
     pub cancel_tried: BTreeSet<JobKey>,
     /// A refusal sink is up: the wire max is pinned at the assigned count.
@@ -324,6 +329,7 @@ impl ScaleSetState {
             pending: BTreeMap::new(),
             trusted: BTreeMap::new(),
             refused: BTreeSet::new(),
+            refused_repositories: BTreeMap::new(),
             cancel_tried: BTreeSet::new(),
             sink_live: false,
             sink_tried: BTreeSet::new(),
@@ -451,6 +457,14 @@ impl ScaleSetState {
             && !self.sink_live
             && self.pending.is_empty()
             && self.waiting() == 0
+    }
+
+    /// The repository a refused job's assignment named, `None` when it named none (or the job is
+    /// not refused): the cancel of [`RefusalAction::CancelRun`] names it. Pinned by
+    /// `tests/scaleset/trust.rs::should_keep_the_assignments_repository_when_a_job_is_refused`.
+    #[must_use]
+    pub fn refused_repository(&self, job: &JobKey) -> Option<&RepositoryName> {
+        self.refused_repositories.get(job)
     }
 
     /// The next refusal action the control plane takes, if any: with `cancel_refused_runs`, a

@@ -456,3 +456,38 @@ fn should_classify_trusted_jobs_again_when_the_trust_policy_changes() {
         Some(RefusalReason::RepositoryNotAllowed)
     );
 }
+
+/// GH-08: the cancel of a refused job names its assignment's repository, which the refused set
+/// does not hold; the stream keeps it while the job stays refused, and forgets it once a job fact
+/// releases the refusal.
+#[test]
+fn should_keep_the_assignments_repository_when_a_job_is_refused() {
+    // given: jobs 3 (refused) and 1 (trusted) assigned on github.com with the cancel option
+    let assigned_two = message(FIRST, 1, Some(assigned(2)), vec![assign(3), assign(1)]);
+    let refused = reach_from(
+        direct(true),
+        [assigned_two, lookup(3, false), lookup(1, true)],
+    );
+
+    // when: job 3 completes
+    let released = reach_from(
+        refused.clone(),
+        [message(
+            FIRST,
+            2,
+            Some(assigned(1)),
+            vec![completed_job(3, true)],
+        )],
+    );
+
+    // then
+    let repository = assigned_job(3, EventName::Push).repository;
+    assert_eq!(refused.refused_repository(&key(3)), repository.as_ref());
+    assert_eq!(
+        refused.refused_repository(&key(1)),
+        None,
+        "trusted, not refused"
+    );
+    assert_eq!(released.refused_repository(&key(3)), None);
+    assert!(released.refused_repositories.is_empty());
+}

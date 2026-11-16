@@ -45,6 +45,10 @@ pub enum Operation {
     RunLookup,
     /// A workflow-run cancel (REST, spec §6.2).
     RunCancel,
+    /// The organisation's fork-PR setting (REST, `check_fork_pr_setting`, spec §6.2).
+    ForkPrSetting,
+    /// A runner group's REST read (the public-repository report, spec §6.2).
+    RunnerGroupRead,
 }
 
 impl Operation {
@@ -70,6 +74,8 @@ impl Operation {
             Self::RunnerRemove => "runner_remove",
             Self::RunLookup => "run_lookup",
             Self::RunCancel => "run_cancel",
+            Self::ForkPrSetting => "fork_pr_setting",
+            Self::RunnerGroupRead => "runner_group_read",
         }
     }
 }

@@ -22,6 +22,7 @@ realm_hosts = ["Auth.Example.com"]
 "2.330" = "not-a-checksum"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "mac"
 tier = "trusted"
 image_manifest = "/etc/mayfly/images/mac.toml"

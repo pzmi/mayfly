@@ -153,6 +153,7 @@ private_key = "file:/etc/mayfly/app-key.pem"
 [provider]
 tart_home = "/var/lib/mayfly/tart"
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "mac"
 tier = "trusted"
 image_manifest = "/etc/mayfly/images/mac.toml"

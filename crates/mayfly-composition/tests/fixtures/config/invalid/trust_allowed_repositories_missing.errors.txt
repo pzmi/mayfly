@@ -1,0 +1,2 @@
+invalid configuration: 1 error
+  pools[0].allowed_repositories: required on github.com: only jobs of the listed repositories run (ADR 0090) (fix: add `allowed_repositories = ["example-org/app"]`, the full names of the repositories this pool serves)

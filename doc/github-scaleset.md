@@ -488,7 +488,11 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
    the scale set only when its group allows public repositories. mayfly reads the group with
    `GET {api}/orgs/{org}/actions/runner-groups/{group_id}` ("Self-hosted runners", which it holds)
    and reports, at start-up and in `doctor`, each allowed repository that is public while
-   `allows_public_repositories` is false; it reports and does not refuse (GH-08).
+   `allows_public_repositories` is false; it reports and does not refuse (GH-08). As built
+   (GH-08): mayfly does not read a repository's visibility ("Metadata" is not used, ADR 0045),
+   so it reports each pool that lists allowed repositories while its group's
+   `allows_public_repositories` is false, as a possible problem, naming no repository; the
+   group is read once the scale set is ensured, beside the listener's ticks.
 2. **Per job, before a runner starts: the gate.** Every `JobAssigned` is classified, and a
    runner starts only for a job classified trusted:
    - its repository (`ownerName/repositoryName`) must be one of the pool's `allowed_repositories`
@@ -512,6 +516,21 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
      `job_refused` with `repository`, `event`, `reason` and `run_id` and nothing more.
    That `workflowRunId` in a `JobAssigned` names the run the REST API knows, and that the lookup
    works with "Actions: Read" alone, are [open: HW-02, item 8].
+   **The listener's lookups (GH-08).** The pool's settings reach its stream as
+   `ApplyTrustPolicy` (the scale set's name, `allowed_repositories`, `allowed_events`,
+   `cancel_refused_runs`). Each pending assignment's run is looked up before each poll and after
+   each recorded message, at most four in one tick (the rest wait for the next), and the answer
+   recorded as `RecordRunLookup`. A lookup that answers nothing definite (`unavailable` or
+   `throttled`: it may spend its whole deadline behind a slow token mint) holds that job alone for
+   the call backoff (30 s, doubling) and refuses it only at its third such answer in a row; any
+   definite failure (404, a refusal, a missing field) refuses at once. An assignment that named no
+   repository is refused `lookup_failed` with no request. Repository names compare ignoring case,
+   as GitHub's do. `throttled` does not read `Retry-After`: a longer secondary rate limit refuses
+   the jobs it outlasts (a limitation). Pinned by `crates/mayfly-control/tests/store/listener.rs`
+   (`should_retry_a_lookup_before_refusing_it_when_it_is_unavailable`,
+   `should_refuse_a_job_when_its_lookups_stay_unavailable`,
+   `should_look_up_the_other_jobs_when_one_lookup_is_unanswered`,
+   `should_look_up_at_most_the_cap_in_one_tick_when_many_jobs_are_pending`).
    **The lookup's answer (GH-10).** The path is built only from an `owner/name` whose parts are
    GitHub's alphabet (`[A-Za-z0-9._-]`, not `.` or `..`); a 200 must carry the asked `id`, an
    `event`, and `repository.full_name` and `head_repository.full_name` (a deleted fork's `null`
@@ -557,7 +576,12 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
      again; if the lost one took effect, that second cancel answers 409 and is recorded refused
      although the run was cancelled (bookkeeping only: a refused job holds nothing). A cancel
      that can never be sent (the job's repository is unknown or not a plain `owner/name`) is
-     recorded refused at once, with no request, so it never stays due;
+     recorded refused at once, with no request, so it never stays due. The listener sends each
+     due cancel with the repository the job's `JobAssigned` named (kept by the stream while the
+     job stays refused); a lost answer holds cancels for the call backoff, doubling (GH-08).
+     **Limitation:** a cancel recorded refused with no request sent and one GitHub answered 409
+     journal the same `CancelAnswered{refused}`; the journal cannot tell them apart (an optional
+     field on the event can add it later);
    - **fallback**: when neither acts (no capacity for a sink, a failed cancel), GitHub's own
      release and requeue (section 4.3) fails the job at its third release. Nothing waits on it.
    The hold, `refusal_release_window` and `mayfly pool release-refusal` of the first decision are
@@ -565,6 +589,11 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
 5. **`check_fork_pr_setting`** (per organisation, default off, "Administration: Read"): at
    start-up mayfly reads the organisation's fork-PR setting for private repositories (section 2)
    and refuses to start when `run_workflows_from_fork_pull_requests` is true. Defence in depth.
+   As built (GH-08): no listener starts for the run (`mayflyd` itself runs, and `doctor` fails
+   `github_trust`); while the read fails, the listeners wait and it is read again (fail closed),
+   and a 403 or 404 also fails `doctor`. Pinned by `crates/mayfly-composition/tests/daemon.rs`
+   (`github::should_refuse_every_pool_and_report_it_when_fork_workflows_run`,
+   `github::should_serve_no_pool_and_fail_doctor_when_the_fork_setting_is_denied`).
 
 Pinned by `formal/scaleset.qnt`'s `vmOnlyForAJobClassifiedTrusted`,
 `noStepOfAnUntrustedJobRuns`, `sinkRunsNoStep`, `sinkOnlyForARefusedJob`,

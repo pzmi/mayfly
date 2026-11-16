@@ -89,8 +89,43 @@
 //! session id are journaled (spec §3.2, §9): a restarted listener polls with `lastMessageId` =
 //! the stream's cursor.
 //!
-//! Left to other cards: the classification of assigned jobs through run lookups (GH-08, GH-10),
-//! the listing of `acquirablejobs` when a GHES session opens (GH-11, spec §6.1), P12's grace for a
+//! - **Trust** (GH-08, ADR 0090, spec §6.2): the pool's settings reach the stream as
+//!   `ApplyTrustPolicy` whenever the stream's differs from [`ListenerConfig::policy`] (none
+//!   configured: none applied, and every assignment is refused, fail closed). The pending
+//!   assignments' workflow runs are looked up ([`WorkflowRuns::workflow_run`]) before each poll
+//!   and after each recorded message, at most [`ListenerConfig::lookups_per_tick`] in one tick,
+//!   so a backlog delays the poll and its ack by a bounded number of lookups; the rest wait for
+//!   the next tick. Each answer is recorded as `RecordRunLookup` ([`run_lookup`]), which the
+//!   aggregate classifies. A lookup without a definite answer ([`Failure::Unavailable`],
+//!   [`Failure::Throttled`]: a lookup may spend its whole deadline behind a slow token mint) is
+//!   not a refusal yet: that job's lookups wait one call backoff, doubling, while the other jobs'
+//!   go on (no job holds another's), and only the job's [`ListenerConfig::lookup_attempts`]th
+//!   such failure in a row is recorded [`RunLookup::Failed`] (refused `lookup_failed`).
+//!   `Throttled` does not read GitHub's `Retry-After`: a secondary rate limit longer than the
+//!   backoffs refuses the jobs it outlasts (a limitation; they fail closed). Any other failure (404, drift, a refusal, the
+//!   credentials) is recorded failed at once. Every `AssignedJobRefused` a lookup records is
+//!   logged at WARN as `job_refused` with `repository`, `event`, `reason` and `run_id` and nothing
+//!   more. Then each `RefusalAction::CancelRun` the stream names
+//!   ([`ScaleSetState::refusal_action`], `cancel_refused_runs` only) is sent through
+//!   [`cancel_refused`] with the repository the job's `JobAssigned` named
+//!   ([`ScaleSetState::refused_repository`]); a lost answer records nothing and holds cancels for
+//!   one call backoff, doubling, so it is asked again later, never in a loop. The listener only
+//!   performs the model's `lookupRun` and `cancelRun` (a retried lookup is a stutter): no runner
+//!   starts for anything here, the reconciler's grant reads `runner_may_start`. Pinned by
+//!   `tests/store/listener.rs::should_start_a_runner_only_for_the_trusted_job_when_a_fork_is_assigned_beside_it`,
+//!   `should_retry_a_lookup_before_refusing_it_when_it_is_unavailable`,
+//!   `should_refuse_a_job_when_its_lookups_stay_unavailable`,
+//!   `should_look_up_the_other_jobs_when_one_lookup_is_unanswered`,
+//!   `should_look_up_at_most_the_cap_in_one_tick_when_many_jobs_are_pending`,
+//!   `should_cancel_each_refused_run_once_when_the_option_is_on` and
+//!   `should_hold_cancels_and_ask_again_when_a_cancel_answer_is_lost`.
+//!
+//!   **Limitation** (GH-10's review): a cancel recorded `Refused` with no request sent (its
+//!   assignment named no usable repository) and one GitHub answered 409 journal the same
+//!   `CancelAnswered{refused}`; the journal cannot tell them apart. An optional field on the
+//!   event can add it if an operator ever needs to.
+//!
+//! Left to other cards: the listing of `acquirablejobs` when a GHES session opens (GH-11, spec §6.1), P12's grace for a
 //! job that ended while its runner never reports its exit (GH-12), and the gap's metric (RT-04).
 //! The daemon's driver and its local lease are `mayfly_composition::github` (RT-07).
 
@@ -98,22 +133,23 @@ mod jobs;
 
 pub use jobs::{JOB_FACTS, JobFacts, JobFactsError, JobFactsReport};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use mayfly_control_domain::demand::WireMode;
+use mayfly_control_domain::demand::{TrustPolicy, WireMode};
 use mayfly_control_domain::pool::TrustTier;
 use mayfly_control_domain::scaleset::{
-    EnsureScaleSet, LossCause, Phase, RecordMessage, ScaleSet, ScaleSetCommand, ScaleSetEvent,
-    ScaleSetRejection, ScaleSetState,
+    Assignment, EnsureScaleSet, LossCause, Phase, RecordMessage, RefusalAction, ScaleSet,
+    ScaleSetCommand, ScaleSetEvent, ScaleSetRejection, ScaleSetState,
 };
 use mayfly_control_domain::{Actor, Command, Rejection};
 use mayfly_domain::{CommandId, Epoch, Millis, PoolName};
 
 use crate::delivery::Kicks;
 use crate::github::{
-    Failure, GitHubCallError, MessageId, MessageItem, PolledMessage, RunnerRequestId, ScaleSetApi,
-    ScaleSetId, ScaleSetSpec, SessionId,
+    Failure, GitHubCallError, JobKey, MessageId, MessageItem, PolledMessage, RunLookup,
+    RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetSpec, SessionId, WorkflowRuns,
+    cancel_refused, run_lookup,
 };
 use crate::ids::derive;
 use crate::journal::{
@@ -150,6 +186,14 @@ pub struct ListenerConfig {
     pub call_backoff_cap: Millis,
     /// How long the assigned-running gap stays above zero before it is alarmed (spec §3.4).
     pub gap_alarm_after: Millis,
+    /// The pool's trust policy (GH-08): applied to the stream when it differs. `None` applies
+    /// none, and the stream then refuses every assignment.
+    pub policy: Option<TrustPolicy>,
+    /// A job's lookups answered without a definite answer in a row before it is recorded
+    /// [`RunLookup::Failed`].
+    pub lookup_attempts: u32,
+    /// The lookups one tick makes at most (module docs).
+    pub lookups_per_tick: u32,
 }
 
 impl ListenerConfig {
@@ -171,9 +215,28 @@ impl ListenerConfig {
             call_backoff: Millis::new(30_000),
             call_backoff_cap: Millis::new(300_000),
             gap_alarm_after: Millis::new(900_000),
+            policy: None,
+            lookup_attempts: DEFAULT_LOOKUP_ATTEMPTS,
+            lookups_per_tick: DEFAULT_LOOKUPS_PER_TICK,
         }
     }
+
+    /// This configuration with the pool's trust policy.
+    #[must_use]
+    pub fn with_policy(mut self, policy: TrustPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
 }
+
+/// [`ListenerConfig::lookup_attempts`] by default: a lookup without a definite answer is asked
+/// three times, one call backoff apart and doubling (about 90 s with the defaults), before the
+/// job is refused `lookup_failed`.
+pub const DEFAULT_LOOKUP_ATTEMPTS: u32 = 3;
+
+/// [`ListenerConfig::lookups_per_tick`] by default: with the run lookup's own deadline, a tick
+/// spends at most this many deadlines on lookups before it polls and acks.
+pub const DEFAULT_LOOKUPS_PER_TICK: u32 = 4;
 
 /// How a polled message was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +273,10 @@ pub struct Polled {
     pub poll_failure: Option<&'static str>,
     /// `totalAssignedJobs − totalRunningJobs` beyond the jobs the stream knows of (spec §3.4).
     pub gap: u32,
+    /// The pending assignments whose lookup this tick recorded, in order.
+    pub looked_up: Vec<JobKey>,
+    /// The refused jobs whose cancel this tick recorded, in order.
+    pub cancelled: Vec<JobKey>,
 }
 
 /// What one [`Listener::tick`] did.
@@ -293,6 +360,38 @@ struct Local {
     gap_since: Option<Millis>,
     /// Whether this episode was alarmed.
     gap_alarmed: bool,
+    /// Per pending job: its lookups answered without a definite answer in a row, and the
+    /// instant before which it is not asked again.
+    lookup_holds: BTreeMap<JobKey, Hold>,
+    /// Cancels held after one's answer was lost.
+    cancels: Hold,
+}
+
+/// A run of failed calls of one kind and the instant before which none is asked again.
+#[derive(Debug, Default, Clone, Copy)]
+struct Hold {
+    failures: u32,
+    until: Option<Millis>,
+}
+
+impl Hold {
+    fn held(self, now: Millis) -> bool {
+        self.until.is_some_and(|until| until > now)
+    }
+
+    /// One more failure: `base` doubled per failure in a row, at most `cap`.
+    fn fail(&mut self, now: Millis, base: Millis, cap: Millis) {
+        let wait = base
+            .get()
+            .saturating_mul(1_u64 << self.failures.min(16))
+            .min(cap.get());
+        self.failures = self.failures.saturating_add(1);
+        self.until = Some(Millis::new(now.get().saturating_add(wait)));
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// One pool's listener over `store` and the scale-set port `api`.
@@ -349,7 +448,7 @@ fn revision_bytes(head: Option<StreamRevision>) -> [u8; 8] {
     head.map_or(u64::MAX, StreamRevision::get).to_be_bytes()
 }
 
-impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
+impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi + WorkflowRuns>
     Listener<'s, J, C, R, N, A>
 {
     /// The listener of `config.pool` over `store` and `api`.
@@ -487,7 +586,15 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
         if let Some(until) = self.local().next_call.filter(|until| *until > now) {
             return Ok(Tick::Waiting(until));
         }
-        let (state, head) = self.load().await?;
+        let (mut state, mut head) = self.load().await?;
+        if let Some(policy) = &self.config.policy
+            && state.policy.as_ref() != Some(policy)
+        {
+            let id = self.command_id(b"policy", &[&revision_bytes(head)]);
+            self.require(id, ScaleSetCommand::ApplyTrustPolicy(policy.clone()))
+                .await?;
+            (state, head) = self.load().await?;
+        }
         match state.phase {
             Phase::Unconfigured => self.ensure(&state, head).await,
             Phase::Active | Phase::Degraded(_) => self.poll_step(&state).await,
@@ -669,8 +776,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
                 return self.lose(lost).await;
             }
         }
-        let (state, head) = self.load().await?;
         let mut polled = Polled::default();
+        let mut budget = self.config.lookups_per_tick;
+        self.trust_step(&mut polled, &mut budget).await?;
+        let (state, head) = self.load().await?;
         let answer = self.api.poll(set, state.cursor, state.wire_max()).await;
         if answer.is_ok() {
             self.answered();
@@ -681,6 +790,7 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
                 if let Some(kicks) = &self.kicks {
                     kicks.kick(&stream_of::<ScaleSet>(self.config.pool.as_str())?);
                 }
+                self.trust_step(&mut polled, &mut budget).await?;
                 polled.gap = self.check_gap(&state);
                 return Ok(Tick::Polled(polled));
             }
@@ -732,9 +842,175 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
                 Err(lost) => return self.lose(lost).await,
             }
         }
+        self.trust_step(&mut polled, &mut budget).await?;
         let (state, _) = self.load().await?;
         polled.gap = self.check_gap(&state);
         Ok(Tick::Polled(polled))
+    }
+
+    /// The pending assignments' lookups, within the tick's `budget`, then the refused runs'
+    /// cancels (module docs).
+    async fn trust_step(&self, polled: &mut Polled, budget: &mut u32) -> Result<(), ListenerError> {
+        self.look_up_pending(polled, budget).await?;
+        self.cancel_refused_runs(polled).await
+    }
+
+    /// Looks up each pending assignment's run that is not held, at most `budget` of them, and
+    /// records each definite answer, or the last of [`ListenerConfig::lookup_attempts`]
+    /// indefinite ones, as `RecordRunLookup`; an earlier indefinite one holds that job alone.
+    async fn look_up_pending(
+        &self,
+        polled: &mut Polled,
+        budget: &mut u32,
+    ) -> Result<(), ListenerError> {
+        let (state, _) = self.load().await?;
+        let now = self.store.clock().now();
+        let due: Vec<(JobKey, Assignment)> = {
+            let mut local = self.local();
+            local
+                .lookup_holds
+                .retain(|job, _| state.pending.contains_key(job));
+            state
+                .pending
+                .iter()
+                .filter(|(job, _)| !local.lookup_holds.get(*job).is_some_and(|h| h.held(now)))
+                .map(|(job, assignment)| (job.clone(), assignment.clone()))
+                .collect()
+        };
+        for (job, assignment) in due {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            let answer = match &assignment.job.repository {
+                Some(repository) => self.api.workflow_run(repository, job.run_id).await,
+                None => Err(GitHubCallError::new(
+                    Failure::ProtocolDrift,
+                    "the assignment named no repository",
+                )),
+            };
+            if let Err(e) = &answer
+                && matches!(e.failure, Failure::Unavailable | Failure::Throttled)
+            {
+                let now = self.store.clock().now();
+                let (base, cap) = (self.config.call_backoff, self.config.call_backoff_cap);
+                let mut local = self.local();
+                let hold = local.lookup_holds.entry(job.clone()).or_default();
+                if hold.failures.saturating_add(1) < self.config.lookup_attempts {
+                    tracing::warn!(
+                        failure = e.failure.as_str(),
+                        run_id = job.run_id.0,
+                        "run_lookup_unanswered"
+                    );
+                    hold.fail(now, base, cap);
+                    continue;
+                }
+            }
+            self.local().lookup_holds.remove(&job);
+            let lookup = run_lookup(&answer);
+            if self.record_lookup(&job, &assignment, lookup).await? {
+                polled.looked_up.push(job);
+            }
+        }
+        Ok(())
+    }
+
+    /// `RecordRunLookup` for `job`, under an id derived from the head it is decided at; logs
+    /// `job_refused` for the refusal it journaled. Whether it was recorded (a lookup for a job no
+    /// longer pending is refused `not_pending` and changes nothing).
+    async fn record_lookup(
+        &self,
+        job: &JobKey,
+        assignment: &Assignment,
+        lookup: RunLookup,
+    ) -> Result<bool, ListenerError> {
+        let (_, head) = self.load().await?;
+        let id = self.command_id(
+            b"lookup",
+            &[
+                job.job_id.0.as_bytes(),
+                &job.run_id.0.to_be_bytes(),
+                &revision_bytes(head),
+            ],
+        );
+        let event = match &lookup {
+            RunLookup::Found(facts) => facts.event_name,
+            RunLookup::Failed => assignment.job.event_name,
+        };
+        let body = ScaleSetCommand::RecordRunLookup {
+            job: job.clone(),
+            lookup,
+        };
+        match self.save(id, body, None).await? {
+            Outcome::Accepted { appended, .. } => {
+                for refused in self.journaled(&appended).await? {
+                    let ScaleSetEvent::AssignedJobRefused(refused) = refused else {
+                        continue;
+                    };
+                    tracing::warn!(
+                        repository = assignment
+                            .job
+                            .repository
+                            .as_ref()
+                            .map_or("", |r| r.0.as_str()),
+                        event = event.as_str(),
+                        reason = refused.reason.as_str(),
+                        run_id = refused.job.run_id.0,
+                        "job_refused"
+                    );
+                }
+                Ok(true)
+            }
+            Outcome::Refused {
+                rejection: ScaleSetRejection::StaleRun,
+                ..
+            } => Err(ListenerError::Fenced),
+            Outcome::Refused { .. } => Ok(false),
+        }
+    }
+
+    /// Sends each cancel the stream names due ([`ScaleSetState::refusal_action`]), unless
+    /// cancels are held, and records each answer; a lost answer holds cancels and ends the pass.
+    async fn cancel_refused_runs(&self, polled: &mut Polled) -> Result<(), ListenerError> {
+        if self.local().cancels.held(self.store.clock().now()) {
+            return Ok(());
+        }
+        loop {
+            let (state, head) = self.load().await?;
+            let Some(RefusalAction::CancelRun(job)) = state.refusal_action() else {
+                break;
+            };
+            let repository = state.refused_repository(&job).cloned();
+            let Some(body) = cancel_refused(self.api, &job, repository.as_ref()).await else {
+                tracing::warn!(run_id = job.run_id.0, "refused_run_cancel_unanswered");
+                let now = self.store.clock().now();
+                let (base, cap) = (self.config.call_backoff, self.config.call_backoff_cap);
+                self.local().cancels.fail(now, base, cap);
+                return Ok(());
+            };
+            let id = self.command_id(
+                b"cancel",
+                &[
+                    job.job_id.0.as_bytes(),
+                    &job.run_id.0.to_be_bytes(),
+                    &revision_bytes(head),
+                ],
+            );
+            match self.save(id, body, None).await? {
+                Outcome::Accepted { .. } => polled.cancelled.push(job),
+                Outcome::Refused {
+                    rejection: ScaleSetRejection::StaleRun,
+                    ..
+                } => return Err(ListenerError::Fenced),
+                // not due any more (a job fact raced it): asking again would loop
+                Outcome::Refused { rejection, .. } => {
+                    tracing::warn!(code = rejection.code(), "cancel_answer_refused");
+                    break;
+                }
+            }
+        }
+        self.local().cancels.clear();
+        Ok(())
     }
 
     /// On the first poll of a session by this listener: the cursor's message, recorded in this
@@ -864,8 +1140,19 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
         &self,
         appended: &Appended,
     ) -> Result<Vec<RunnerRequestId>, ListenerError> {
-        let stream = stream_of::<ScaleSet>(self.config.pool.as_str())?;
         let mut acquire = Vec::new();
+        for event in self.journaled(appended).await? {
+            if let ScaleSetEvent::MessageRecorded(e) = event {
+                acquire.extend(e.acquire);
+            }
+        }
+        Ok(acquire)
+    }
+
+    /// The scale-set events `appended` journaled, in order.
+    async fn journaled(&self, appended: &Appended) -> Result<Vec<ScaleSetEvent>, ListenerError> {
+        let stream = stream_of::<ScaleSet>(self.config.pool.as_str())?;
+        let mut journaled = Vec::new();
         for part in appended.streams.iter().filter(|s| s.stream == stream) {
             let after = part.first.get().checked_sub(1).map(StreamRevision::new);
             let events = self
@@ -880,12 +1167,10 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier, A: ScaleSetApi>
                         stream: stream.clone(),
                         what: "event_payload",
                     })?;
-                if let ScaleSetEvent::MessageRecorded(e) = event {
-                    acquire.extend(e.acquire);
-                }
+                journaled.push(event);
             }
         }
-        Ok(acquire)
+        Ok(journaled)
     }
 
     /// `AcquireJobs` for `requests`, and `RecordAcquireResult` when it answered: `Ok(None)` when

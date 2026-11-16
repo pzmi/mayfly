@@ -190,6 +190,26 @@ pub enum EventName {
     Unknown,
 }
 
+impl EventName {
+    /// GitHub's name of the event (`pull_request`), `unknown` for [`EventName::Unknown`]: the
+    /// `event` field of the `job_refused` log and the configuration's `allowed_events` spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::PullRequest => "pull_request",
+            Self::PullRequestTarget => "pull_request_target",
+            Self::WorkflowDispatch => "workflow_dispatch",
+            Self::Schedule => "schedule",
+            Self::MergeGroup => "merge_group",
+            Self::Release => "release",
+            Self::WorkflowRun => "workflow_run",
+            Self::IssueComment => "issue_comment",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// A `JobAvailable` offer, as the ACL hands it to the domain: the request id and what trust
 /// classification reads. Its strings never reach the domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,10 +404,22 @@ pub struct JobKey {
 }
 
 /// A repository's full name, `owner/name`, as the ACL bounded it (for a `JobAssigned`,
-/// `ownerName/repositoryName`). Compared exactly, never interpolated.
+/// `ownerName/repositoryName`). Never interpolated. The classification compares two names as
+/// GitHub does, ignoring ASCII case ([`RepositoryName::same`]); `==` stays exact, for the
+/// journal's own bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RepositoryName(pub String);
+
+impl RepositoryName {
+    /// Whether `other` names the same repository: GitHub's owner and repository names are
+    /// case-insensitive (`Example-Org/App` is `example-org/app`), and both are ASCII. Pinned by
+    /// `tests/demand.rs::should_compare_repositories_ignoring_case_when_an_assignment_is_classified`.
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(&other.0)
+    }
+}
 
 /// A `JobAssigned` with what the classification reads from the message itself. A field the
 /// message lacked is `None`, `Unknown` or empty, and the job is then unclassifiable (A5).
@@ -473,6 +505,20 @@ pub enum RefusalReason {
     LookupFailed,
 }
 
+impl RefusalReason {
+    /// Its journaled code (the serde form): the `reason` field of the `job_refused` log.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RepositoryNotAllowed => "repository_not_allowed",
+            Self::EventNotAllowed => "event_not_allowed",
+            Self::Fork => "fork",
+            Self::Unclassifiable => "unclassifiable",
+            Self::LookupFailed => "lookup_failed",
+        }
+    }
+}
+
 /// An assigned job's class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
@@ -485,7 +531,7 @@ pub enum Classification {
 /// Classifies an assignment from its message and its run's lookup (ADR 0090, owner 2026-11-11
 /// and 2026-11-12; `formal/scaleset.qnt`'s `lookupRun` with `TRUST`). In order: a failed lookup
 /// refuses; the repository must be known, agree between the message and the run, and be allowed;
-/// the labels must name the scale set; the message's and the run's event must both be known,
+/// names compare ignoring case, as GitHub's do; the labels must name the scale set; the message's and the run's event must both be known,
 /// agree, and be allowed (a `JobAssigned` without an event name is unclassifiable, A5); the head repository must be known and be the
 /// base. With no policy applied every job is refused (fail closed). Pinned by
 /// `tests/demand.rs::should_trust_only_an_allowed_event_of_an_allowed_repository_when_an_assignment_is_classified`.
@@ -503,13 +549,13 @@ pub fn classify_assigned(
     let (Some(repository), Some(base)) = (&job.repository, &run.repository) else {
         return refuse(RefusalReason::Unclassifiable);
     };
-    if repository != base {
+    if !repository.same(base) {
         return refuse(RefusalReason::Unclassifiable);
     }
     let Some(policy) = policy else {
         return refuse(RefusalReason::RepositoryNotAllowed);
     };
-    if !policy.allowed_repositories.contains(base) {
+    if !policy.allowed_repositories.iter().any(|a| a.same(base)) {
         return refuse(RefusalReason::RepositoryNotAllowed);
     }
     if !job.labels.contains(&policy.scale_set_name) {
@@ -524,7 +570,7 @@ pub fn classify_assigned(
     }
     match &run.head_repository {
         None => refuse(RefusalReason::Unclassifiable),
-        Some(head) if head != base => refuse(RefusalReason::Fork),
+        Some(head) if !head.same(base) => refuse(RefusalReason::Fork),
         Some(_) => Classification::Trusted,
     }
 }

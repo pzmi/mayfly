@@ -10,6 +10,7 @@ installation_id = 12345678
 private_key = "keychain:mayfly/app-key"
 api_url = "https://ghes.example/api/v3"
 web_url = "https://ghes.example"
+check_fork_pr_setting = true
 
 [host]
 reserve_memory_mib = 8192
@@ -48,6 +49,9 @@ breaker_failures = 5
 breaker_window = "1h"
 runner_refresh_at = "03:30"
 capacity_policy = "demand"
+allowed_repositories = ["example-org/app", "example-org/site"]
+allowed_events = ["push", "workflow_dispatch"]
+cancel_refused_runs = true
 
 [[pools]]
 name = "lin"

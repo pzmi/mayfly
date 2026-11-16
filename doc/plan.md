@@ -749,7 +749,11 @@ scale set advertising `maxCapacity` 0 (`doc/github-scaleset.md` §5), so a `dema
 nothing never sees its job and can starve. An older build refuses the key (unknown keys are
 refused). On github.com each pool also lists its `allowed_repositories` and may set
 `allowed_events` and `cancel_refused_runs`; an organisation may set
-`check_fork_pr_setting` (ADR 0090, GH-08).
+`check_fork_pr_setting` (ADR 0090, GH-08). As built (GH-08): github.com is `api_url` absent or
+on `api.github.com`; there `allowed_repositories` is required and never empty (elsewhere it is
+optional and empty refuses every assignment), each listed once ignoring case; `allowed_events`
+takes a subset of ADR 0090's list, never empty (any other event is refused naming ADR 0090); `check_fork_pr_setting` lives in `[github]` (one organisation
+per daemon); an `enterprise` key is refused naming ADR 0040.
 As built (RT-02, ADR 0091; owner, 2026-11-12: "reasonable defaults out of the box"): `state_dir`
 and `[provider] tart_home` are optional. Without them `mayflyd` uses the platform's standard
 places, creating them `0700` and then running its usual checks: on macOS `~/Library/Application

@@ -40,6 +40,7 @@ use crate::config::credential_base_problem;
 use crate::error::{ErrorClass, ErrorKind, GitHubError};
 use crate::http::{HttpRequest, HttpResponse, Method, Transport};
 use crate::metrics::Operation;
+use crate::permissions::GrantedPermissions;
 use crate::retry::Phase;
 use crate::wire::{
     decode_message, decode_offer, decode_runner, decode_scale_set, decode_statistics,
@@ -104,6 +105,56 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> ScaleSetClient<T, C, R, 
     /// Whether a session is held for `scale_set`.
     pub async fn holds_session(&self, scale_set: ScaleSetId) -> bool {
         self.sessions.lock().await.contains_key(&scale_set.0)
+    }
+
+    /// `check_fork_pr_setting` (ADR 0090 point 4, spec §6.2): whether the organisation runs
+    /// workflows from fork pull requests in its private repositories
+    /// (`run_workflows_from_fork_pull_requests`), on the installation token
+    /// ("Administration: Read"). Pinned by
+    /// `tests/client/runs.rs::should_read_the_fork_setting_and_the_group_when_checked`.
+    ///
+    /// # Errors
+    /// [`GitHubCallError`]; an answer without the boolean is [`Failure::ProtocolDrift`].
+    pub async fn fork_pr_workflows_run(&self) -> Result<bool, GitHubCallError> {
+        let url = self.auth.config().fork_pr_setting_url();
+        let answer = self
+            .rest(Operation::ForkPrSetting, Method::Get, &url, false)
+            .await
+            .map_err(|e| call_error(&e))?;
+        body_json(&answer)?
+            .get("run_workflows_from_fork_pull_requests")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| drift("the fork-PR setting lacks its boolean"))
+    }
+
+    /// Whether the runner group `group_id` admits public repositories
+    /// (`allows_public_repositories`, spec §6.2's report), on the installation token
+    /// ("Self-hosted runners").
+    ///
+    /// # Errors
+    /// [`GitHubCallError`]; an answer without the boolean is [`Failure::ProtocolDrift`].
+    pub async fn runner_group_admits_public(&self, group_id: u64) -> Result<bool, GitHubCallError> {
+        let url = self.auth.config().runner_group_url(group_id);
+        let answer = self
+            .rest(Operation::RunnerGroupRead, Method::Get, &url, false)
+            .await
+            .map_err(|e| call_error(&e))?;
+        body_json(&answer)?
+            .get("allows_public_repositories")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| drift("the runner group lacks allows_public_repositories"))
+    }
+
+    /// The installation's granted permissions (ADR 0045), for `doctor`'s comparison with what
+    /// the pools' options need.
+    ///
+    /// # Errors
+    /// [`GitHubCallError`].
+    pub async fn granted_permissions(&self) -> Result<GrantedPermissions, GitHubCallError> {
+        self.auth
+            .granted_permissions()
+            .await
+            .map_err(|e| call_error(&e))
     }
 
     /// One Actions-service call with the admin token, retried once with a fresh token after a

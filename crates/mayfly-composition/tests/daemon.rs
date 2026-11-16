@@ -376,6 +376,24 @@ max_running = 2
         command
     }
 
+    /// Adds `github` to the config's `[github]` table and `pool` to its pool's (GH-08's trust
+    /// settings).
+    fn configure(&self, github: &str, pool: &str) {
+        let config = std::fs::read_to_string(self.config()).expect("the config");
+        assert!(config.contains("max_running = 2\n"), "{config}");
+        std::fs::write(
+            self.config(),
+            config
+                .replacen("[github]\n", &format!("[github]\n{github}\n"), 1)
+                .replacen(
+                    "max_running = 2\n",
+                    &format!("max_running = 2\n{pool}\n"),
+                    1,
+                ),
+        )
+        .expect("the config");
+    }
+
     /// Points the config's `[github]` at `github` and hands the daemon its App key.
     fn serve_github(&mut self, github: &ServedGithub) {
         let config = std::fs::read_to_string(self.config()).expect("the config");
@@ -520,14 +538,31 @@ struct ServedGithub {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// What the world's installation is granted: GitHub's implied metadata, the self-hosted
+/// runners, and the run lookups, the cancel option and the fork check.
+const GRANTED: &[(&str, &str)] = &[
+    ("metadata", "read"),
+    ("organization_self_hosted_runners", "write"),
+    ("actions", "write"),
+    ("organization_administration", "read"),
+];
+
 /// The world's App and installation, as its config names them.
 const APP_CLIENT_ID: &str = "Iv1.0123456789abcdef";
 const ORGANISATION: &str = "example-org";
 
 impl ServedGithub {
-    /// The fake with `knobs`, the world's App installed in its organisation with the
-    /// self-hosted runners permission, and a key pair made for it.
+    /// The fake with `knobs`, the world's App installed in its organisation with every
+    /// permission the options can need ([`GRANTED`]), and a key pair made for it.
     fn start(knobs: mayfly_fake_github::Knobs) -> Self {
+        Self::start_granting(knobs, GRANTED)
+    }
+
+    /// [`ServedGithub::start`], the installation granted `permissions` instead.
+    fn start_granting(
+        knobs: mayfly_fake_github::Knobs,
+        permissions: &'static [(&'static str, &'static str)],
+    ) -> Self {
         use mayfly_fake_github::{FakeConfig, FakeGithub, FakeServer, Scope};
         let keys = mayfly_fake_github::generate_app_key();
         let (public, private) = (keys.public_pem.clone(), keys.private_pem.clone());
@@ -551,13 +586,10 @@ impl ServedGithub {
                             service_url: format!("{base}/service"),
                             admin_token_lifetime_secs: 3600,
                             admin_token_key_pem: private,
-                            permissions: [
-                                ("metadata", "read"),
-                                ("organization_self_hosted_runners", "write"),
-                            ]
-                            .into_iter()
-                            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                            .collect(),
+                            permissions: permissions
+                                .iter()
+                                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                                .collect(),
                         },
                         knobs,
                         std::sync::Arc::new(|| {
@@ -617,6 +649,60 @@ fn pool_job(run_id: u64) -> mayfly_fake_github::JobSpec {
         labels: vec![POOL.to_owned()],
         ..mayfly_fake_github::JobSpec::default()
     }
+}
+
+/// A direct-flow job (github.com) of the world's organisation's `repository`, for its pool.
+#[cfg(target_os = "linux")]
+fn direct_job(
+    run_id: u64,
+    repository: &str,
+    event: &str,
+    head: &str,
+) -> mayfly_fake_github::JobSpec {
+    mayfly_fake_github::JobSpec {
+        repository: repository.to_owned(),
+        event: event.to_owned(),
+        head_repository: head.to_owned(),
+        ..pool_job(run_id)
+    }
+}
+
+/// Knobs for a github.com daemon test: the direct flow, a poll held one second, and the
+/// `Default` runner group admitting public repositories.
+fn direct_knobs() -> mayfly_fake_github::Knobs {
+    let mut knobs = mayfly_fake_github::Knobs {
+        flow: mayfly_fake_github::Flow::Direct,
+        poll_hold: Duration::from_secs(1),
+        ..mayfly_fake_github::Knobs::default()
+    };
+    knobs.runner_groups[0].allows_public_repositories = true;
+    knobs
+}
+
+/// The refusals the pool's scale-set stream journaled, as `(run id, reason)`.
+#[cfg(target_os = "linux")]
+fn refusals(
+    journal: &SqliteJournal,
+    pool: &str,
+) -> Vec<(u64, mayfly_control_domain::demand::RefusalReason)> {
+    scale_set_events(journal, pool)
+        .into_iter()
+        .filter_map(|e| match e {
+            mayfly_control_domain::scaleset::ScaleSetEvent::AssignedJobRefused(r) => {
+                Some((r.job.run_id.0, r.reason))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `github_trust` check of a `doctor --json` report.
+fn trust_check(doctor: &Value) -> Value {
+    doctor["checks"]
+        .as_array()
+        .and_then(|checks| checks.iter().find(|c| c["name"] == "github_trust"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 /// The events of `pool`'s scale-set stream.
@@ -1448,6 +1534,171 @@ mod github {
             "{doctor}"
         );
     }
+
+    // ---- GH-08: the start-up trust checks ------------------------------------------------
+
+    #[test]
+    fn should_refuse_every_pool_and_report_it_when_fork_workflows_run() {
+        // given: `check_fork_pr_setting`, and the organisation runs workflows from fork pull
+        // requests in its private repositories
+        let mut knobs = direct_knobs();
+        knobs.fork_pr_setting.run_workflows_from_fork_pull_requests = true;
+        let github = ServedGithub::start(knobs);
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        world.configure(
+            "check_fork_pr_setting = true",
+            "allowed_repositories = [\"example-org/app\"]",
+        );
+        github.fake.queue_job(pool_job(7));
+        let daemon = world.start();
+        daemon.ready();
+
+        // when: `doctor` reads the trust checks (a bounded poll: the read follows recovery)
+        let mut doctor = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "the fork-PR setting read, in doctor",
+            || {
+                doctor = world.doctor();
+                trust_check(&doctor)["verdict"] == "fail"
+            },
+        );
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; doctor: {doctor}; daemon: {}",
+                daemon_output(&world)
+            );
+        }
+        let exit = daemon.terminate();
+
+        // then: refused with its reason, and no pool served: no scale set, no session
+        assert_eq!(exit, Some(0));
+        let check = trust_check(&doctor);
+        assert!(
+            check["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("fork pull requests")),
+            "{doctor}"
+        );
+        assert_eq!(github.fake.counts().sessions_created, 0);
+        let events = scale_set_events(&open_journal(&world), POOL);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ScaleSetEvent::ScaleSetEnsured(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn should_serve_no_pool_and_fail_doctor_when_the_fork_setting_is_denied() {
+        // given: `check_fork_pr_setting`, and an installation without "Administration: Read",
+        // so GitHub answers every read of the setting 403
+        let github = ServedGithub::start_granting(
+            direct_knobs(),
+            &[
+                ("metadata", "read"),
+                ("organization_self_hosted_runners", "write"),
+                ("actions", "read"),
+            ],
+        );
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        world.configure(
+            "check_fork_pr_setting = true",
+            "allowed_repositories = [\"example-org/app\"]",
+        );
+        github.fake.queue_job(pool_job(7));
+        let daemon = world.start();
+        daemon.ready();
+
+        // when: `doctor` reads the trust checks, until the denied read is reported (the
+        // documented signal: the `trust` answer's `fork_pr_setting`, which is `pending` until
+        // its first answer); every later read is denied too
+        let mut doctor = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "the denied fork-PR setting read, in doctor",
+            || {
+                doctor = world.doctor();
+                trust_check(&doctor)["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("403 or 404"))
+            },
+        );
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; doctor: {doctor}; daemon: {}",
+                daemon_output(&world)
+            );
+        }
+        let sessions = github.fake.counts().sessions_created;
+        let exit = daemon.terminate();
+
+        // then: fail closed: doctor fails, and no listener started (no scale set, no session)
+        assert_eq!(exit, Some(0));
+        assert_eq!(trust_check(&doctor)["verdict"], "fail", "{doctor}");
+        assert_eq!(sessions, 0);
+        assert_eq!(github.fake.counts().sessions_created, 0);
+        let events = scale_set_events(&open_journal(&world), POOL);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ScaleSetEvent::ScaleSetEnsured(_))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn should_serve_the_pool_and_report_its_runner_group_when_the_fork_setting_is_off() {
+        // given: `check_fork_pr_setting` with fork workflows off; allowed repositories behind a
+        // runner group that admits no public repository
+        let mut knobs = direct_knobs();
+        knobs.runner_groups[0].allows_public_repositories = false;
+        let github = ServedGithub::start(knobs);
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        world.configure(
+            "check_fork_pr_setting = true",
+            "allowed_repositories = [\"example-org/app\", \"example-org/site\"]",
+        );
+        let daemon = world.start();
+        daemon.ready();
+
+        // when: the pool's session opens and `doctor` reads the report
+        let reported = format!(
+            "pool {POOL} has allowed repositories but its runner group admits no public repository"
+        );
+        let mut doctor = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "a session opened and the runner group reported, in doctor",
+            || {
+                doctor = world.doctor();
+                github.fake.counts().sessions_created >= 1
+                    && trust_check(&doctor)["detail"]
+                        .as_str()
+                        .is_some_and(|d| d.contains(&reported))
+            },
+        );
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; doctor: {doctor}; daemon: {}",
+                daemon_output(&world)
+            );
+        }
+        let exit = daemon.terminate();
+
+        // then: served; the group reported as a possible problem (a warning, not a refusal),
+        // naming no repository as public; the fork setting passed
+        assert_eq!(exit, Some(0));
+        let check = trust_check(&doctor);
+        assert_eq!(check["verdict"], "warn", "{doctor}");
+        let detail = check["detail"].as_str().unwrap_or_default();
+        assert!(!detail.contains("example-org/"), "{doctor}");
+        assert!(!detail.contains("fork pull requests"), "{doctor}");
+    }
 }
 
 /// A real placement under `mayflyd` (VER-09, ver §7.5). **Linux only, deliberately:** the
@@ -1462,6 +1713,7 @@ mod placement {
     use mayfly_control_domain::attempt::{
         Attempt, AttemptEvent, GuestOs, RefusalReason, RetireReason,
     };
+    use mayfly_control_domain::demand::RefusalReason as TrustRefusal;
     use mayfly_control_domain::image::{RunnerVersion, base_name};
     use mayfly_control_domain::placement::{ImagePlacement, PlacementEvent, placement_instance};
     use mayfly_data::Shim;
@@ -2434,6 +2686,160 @@ mod placement {
         let tart_log = std::fs::read_to_string(world.tart_home().join("invocations.jsonl"))
             .unwrap_or_default();
         assert_no_secret(&tart_log, &github);
+    }
+
+    // ---- trust on github.com (GH-08) -------------------------------------------------------
+
+    /// Waits, by a bounded poll of the fake's counts and the journal, for `done`; on a timeout
+    /// names what the daemon, the fake and the stream showed.
+    fn await_trust(
+        world: &World,
+        github: &ServedGithub,
+        what: &str,
+        done: impl Fn(&mayfly_fake_github::Counts, &[(u64, TrustRefusal)]) -> bool,
+    ) {
+        let waited = mayfly_testkit_shared::poll::try_wait_until(TO_LAUNCH, what, || {
+            done(&github.fake.counts(), &refusals(&open_journal(world), POOL))
+        });
+        if let Err(timed_out) = waited {
+            panic!(
+                "{timed_out}; counts: {:?}; refusals: {:?}; status: {}; daemon: {}",
+                github.fake.counts(),
+                refusals(&open_journal(world), POOL),
+                world.try_status(),
+                daemon_output(world)
+            );
+        }
+    }
+
+    fn sorted(mut refused: Vec<(u64, TrustRefusal)>) -> Vec<(u64, TrustRefusal)> {
+        refused.sort_by_key(|(run, _)| *run);
+        refused
+    }
+
+    #[test]
+    fn should_mint_only_for_the_trusted_job_when_a_forks_run_is_assigned_beside_it() {
+        // given: github.com's direct flow; the pool allows `example-org/app`, behind a runner
+        // group that admits public repositories; a fork's pull request and a push to it are
+        // assigned together
+        use mayfly_control_domain::scaleset::ScaleSetEvent;
+        let (image, registry) = registry();
+        let github = ServedGithub::start(direct_knobs());
+        let mut world = serving(&registry, &image, true);
+        world.serve_github(&github);
+        world.configure("", "allowed_repositories = [\"example-org/app\"]");
+        let _reaped = Reaped(&world);
+        github
+            .fake
+            .queue_job(direct_job(21, "app", "pull_request", "contributor/app"));
+        github.fake.queue_job(direct_job(20, "app", "push", ""));
+        let (daemon, _host) = pinned_run(&world);
+
+        // when: both looked up; the push's runner minted
+        await_trust(
+            &world,
+            &github,
+            "the fork refused and the push minted",
+            |c, r| c.jit_configs >= 1 && !r.is_empty(),
+        );
+        let exit = daemon.terminate();
+
+        // then: one mint, for the trusted job only; the fork refused as one and journaled;
+        // nothing cancelled without the option
+        assert_eq!(exit, Some(0));
+        assert_eq!(
+            github.fake.counts().jit_configs,
+            1,
+            "no runner for the fork"
+        );
+        assert_eq!(github.fake.counts().run_cancels, 0);
+        let journal = open_journal(&world);
+        assert_eq!(refusals(&journal, POOL), [(21, TrustRefusal::Fork)]);
+        let trusted: Vec<u64> = scale_set_events(&journal, POOL)
+            .into_iter()
+            .filter_map(|e| match e {
+                ScaleSetEvent::AssignedJobTrusted(t) => Some(t.job.run_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(trusted, [20]);
+        assert_no_secret(&daemon_output(&world), &github);
+    }
+
+    #[test]
+    fn should_cancel_each_refused_run_and_mint_for_the_trusted_job_when_cancel_refused_runs_is_on()
+    {
+        // given: `cancel_refused_runs`; a job whose lookup is answered 404, then a fork's run
+        // and an unlisted repository's push, then a push to the allowed repository
+        let (image, registry) = registry();
+        let github = ServedGithub::start(direct_knobs());
+        let mut world = serving(&registry, &image, true);
+        world.serve_github(&github);
+        world.configure(
+            "",
+            "allowed_repositories = [\"example-org/app\"]\ncancel_refused_runs = true",
+        );
+        let _reaped = Reaped(&world);
+        github.fake.fail_next(
+            mayfly_fake_github::Route::WorkflowRun,
+            mayfly_fake_github::Fault::status(404),
+        );
+        github.fake.queue_job(direct_job(30, "app", "push", ""));
+        let (daemon, _host) = pinned_run(&world);
+
+        // when: each refused and its run cancelled, one after the other; then the push
+        await_trust(
+            &world,
+            &github,
+            "the failed lookup refused and cancelled",
+            |c, r| c.run_cancels >= 1 && r.len() == 1,
+        );
+        github
+            .fake
+            .queue_job(direct_job(31, "app", "pull_request", "contributor/app"));
+        github.fake.queue_job(direct_job(32, "other", "push", ""));
+        await_trust(
+            &world,
+            &github,
+            "the fork and the unlisted refused and cancelled",
+            |c, r| c.run_cancels >= 3 && r.len() == 3,
+        );
+        github.fake.queue_job(direct_job(33, "app", "push", ""));
+        await_trust(&world, &github, "the push minted", |c, _| {
+            c.jit_configs >= 1
+        });
+        let exit = daemon.terminate();
+
+        // then: three refusals, each run cancelled once and its answer journaled once; one mint,
+        // for the trusted job
+        assert_eq!(exit, Some(0));
+        let journal = open_journal(&world);
+        assert_eq!(
+            sorted(refusals(&journal, POOL)),
+            [
+                (30, TrustRefusal::LookupFailed),
+                (31, TrustRefusal::Fork),
+                (32, TrustRefusal::RepositoryNotAllowed)
+            ]
+        );
+        let answered: Vec<u64> = scale_set_events(&journal, POOL)
+            .into_iter()
+            .filter_map(|e| match e {
+                mayfly_control_domain::scaleset::ScaleSetEvent::CancelAnswered(c) => {
+                    Some(c.job.run_id.0)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sorted_ids(answered), [30, 31, 32]);
+        assert_eq!(github.fake.counts().run_cancels, 3);
+        assert_eq!(github.fake.counts().jit_configs, 1);
+        assert_no_secret(&daemon_output(&world), &github);
+    }
+
+    fn sorted_ids(mut ids: Vec<u64>) -> Vec<u64> {
+        ids.sort_unstable();
+        ids
     }
 
     // ---- a runner's exit (DP-09) -----------------------------------------------------------

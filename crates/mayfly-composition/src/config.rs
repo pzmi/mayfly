@@ -17,19 +17,28 @@
 //! - **Secrets are references, never values** (ADR 0033): a secret field holds a
 //!   [`SecretRef`], and neither a refused reference nor a syntax error ever repeats the text it
 //!   refused. Pinned by `tests/config.rs::should_not_echo_a_pasted_secret_when_the_reference_is_refused`.
+//! - **Trust on github.com** (GH-08, ADR 0090): a pool on github.com (`api_url` absent or
+//!   `https://api.github.com`) must list its `allowed_repositories` (full names, public ones
+//!   allowed, never empty, each listed once ignoring case, as GitHub compares names);
+//!   `allowed_events` defaults to ADR 0090's list and takes only a subset of it (adding an event
+//!   is a new decision, ADR 0090 point 2); `cancel_refused_runs` and `[github] check_fork_pr_setting` default
+//!   to false; an `enterprise` scope is refused naming ADR 0040. Pinned by
+//!   `tests/config.rs::should_read_each_pools_trust_settings_when_they_are_configured` and the
+//!   `trust_*` (`trust_events_outside_adr_0090` among them) and `refused_enterprise` fixtures.
 //! - **Keys are never renamed** (compatibility rule); a breaking shape raises
 //!   [`SCHEMA_VERSION`]. Pinned by `tests/config.rs::should_accept_every_key_when_the_full_fixture_is_parsed`.
 //!
 //! The config file itself holds no secret, so it carries no permission requirement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use mayfly_adapter_github::{BaseProblem, Url, parse_base};
+use mayfly_adapter_github::{BaseProblem, Url, event_name, parse_base, split_full_name};
 use mayfly_control_domain::capacity;
+use mayfly_control_domain::demand::{EventName, RepositoryName, TrustPolicy};
 use mayfly_control_domain::reconcile::PolicyOf;
 use mayfly_domain::{PoolName, SecretRef};
 use toml::{Table, Value};
@@ -123,7 +132,23 @@ pub struct GithubConfig {
     /// The web base runners register under (`web_url`): [`DEFAULT_WEB_URL`] when absent, the
     /// GHES host's root for GHES. The same rule as `api_url`.
     pub web_url: Url,
+    /// `check_fork_pr_setting` (ADR 0090 point 4, default false): at start-up, read the
+    /// organisation's fork-PR setting for private repositories and refuse its pools while
+    /// workflows from fork pull requests run ("Administration: Read").
+    pub check_fork_pr_setting: bool,
 }
+
+impl GithubConfig {
+    /// Whether the API is github.com's, where jobs are assigned with no offer and every pool
+    /// must list its `allowed_repositories` (ADR 0090).
+    #[must_use]
+    pub fn is_github_com(&self) -> bool {
+        self.api_url.host_str() == Some(GITHUB_COM_API_HOST)
+    }
+}
+
+/// github.com's REST API host.
+pub const GITHUB_COM_API_HOST: &str = "api.github.com";
 
 /// `[github] api_url` when absent: github.com's REST API.
 pub const DEFAULT_API_URL: &str = "https://api.github.com";
@@ -282,6 +307,31 @@ pub struct PoolConfig {
     pub runner_refresh_at: Option<TimeOfDay>,
     /// What the pool keeps ahead of the pools after it (ADR 0069); `exact` by default.
     pub capacity_policy: CapacityPolicy,
+    /// `allowed_repositories` (ADR 0090): the full names (`owner/name`) whose assigned jobs may
+    /// be classified trusted, public ones included. Required, and never empty, on github.com;
+    /// empty when absent elsewhere (GHES classifies offers instead, ADR 0027), which refuses
+    /// every assignment.
+    pub allowed_repositories: BTreeSet<RepositoryName>,
+    /// `allowed_events` (ADR 0090, amended 2026-11-12): [`TrustPolicy::default_events`] when
+    /// absent, a subset of it otherwise.
+    pub allowed_events: BTreeSet<EventName>,
+    /// `cancel_refused_runs` (ADR 0090, default false, "Actions: Write"): a refused run is
+    /// cancelled instead of sent to a refusal sink.
+    pub cancel_refused_runs: bool,
+}
+
+impl PoolConfig {
+    /// The pool's trust policy as its stream applies it (`ApplyTrustPolicy`, GH-08): its scale
+    /// set is named after the pool (`crate::github::spec_of`).
+    #[must_use]
+    pub fn trust_policy(&self) -> TrustPolicy {
+        TrustPolicy {
+            scale_set_name: self.name.as_str().to_owned(),
+            allowed_repositories: self.allowed_repositories.clone(),
+            allowed_events: self.allowed_events.clone(),
+            cancel_refused_runs: self.cancel_refused_runs,
+        }
+    }
 }
 
 /// `capacity_policy`: what a pool keeps of the host's free capacity ahead of the pools after it
@@ -554,7 +604,8 @@ impl Config {
         let provider = root.read_section("provider", false, read_provider);
         let images = root.read_section("images", false, read_images);
         let shutdown = root.read_section("shutdown", false, read_shutdown);
-        let pools = read_pools(&mut root);
+        let github_com = github.as_ref().is_none_or(GithubConfig::is_github_com);
+        let pools = read_pools(&mut root, github_com);
         let errors = root.finish();
         match (github, pools) {
             (Some(github), Some(pools)) if errors.is_empty() => Ok(Self {
@@ -893,6 +944,10 @@ fn refusal(key: &str) -> Option<(&'static str, &'static str)> {
             "classic runner registration is not supported (ADR 0028): mayfly serves GitHub Runner Scale Sets only",
             "remove `mode`",
         )),
+        "enterprise" => Some((
+            "an enterprise scope is not supported (ADR 0040): a GitHub App cannot serve one, and mayfly serves organisations",
+            "remove `enterprise` and name the `organisation` the App is installed in",
+        )),
         _ => None,
     }
 }
@@ -907,6 +962,7 @@ fn section_keys(key: &str) -> &'static [&'static str] {
             "private_key",
             "api_url",
             "web_url",
+            "check_fork_pr_setting",
         ],
         "host" => &[
             "reserve_memory_mib",
@@ -937,6 +993,9 @@ const POOL_KEYS: &[&str] = &[
     "breaker_window",
     "runner_refresh_at",
     "capacity_policy",
+    "allowed_repositories",
+    "allowed_events",
+    "cancel_refused_runs",
 ];
 
 /// A duration as the configuration writes one: a whole number and one unit of `s`, `m`, `h` or
@@ -1028,6 +1087,8 @@ fn read_github(reader: &mut Reader) -> Option<GithubConfig> {
     );
     let api_url = reader.base_url("api_url", DEFAULT_API_URL, "https://ghes.example/api/v3");
     let web_url = reader.base_url("web_url", DEFAULT_WEB_URL, "https://ghes.example");
+    let check_fork_pr_setting =
+        reader.boolean("check_fork_pr_setting", "check_fork_pr_setting = true");
 
     let organisation = organisation.filter(|text| {
         let ok = organisation_ok(text);
@@ -1077,6 +1138,7 @@ fn read_github(reader: &mut Reader) -> Option<GithubConfig> {
         private_key: private_key?,
         api_url: api_url?,
         web_url: web_url?,
+        check_fork_pr_setting: check_fork_pr_setting.unwrap_or(false),
     })
 }
 
@@ -1302,7 +1364,7 @@ fn read_shutdown(reader: &mut Reader) -> Option<ShutdownConfig> {
     })
 }
 
-fn read_pools(root: &mut Reader) -> Option<Vec<PoolConfig>> {
+fn read_pools(root: &mut Reader, github_com: bool) -> Option<Vec<PoolConfig>> {
     let items = match root.value("pools", "[[pools]]", true)? {
         Value::Array(items) => items,
         other => {
@@ -1333,7 +1395,7 @@ fn read_pools(root: &mut Reader) -> Option<Vec<PoolConfig>> {
             continue;
         };
         let mut child = Reader::new(path, table, POOL_KEYS);
-        let pool = read_pool(&mut child);
+        let pool = read_pool(&mut child, github_com);
         root.absorb(child);
         match pool {
             Some(pool) => pools.push((index, pool)),
@@ -1359,7 +1421,7 @@ fn read_pools(root: &mut Reader) -> Option<Vec<PoolConfig>> {
     complete.then(|| pools.into_iter().map(|(_, pool)| pool).collect())
 }
 
-fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
+fn read_pool(reader: &mut Reader, github_com: bool) -> Option<PoolConfig> {
     let name = reader.string("name", "name = \"mac\"", true).and_then(|text| {
         PoolName::new(&text)
             .inspect_err(|_| {
@@ -1455,6 +1517,10 @@ fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
             }
         });
 
+    let allowed_repositories = allowed_repositories_of(reader, github_com);
+    let allowed_events = allowed_events_of(reader);
+    let cancel_refused_runs = reader.boolean("cancel_refused_runs", "cancel_refused_runs = true");
+
     let min_prepared_value = min_prepared.unwrap_or(0);
     if let Some(running) = max_running
         && min_prepared_value > running
@@ -1481,7 +1547,143 @@ fn read_pool(reader: &mut Reader) -> Option<PoolConfig> {
         },
         runner_refresh_at,
         capacity_policy: capacity_policy.unwrap_or_default(),
+        allowed_repositories: allowed_repositories?,
+        allowed_events: allowed_events?,
+        cancel_refused_runs: cancel_refused_runs.unwrap_or(false),
     })
+}
+
+const ALLOWED_REPOSITORIES_EXAMPLE: &str = "allowed_repositories = [\"example-org/app\"]";
+
+/// `allowed_repositories`: required and never empty on github.com, where it is the boundary of
+/// the per-job check (ADR 0090); each entry a full name `owner/name`, listed once (GitHub's
+/// names are case-insensitive, so `Example-Org/App` repeats `example-org/app`).
+fn allowed_repositories_of(
+    reader: &mut Reader,
+    github_com: bool,
+) -> Option<BTreeSet<RepositoryName>> {
+    let example = ALLOWED_REPOSITORIES_EXAMPLE;
+    let items = match reader.value("allowed_repositories", example, false) {
+        None if github_com => {
+            reader.push(
+                "allowed_repositories",
+                ConfigErrorKind::Missing,
+                "required on github.com: only jobs of the listed repositories run (ADR 0090)"
+                    .to_owned(),
+                &format!("add `{example}`, the full names of the repositories this pool serves"),
+            );
+            return None;
+        }
+        None => return Some(BTreeSet::new()),
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            reader.wrong_type(
+                "allowed_repositories",
+                "an array of full names",
+                &other,
+                example,
+            );
+            return None;
+        }
+    };
+    if items.is_empty() {
+        reader.invalid(
+            "allowed_repositories",
+            "is empty: every job of the pool would be refused",
+            &format!("list the repositories this pool serves, like `{example}`"),
+        );
+        return None;
+    }
+    let mut repositories = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut ok = true;
+    for item in items {
+        match item {
+            Value::String(name) if split_full_name(&name).is_some() => {
+                if seen.insert(name.to_ascii_lowercase()) {
+                    repositories.insert(RepositoryName(name));
+                } else {
+                    reader.push(
+                        "allowed_repositories",
+                        ConfigErrorKind::Duplicate,
+                        "lists a repository twice".to_owned(),
+                        "list each repository once",
+                    );
+                    ok = false;
+                }
+            }
+            _ => {
+                reader.invalid(
+                    "allowed_repositories",
+                    "holds an entry that is not a full name `owner/name`",
+                    &format!("write each as GitHub names it, owner and name, like `{example}`"),
+                );
+                ok = false;
+            }
+        }
+    }
+    ok.then_some(repositories)
+}
+
+const ALLOWED_EVENTS_EXAMPLE: &str = "allowed_events = [\"push\", \"workflow_dispatch\"]";
+
+/// `allowed_events`: ADR 0090's default list when absent; otherwise a subset of it, each listed
+/// once, never empty. Any other event, one the classification knows included
+/// (`pull_request_target`, `workflow_run`, `issue_comment`), is refused naming ADR 0090: adding
+/// an event is a new decision (its point 2).
+fn allowed_events_of(reader: &mut Reader) -> Option<BTreeSet<EventName>> {
+    let example = ALLOWED_EVENTS_EXAMPLE;
+    let items = match reader.value("allowed_events", example, false) {
+        None => return Some(TrustPolicy::default_events()),
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            reader.wrong_type("allowed_events", "an array of event names", &other, example);
+            return None;
+        }
+    };
+    if items.is_empty() {
+        reader.invalid(
+            "allowed_events",
+            "is empty: every job of the pool would be refused",
+            "remove it for the default list, or name the events this pool runs",
+        );
+        return None;
+    }
+    let decided = TrustPolicy::default_events();
+    let listed: Vec<&str> = decided.iter().map(|e| e.as_str()).collect();
+    let mut events = BTreeSet::new();
+    let mut ok = true;
+    for item in items {
+        let event = match &item {
+            Value::String(name) => event_name(name),
+            _ => EventName::Unknown,
+        };
+        if !decided.contains(&event) {
+            // a known event is named (a fixed spelling); anything else is never repeated
+            let what = if event == EventName::Unknown {
+                "an event".to_owned()
+            } else {
+                format!("`{}`", event.as_str())
+            };
+            reader.invalid(
+                "allowed_events",
+                &format!(
+                    "holds {what}, outside ADR 0090's list: adding an event is a new decision (ADR 0090 point 2)"
+                ),
+                &format!("use events from: {}", listed.join(", ")),
+            );
+            ok = false;
+        } else if !events.insert(event) {
+            reader.push(
+                "allowed_events",
+                ConfigErrorKind::Duplicate,
+                format!("lists {} twice", event.as_str()),
+                "list each event once",
+            );
+            ok = false;
+        }
+    }
+    ok.then_some(events)
 }
 
 impl Reader {
@@ -1522,6 +1724,17 @@ impl Reader {
                     why.to_owned(),
                     &format!("{fix}: `{example_line}`"),
                 );
+                None
+            }
+        }
+    }
+
+    /// An optional boolean.
+    fn boolean(&mut self, key: &str, example: &str) -> Option<bool> {
+        match self.value(key, example, false)? {
+            Value::Boolean(value) => Some(value),
+            other => {
+                self.wrong_type(key, "a boolean", &other, example);
                 None
             }
         }

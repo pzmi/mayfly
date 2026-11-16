@@ -39,6 +39,11 @@
       "name": "reaper",
       "verdict": "warn",
       "detail": "GitHub's runners have not been listed yet"
+    },
+    {
+      "name": "github_trust",
+      "verdict": "warn",
+      "detail": "the App's permissions have not been read yet"
     }
   ]
 }

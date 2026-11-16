@@ -669,6 +669,9 @@ fn fold_assignments(state: &mut ScaleSetState, facts: &[JobFact]) {
     }
     let refused = &state.refused;
     state.sink_tried.retain(|job| refused.contains(job));
+    state
+        .refused_repositories
+        .retain(|job, _| refused.contains(job));
 }
 
 /// Applies one recorded event.
@@ -768,7 +771,10 @@ pub fn evolve(mut state: ScaleSetState, event: &ScaleSetEvent) -> ScaleSetState 
             }
         }
         ScaleSetEvent::AssignedJobRefused(e) => {
-            state.pending.remove(&e.job);
+            let assignment = state.pending.remove(&e.job);
+            if let Some(repository) = assignment.and_then(|a| a.job.repository) {
+                state.refused_repositories.insert(e.job.clone(), repository);
+            }
             state.refused.insert(e.job.clone());
         }
         ScaleSetEvent::SinkStarted(e) => {
@@ -794,6 +800,7 @@ pub fn evolve(mut state: ScaleSetState, event: &ScaleSetEvent) -> ScaleSetState 
             state.pending.clear();
             state.trusted.clear();
             state.refused.clear();
+            state.refused_repositories.clear();
             state.cancel_tried.clear();
             state.sink_tried.clear();
         }

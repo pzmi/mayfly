@@ -323,6 +323,36 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn should_read_back_each_event_when_the_domain_names_it() {
+        // given: every event the domain names, as GitHub writes it (`EventName::as_str`, which
+        // the configuration's `allowed_events` and the `job_refused` log use) and as serde does
+        let named = [
+            EventName::Push,
+            EventName::PullRequest,
+            EventName::PullRequestTarget,
+            EventName::WorkflowDispatch,
+            EventName::Schedule,
+            EventName::MergeGroup,
+            EventName::Release,
+            EventName::WorkflowRun,
+            EventName::IssueComment,
+        ];
+
+        // when
+        let read: Vec<EventName> = named.iter().map(|e| event_name(e.as_str())).collect();
+        let serde: Vec<String> = named
+            .iter()
+            .map(|e| serde_json::to_value(e).map_or_else(|_| String::new(), |v| v.to_string()))
+            .collect();
+
+        // then
+        assert_eq!(read, named);
+        let quoted: Vec<String> = named.iter().map(|e| format!("{:?}", e.as_str())).collect();
+        assert_eq!(serde, quoted);
+        assert_eq!(event_name(EventName::Unknown.as_str()), EventName::Unknown);
+    }
+
     fn envelope(message_type: &str, jobs: &Value) -> Vec<u8> {
         json!({
             "messageId": 100_000_001_u64,

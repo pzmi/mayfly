@@ -57,7 +57,7 @@ use super::wire::{
     API, Answer, COMMANDS, DEFAULT_DRAIN_SECS, EventLine, Following, Lagged, MAX_SINCE_SECS,
     PoolList, Request, Reset, Status, VmList,
 };
-use crate::github::{DOCTOR_WAIT, ReaperDesk};
+use crate::github::{DOCTOR_WAIT, ReaperDesk, TrustDesk};
 use crate::sizing::SizingReport;
 use crate::supervise::ShutdownSignal;
 
@@ -281,6 +281,8 @@ pub struct Service<'a, J, C, R, N> {
     pub operators: Operators,
     /// The reaper's desk (RT-07): `reaper` asks the run for a sweep and answers its report.
     pub reaper: &'a ReaperDesk,
+    /// The trust checks' desk (GH-08): `trust` answers what they found.
+    pub trust: &'a TrustDesk,
 }
 
 impl<J, C, R, N> std::fmt::Debug for Service<'_, J, C, R, N> {
@@ -510,6 +512,7 @@ where
             },
             Request::Events { .. } => Answer::failed("bad_request", "events streams"),
             Request::Reaper => Answer::served(&self.reaper.ask(DOCTOR_WAIT).await),
+            Request::Trust => Answer::served(&self.trust.report()),
             mutating => self.command(mutating, peer).await,
         }
     }
@@ -618,7 +621,8 @@ where
             | Request::VmList
             | Request::PoolList
             | Request::Events { .. }
-            | Request::Reaper => Answer::failed("bad_request", "not a command"),
+            | Request::Reaper
+            | Request::Trust => Answer::failed("bad_request", "not a command"),
         }
     }
 

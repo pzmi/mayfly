@@ -17,7 +17,7 @@
 //! `tests/operator.rs::should_ignore_an_unknown_field_when_a_newer_client_sends_one` and
 //! `should_answer_unknown_command_when_the_daemon_does_not_know_it`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,9 @@ pub enum Request {
     /// `mayfly doctor`'s ask of the reaper (RT-07): a sweep within P14's hourly budget, then
     /// [`Reaper`]. An older daemon answers `unknown_command`.
     Reaper,
+    /// `mayfly doctor`'s ask of the trust checks (GH-08): [`Trust`]. An older daemon answers
+    /// `unknown_command`.
+    Trust,
 }
 
 /// The longest history `events --since` reads: seven days. Reading history enumerates every
@@ -116,6 +119,7 @@ pub const COMMANDS: &[&str] = &[
     "host_resume",
     "events",
     "reaper",
+    "trust",
 ];
 
 /// Why a request was not served.
@@ -426,6 +430,36 @@ pub fn pretty<T: Serialize>(value: &T) -> String {
 #[must_use]
 pub fn compact<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_default()
+}
+
+/// `trust`: what the daemon's start-up trust checks found (GH-08, ADR 0090, ADR 0045), as of
+/// this run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trust {
+    /// `check_fork_pr_setting`: `off` (not configured), `pending` (not read yet), `passed`
+    /// (workflows from fork pull requests do not run in private repositories), `refused` (they
+    /// do: no listener starts this run), `unread` (the read answered nothing definite; the
+    /// pools wait and it is read again) or `denied` (GitHub answered 403 or 404; the pools wait
+    /// and it is read again).
+    pub fork_pr_setting: String,
+    /// The pools that list allowed repositories while their scale set's runner group admits no
+    /// public repository: a public one among them would be routed nothing. A possible problem
+    /// (mayfly does not read a repository's visibility), reported, never refused.
+    #[serde(default)]
+    pub public_not_admitted: BTreeSet<String>,
+    /// Pools whose runner group could not be read this run, with the failure's code.
+    #[serde(default)]
+    pub unreported: BTreeMap<String, String>,
+    /// The App's permissions the pools' options need and the installation lacks
+    /// (`name: level`), when they were read.
+    #[serde(default)]
+    pub missing_permissions: Vec<String>,
+    /// The permissions granted beyond what the options need (ADR 0045: `doctor` warns).
+    #[serde(default)]
+    pub excess_permissions: Vec<String>,
+    /// Whether the installation's permissions were read this run.
+    #[serde(default)]
+    pub permissions_read: bool,
 }
 
 /// `reaper`: the reaper's last sweep of GitHub's runners (P14, RT-07), kept across runs.

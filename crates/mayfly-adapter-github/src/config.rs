@@ -179,6 +179,42 @@ impl AppConfig {
     }
 }
 
+impl AppConfig {
+    /// The organisation the scope names (a repository scope's owner).
+    fn organisation(&self) -> &str {
+        match &self.scope {
+            Scope::Organization { org } => org,
+            Scope::Repository { owner, .. } => owner,
+        }
+    }
+
+    /// `GET {api}/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos` (spec §6.2,
+    /// `check_fork_pr_setting`).
+    #[must_use]
+    pub fn fork_pr_setting_url(&self) -> Url {
+        join(
+            &self.api_base,
+            &[
+                "orgs",
+                self.organisation(),
+                "actions",
+                "permissions",
+                "fork-pr-workflows-private-repos",
+            ],
+        )
+    }
+
+    /// `GET {api}/orgs/{org}/actions/runner-groups/{group_id}` (spec §6.2).
+    #[must_use]
+    pub fn runner_group_url(&self, group_id: u64) -> Url {
+        let id = group_id.to_string();
+        join(
+            &self.api_base,
+            &["orgs", self.organisation(), "actions", "runner-groups", &id],
+        )
+    }
+}
+
 /// A repository's full name `owner/name` as its two parts, each `[A-Za-z0-9._-]{1,100}` and
 /// neither `.` nor `..` (GitHub's own alphabet for both), or `None`. Pinned by
 /// `config::tests::should_build_each_endpoint_when_the_base_has_a_path`.

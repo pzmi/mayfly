@@ -1065,6 +1065,7 @@ pub async fn run_with(
         follow: &daemon.notifier.follow,
         operators: Operators::this_user(),
         reaper: &daemon.github.reaper,
+        trust: &daemon.github.trust,
     };
     // the socket stops with the root (its post-stop wait is bounded like the runs', in
     // parallel with them) or once the runs ended for another reason
@@ -1515,6 +1516,7 @@ impl Daemon<'_> {
             broker: &self.broker,
             host: &self.host,
             pools: &self.config.pools,
+            github: &self.config.github,
             sessions,
             epoch,
         })

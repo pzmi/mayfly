@@ -2022,6 +2022,11 @@ no metrics port yet, so DEC-07 adds none.
 Note (RT-02, ADR 0091 decision 5): log files, if any, default to `~/Library/Logs/mayfly` on
 macOS and `$XDG_STATE_HOME/mayfly/logs` on Linux (`mayfly_composition::paths`); RT-02 writes none.
 
+Note (GH-08, 2026-11-16): `mayflyd` installs no tracing subscriber yet, so its WARN and ERROR
+events go nowhere. The subscriber must route GH-08's `job_refused`, `pools_refused_fork_pr_setting`
+and `app_permission_missing` (with the rest), with a smoke test that one event of each reaches
+the output, and must land before any release (OPS-03). Logs stay unasserted otherwise (fnd §5).
+
 #### RT-05 Terminal mode: a clean stop on Ctrl-C (split into RT-05a and RT-05b)
 Cites: plan §10 (P23 drain, P24 shutdown), §11; ADR 0031; ADR 0087 decision 1. The owner runs
 `mayflyd` from a terminal as their own user (the primary deployment) and stops it with Ctrl-C.
@@ -2634,6 +2639,53 @@ Note (CP-09): the reconciler's half is built: its grant reads `runner_may_start`
 (`crates/mayfly-control/tests/store/activation.rs::should_grant_nothing_when_no_runner_may_start`),
 and the registration manager mints only for an attempt the grant activated; what is left here
 is recording the lookups and acquisitions under `mayflyd` that make `waiting` non-zero.
+Note (GH-08, as built): the listener applies `PoolConfig::trust_policy` (`ApplyTrustPolicy`) when
+the stream's differs and looks up the pending assignments before each poll and after each
+record, at most `lookups_per_tick` (4) in one tick, so a backlog delays the poll and its ack by a
+bounded number of lookups. An `unavailable` or `throttled` lookup holds that job alone for the
+call backoff, doubling (no job holds another's), and refuses it only at the third in a row; any
+definite failure refuses at once. It logs `job_refused` at WARN for each refusal it records and
+sends each due `RefusalAction::CancelRun` through `cancel_refused` with the assignment's
+repository, which the stream now keeps while the job is refused (`refused_repositories`, state
+only, no event change; a lost answer holds cancels for a doubling backoff). No model change: the
+listener performs `lookupRun` and `cancelRun`. Repository names compare ignoring ASCII case, as
+GitHub's do, in the classification (`RepositoryName::same`) and in the configuration's
+duplicate check. `allowed_events` takes only a subset of ADR 0090's list (adding an event is a
+new decision, its point 2): `pull_request_target`, `workflow_run`, `issue_comment` and any other
+event are refused naming ADR 0090. `mayflyd` reads the App's permissions against what the
+options need ("Metadata: Read-only" is neither needed nor counted as excess: GitHub grants it
+with any repository permission and mayfly does not use it, ADR 0045), then the fork-PR setting
+before any listener starts: no listener starts for the run when fork workflows run; while the
+read fails the listeners wait and it is read again (fail closed), `unread` with no definite
+answer, `denied` on a 403 or 404, which `doctor` fails. Once a pool's scale set is ensured, its
+runner group is read beside the ticks (never delaying a session open or a poll); a group that
+admits no public repository, for a pool listing allowed repositories, is reported as a possible
+problem. mayfly does not read a repository's visibility (ADR 0045), so the report names no
+repository as public, and a repository that does not exist or is out of reach shows up as its
+jobs' `lookup_failed` refusals instead. `doctor` shows all this as `github_trust` (`trust`
+request; fail for the fork setting on or denied, or a missing permission; warn otherwise).
+Deviations: the hand-off of the pool's lists to the launcher is left to IMG-02, whose card
+already holds it with the launcher contract test (it changes the `Launch` directive). Logs are
+not asserted (fnd §5: tests do not assert log lines), so the card's "a test for each" is met for
+the journaled facts the logs accompany (`AssignedJobRefused`, the desk's `trust` report), not
+for `job_refused`, `pools_refused_fork_pr_setting` or `app_permission_missing` themselves;
+`mayflyd` installs no subscriber yet (RT-04's note). The reconciler's gate is CP-09's test.
+Limitations: `throttled` does not read GitHub's `Retry-After`, so a secondary rate limit longer
+than the backoffs refuses the trusted jobs it outlasts (they fail closed); a GHE.com host
+(`api.<subdomain>.ghe.com`) is not recognised as github.com, so its pools get no
+`allowed_repositories` requirement (an empty list there still refuses every assignment).
+For the release notes: a github.com configuration without `allowed_repositories` is now refused
+at start-up, and an older build refuses the new keys (`allowed_repositories`, `allowed_events`,
+`cancel_refused_runs`, `check_fork_pr_setting`), so rolling back means removing them first.
+Pinned by `crates/mayfly-control/tests/store/listener.rs` (the GH-08 section),
+`crates/mayfly-control-domain/tests/demand.rs::should_compare_repositories_ignoring_case_when_an_assignment_is_classified`,
+`crates/mayfly-composition/src/trust.rs` (`should_keep_the_listeners_waiting_when_the_fork_setting_is_not_read`),
+the `trust_*` config fixtures and
+`crates/mayfly-composition/tests/daemon.rs` (`github::should_refuse_every_pool_and_report_it_when_fork_workflows_run`,
+`github::should_serve_no_pool_and_fail_doctor_when_the_fork_setting_is_denied`,
+`github::should_serve_the_pool_and_report_its_runner_group_when_the_fork_setting_is_off`,
+`placement::should_mint_only_for_the_trusted_job_when_a_forks_run_is_assigned_beside_it`,
+`placement::should_cancel_each_refused_run_and_mint_for_the_trusted_job_when_cancel_refused_runs_is_on`).
 
 #### GH-09 (Withdrawn) Operator release of a refusal
 Withdrawn by GH-00S (owner, 2026-11-12, ADR 0090 amended): refused jobs hold nothing any more
@@ -2884,6 +2936,10 @@ data plane's registry client and the GitHub client trust, follow OpenSSL's `SSL_
 `SSL_CERT_DIR` convention (rustls-native-certs under the platform verifier), so `mayflyd`'s
 environment can override them: operator-controlled, as the environment is, and what the placement
 tests use to trust their registry's CA (ver §7.5). macOS reads the keychain only.
+Note (GH-08, 2026-11-16): the threat model records IMG-02's open window: until the in-guest hook
+lands, a runner started for a trusted job on github.com can be handed a fork's job assigned
+beside it (GitHub picks the job), so there is no hard boundary yet; it must close before any
+release (OPS-03).
 
 ### Phase 7 — operate
 
@@ -2919,6 +2975,12 @@ unreadable payload: non-zero with its reason; each allowed event: zero); the lau
 test that the variable is set and the verdict reported; the image checks (OPS-02) refuse an image
 without the hook. The timing, the failed job and what a fork PR's author sees are HW-02 checks
 (spec §12 item 11, owner).
+Note (GH-08, 2026-11-16): **no hard boundary on github.com until this card lands.** GH-08 starts
+a runner only for an assignment its run lookup classified trusted, but GitHub, not mayfly, picks
+which assigned job a runner takes: a runner started for a trusted job can be handed a fork's job
+assigned beside it, and nothing in the guest refuses it yet. The window is open on every
+github.com pool from GH-08 on, and it must close before any release (OPS-03); no guard code
+narrows it meanwhile.
 
 #### IMG-03 Refusal sink
 Cites: ADR 0090 (amended 2026-11-12, owner: option A), `doc/github-scaleset.md` §5, §6.2, ADRs

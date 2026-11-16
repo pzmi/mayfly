@@ -1,0 +1,5 @@
+invalid configuration: 4 errors
+  pools[0].allowed_repositories: lists a repository twice (fix: list each repository once)
+  pools[0].allowed_events: holds `pull_request_target`, outside ADR 0090's list: adding an event is a new decision (ADR 0090 point 2) (fix: use events from: push, pull_request, workflow_dispatch, schedule, merge_group, release)
+  pools[0].allowed_events: holds `workflow_run`, outside ADR 0090's list: adding an event is a new decision (ADR 0090 point 2) (fix: use events from: push, pull_request, workflow_dispatch, schedule, merge_group, release)
+  pools[0].allowed_events: holds `issue_comment`, outside ADR 0090's list: adding an event is a new decision (ADR 0090 point 2) (fix: use events from: push, pull_request, workflow_dispatch, schedule, merge_group, release)

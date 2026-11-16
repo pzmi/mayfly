@@ -179,7 +179,7 @@ fn config(repository: &str, runners: &str, pools: &[(&str, &str, &str)]) -> Conf
     );
     for (name, os, path) in pools {
         text.push_str(&format!(
-            "[[pools]]\nname = \"{name}\"\ntier = \"trusted\"\nimage_manifest = \"{path}\"\n\
+            "[[pools]]\nallowed_repositories = [\"example-org/app\"]\nname = \"{name}\"\ntier = \"trusted\"\nimage_manifest = \"{path}\"\n\
              guest_os = \"{os}\"\ncpu = 2\nmemory_mib = 4096\nmax_running = 1\n"
         ));
     }

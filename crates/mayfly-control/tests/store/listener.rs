@@ -5,7 +5,9 @@
 //! again after a lost answer, sessions lost, deleted, re-opened and re-created, and protocol
 //! drift degrading the session, never more. GH-10: an assigned job's workflow-run lookup and a
 //! refused run's cancel, over the in-memory `WorkflowRuns` port, recorded as the observations
-//! the aggregate classifies (the listener's wiring of them is GH-08's).
+//! the aggregate classifies. GH-08: the listener's own wiring of them (the pool's trust policy
+//! applied, every pending assignment looked up with a backoff before an indefinite answer
+//! refuses, every due cancel sent once per answer).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
@@ -14,8 +16,8 @@ use mayfly_control::delivery::Kicks;
 use mayfly_control::github::{
     CancelAnswer, Failure, GitHubCallError, JitConfig, JobKey, MessageId, MessageItem, Offer,
     OpenedSession, PolledMessage, RepositoryName, RunnerRequestId, ScaleSetApi, ScaleSetId,
-    ScaleSetInfo, ScaleSetSpec, SessionId, Statistics, WorkflowRuns as _, cancel_observation,
-    cancel_refused, run_lookup,
+    ScaleSetInfo, ScaleSetSpec, SessionId, Statistics, WorkflowRun, WorkflowRunId, WorkflowRuns,
+    cancel_observation, cancel_refused, run_lookup,
 };
 use mayfly_control::journal::{Journal as _, StreamId};
 use mayfly_control::listener::{
@@ -97,7 +99,7 @@ async fn save_scale_set(
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn tick<A: ScaleSetApi>(l: &L<'_, A>) -> Tick {
+fn tick<A: ScaleSetApi + WorkflowRuns>(l: &L<'_, A>) -> Tick {
     block_on(l.tick()).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -147,7 +149,7 @@ impl Bench {
     }
 
     /// Ensures the scale set and opens a session.
-    fn live<A: ScaleSetApi>(&self, l: &L<'_, A>) -> SessionId {
+    fn live<A: ScaleSetApi + WorkflowRuns>(&self, l: &L<'_, A>) -> SessionId {
         assert!(matches!(tick(l), Tick::Ensured(..)));
         match tick(l) {
             Tick::Opened(session) => session,
@@ -339,6 +341,26 @@ impl ScaleSetApi for Hooked<'_> {
     }
 }
 
+impl WorkflowRuns for Hooked<'_> {
+    async fn workflow_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<WorkflowRun, GitHubCallError> {
+        self.failed("workflow_run")?;
+        self.api.workflow_run(repository, run).await
+    }
+
+    async fn cancel_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<CancelAnswer, GitHubCallError> {
+        self.failed("cancel_run")?;
+        self.api.cancel_run(repository, run).await
+    }
+}
+
 #[test]
 fn should_record_ack_and_start_no_runner_when_an_assigned_job_is_pending_or_refused() {
     // given: github.com assigns a job directly
@@ -347,6 +369,7 @@ fn should_record_ack_and_start_no_runner_when_an_assigned_job_is_pending_or_refu
     w.live(&l);
     w.capacity(1, 2, 2, WireMode::Open);
     w.api.queue_jobs(1, LABEL, 42);
+    w.api.inject_run(RunFault::LookupStalls { run: 42 });
 
     // when
     let p = polled(tick(&l));
@@ -632,6 +655,8 @@ fn should_delete_the_journaled_session_and_reopen_when_the_daemon_restarted() {
     let old = w.live(&l);
     w.capacity(1, 2, 2, WireMode::Open);
     w.api.queue_jobs(1, LABEL, 42);
+    // its run's lookup has not answered: it stays pending
+    w.api.inject_run(RunFault::LookupStalls { run: 42 });
     polled(tick(&l));
     drop(l);
     w.api.restart_client();
@@ -821,6 +846,7 @@ fn should_send_the_streams_wire_max_when_a_sink_pins_it() {
     w.live(&l);
     w.capacity(1, 3, 3, WireMode::Open);
     w.api.queue_jobs(1, LABEL, 42);
+    w.api.inject_run(RunFault::LookupStalls { run: 42 });
     polled(tick(&l));
     let job = w
         .state()
@@ -1327,15 +1353,28 @@ fn should_ask_a_throttled_acquire_at_most_once_per_backoff_when_messages_keep_co
 }
 
 /// The pool's trust policy (GH-08's settings): `acme/app` allowed, the default events.
-fn trust(bench: &Bench, cancel_refused_runs: bool) {
-    let policy = TrustPolicy {
+fn policy(cancel_refused_runs: bool) -> TrustPolicy {
+    TrustPolicy {
         scale_set_name: LABEL.to_owned(),
         allowed_repositories: BTreeSet::from([RepositoryName("acme/app".to_owned())]),
         allowed_events: TrustPolicy::default_events(),
         cancel_refused_runs,
-    };
+    }
+}
+
+/// [`policy`] applied by hand, as GH-10's tests do.
+fn trust(bench: &Bench, cancel_refused_runs: bool) {
+    let policy = policy(cancel_refused_runs);
     let outcome = bench.command(0x7700, ScaleSetCommand::ApplyTrustPolicy(policy));
     assert!(matches!(outcome, Outcome::Accepted { .. }), "{outcome:?}");
+}
+
+/// A GitHub whose lookups never answer the listener (GH-10's tests record them by hand, over
+/// the port; the listener's own lookups are GH-08's tests).
+fn unanswered_lookups(bench: &Bench) -> Hooked<'_> {
+    let hooked = Hooked::new(bench.api.clone(), &bench.h.store);
+    hooked.fail_always("workflow_run", Failure::Unavailable);
+    hooked
 }
 
 /// Looks up every pending assignment's run over the port and records what it answered.
@@ -1375,7 +1414,8 @@ fn refusals(bench: &Bench) -> Vec<RefusalReason> {
 fn should_trust_a_push_and_refuse_a_forks_run_when_their_lookups_are_recorded() {
     // given: GH-10, a push and a fork's pull request to the allowed repository, both assigned
     let w = bench(Flow::Direct);
-    let l = w.listener();
+    let hooked = unanswered_lookups(&w);
+    let l: L<'_, Hooked<'_>> = Listener::new(&w.h.store, &hooked, config());
     w.live(&l);
     w.capacity(1, 2, 2, WireMode::Open);
     trust(&w, false);
@@ -1403,7 +1443,8 @@ fn should_record_each_answer_once_and_ask_again_when_a_cancel_answer_is_lost() {
     // given: GH-10 with `cancel_refused_runs`, two forks' runs refused; the first cancel's
     // answer is lost after its effect
     let w = bench(Flow::Direct);
-    let l = w.listener();
+    let hooked = unanswered_lookups(&w);
+    let l: L<'_, Hooked<'_>> = Listener::new(&w.h.store, &hooked, config());
     w.live(&l);
     w.capacity(1, 2, 2, WireMode::Open);
     trust(&w, true);
@@ -1479,7 +1520,8 @@ fn should_record_refused_without_a_call_when_a_cancel_can_never_be_sent() {
     // given: GH-10 with `cancel_refused_runs`, two forks' runs refused; the first due one's
     // repository is unknown (an unclassifiable assignment that named none)
     let w = bench(Flow::Direct);
-    let l = w.listener();
+    let hooked = unanswered_lookups(&w);
+    let l: L<'_, Hooked<'_>> = Listener::new(&w.h.store, &hooked, config());
     w.live(&l);
     w.capacity(1, 2, 2, WireMode::Open);
     trust(&w, true);
@@ -1516,4 +1558,294 @@ fn should_record_refused_without_a_call_when_a_cancel_can_never_be_sent() {
         2,
         "nothing was cancelled at GitHub"
     );
+}
+
+// ---- GH-08: the listener's own lookups and cancels ----------------------------------------
+
+/// The listener of the pool with its trust policy configured (GH-08).
+fn trusting<'a, A: ScaleSetApi + WorkflowRuns>(
+    bench: &'a Bench,
+    api: &'a A,
+    cancel_refused_runs: bool,
+) -> L<'a, A> {
+    Listener::new(
+        &bench.h.store,
+        api,
+        config().with_policy(policy(cancel_refused_runs)),
+    )
+}
+
+fn run_ids(keys: impl IntoIterator<Item = JobKey>) -> Vec<u64> {
+    let mut ids: Vec<u64> = keys.into_iter().map(|k| k.run_id.0).collect();
+    ids.sort_unstable();
+    ids
+}
+
+fn cancel_answers(bench: &Bench) -> Vec<(u64, CancelAnswer)> {
+    bench
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ScaleSetEvent::CancelAnswered(c) => Some((c.job.run_id.0, c.answer)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn should_apply_the_pools_trust_policy_once_when_it_differs() {
+    // given
+    let w = bench(Flow::Direct);
+    let l = trusting(&w, &w.api, false);
+
+    // when: the scale set is ensured, a session opened and polled twice
+    w.live(&l);
+    polled(tick(&l));
+    polled(tick(&l));
+    let changed = trusting(&w, &w.api, true);
+    polled(tick(&changed));
+
+    // then: applied before anything else, once per change
+    let applied: Vec<bool> = w
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ScaleSetEvent::TrustPolicyApplied(p) => Some(p.policy.cancel_refused_runs),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(applied, [false, true]);
+    let events = w.events();
+    let at = |f: fn(&ScaleSetEvent) -> bool| events.iter().position(f);
+    assert!(
+        at(|e| matches!(e, ScaleSetEvent::TrustPolicyApplied(_)))
+            < at(|e| matches!(e, ScaleSetEvent::ScaleSetEnsured(_)))
+    );
+    assert_eq!(w.state().policy, Some(policy(true)));
+}
+
+#[test]
+fn should_start_a_runner_only_for_the_trusted_job_when_a_fork_is_assigned_beside_it() {
+    // given: a push to the allowed repository, a fork's pull request to it and a push to an
+    // unlisted repository, all assigned at once
+    let w = bench(Flow::Direct);
+    let l = trusting(&w, &w.api, false);
+    w.live(&l);
+    w.capacity(1, 4, 4, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(43), 1, LABEL);
+    let unlisted = RunSpec {
+        repository: RepositoryName("acme/other".to_owned()),
+        head_repository: RepositoryName("acme/other".to_owned()),
+        ..RunSpec::push(44)
+    };
+    w.api.start_run(&unlisted, 1, LABEL);
+
+    // when
+    let p = polled(tick(&l));
+
+    // then: each looked up in the tick that recorded it; only the push backs a runner
+    assert_eq!(run_ids(p.looked_up.clone()), [42, 43, 44]);
+    let s = w.state();
+    assert!(s.pending.is_empty());
+    assert_eq!(run_ids(s.trusted.keys().cloned()), [42]);
+    assert_eq!(run_ids(s.refused.iter().cloned()), [43, 44]);
+    let mut reasons = refusals(&w);
+    reasons.sort_by_key(|r| r.as_str());
+    assert_eq!(
+        reasons,
+        [RefusalReason::Fork, RefusalReason::RepositoryNotAllowed]
+    );
+    assert!(s.runner_may_start(0));
+    assert!(!s.runner_may_start(1), "a refused job backs no runner");
+    assert!(p.cancelled.is_empty(), "no cancel without the option");
+}
+
+#[test]
+fn should_refuse_a_job_at_once_when_its_run_is_not_found() {
+    // given: the lookup answers 404, a definite answer
+    let w = bench(Flow::Direct);
+    let hooked = Hooked::new(w.api.clone(), &w.h.store);
+    let l = trusting(&w, &hooked, false);
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    hooked.fail_always("workflow_run", Failure::Refused { status: 404 });
+
+    // when
+    let p = polled(tick(&l));
+
+    // then: refused `lookup_failed` in the same tick, asked once, and it backs no runner
+    assert_eq!(run_ids(p.looked_up), [42]);
+    assert_eq!(hooked.calls("workflow_run"), 1);
+    assert_eq!(refusals(&w), [RefusalReason::LookupFailed]);
+    assert!(!w.state().runner_may_start(0));
+}
+
+#[test]
+fn should_retry_a_lookup_before_refusing_it_when_it_is_unavailable() {
+    // given: the first lookup goes unanswered (a token mint that took its whole deadline)
+    let w = bench(Flow::Direct);
+    let hooked = Hooked::new(w.api.clone(), &w.h.store);
+    let l = trusting(&w, &hooked, false);
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    hooked.fail_next("workflow_run", Failure::Unavailable);
+
+    // when: recorded and looked up, polled again within the backoff, then after it
+    let first = polled(tick(&l));
+    let pending = w.state().pending.len();
+    let held = polled(tick(&l));
+    let asked_within = hooked.calls("workflow_run");
+    w.h.clock.advance(Millis::new(30_000));
+    let second = polled(tick(&l));
+
+    // then: not refused on an indefinite answer; asked again after the backoff, and trusted
+    assert!(first.looked_up.is_empty());
+    assert_eq!(pending, 1);
+    assert!(held.looked_up.is_empty());
+    assert_eq!(asked_within, 1);
+    assert_eq!(run_ids(second.looked_up), [42]);
+    assert_eq!(run_ids(w.state().trusted.keys().cloned()), [42]);
+    assert!(refusals(&w).is_empty());
+}
+
+#[test]
+fn should_look_up_the_other_jobs_when_one_lookup_is_unanswered() {
+    // given: two pushes assigned in one message; the first lookup goes unanswered
+    let w = bench(Flow::Direct);
+    let hooked = Hooked::new(w.api.clone(), &w.h.store);
+    let l = trusting(&w, &hooked, false);
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    w.api.start_run(&RunSpec::push(43), 1, LABEL);
+    hooked.fail_next("workflow_run", Failure::Unavailable);
+
+    // when
+    let first = polled(tick(&l));
+    let held = polled(tick(&l));
+
+    // then: the other job is looked up and trusted in the same tick; only the unanswered one
+    // waits for its backoff, and it is not refused
+    assert_eq!(first.looked_up.len(), 1);
+    assert_eq!(w.state().trusted.len(), 1);
+    assert_eq!(w.state().pending.len(), 1);
+    assert!(held.looked_up.is_empty());
+    assert_eq!(hooked.calls("workflow_run"), 2);
+    w.h.clock.advance(Millis::new(30_000));
+    let second = polled(tick(&l));
+    assert_eq!(second.looked_up.len(), 1);
+    assert_eq!(run_ids(w.state().trusted.keys().cloned()), [42, 43]);
+    assert!(refusals(&w).is_empty());
+}
+
+#[test]
+fn should_look_up_at_most_the_cap_in_one_tick_when_many_jobs_are_pending() {
+    // given: a cap of two lookups a tick, five pushes assigned
+    let w = bench(Flow::Direct);
+    let capped = ListenerConfig {
+        lookups_per_tick: 2,
+        ..config().with_policy(policy(false))
+    };
+    let l = Listener::new(&w.h.store, &w.api, capped);
+    w.live(&l);
+    w.capacity(1, 5, 5, WireMode::Open);
+    for run in 42..47 {
+        w.api.start_run(&RunSpec::push(run), 1, LABEL);
+    }
+
+    // when: three ticks
+    let counts: Vec<usize> = (0..3).map(|_| polled(tick(&l)).looked_up.len()).collect();
+
+    // then: two, two, then the last one; every job trusted in the end, none refused
+    assert_eq!(counts, [2, 2, 1]);
+    assert_eq!(
+        run_ids(w.state().trusted.keys().cloned()),
+        [42, 43, 44, 45, 46]
+    );
+    assert!(refusals(&w).is_empty());
+}
+
+#[test]
+fn should_refuse_a_job_when_its_lookups_stay_unavailable() {
+    // given: every lookup of the run goes unanswered
+    let w = bench(Flow::Direct);
+    let l = trusting(&w, &w.api, false);
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    w.api.inject_run(RunFault::LookupStalls { run: 42 });
+
+    // when: three lookups, a doubling backoff apart
+    polled(tick(&l));
+    w.h.clock.advance(Millis::new(30_000));
+    polled(tick(&l));
+    let pending = w.state().pending.len();
+    w.h.clock.advance(Millis::new(60_000));
+    let third = polled(tick(&l));
+
+    // then: refused `lookup_failed` at the third, and it backs no runner
+    assert_eq!(pending, 1);
+    assert_eq!(run_ids(third.looked_up), [42]);
+    assert_eq!(refusals(&w), [RefusalReason::LookupFailed]);
+    assert!(!w.state().runner_may_start(0));
+}
+
+#[test]
+fn should_cancel_each_refused_run_once_when_the_option_is_on() {
+    // given: `cancel_refused_runs`, two forks' runs assigned beside a push
+    let w = bench(Flow::Direct);
+    let l = trusting(&w, &w.api, true);
+    w.live(&l);
+    w.capacity(1, 3, 3, WireMode::Open);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(43), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(44), 1, LABEL);
+
+    // when
+    let p = polled(tick(&l));
+    let after = polled(tick(&l));
+
+    // then: both refused runs cancelled at once, each answer recorded once, the push's never
+    assert_eq!(run_ids(p.cancelled), [43, 44]);
+    assert!(after.cancelled.is_empty());
+    assert_eq!(
+        cancel_answers(&w),
+        [(43, CancelAnswer::Accepted), (44, CancelAnswer::Accepted)]
+    );
+    let s = w.state();
+    assert_eq!(run_ids(s.trusted.keys().cloned()), [42]);
+    assert!(
+        s.refused.is_empty(),
+        "the cancels completed the forks' jobs"
+    );
+}
+
+#[test]
+fn should_hold_cancels_and_ask_again_when_a_cancel_answer_is_lost() {
+    // given: `cancel_refused_runs`, a fork's run refused, the first cancel's call unanswered
+    let w = bench(Flow::Direct);
+    let hooked = Hooked::new(w.api.clone(), &w.h.store);
+    let l = trusting(&w, &hooked, true);
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    w.api.start_run(&RunSpec::fork_pull_request(43), 1, LABEL);
+    hooked.fail_next("cancel_run", Failure::Unavailable);
+
+    // when: refused and its cancel lost; a tick within the backoff; one after it
+    let lost = polled(tick(&l));
+    let held = polled(tick(&l));
+    let asked_within = hooked.calls("cancel_run");
+    w.h.clock.advance(Millis::new(30_000));
+    let again = polled(tick(&l));
+
+    // then: nothing recorded for the lost answer and no call in a loop; asked again later
+    assert!(lost.cancelled.is_empty());
+    assert!(held.cancelled.is_empty());
+    assert_eq!(asked_within, 1);
+    assert_eq!(run_ids(again.cancelled), [43]);
+    assert_eq!(hooked.calls("cancel_run"), 2);
+    assert_eq!(cancel_answers(&w), [(43, CancelAnswer::Accepted)]);
 }

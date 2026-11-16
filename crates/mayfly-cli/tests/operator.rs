@@ -102,6 +102,7 @@ tart_home = "{state}/tart"
 repository = "{repository}"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "{POOL}"
 tier = "trusted"
 image_manifest = "{manifest}"

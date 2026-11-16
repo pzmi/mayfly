@@ -46,6 +46,16 @@
 //!   guard and busy backoffs, which a new run starts afresh: CP-05's note). A removal a sweep
 //!   asks for, `doctor`'s included, is journaled under the automation actor
 //!   `registration_manager`, never an operator's: `doctor` only asks for a listing.
+//! - **Trust** (GH-08, `crate::trust`): each listener applies its pool's trust policy
+//!   ([`PoolConfig::trust_policy`]) and looks up and cancels as `Listener` does; the run's
+//!   start-up checks (the App's permissions; then the fork-PR setting, which holds every
+//!   listener until it is read and starts none when fork workflows run) and, once a pool's
+//!   scale set is ensured, its runner-group report (read beside the ticks, never delaying them)
+//!   land on the [`TrustDesk`] `doctor` reads.
+//!   Pinned by `tests/daemon.rs::github::should_refuse_every_pool_and_report_it_when_fork_workflows_run`,
+//!   `github::should_serve_no_pool_and_fail_doctor_when_the_fork_setting_is_denied`,
+//!   `github::should_serve_the_pool_and_report_its_runner_group_when_the_fork_setting_is_off`
+//!   and `placement::should_mint_only_for_the_trusted_job_when_a_forks_run_is_assigned_beside_it`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -54,12 +64,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
+pub use crate::trust::TrustDesk;
+use crate::trust::{Gate, compare_permissions, fork_state, needed_permissions};
 use mayfly_adapter_github::{
     ApiClient, AppAuth, AppConfig, DEFAULT_CALL_POLICY, ReqwestTransport, ScaleSetClient, Scope,
 };
 use mayfly_adapter_secrets::UriSecretProvider;
 use mayfly_control::delivery::{DeliveryConfig, DeliveryWorker, Kicks};
-use mayfly_control::github::ScaleSetSpec;
+use mayfly_control::github::{ScaleSetApi as _, ScaleSetSpec};
 use mayfly_control::listener::{JobFacts, Listener, ListenerConfig, ListenerError, Tick};
 use mayfly_control::registration::{
     JitBroker, RegistrationConfig, RegistrationManager, ScaleSetDirectory, SweepError, SweepReport,
@@ -138,6 +150,8 @@ pub struct GithubSide {
     pub reaper: ReaperDesk,
     /// One listener per scale set.
     pub leases: ListenerLeases,
+    /// What the trust checks found (GH-08).
+    pub trust: TrustDesk,
 }
 
 impl GithubSide {
@@ -149,6 +163,7 @@ impl GithubSide {
             directory: Directory::default(),
             reaper: ReaperDesk::default(),
             leases: ListenerLeases::default(),
+            trust: TrustDesk::default(),
         }
     }
 }
@@ -451,6 +466,8 @@ pub struct RunInputs<'r> {
     pub host: &'r HostId,
     /// The configured pools: one listener each.
     pub pools: &'r [PoolConfig],
+    /// `[github]`: its start-up checks' options.
+    pub github: &'r GithubConfig,
     /// The run's host sessions, which the manager reads epochs from.
     pub sessions: &'r HostSessions,
     /// The run's epoch.
@@ -566,7 +583,8 @@ impl<'r> GithubRun<'r> {
                     },
                     format!("{}-{}", inputs.host, pool.name.as_str()),
                     inputs.epoch,
-                );
+                )
+                .with_policy(pool.trust_policy());
                 let listener = Listener::new(inputs.store, &inputs.side.client, config)
                     .with_kicks(inputs.notifier.reconciler.clone());
                 (pool.name.clone(), listener)
@@ -600,6 +618,11 @@ impl<'r> GithubRun<'r> {
     /// Every loop of the run's GitHub side, until `cancel`; each waits for `recovery` first.
     pub async fn serve(&self, recovery: &watch::Receiver<Option<Mode>>, cancel: &ShutdownSignal) {
         let mut loops: Vec<Pin<Box<dyn Future<Output = ()> + '_>>> = Vec::new();
+        self.inputs
+            .side
+            .trust
+            .run_started(self.inputs.github.check_fork_pr_setting);
+        loops.push(Box::pin(self.check_trust(recovery.clone(), cancel.clone())));
         for (pool, listener) in &self.listeners {
             loops.push(Box::pin(self.listen(
                 pool,
@@ -639,10 +662,55 @@ impl<'r> GithubRun<'r> {
         if !recovered(&mut recovery, &mut cancel).await {
             return;
         }
+        let gate = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            gate = self.inputs.side.trust.decided() => gate,
+        };
+        if gate != Gate::Open {
+            return;
+        }
         let Some(_lease) = self.inputs.side.leases.acquire(pool) else {
             tracing::error!(pool = pool.as_str(), "listener_lease_held");
             return;
         };
+        let (ensured, mut seen) = watch::channel(None::<ScaleSetId>);
+        // the runner-group report runs beside the ticks, never in their way: a slow read delays
+        // no session open and no poll, and a newer ensure replaces an older one
+        let report = async {
+            while seen.changed().await.is_ok() {
+                let id = *seen.borrow_and_update();
+                if let Some(id) = id {
+                    self.report_group(pool, id).await;
+                }
+            }
+            std::future::pending::<()>().await;
+        };
+        let close = tokio::select! {
+            biased;
+            close = self.drive(pool, listener, &mut cancel, &ensured) => close,
+            () = report => false,
+        };
+        if !close {
+            return;
+        }
+        match tokio::time::timeout(LISTENER_CLOSE, listener.close()).await {
+            Ok(Ok(Tick::Closed)) => {}
+            Ok(Ok(_) | Err(_)) | Err(_) => {
+                tracing::warn!(pool = pool.as_str(), "listener_close_failed");
+            }
+        }
+    }
+
+    /// The ticks of `pool`'s listener until `cancel` (`true`: close the session) or a fence
+    /// (`false`); each ensure is handed to the runner-group report through `ensured`.
+    async fn drive(
+        &self,
+        pool: &PoolName,
+        listener: &PoolListener<'r>,
+        cancel: &mut ShutdownSignal,
+        ensured: &watch::Sender<Option<ScaleSetId>>,
+    ) -> bool {
         self.refresh(pool).await;
         let mut lost_since: Option<tokio::time::Instant> = None;
         let mut retry = LISTENER_RETRY;
@@ -657,7 +725,7 @@ impl<'r> GithubRun<'r> {
                     let now = self.inputs.store.clock().now().get();
                     let wait = Duration::from_millis(until.get().saturating_sub(now))
                         .clamp(WAIT_FLOOR, WAIT_CAP);
-                    if sleep_or(&mut cancel, wait).await {
+                    if sleep_or(cancel, wait).await {
                         break;
                     }
                     continue;
@@ -671,12 +739,15 @@ impl<'r> GithubRun<'r> {
                 Ok(Tick::SessionLost(_) | Tick::OpenFailed(_)) => {
                     lost_since.get_or_insert_with(tokio::time::Instant::now);
                 }
+                Ok(Tick::Ensured(id)) => {
+                    ensured.send_replace(Some(id));
+                }
                 // a poll that answered: the session lives, whatever failed around it
                 Ok(Tick::Polled(polled)) if polled.poll_failure.is_none() => lost_since = None,
                 Ok(_) => {}
                 Err(ListenerError::Fenced) => {
                     tracing::warn!(pool = pool.as_str(), "listener_fenced");
-                    return;
+                    return false;
                 }
                 Err(error) => {
                     let code = match &error {
@@ -691,7 +762,7 @@ impl<'r> GithubRun<'r> {
                         retry_s = retry.as_secs(),
                         "listener_tick_failed"
                     );
-                    if sleep_or(&mut cancel, retry).await {
+                    if sleep_or(cancel, retry).await {
                         break;
                     }
                     retry = retry.saturating_mul(2).min(WAIT_CAP);
@@ -702,10 +773,100 @@ impl<'r> GithubRun<'r> {
             retry = LISTENER_RETRY;
             self.refresh(pool).await;
         }
-        match tokio::time::timeout(LISTENER_CLOSE, listener.close()).await {
-            Ok(Ok(Tick::Closed)) => {}
-            Ok(Ok(_) | Err(_)) | Err(_) => {
-                tracing::warn!(pool = pool.as_str(), "listener_close_failed");
+        true
+    }
+
+    /// The run's start-up trust checks (`crate::trust`): the App's permissions first, then the
+    /// fork-PR setting, which the listeners wait on.
+    async fn check_trust(
+        &self,
+        mut recovery: watch::Receiver<Option<Mode>>,
+        mut cancel: ShutdownSignal,
+    ) {
+        if !recovered(&mut recovery, &mut cancel).await {
+            return;
+        }
+        let desk = &self.inputs.side.trust;
+        let client = &self.inputs.side.client;
+        match unless_cancelled(&mut cancel, client.granted_permissions()).await {
+            None => return,
+            Some(Ok(granted)) => {
+                let needed = needed_permissions(self.inputs.github, self.inputs.pools);
+                let gap = compare_permissions(&needed, &granted);
+                for permission in &gap.missing {
+                    tracing::warn!(permission = permission.as_str(), "app_permission_missing");
+                }
+                desk.permissions(&gap);
+            }
+            Some(Err(e)) => {
+                tracing::warn!(failure = e.failure.as_str(), "app_permissions_unread");
+            }
+        }
+        if !self.inputs.github.check_fork_pr_setting {
+            return;
+        }
+        let mut wait = Duration::from_secs(30);
+        loop {
+            let Some(answer) = unless_cancelled(&mut cancel, client.fork_pr_workflows_run()).await
+            else {
+                return;
+            };
+            let state = fork_state(&answer);
+            desk.fork_pr_setting(state);
+            match (state, &answer) {
+                ("passed", _) => return,
+                ("refused", _) => {
+                    tracing::error!(
+                        pools = self.inputs.pools.len(),
+                        "pools_refused_fork_pr_setting"
+                    );
+                    return;
+                }
+                (_, Err(e)) => {
+                    tracing::warn!(
+                        failure = e.failure.as_str(),
+                        state,
+                        "fork_pr_setting_unread"
+                    );
+                }
+                (_, Ok(_)) => {}
+            }
+            if sleep_or(&mut cancel, wait).await {
+                return;
+            }
+            wait = wait.saturating_mul(2).min(WAIT_CAP);
+        }
+    }
+
+    /// The runner-group report of `pool`, whose scale set `id` was just ensured
+    /// (`crate::trust`): only for a pool that lists allowed repositories.
+    async fn report_group(&self, pool: &PoolName, id: ScaleSetId) {
+        let desk = &self.inputs.side.trust;
+        let Some(config) = self.inputs.pools.iter().find(|p| &p.name == pool) else {
+            return;
+        };
+        if config.allowed_repositories.is_empty() {
+            return;
+        }
+        let client = &self.inputs.side.client;
+        let admits = async {
+            let set = client.get_scale_set(id).await?;
+            client.runner_group_admits_public(set.runner_group_id).await
+        };
+        match admits.await {
+            Ok(admits) => {
+                if !admits {
+                    tracing::warn!(
+                        pool = pool.as_str(),
+                        "runner_group_admits_no_public_repository"
+                    );
+                }
+                desk.group_admits_public(pool.as_str(), admits);
+            }
+            Err(e) => {
+                let code = e.failure.as_str();
+                tracing::warn!(pool = pool.as_str(), failure = code, "runner_group_unread");
+                desk.unreported(pool.as_str(), code);
             }
         }
     }
@@ -905,6 +1066,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e:?}")),
             web_url: mayfly_adapter_github::parse_base("https://ghes.example")
                 .unwrap_or_else(|e| panic!("{e:?}")),
+            check_fork_pr_setting: false,
         };
 
         // when

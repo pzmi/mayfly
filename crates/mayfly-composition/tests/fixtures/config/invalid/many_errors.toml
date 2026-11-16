@@ -11,6 +11,7 @@ mode = "classic"
 kind = "qemu"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "a"
 tier = "untrusted"
 guest_os = "freebsd"

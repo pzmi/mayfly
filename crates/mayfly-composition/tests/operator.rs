@@ -5,7 +5,7 @@
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use mayfly_composition::github::{DOCTOR_WAIT, ReaperDesk};
+use mayfly_composition::github::{DOCTOR_WAIT, ReaperDesk, TrustDesk};
 use mayfly_composition::operator::server::{
     BindError, Listener, MAX_CONNECTIONS, MAX_REQUEST, Operators, REQUEST_DEADLINE,
     SOCKET_PATH_MAX, Service, serve,
@@ -43,6 +43,7 @@ struct Kit {
     sizing: SizingReport,
     ready: tokio::sync::watch::Sender<bool>,
     reaper: ReaperDesk,
+    trust: TrustDesk,
     dir: tempfile::TempDir,
     next: std::cell::Cell<u128>,
 }
@@ -78,6 +79,7 @@ impl Kit {
             },
             ready: tokio::sync::watch::channel(true).0,
             reaper: ReaperDesk::default(),
+            trust: TrustDesk::default(),
             dir,
             next: std::cell::Cell::new(1),
         }
@@ -181,6 +183,7 @@ impl Kit {
                 follow: &self.notifier.follow,
                 operators,
                 reaper: &self.reaper,
+                trust: &self.trust,
             };
             let stop = Shutdown::new();
             let script = async {
@@ -354,6 +357,24 @@ fn should_answer_the_last_sweep_when_doctor_asks_and_no_run_answers() {
     assert_eq!(result["last"], serde_json::Value::Null, "{result}");
     assert_eq!(result["failure"], "unavailable", "{result}");
     assert!(waited >= DOCTOR_WAIT, "{waited:?}");
+}
+
+#[test]
+fn should_answer_the_trust_checks_when_doctor_asks() {
+    // given: GH-08's start-up check refused the pools for the fork-PR setting
+    let kit = Kit::new();
+    kit.trust.fork_pr_setting("refused");
+
+    // when
+    let (answer, _) = kit.serving(true, Operators::this_user(), |socket| async move {
+        ask(&socket, r#"{"api":1,"command":"trust"}"#).await
+    });
+
+    // then
+    assert!(answer.ok, "{answer:?}");
+    let result = answer.result.unwrap_or_default();
+    assert_eq!(result["fork_pr_setting"], "refused", "{result}");
+    assert_eq!(result["permissions_read"], false, "{result}");
 }
 
 #[test]

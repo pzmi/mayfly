@@ -33,4 +33,5 @@ pub mod paths;
 pub mod sizing;
 pub mod state_dir;
 pub mod supervise;
+pub mod trust;
 pub mod vm_shim;

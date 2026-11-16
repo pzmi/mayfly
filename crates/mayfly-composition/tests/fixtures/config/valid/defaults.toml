@@ -9,6 +9,7 @@ installation_id = 12345678
 private_key = "env:MAYFLY_APP_KEY"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "lin"
 tier = "trusted"
 image_manifest = "/etc/mayfly/images/lin.toml"

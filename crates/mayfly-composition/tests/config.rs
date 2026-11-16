@@ -2,6 +2,7 @@
 //! examples under `tests/fixtures/config/`, one invalid example per refusal, and the rules
 //! the module documents.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use mayfly_composition::config::{
     ProviderKind, Tier, TimeOfDay, plan_policy,
 };
 use mayfly_control_domain::capacity;
+use mayfly_control_domain::demand::{EventName, RepositoryName, TrustPolicy};
 use mayfly_domain::SecretRef;
 
 fn fixtures(family: &str) -> PathBuf {
@@ -108,6 +110,7 @@ fn should_name_the_reason_when_a_refused_key_is_present() {
             "ADR 0027",
         ),
         ("refused_classic_mode.toml", "github.mode", "ADR 0028"),
+        ("refused_enterprise.toml", "github.enterprise", "ADR 0040"),
     ];
     for (fixture, field, adr) in cases {
         // when
@@ -219,6 +222,25 @@ fn should_accept_every_key_when_the_full_fixture_is_parsed() {
         })
     );
     assert_eq!(mac.capacity_policy, CapacityPolicy::Demand);
+    assert!(config.github.check_fork_pr_setting);
+    let policy = mac.trust_policy();
+    assert_eq!(policy.scale_set_name, "mac");
+    assert_eq!(
+        policy.allowed_repositories,
+        BTreeSet::from([
+            RepositoryName("example-org/app".to_owned()),
+            RepositoryName("example-org/site".to_owned())
+        ])
+    );
+    assert_eq!(
+        policy.allowed_events,
+        BTreeSet::from([EventName::Push, EventName::WorkflowDispatch])
+    );
+    assert!(policy.cancel_refused_runs);
+    let lin = &config.pools[1];
+    assert!(lin.allowed_repositories.is_empty(), "optional on GHES");
+    assert_eq!(lin.allowed_events, TrustPolicy::default_events());
+    assert!(!lin.cancel_refused_runs);
     assert_eq!(config.pools[1].guest_os, GuestOs::Linux);
     assert_eq!(config.shutdown.busy_wait, Duration::from_secs(45 * 60));
 }
@@ -796,4 +818,89 @@ fn should_cap_macos_guests_at_apples_limit_when_more_are_configured() {
 
     // then
     assert_eq!(effective, [0, 1, 2, 2, 2]);
+}
+
+#[test]
+fn should_read_each_pools_trust_settings_when_they_are_configured() {
+    // given: github.com with the defaults, github.com with every setting, and GHES without a
+    // list (GH-08, ADR 0090)
+    let defaults = minimal();
+    let set = minimal().replacen(
+        "max_running = 2",
+        "max_running = 2\nallowed_events = [\"release\"]\ncancel_refused_runs = true",
+        1,
+    );
+    let ghes = minimal()
+        .replacen(
+            "[github]",
+            "[github]\napi_url = \"https://ghes.example/api/v3\"",
+            1,
+        )
+        .replacen("allowed_repositories = [\"example-org/app\"]\n", "", 1);
+    let missing = minimal().replacen("allowed_repositories = [\"example-org/app\"]\n", "", 1);
+
+    // when
+    let defaults = Config::parse(&defaults).unwrap();
+    let set = Config::parse(&set).unwrap();
+    let ghes = Config::parse(&ghes).unwrap();
+    let missing = errors_of(&missing);
+
+    // then
+    let pool = &defaults.pools[0];
+    assert!(defaults.github.is_github_com());
+    assert!(!defaults.github.check_fork_pr_setting);
+    assert_eq!(
+        pool.allowed_repositories,
+        BTreeSet::from([RepositoryName("example-org/app".to_owned())])
+    );
+    assert_eq!(pool.allowed_events, TrustPolicy::default_events());
+    assert!(!pool.cancel_refused_runs);
+    assert_eq!(
+        set.pools[0].allowed_events,
+        BTreeSet::from([EventName::Release])
+    );
+    assert!(set.pools[0].cancel_refused_runs);
+    assert!(!ghes.github.is_github_com());
+    assert!(ghes.pools[0].allowed_repositories.is_empty());
+    assert_eq!(
+        missing,
+        [(
+            "pools[0].allowed_repositories".to_owned(),
+            ConfigErrorKind::Missing
+        )]
+    );
+}
+
+#[test]
+fn should_refuse_a_trust_list_when_it_is_not_an_array() {
+    // given
+    let text = minimal()
+        .replacen(
+            "allowed_repositories = [\"example-org/app\"]",
+            "allowed_repositories = \"example-org/app\"",
+            1,
+        )
+        .replacen(
+            "max_running = 2",
+            "max_running = 2\nallowed_events = \"push\"",
+            1,
+        );
+
+    // when
+    let errors = errors_of(&text);
+
+    // then
+    assert_eq!(
+        errors,
+        [
+            (
+                "pools[0].allowed_repositories".to_owned(),
+                ConfigErrorKind::WrongType
+            ),
+            (
+                "pools[0].allowed_events".to_owned(),
+                ConfigErrorKind::WrongType
+            ),
+        ]
+    );
 }

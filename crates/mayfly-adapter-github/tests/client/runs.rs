@@ -387,3 +387,41 @@ async fn should_share_one_deadline_when_the_mint_and_the_lookup_wait() {
     );
     assert_eq!(run_lookup(&looked), RunLookup::Failed);
 }
+
+#[tokio::test(start_paused = true)]
+async fn should_read_the_fork_setting_and_the_group_when_checked() {
+    // given: GH-08's start-up reads, the installation holding what they need
+    let (fake, _clock, client) = world_granting(&[
+        ("organization_self_hosted_runners", "write"),
+        ("organization_administration", "read"),
+        ("actions", "read"),
+    ]);
+    fake.update_knobs(|k| {
+        k.fork_pr_setting.run_workflows_from_fork_pull_requests = true;
+        k.runner_groups[0].allows_public_repositories = true;
+    });
+
+    // when
+    let fork = client.fork_pr_workflows_run().await;
+    let group = client.runner_group_admits_public(1).await;
+    let absent_group = client.runner_group_admits_public(9).await;
+    let granted = client.granted_permissions().await;
+
+    // then
+    assert_eq!(fork, Ok(true));
+    assert_eq!(group, Ok(true));
+    assert_eq!(
+        absent_group.map_err(|e| e.failure),
+        Err(Failure::Refused { status: 404 })
+    );
+    let granted = granted.expect("granted").0;
+    assert_eq!(
+        granted
+            .get("organization_administration")
+            .map(String::as_str),
+        Some("read")
+    );
+    for op in [Operation::ForkPrSetting, Operation::RunnerGroupRead] {
+        assert!(attempts(&client, op) > 0, "{}", op.as_str());
+    }
+}

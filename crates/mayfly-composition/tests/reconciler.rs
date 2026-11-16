@@ -28,6 +28,7 @@ private_key = "file:/etc/mayfly/app-key.pem"
 tart_home = "/var/lib/mayfly/tart"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "amac"
 tier = "trusted"
 image_manifest = "/etc/mayfly/images/mac.toml"
@@ -38,6 +39,7 @@ max_running = 2
 capacity_policy = "{mac_policy}"
 
 [[pools]]
+allowed_repositories = ["example-org/app"]
 name = "blin"
 tier = "trusted"
 image_manifest = "/etc/mayfly/images/lin.toml"
