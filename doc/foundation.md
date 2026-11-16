@@ -748,14 +748,16 @@ boundaries), not as an object model.
 
 1. **Each job is `cargo xtask check --only <stages>`.** CI never re-implements a stage in YAML;
    local and CI run the same code. Jobs today: `architecture`; `static` (`doctor`, then
-   fmt-check, clippy, docs); `tests` (unit, integration, doctests); `security` (deny, secrets,
+   fmt-check, clippy, docs); `tests` (unit, integration, doctests); `e2e` (`e2e-tests`, the
+   `tests/e2e_*.rs` binaries, Linux; E2E-01); `formal` (the Quint stages and
+   `conformance-replay`); `security` (deny, secrets,
    workflows, action-pins); `coverage` (`coverage`, `changed-lines`, full history); `macos` (native build and tests on arm64 with
    `RUSTFLAGS=-D warnings`, `test --only platform-tests`); `cross` (`check --only cross-check`:
    `cargo clippy --locked --workspace --all-targets --features
    mayfly-adapter-tart/real-tart,mayfly-adapter-secrets/real-keychain --target
    aarch64-apple-darwin -- -D warnings` from Linux, so macOS-only code, the hardware lane's
-   gated tests included, is linted, not just compiled). Later tasks add
-   `e2e` and `conformance` with their stages.
+   gated tests included, is linted, not just compiled). A later stage joins a job in the
+   commit of the task that brings it.
 2. **One aggregate job, `required`**, runs `if: always()`, needs every other job of `ci.yml`, and
    fails unless every result is `success` (skipped and cancelled fail).
 3. **Self-tests** in xtask parse `ci.yml` with a YAML parser and fail when an `in_check` stage

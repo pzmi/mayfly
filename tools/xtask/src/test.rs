@@ -2,9 +2,13 @@
 //!
 //! The runner is `cargo nextest` under the `ci` profile of `.config/nextest.toml` (no retries,
 //! every test run, a bound on each): `unit-tests` runs every test compiled into a library or
-//! binary (`not kind(test)`), `integration-tests` every `tests/*.rs` binary (`kind(test)`).
-//! Together they are the whole workspace run, and `coverage` measures that whole run in one
-//! pass. The documentation examples stay on `cargo test --doc`, which nextest does not run.
+//! binary (`not kind(test)`), `integration-tests` every `tests/*.rs` binary but the end-to-end
+//! ones, and `e2e-tests` those: the `tests/e2e_*.rs` binaries (verification.md section 2, the
+//! e2e level; E2E-01). Together they are the whole workspace run, and `coverage` measures that
+//! whole run in one pass: it runs the e2e binaries too, under instrumentation (the binaries
+//! they start write their profiles through `LLVM_PROFILE_FILE`), within the same `ci` profile's
+//! bound of four 30 s periods per test. The documentation examples stay on `cargo test --doc`,
+//! which nextest does not run.
 
 use crate::process::{Stage, finish, run_report};
 use crate::tools;
@@ -31,8 +35,14 @@ pub fn stages() -> Vec<Stage> {
 /// The `-E` filter of `unit-tests`: tests compiled into a library or binary.
 const UNIT_FILTER: &str = "not kind(test)";
 
-/// The `-E` filter of `integration-tests`: every `tests/*.rs` binary.
-const INTEGRATION_FILTER: &str = "kind(test)";
+/// The `-E` filter of `integration-tests`: every `tests/*.rs` binary but the end-to-end ones.
+const INTEGRATION_FILTER: &str = "kind(test) and not binary(/^e2e_/)";
+
+/// The `-E` filter of `e2e-tests`: the `tests/e2e_*.rs` binaries (verification.md section 2:
+/// the built `mayflyd` and `mayfly` against the fakes, black-box). Exactly the binaries
+/// [`INTEGRATION_FILTER`] leaves out, so each test runs in one stage. Pinned by
+/// `should_split_the_workspace_run_by_test_kind_when_test_is_built`.
+const E2E_FILTER: &str = "kind(test) and binary(/^e2e_/)";
 
 /// A nextest stage over the workspace under the `ci` profile, narrowed by `filter`, with the
 /// proptest floor and the unknown-key guard. Pinned by
@@ -82,6 +92,7 @@ fn stages_with(developer_cases: Option<&str>) -> Vec<Stage> {
             "cargo",
             &["test", "--workspace", "--locked", "--doc"],
         ),
+        nextest_stage("e2e-tests", Some(E2E_FILTER), developer_cases, &[]),
     ]
 }
 
@@ -89,10 +100,11 @@ fn stages_with(developer_cases: Option<&str>) -> Vec<Stage> {
 /// natively on macOS arm64 by the `macos` CI job, because the code under test is the operating
 /// system's (processes, sockets, signals).
 ///
-/// It is `unit-tests` plus `integration-tests` minus what is not OS behaviour: `xtask`, whose
+/// It is `unit-tests`, `integration-tests` and `e2e-tests` (no filter; the e2e binary compiles
+/// empty on macOS, its tests being Linux only) minus what is not OS behaviour: `xtask`, whose
 /// security fixtures need cargo-deny, Gitleaks and actionlint (only the Linux jobs install them)
 /// and whose repository-policy tests read the Linux CI definition. It is not part of [`stages`]
-/// or of `check`: on Linux the two stages it repeats already run, so a local `check` would run
+/// or of `check`: on Linux the stages it repeats already run, so a local `check` would run
 /// everything twice. Reached only as `cargo xtask test --only platform-tests`. Pinned by
 /// `should_run_the_product_crates_natively_when_platform_stage_is_built`.
 fn platform_stage(developer_cases: Option<&str>) -> Stage {
@@ -213,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn should_run_unit_integration_and_doctests_when_test_is_built() {
+    fn should_run_unit_integration_doctests_and_e2e_when_test_is_built() {
         // given
         let stages = stages();
 
@@ -221,7 +233,10 @@ mod tests {
         let names: Vec<_> = stages.iter().map(|s| s.name).collect();
 
         // then
-        assert_eq!(names, ["unit-tests", "integration-tests", "doctests"]);
+        assert_eq!(
+            names,
+            ["unit-tests", "integration-tests", "doctests", "e2e-tests"]
+        );
         assert!(format!("{:?}", stages[0].action).contains("\"--locked\""));
         assert_eq!(stages[0].tool, Some("cargo-nextest"));
         assert_eq!(stages[2].tool, None, "doctests stay on cargo test");
@@ -249,14 +264,20 @@ mod tests {
         // when
         let unit = format!("{:?}", stages[0].action);
         let integration = format!("{:?}", stages[1].action);
+        let e2e = format!("{:?}", stages[3].action);
 
-        // then
+        // then: the e2e binaries run in their own stage only
         assert!(unit.contains("\"-E\", \"not kind(test)\""), "{unit}");
         assert!(
-            integration.contains("\"-E\", \"kind(test)\""),
+            integration.contains("\"-E\", \"kind(test) and not binary(/^e2e_/)\""),
             "{integration}"
         );
-        for debug in [&unit, &integration] {
+        assert_eq!(stages[3].name, "e2e-tests");
+        assert!(
+            e2e.contains("\"-E\", \"kind(test) and binary(/^e2e_/)\""),
+            "{e2e}"
+        );
+        for debug in [&unit, &integration, &e2e] {
             assert!(debug.contains("\"nextest\", \"run\""), "{debug}");
             assert!(debug.contains("\"--workspace\""), "{debug}");
             assert!(debug.contains("\"--profile\", \"ci\""), "{debug}");

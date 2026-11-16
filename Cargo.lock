@@ -1180,8 +1180,13 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "mayfly-composition",
+ "mayfly-fake-github",
+ "mayfly-fake-registry",
  "mayfly-testkit-shared",
+ "rustix",
+ "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

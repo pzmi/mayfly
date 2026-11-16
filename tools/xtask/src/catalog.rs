@@ -71,7 +71,7 @@ pub const CATALOG: &[Check] = &[
     row(
         "integration-tests",
         "integration",
-        "cargo nextest run --workspace --locked --profile ci -E kind(test)",
+        "cargo nextest run --workspace --locked --profile ci -E kind(test) and not binary(/^e2e_/)",
         "FND-05",
         true,
     ),
@@ -80,6 +80,13 @@ pub const CATALOG: &[Check] = &[
         "unit",
         "cargo test --workspace --locked --doc",
         "FND-02",
+        true,
+    ),
+    row(
+        "e2e-tests",
+        "e2e",
+        "cargo nextest run --workspace --locked --profile ci -E kind(test) and binary(/^e2e_/)",
+        "E2E-01",
         true,
     ),
     row("fmt", "tooling", "cargo xtask fmt", "FND-02", false),

@@ -196,6 +196,35 @@ jobs:
           key: ${{ steps.rust.outputs.cache-key }}
           hit: ${{ steps.rust.outputs.cache-hit }}
 
+  # The walking skeleton and every later end-to-end test (verification.md section 2, E2E-01): the
+  # built `mayflyd` and `mayfly` against fake-tart, the fake GitHub and the fake registry, black
+  # box, on Linux (the fake registry's CA reaches `mayflyd` through SSL_CERT_FILE, which macOS
+  # does not read). nextest builds every binary of the workspace the tests start.
+  e2e:
+    name: End to end (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          job: e2e
+          tools: cargo-nextest
+
+      - name: End to end
+        run: cargo xtask check --only e2e-tests
+
+      - name: Save caches (main only)
+        uses: ./.github/actions/save-rust-cache
+        with:
+          key: ${{ steps.rust.outputs.cache-key }}
+          hit: ${{ steps.rust.outputs.cache-hit }}
+
   # The product crates' unit and integration tests on the native macOS arm64 runner, because
   # the code under test is the operating system's: processes, sockets, signals (D2). It installs
   # no scanners (they are Linux x86-64 only) and so runs `cargo xtask test --only
@@ -304,6 +333,7 @@ jobs:
       - static
       - cross
       - tests
+      - e2e
       - formal
       - macos
       - coverage

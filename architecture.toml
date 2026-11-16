@@ -253,8 +253,11 @@ mayfly-adapter-secrets = { tempfile = ["default"], tokio = ["rt", "process", "io
 # The operator socket's component tests (RT-03) pause the clock to pass its request deadline.
 mayfly-composition = { tempfile = ["default"], tokio = ["default", "test-util"] }
 # The CLI's black-box tests (RT-03): `assert_cmd` runs the built binaries (the card's Accept),
-# tempfile holds each test's world.
-mayfly-cli = { assert_cmd = ["default"], tempfile = ["default"] }
+# tempfile holds each test's world. The walking skeleton (E2E-01) reads the binaries' `--json`
+# and the fakes' JSON with serde_json, serves mayfly-fake-github on a current-thread Tokio
+# runtime of its own (rt; sync for its stop signal), and signals only the processes its run
+# started through rustix (SIGTERM to its daemon, SIGKILL to the clone its killed daemon left).
+mayfly-cli = { assert_cmd = ["default"], rustix = ["default", "process"], serde_json = ["default"], tempfile = ["default"], tokio = ["rt", "sync"] }
 # The executor's component tests poll it and their script together on a current-thread runtime
 # (`tokio::join!`), nothing spawned (DP-01).
 mayfly-data = { tokio = ["rt", "macros"] }

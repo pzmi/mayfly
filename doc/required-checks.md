@@ -28,7 +28,8 @@ pull requests and by hand. A test in `tools/xtask/src/check.rs`
 | `architecture` | Architecture and policy | `check --only architecture` |
 | `static` | Static quality | `check --only fmt-check,clippy,docs` (docs: the ADR index matches the ADR files), after `doctor` has asserted every pinned tool a `check` stage needs (Node 22 and the locked Quint included) |
 | `cross` | Cross check (aarch64-apple-darwin) | `check --only cross-check` (Clippy over every target for the macOS target, warnings denied) |
-| `tests` | Tests | `check --only unit-tests,integration-tests,doctests` (nextest under the `ci` profile; doctests on `cargo test --doc`) |
+| `tests` | Tests | `check --only unit-tests,integration-tests,doctests` (nextest under the `ci` profile, the end-to-end binaries left to `e2e`; doctests on `cargo test --doc`) |
+| `e2e` | End to end (Linux) | `check --only e2e-tests` (the `tests/e2e_*.rs` binaries under nextest's `ci` profile: the built `mayflyd` and `mayfly` against fake-tart, the fake GitHub and the fake registry; Linux only) |
 | `formal` | Formal models (Quint) | `check --only formal-typecheck,formal-test,formal-freshness,conformance-replay` (typecheck every `formal/*.qnt`, run each registered model's Quint tests, check the committed regression traces are fresh and replay them with seeded generated traces through the conformance drivers; Node 22 and `npm ci --prefix formal` first) |
 | `macos` | macOS (arm64) | `cargo build --workspace --locked`, then `test --only platform-tests` on `macos-latest`, with `RUSTFLAGS=-D warnings` |
 | `coverage` | Coverage | `check --only coverage,changed-lines` (the instrumented nextest run against `coverage-floor.toml`, then the changed lines against the merge base; full history) |
