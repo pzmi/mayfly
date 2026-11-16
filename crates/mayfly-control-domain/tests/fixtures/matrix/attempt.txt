@@ -140,7 +140,7 @@ cloning/sent x request_retirement -> refused directive_pending
 cloning/sent x confirm_retirement -> refused directive_pending
 cloning/sent x withdraw_retirement -> refused directive_pending
 cloning/sent x quarantine -> refused directive_pending
-cloning/sent x adopt -> accepted attempt_adopted/v1
+cloning/sent x adopt -> accepted attempt_adopted/v1 directive_outcome_unknown/v1
 cloning/sent x resolve_quarantine -> refused directive_pending
 cloning/sent x close -> refused directive_pending
 cloning/sent x vm_cloned -> accepted vm_cloned/v1

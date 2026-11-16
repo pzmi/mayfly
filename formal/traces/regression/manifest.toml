@@ -412,6 +412,46 @@ seed = "0x5ce1"
 invariant = "allInvariants"
 
 [[trace]]
+file = "lifecycle-cloneInFlightAtCrashResolvedAtRecovery.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "cloneInFlightAtCrashResolvedAtRecovery"
+max_steps = 6
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-cloneInFlightAtCrashAbsentRetries.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "cloneInFlightAtCrashAbsentRetries"
+max_steps = 5
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-heldCloneAtCrashSentAfterAdoption.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "heldCloneAtCrashSentAfterAdoption"
+max_steps = 5
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
+file = "lifecycle-lateCloneAdoptedByObservation.itf.json"
+model = "lifecycle.qnt"
+main = "lifecycle_traces"
+init = "tinit"
+step = "lateCloneAdoptedByObservation"
+max_steps = 8
+seed = "0x5ce1"
+invariant = "allInvariants"
+
+[[trace]]
 file = "lifecycle-stageFailureBacksOffThenRetires.itf.json"
 model = "lifecycle.qnt"
 main = "lifecycle_traces"

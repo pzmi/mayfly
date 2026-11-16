@@ -491,7 +491,7 @@ pins the same reason, so the lab is never the only evidence.
 | Id | Scenario | Nemesis | Expected | Invariants | Core | Also |
 |:--|:--|:--|:--|:--|:--|:--|
 | F01 | Kill after durable `SlotReserved`, before clone | SIGKILL at the observed record | restart resumes `CloneVm` with the same name and generation; one clone | I03, I13 | ● | CP-04 component |
-| F02 | Kill after clone succeeds, before confirmation | fake-tart `crash_after_effect` + SIGKILL | inventory shows the owned clone; adopted, not cloned again | I10, I13 | ● | recovery table |
+| F02 | Kill after clone succeeds, before confirmation | fake-tart `crash_after_effect` + SIGKILL | inventory shows the owned clone; adopted, not cloned again | I10, I13 | ● | recovery table; CP-04D component (a clone sent and unanswered at the crash is `Unknown` from the adoption and resolved by the recovery inventory) |
 | F03 | Timeout mid-clone | fake-tart `hang` | deadline → `Unknown`; resolved by inventory; no new name | I10, I13 | ● | CP-02 component |
 | F04 | Kill while VM starting | SIGKILL during `StartVm` | adopted or stopped and deleted with proof; slot never double-booked | I02, I03 | ● | recovery table |
 | F05 | Guest never reachable | fake-tart `exec` hangs | probe deadline → backoff → budget → quarantine or delete; slot held until delete observed | I03, I11 | ● | lifecycle conformance |
@@ -520,7 +520,7 @@ pins the same reason, so the lab is never the only evidence.
 | F28 | Invalid guest bootstrap secret | launcher rejects the JIT config | definite failure; attempt retired; secret absent from all records | I14 (I15 by SEC-01) | | DP-05 integration |
 | F29 | Stop while exporting logs | SIGTERM during diagnostics export | shutdown within its deadline; attempt left recoverable; deletion completes after restart | I11 | | RT-02 integration |
 | F30 | Provider recovers after all jobs complete | fake-tart faults cleared at the end | converges to `min_prepared` and nothing more | I07, I11 | | CP-03 simulation |
-| F31 | Kill the data-plane process alone (UDS split) | SIGKILL `mayflyd --role data` | CP marks in-flight directives `Unknown`, mints epoch N+1 on reconnect, reconciles by inventory | I09, I10 | ● | LNK-01 e2e |
+| F31 | Kill the data-plane process alone (UDS split) | SIGKILL `mayflyd --role data` | CP marks in-flight directives `Unknown`, mints epoch N+1 on reconnect, reconciles by inventory | I09, I10 | ● | LNK-01 e2e; CP-04D component (the adoption records a sent directive `Unknown`) |
 | F32 | Crash after JIT issued, before handle issue | SIGKILL after `RegistrationIssued` | `JitHandleOrphaned` at restart; registration deregistered by id; new attempt, new name | I19, I20, I22 | ● | CP-05 component |
 | F33 | Cancel while runner registered-idle; job lands during deregistration | fake-github 422 on delete | retirement withdrawn; job served; no VM stopped before the answer | I06, I21 | ● | KER-09 model |
 | F34 | `tart list` unparseable / Tart upgraded mid-run | fake-tart garbage output, version change | `InventoryIncomplete`; no slot released; admission closed until re-probe | I25 | ● | KER-08 unit |

@@ -227,7 +227,9 @@ link; the attempt's `sent` flag), and `directiveTimeout` the saga's `RecordDirec
 `RecordObservation` facts; `beginActivation`, `recordJitHandle`, `bindJob`,
 `requestRetirement`, `confirmRetirement`, `withdrawRetirement`, `quarantineCommand`, `adopt`,
 `resolveQuarantine` and `close` are commands; `vmReplacedOrRemoved` changes the provider behind
-the journal's back. A reply is merged with the execution of its effect, so a lost reply is the
+the journal's back, and `effectApplied` (CP-04D) is the data plane executing the pending
+directive before its reply, which may then come or never come (the run that sent it died). A
+reply is merged with the execution of its effect, so a lost reply is the
 effect happening or not, then `Unknown`. `step` offers every stimulus at every state;
 `serveStep` is the biased relation of verification §6 (no policy retirement before the job ends,
 no interference with the provider), because a uniform random walk of `step` almost never strings
@@ -321,6 +323,38 @@ key does not withdraw the stop; it asks again), and Rust's
 `should_request_the_stop_deregistration_when_quarantined_during_a_pending_retirement`.
 `runnerExited` inside quarantine required a JIT, while the aggregate accepts it whatever the JIT;
 the model now accepts it too (with no JIT the stop reads nothing it changes).
+
+**A directive in flight at a restart (CP-04D).** `adopt` "moved nothing": a directive the
+older run sent and left unanswered stayed in flight under the new epoch, so the inventory, which
+resolves only an `Unknown` outcome, left it alone until its deadline (ten minutes for a clone;
+E2E-01 measured 636 s from the crash to `prepared`), although `recovery.qnt` reads every pending
+outcome after a restart as `Unknown` and ADOPTs a CLONING record with the listed instance. Now
+`adopt` (`adopted`) records a pending directive the relay sent (`sent`) `Unknown`: it *enters*
+`Unknown`, so `i10UnknownLeavesOnlyOnObservation` is kept, and `inventoryPresent` and
+`inventoryAbsent` resolve it at recovery. A directive issued and not recorded sent stays in
+flight: the relay still holds it and sends it under the new epoch once the attempt is adopted, and
+a data plane that executed it before the restart answers by re-observing the name (ADR 0042,
+Decision 4). `effectApplied` is the new world action that lets a scenario crash after the effect
+and before its reply, and `lateCloneLands` the one in which a superseded clone's VM (a `tart
+clone` the killed run left running) appears under the name later: the retry that finds the name
+taken is answered `Unknown`, never refused, and the inventory records the VM
+(`lateCloneAdoptedByObservationTest`, a regression trace; the control `lateCloneRefusedRetiresTest`
+shows that a definite refusal there retires the attempt with the VM left unrecorded).
+`recovery.qnt`'s overlay ("every pending outcome here is Unknown") is the overlay of a sent
+directive; an unsent one is resolved by the relay's re-send under the new epoch. Scenarios `cloneInFlightAtCrashResolvedAtRecoveryTest` (listed: `Booting`
+with the one clone, then the boot issued), `cloneInFlightAtCrashAbsentRetriesTest` (absent:
+backed off and cloned again by the same name and generation) and
+`heldCloneAtCrashSentAfterAdoptionTest` (the unsent clone sent after the adoption and answered),
+each a regression trace too; the negative control `adoptKeepingInFlightNeverResolvesAtRecoveryTest`
+forces the old adoption, after which the recovery inventory leaves the clone in flight and only
+its deadline (`canTimeOut`) could move it. No existing scenario or trace changed: none adopted a
+directive recorded sent. Conformance:
+`should_catch_an_adoption_that_keeps_a_sent_directive_in_flight_when_its_trace_is_replayed`
+replays `cloneInFlightAtCrashResolvedAtRecovery` against an aggregate whose adoption keeps it in
+flight, and finds the divergence at the `adopt` step, on `unknown`. Rust:
+`tests/attempt/lifecycle.rs::should_make_a_sent_directive_unknown_when_its_attempt_is_adopted`
+and `should_keep_a_held_directive_in_flight_when_its_attempt_is_adopted`; the matrix golden's
+`cloning/sent x adopt` row.
 
 | Id | Invariant | Pinned by |
 |:--|:--|:--|
@@ -480,7 +514,8 @@ an outcome is `Unknown` or the pending directive is not sent yet. **Not modelled
 deadline per directive kind fixed at the first send, the reply grace,
 the aggregate's refusal of a timeout before the deadline, `deadline_not_reached`, pinned by
 `tests/attempt/lifecycle.rs::should_make_the_outcome_unknown_never_success_when_a_deadline_passes`);
-the saga's timers being memory that startup re-arms (`AttemptSaga::reconsider`, CP-04); and the
+the saga's timers being memory, which startup does not need to re-arm for a directive the older
+run sent, since the adoption makes it `Unknown` (CP-04D; `AttemptSaga::reconsider`); and the
 saga reading the attempt's current state rather than the event that woke it, so a late or repeated
 event issues nothing the model's `issueNext` would not (`crates/mayfly-control/tests/store/saga.rs`).
 

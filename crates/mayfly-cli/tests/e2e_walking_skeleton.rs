@@ -9,8 +9,8 @@
 //! 2. a demand of three on two slots, three jobs run through it: never more than two VMs or
 //!    leases at any point;
 //! 3. `mayflyd` killed (SIGKILL) while a clone is in flight, then started again: the restart
-//!    adopts the cloning attempt and its VM, and nothing has duplicated them by the time
-//!    recovery completed (a snapshot; the test's own comment says what CP-04D adds).
+//!    adopts the cloning attempt and resolves its clone by the recovery inventory, and the
+//!    attempt reaches `prepared` with one lease, one VM and one clone, no name cloned twice.
 //!
 //! What the tests read is what an operator or GitHub could: the daemon's ready line (its
 //! documented "recovery finished" signal), `mayfly status --json` and `mayfly events --since
@@ -1053,16 +1053,13 @@ fn should_never_hold_more_than_two_vms_when_three_are_wanted_on_two_slots() {
     assert_eq!(unique.len(), started_vms.len(), "a VM name per attempt");
 }
 
-/// The crash of Accept 3, as far as the product reaches today. It pins what the restart's
-/// recovery does: the killed run recorded unclean, recovery completed, the cloning attempt
-/// adopted under the new run with its VM kept, and nothing duplicated **by the time recovery
-/// completed** (one attempt, one lease, one VM, its name cloned once and never deleted). It is a
-/// snapshot at that point, not a steady state: the reconciler's first pass after admission
-/// reopens may run after it, and nothing later can be waited for yet, because the adopted
-/// attempt stays `cloning` until its clone directive's deadline (ten minutes from its first
-/// send, `DirectiveTimeouts::clone`): nothing resolves a directive merely in flight at
-/// adoption. CP-04D (doc/tasks.md) closes that gap; this test then waits for `prepared` and
-/// asserts one lease, one VM and one clone at that steady state.
+/// The crash of Accept 3: the killed run recorded unclean, recovery completed, the cloning
+/// attempt adopted under the new run, its clone (sent and unanswered when the run died) made
+/// `Unknown` by the adoption and resolved by the recovery inventory, which lists it, so the
+/// attempt moves on at recovery instead of at the clone's ten-minute deadline
+/// (`DirectiveTimeouts::clone`). The test waits, within its whole budget, for that attempt to be
+/// `prepared`, then asserts the steady state: one attempt, one lease, one VM, its name cloned
+/// once and never deleted, and no effect left unknown.
 #[test]
 fn should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_and_restarted() {
     // given: one VM prepared ahead of demand, and the first attempt's clone made to hang once
@@ -1112,18 +1109,31 @@ fn should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_a
         .map(str::to_owned)
         .collect();
     let hung_vm = argv.get(2).cloned().unwrap_or_default();
+    // The relay hands a frame to the link before it records `DirectiveSent`, so the fault alone
+    // does not say the send is on record. A kill between the two takes the held path (the clone
+    // stays in flight and is sent again under the new epoch), which records no
+    // `directive_outcome_unknown`; this test pins the path where the send was recorded.
+    let _sent = world.await_events(
+        world.budget.waits(),
+        "the held clone's send recorded (`directive_sent`), in mayfly events",
+        |events| {
+            events
+                .attempts()
+                .values()
+                .any(|h| h.vm.as_deref() == Some(hung_vm.as_str()) && h.has("directive_sent"))
+        },
+    );
 
     // when: mayflyd is killed with the clone in flight; the clone its run started then ends
-    // without an answer, and mayflyd starts again and recovers (its ready line)
+    // without an answer, and mayflyd starts again, recovers, and carries the adopted attempt on
     first.kill();
-    // The test ends the orphaned clone itself because the fault hangs forever. In production a
-    // `tart clone` left by a killed mayflyd keeps running in its own process group, nothing
-    // reaps it, and a retried clone of the same name may race it (a caveat CP-04D records).
+    // The fault hangs forever, so the test ends the orphaned clone itself (a `tart clone` left
+    // by a killed mayflyd keeps running in its own process group, and nothing reaps it).
     hung.end();
     let second = world.start();
     let events = world.await_events(
         world.budget.waits(),
-        "the cloning attempt adopted by the second run's recovery, in mayfly events",
+        "the cloning attempt adopted by the second run and prepared, in mayfly events",
         |events| {
             events
                 .host_run_kinds()
@@ -1131,22 +1141,21 @@ fn should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_a
                 .filter(|k| *k == "recovery_completed")
                 .count()
                 == 2
-                && events
-                    .attempts()
-                    .values()
-                    .any(|h| h.vm.as_deref() == Some(hung_vm.as_str()) && h.has("attempt_adopted"))
+                && events.attempts().values().any(|h| {
+                    h.vm.as_deref() == Some(hung_vm.as_str())
+                        && h.has("attempt_adopted")
+                        && h.has("attempt_prepared")
+                })
         },
     );
-    // A snapshot as recovery completed (see the doc above). With CP-04D this waits instead for
-    // the adopted attempt `prepared`, then asserts one lease, one VM and one clone there.
     let status = world.status();
     let vms = world.vms();
     let stopped = second.terminate();
     drop(reaped);
 
     // then: the held clone was the attempt's, from the base; the killed run is recorded unclean
-    // and the restart recovered; the attempt is adopted with its VM kept, and nothing had
-    // duplicated it by then: one attempt, one lease, one VM, its name cloned once, never deleted
+    // and the restart recovered; the attempt is adopted with its VM kept and prepared, with
+    // nothing duplicated: one attempt, one lease, one VM, its name cloned once, never deleted
     assert_eq!(stopped.code, Some(0), "SIGTERM is a clean stop");
     assert_eq!(argv.first().map(String::as_str), Some("clone"), "{argv:?}");
     assert!(
@@ -1164,7 +1173,23 @@ fn should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_a
     assert_eq!(started_vms, std::slice::from_ref(&hung_vm), "{attempts:?}");
     assert_eq!(world.effects("vm_cloned"), std::slice::from_ref(&hung_vm));
     assert!(world.effects("vm_deleted").is_empty());
-    assert_eq!(vms, BTreeSet::from([hung_vm]));
+    assert_eq!(vms, BTreeSet::from([hung_vm.clone()]));
     assert_eq!(status["hosts"][0]["leases"], 1, "{status}");
     assert_eq!(events.peak_leases(), 1, "{:?}", events.slots());
+    assert!(
+        status["attempts"]["unknown_effects"] == 0,
+        "the clone's Unknown resolved by the inventory: {status}"
+    );
+    let adopted = attempts
+        .values()
+        .find(|h| h.vm.as_deref() == Some(hung_vm.as_str()))
+        .expect("the adopted attempt");
+    for kind in [
+        "attempt_adopted",
+        "directive_outcome_unknown",
+        "vm_cloned",
+        "attempt_prepared",
+    ] {
+        assert!(adopted.has(kind), "{kind}: {adopted:?}");
+    }
 }

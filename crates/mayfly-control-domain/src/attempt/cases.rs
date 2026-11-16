@@ -385,6 +385,24 @@ fn retirement_waiting_in_backoff() -> Vec<Step> {
     path
 }
 
+fn adopt_at(run_epoch: u64) -> Step {
+    at(
+        run_epoch,
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    )
+}
+
+/// A clone the relay sent before the restart, unanswered: the adoption makes it `Unknown`
+/// (CP-04D).
+fn clone_in_flight_adopted() -> Vec<Step> {
+    let mut path = then(cloning(), [sent(1)]);
+    path.push(adopt_at(2));
+    path
+}
+
 fn adopted() -> Vec<Step> {
     let mut path = prepared();
     path.push(at(
@@ -472,6 +490,9 @@ pub(super) fn paths() -> Vec<Vec<Step>> {
         unknown_clone(),
         doubted(),
         adopted(),
+        clone_in_flight_adopted(),
+        then(stopped(), [issue(8), sent(8)]),
+        then(jit_issued(), [issue(5), sent(5)]),
         launched_after_restart(),
         backoff_holding_registration(),
         retirement_waiting_in_backoff(),
@@ -655,6 +676,45 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
             ),
             Expect::Accepted,
         ),
+        case(
+            "adopt_makes_sent_clone_unknown",
+            then(cloning(), [sent(1)]),
+            adopt_at(2),
+            Expect::Accepted,
+        ),
+        case(
+            "adopt_makes_sent_delete_unknown",
+            then(stopped(), [issue(8), sent(8)]),
+            adopt_at(2),
+            Expect::Accepted,
+        ),
+        case(
+            "adopt_makes_sent_launch_unknown_and_orphans_handle",
+            then(jit_issued(), [issue(5), sent(5)]),
+            adopt_at(2),
+            Expect::Accepted,
+        ),
+        case(
+            "adopt_keeps_held_clone_in_flight",
+            cloning(),
+            adopt_at(2),
+            Expect::Accepted,
+        ),
+        case(
+            "inventory_resolves_adopted_clone",
+            clone_in_flight_adopted(),
+            observe_after_restart(Fact::VmPresent {
+                instance_id: ProviderInstanceId::sample(),
+                running: false,
+            }),
+            Expect::Accepted,
+        ),
+        case(
+            "inventory_absence_backs_off_adopted_clone",
+            clone_in_flight_adopted(),
+            observe_after_restart(Fact::VmAbsent),
+            Expect::Accepted,
+        ),
         accepted(
             "stale_generation_ignored",
             cloning(),
@@ -701,6 +761,24 @@ pub(super) fn cases() -> Vec<DeterminismCase<Attempt>> {
                     grant_ref: event(1),
                 },
             ),
+            Expect::Refused,
+        ),
+        case(
+            "outcome_unknown_after_adopting_a_sent_clone",
+            clone_in_flight_adopted(),
+            at(
+                2,
+                SAGA,
+                AttemptCommand::RequestRetirement {
+                    reason: RetireReason::Surplus,
+                },
+            ),
+            Expect::Refused,
+        ),
+        case(
+            "adopt_sent_clone_already_current",
+            then(cloning(), [sent(1)]),
+            adopt_at(1),
             Expect::Refused,
         ),
         refused(

@@ -816,8 +816,9 @@ issues `RecordDirectiveTimeout` (command id `f(directive_id)`) once the sent dea
 grace passed, which records `DirectiveOutcomeUnknown` (never a success; a timeout of a directive
 not sent is refused `directive_not_sent`, before the deadline `deadline_not_reached`, of an
 answered one `directive_not_pending`, the only refusal that disarms the timer; any other keeps it,
-retried one reply grace later). Timers do not survive a restart: startup re-arms them with
-`AttemptSaga::reconsider` (CP-04). `directive_relay` sends through
+retried one reply grace later). Timers do not survive a restart: startup calls
+`AttemptSaga::reconsider` for every attempt it adopts (CP-04); a directive the older run sent is
+`Unknown` from the adoption on (CP-04D), so no deadline of the older run is re-armed. `directive_relay` sends through
 `mayfly_control::delivery::LinkSink`, which reads the attempt through the store (an unknown kind
 raises safe mode as any load does), composes the protocol `Directive` from the stream
 (name, generation, proof) and `DirectiveDetails` (image base, run options, stop grace, nonce),

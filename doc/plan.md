@@ -566,7 +566,10 @@ is not a port call: the re-observation before an effect reads instance ids from 
 `inventory`. Like Tart, `clone_vm` onto an existing name and `start` of a running VM fail, so the
 executor re-observes a `CloneVm` or `StartVm` by name first (ADR 0042 decision 4: a re-delivery
 under a new epoch is a re-observation): a clone whose exact name is listed with an instance id is
-answered `VmCloned` with it, a start of a running VM `VmBooted`, both without the effect.
+answered `VmCloned` with it, a start of a running VM `VmBooted`, both without the effect. A
+clone the provider then finds its name taken by (the name appeared after the re-observation, as a
+clone left running by a killed daemon finishes late) is answered `Ambiguous(ProcessLost)`, never
+`Definite`, and the inventory decides it by the name (CP-04D, the provider contract's VP-02).
 `VmError` is `Definite` or `Ambiguous(Ambiguity)`, the ambiguity naming the unknown reason
 (`deadline`, `process_lost`, `host_slept`); `ImageStore` and `GuestTransport` use the same error.
 **An effect's future is never dropped**: at its directive's deadline the executor answers

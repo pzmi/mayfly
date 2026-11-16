@@ -1151,6 +1151,14 @@ Accept: the model's scenarios pass with a negative control (a hold the sink igno
 delete); a held attempt is adopted and no delete is sent until the hold is released, which
 happens only once GitHub reports the runner offline or gone (an unreadable GitHub keeps it); the
 divergence note in `doc/formal-models.md` is removed.
+Note (2026-11-16, CP-04D): the model change this card plans first, "an adoption reads a
+directive in flight as `Unknown`", is made by CP-04D: `formal/lifecycle.qnt`'s `adopted` and
+`decide_adopt` record `DirectiveOutcomeUnknown` for a pending directive recorded sent
+(`DirectiveSent`); one issued and not sent stays in flight for the relay to send under the new
+epoch. Build the hold on it: a held cleanup's sent delete is `Unknown` from the adoption, and the
+inventory then reads it not applied while the VM is listed, so the hold must keep the saga from
+issuing the delete again, not only the relay's sink from sending it (an unsent delete stays in
+flight and is the sink's to hold).
 
 #### CP-05 Registration manager and reaper
 Cites: dm §6.5, P9–P14; ADRs 0029, 0038. Mint JIT through the scale-set client once per
@@ -2261,12 +2269,18 @@ a slot is released), and
 `should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_and_restarted`
 (fake-tart's `hang_after_effect` on the first attempt clone, SIGKILL to `mayflyd`, then to the
 clone it left; the restart records the run unclean, recovers and adopts the cloning attempt
-with its VM, and nothing is duplicated by the time recovery completed: a snapshot then, since
-nothing later can be waited for until CP-04D). The stage is
+with its VM; before the kill it also waits for the clone's `directive_sent` in `mayfly events`
+(the relay hands the frame to the link before it records the send, and a kill between the two
+takes the held path, which records no `Unknown`); since CP-04D the test then waits, within its
+whole budget, for that attempt to be
+`prepared`, and asserts one attempt, one lease, one VM and one clone, no name cloned twice, and
+no effect left `Unknown`). The stage is
 `e2e-tests` (`kind(test) and binary(/^e2e_/)`; `integration-tests` leaves those binaries out),
 CI job `e2e`. No model change.
-**Accept 3 is met in part (a snapshot); CP-04D completes it; proposed to the owner at the ⛳.**
-The restart does not *converge* in the e2e budget. An attempt whose directive was in flight when its run died is adopted with the
+**Accept 3 is met through CP-04D** (as first committed, E2E-01 met it only in part: a snapshot
+as recovery completed). The owner decided on 2026-11-16 that E2E-01 lands only together with
+CP-04D, so that Accept 3 is fully met when they land. What E2E-01 found, as it stood before
+CP-04D: the restart did not *converge* in the e2e budget. An attempt whose directive was in flight when its run died was adopted with the
 directive still in flight (`formal/lifecycle.qnt` `adopt`: "it moves nothing";
 `mayfly_control::recovery`: the saga re-arms its deadline), nothing resends it to the new run's
 data plane (the relay's checkpoint passed it), and the old run's answer would be stale, so the
@@ -2287,8 +2301,8 @@ merely in flight. The fix brings `lifecycle.qnt`'s `adopt` and `decide_adopt` in
 those (CP-04D). Re-sending the directive under the new epoch is a complement whose data-plane
 half already exists (ADR 0042, Decision 4 and its Consequences; `mayfly-data/src/executor.rs`'s
 re-observation by name; `mayfly_data_domain::executor::reobserve_name`). Making the timeouts
-configurable is rejected: it hides the divergence. The test's own doc names what it will assert
-once CP-04D lands.
+configurable is rejected: it hides the divergence. With CP-04D the whole test, crash and
+restart included, takes 3 to 7 s locally, against 636 s from the crash to `prepared` before.
 
 #### CP-04D Resolve a directive in flight at a restart by the recovery inventory
 Cites: plan §10, `formal/recovery.qnt` (`:127`, `apply`, the classification step),
@@ -2322,6 +2336,98 @@ the attempt past `cloning` once recovery completes (and one with the clone absen
 the same name); the model's scenarios with a negative control (an adoption that keeps the
 directive in flight never resolves at recovery); E2E-01's third test then waits for the adopted
 attempt `prepared` and asserts exactly one lease, one VM and one clone.
+Note (CP-04D, as built): **the adoption records a directive the older run sent `Unknown`.**
+`formal/lifecycle.qnt`'s `adopt` (`adopted`) and `decide_adopt` add `DirectiveOutcomeUnknown`
+(the existing event, `since` the `Adopt` command's time) for a pending directive that is
+`InFlight` and recorded sent (`DirectiveSent`): its run is gone, its answer would be stale, and
+the relay's checkpoint passed it. It *enters* `Unknown`, so I10 is kept. A directive issued and not
+recorded sent stays in flight: the relay still holds it (the sink answers `attempt_not_adopted`
+and keeps its checkpoint), sends it under the new epoch once the attempt is adopted, and a data
+plane that executed it before the restart answers by re-observing the name (ADR 0042, Decision 4;
+making it `Unknown` would drop it from the relay and leave a guest-side directive to P19).
+Compatibility: no new event, field or value; an older build folds the same events and would
+have reached the same `Unknown` at the deadline. The model gains the world action
+`effectApplied` (the effect before its reply); scenarios
+`cloneInFlightAtCrashResolvedAtRecoveryTest`, `cloneInFlightAtCrashAbsentRetriesTest` and
+`heldCloneAtCrashSentAfterAdoptionTest`, each a regression trace (`lifecycle-*.itf.json`), and the
+negative control `adoptKeepingInFlightNeverResolvesAtRecoveryTest`; no existing trace changed.
+Conformance's negative control:
+`crates/mayfly-conformance/tests/lifecycle.rs::should_catch_an_adoption_that_keeps_a_sent_directive_in_flight_when_its_trace_is_replayed`.
+The aggregate: `tests/attempt/lifecycle.rs::should_make_a_sent_directive_unknown_when_its_attempt_is_adopted`
+and `should_keep_a_held_directive_in_flight_when_its_attempt_is_adopted`; DETERMINISM_CASES
+`adopt_makes_sent_clone_unknown`, `adopt_keeps_held_clone_in_flight`,
+`inventory_resolves_adopted_clone`, `inventory_absence_backs_off_adopted_clone`,
+`adopt_makes_sent_delete_unknown`, `adopt_makes_sent_launch_unknown_and_orphans_handle` (accepted),
+`adopt_sent_clone_already_current`, `outcome_unknown_after_adopting_a_sent_clone` (refused); the
+KER-04 matrix golden changes in one row, `cloning/sent x adopt`, now `attempt_adopted
+directive_outcome_unknown` (the only matrix state with a sent directive). Recovery
+(`mayfly_control::recovery`): the pass adopts, then records the inventory through the inbox, whose
+`VmPresent` carries the instance id the table's `Adoption::Clone(instance)` read and records
+`VmCloned`, and whose `VmAbsent` backs the clone off for its retry by the same name and
+generation (`RetryClone`); `act` names both rows explicitly, with no command of its own (the
+observation, never a command, resolves an `Unknown`, I10). Pinned by
+`crates/mayfly-control/tests/store/recovery.rs::should_move_past_cloning_at_recovery_when_a_clone_sent_before_the_crash_is_listed`,
+`should_retry_by_the_same_name_at_recovery_when_a_clone_sent_before_the_crash_is_absent`,
+`should_send_a_held_directive_under_the_new_epoch_when_its_attempt_is_adopted` (which replaces
+`should_rearm_the_deadline_of_a_directive_in_flight_when_its_attempt_is_adopted`: nothing of the
+older run is re-armed now) and, for status, `should_count_the_outcome_unknown_when_a_directive_sent_before_the_crash_has_no_inventory_answer`
+(`attempts.unknown_effects` reads the `pending_effects` query, which counts the adoption's
+`Unknown` until an observation resolves it; no status code changed). A resumed held cleanup
+(`should_resume_a_held_cleanup_when_github_reports_the_runner_offline`) now reads its sent delete
+`Unknown` at the adoption and, the VM listed, not applied, so the delete is due again at once, as
+`recovery.qnt`'s ADOPT says. So does a retirement P24 left with its stop sent and the VM running
+(`should_stop_again_at_recovery_when_a_stop_sent_before_the_crash_left_the_vm_running`): the stop
+is due again at once, so the next start finishes the retirement within seconds. The daemon test
+`should_force_p24_when_ctrl_c_is_pressed_a_third_time_during_the_wait` read `retiring` once right
+after the next ready line, which promises the adoption, not how far the stop sent again got: a
+race this change opened (10 failures in 46 runs, none in 20 before it). It now waits, by
+`attempts.by_phase`, for the retirement to finish and reads the adoption, the close and the
+deleted VM from the journal and fake-tart. The e2e: E2E-01's
+`should_adopt_the_clone_without_a_duplicate_when_mayflyd_is_killed_mid_clone_and_restarted`.
+Left as a note, not built: the optional re-send under the new epoch (option b: nothing needs it,
+since the adoption hands a sent directive to the inventory and an unsent one is sent anyway).
+
+**The orphaned clone, as built.** A `tart clone` left running by a killed `mayflyd` is not reaped,
+and it may finish after the restart's inventory found the name absent, so the retry's `tart clone`
+can find the name taken (Tart: exit 64, `VM "<name>" already exists`). That is no longer read as
+"nothing happened": `mayfly-adapter-tart`'s `clone_failed` (`parse::is_name_taken`) answers it
+`Ambiguous(ProcessLost)` and leaves the VM it did not make as it is (no `set --random-mac`, no
+`--overwrite`), and the `VmProvider` contract's VP-02 now requires that of every provider
+(`mayfly_data::VmProvider::clone_vm`, the in-memory fake, plan §8). The attempt's outcome is then
+`Unknown`, no try is spent on a refusal, and the next inventory records the VM by the name. Pinned
+by `crates/mayfly-adapter-tart/tests/tart/calls.rs::should_answer_unknown_and_touch_nothing_when_the_clone_name_appeared_meanwhile`
+(over fake-tart: the name made just before the adapter's clone),
+`tests/tart/contract.rs::should_answer_unknown_and_keep_the_vm_when_cloning_onto_an_existing_name`
+and `src/parse.rs`'s `should_read_the_name_taken_only_when_a_clone_is_refused_for_an_existing_vm`;
+at the control plane by
+`crates/mayfly-control/tests/store/recovery.rs::should_record_the_late_clone_by_observation_when_the_retry_finds_its_name_taken`
+(the last try of the budget answered `Unknown`, then the inventory: `Booting` with the late VM,
+never retired); in the model by the world action `lateCloneLands` (a superseded clone's VM
+appearing under the name), `lateCloneAdoptedByObservationTest` (a regression trace too) and the
+control `lateCloneRefusedRetiresTest` (a definite refusal spends the last try and retires the
+attempt with the VM left unrecorded). A late clone found while nothing is pending (the attempt
+backed off, its retry not issued yet) is a VM of our name never recorded: quarantined for
+ownership doubt, as any such VM (safe, but it holds the slot until an operator resolves it).
+**Open for the owner:** reaping the orphan by its recorded process group. It needs the process
+group recorded durably, which the data plane does not do (it stores nothing durable but its epoch
+floor and its bases, ADR 0087).
+
+**The `StartVm` race (2026-11-16, not built).** The same shape for a start: a shim left by a killed
+`mayflyd` may still be booting its VM when the restart's inventory runs, which then lists it
+stopped, so an `Unknown` start is read not applied; the re-issued start's shim finds the VM's lock
+held and refuses before spawning, which `TartProvider::settled` answers `Definite`
+(`effect_failed`), spending a try. Before CP-04D the start's two-minute deadline acted as a settle
+time. Answering `Ambiguous` when another live shim holds the lock needs the settled path to tell
+that refusal from an I/O one (it reads only that this run's shim exited without a run record),
+which is more than a small change here: a follow-up for the Tart adapter, with a fake-tart test in
+which the orphan's shim holds the lock.
+
+**Follow-up (2026-11-16): a clone adopted without its random MAC.** A listed clone whose
+`tart set --random-mac` never ran (the daemon died between the clone and it) carries its base's
+MAC, and the inventory, recovery included, would record that as the attempt's instance id, losing
+ADR 0026's random MAC per clone. The adapter's `describe` should report such a VM with
+`instance_id: None` (unproven) when the bases registry's intent for the name is unresolved or its
+MAC equals a base's, which routes it to `Wait` or quarantine as ADR 0087 does for bases.
 
 ### Phase 4 — GitHub
 

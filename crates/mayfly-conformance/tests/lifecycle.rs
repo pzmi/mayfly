@@ -11,7 +11,7 @@ use mayfly_conformance::lifecycle::{self, KNOWN_DIVERGENCES, KnownDivergence, ca
 use mayfly_conformance::manifest::{self, Entry, Manifest};
 use mayfly_conformance::replay::{Divergence, ReplayError};
 use mayfly_control_domain::attempt::{
-    Attempt, AttemptCommand, AttemptEvent, AttemptRejection, AttemptState, Jit, Phase,
+    Attempt, AttemptCommand, AttemptEvent, AttemptRejection, AttemptState, Jit, Pending, Phase,
 };
 use mayfly_control_domain::{Aggregate, Command};
 
@@ -344,6 +344,63 @@ fn should_catch_a_quarantine_stop_that_skips_the_deregistration_when_its_trace_i
     assert_eq!(mutant.fields, ["dereg"], "{mutant}");
     assert_eq!(mutant.expected.0["dereg"], "requested");
     assert_eq!(mutant.actual.0["dereg"], "none");
+    assert_eq!(lifecycle::known(&mutant), None);
+}
+
+/// `Attempt` with the adoption before CP-04D: `Adopt` is decided as if the pending directive had
+/// never been sent, so a directive the older run sent stays in flight.
+#[derive(Debug, Clone, Copy, Default)]
+struct AdoptKeepsInFlight;
+
+impl Aggregate for AdoptKeepsInFlight {
+    const NAME: &'static str = Attempt::NAME;
+    type State = AttemptState;
+    type Body = AttemptCommand;
+    type Event = AttemptEvent;
+    type Rejection = AttemptRejection;
+
+    fn initial() -> AttemptState {
+        Attempt::initial()
+    }
+
+    fn decide(
+        state: &AttemptState,
+        command: Command<AttemptCommand>,
+    ) -> Result<Vec<AttemptEvent>, AttemptRejection> {
+        match command.body {
+            AttemptCommand::Adopt { .. } => {
+                let unsent = AttemptState {
+                    pending: state.pending.map(|p| Pending { sent: false, ..p }),
+                    ..state.clone()
+                };
+                Attempt::decide(&unsent, command)
+            }
+            _ => Attempt::decide(state, command),
+        }
+    }
+
+    fn evolve(state: AttemptState, event: &AttemptEvent) -> AttemptState {
+        Attempt::evolve(state, event)
+    }
+}
+
+#[test]
+fn should_catch_an_adoption_that_keeps_a_sent_directive_in_flight_when_its_trace_is_replayed() {
+    // given: a clone sent and cloned, unanswered when the run died; adopted at step 4
+    let manifest = regression();
+    let (entry, trace) = load(&manifest, "cloneInFlightAtCrashResolvedAtRecovery");
+
+    // when
+    let real = lifecycle::replay::<Attempt>(&entry, &trace);
+    let mutant = divergence(lifecycle::replay::<AdoptKeepsInFlight>(&entry, &trace));
+
+    // then
+    assert!(real.is_ok(), "{real:?}");
+    assert_eq!(mutant.step, 4, "{mutant}");
+    assert_eq!(mutant.action, "adopt");
+    assert_eq!(mutant.fields, ["unknown"], "{mutant}");
+    assert_eq!(mutant.expected.0["unknown"], "true");
+    assert_eq!(mutant.actual.0["unknown"], "false");
     assert_eq!(lifecycle::known(&mutant), None);
 }
 

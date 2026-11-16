@@ -75,8 +75,11 @@ pub trait VmProvider: Send + Sync {
     fn inventory(&self) -> impl Future<Output = Inventory> + Send;
 
     /// Clones `name` from the local base `base` and gives it a random MAC; returns that
-    /// instance id (ADR 0026, ADR 0039). Cloning onto a name that exists is an error, as it is
-    /// for Tart; the executor re-observes the name before it clones.
+    /// instance id (ADR 0026, ADR 0039). Cloning onto a name that exists never overwrites it and
+    /// is answered [`VmError::Ambiguous`] (`ProcessLost`), never `Definite`: the executor
+    /// re-observes the name before it clones, so the VM appeared since, made by a process this
+    /// call did not run (a clone left running by a killed daemon), and only an observation can
+    /// say whose it is (CP-04D). Pinned by the provider contract's VP-02.
     ///
     /// # Errors
     /// [`VmError`].

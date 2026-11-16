@@ -4,14 +4,17 @@
 
 use std::collections::BTreeMap;
 
+use mayfly_control::inbox::Inbox;
 use mayfly_control::projection::ProjectionStore;
+use mayfly_control::queries;
 use mayfly_control::recovery::{Recovered, Recovery, StartupError};
 use mayfly_control::saga::{AttemptSaga, SagaConfig};
 use mayfly_control::sessions::HostSession;
-use mayfly_control::store::{AggregateStore, NoNotifier, SaveRequest};
+use mayfly_control::store::{AggregateStore, NoNotifier, Outcome, SaveRequest};
 use mayfly_control_domain::attempt::{
-    AttemptCommand, AttemptEvent, AttemptRejection, DirectiveTag, Phase, QuarantineReason,
-    RetireReason,
+    AttemptCommand, AttemptEvent, AttemptRejection, DirectiveKind, DirectiveTag, Fact,
+    Observation as AttemptObservation, Outcome as PendingOutcome, Phase, QuarantineReason,
+    RetireReason, SagaStep, Stage, next_step,
 };
 use mayfly_control_domain::host::{AdmissionCause, Host, HostCommand, HostRejection};
 use mayfly_control_domain::operations::hostrun::{
@@ -21,7 +24,7 @@ use mayfly_control_domain::operations::recovery::{
     Adoption, Decision, GithubView, Proposal, SafeModeCause,
 };
 use mayfly_control_domain::{Actor, Command, ControlAggregates};
-use mayfly_domain::{CommandId, Epoch, Millis, Sample as _};
+use mayfly_domain::{CommandId, Epoch, Generation, Millis, ObservationId, Sample as _};
 use mayfly_protocol::{CURRENT, Mode, VmObservation};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, SeededRng};
@@ -596,10 +599,22 @@ fn should_resume_a_held_cleanup_when_github_reports_the_runner_offline() {
     let still = block_on(startup.resume_held(&listing(0x4), &offline, &saga))
         .unwrap_or_else(|e| panic!("{e}"));
 
-    // then it is adopted and its cleanup resumes
+    // then it is adopted and its cleanup resumes: the delete sent before the restart is
+    // Unknown from the adoption, the listing that shows the VM reads it not applied,
+    // and the delete is due again with its proof (the data plane re-checks it)
     assert!(still.is_empty());
-    assert_eq!(kit.state(1).epoch, RUN);
-    assert!(saga.next_due().is_some(), "the saga reconsidered it");
+    let state = kit.state(1);
+    assert_eq!(state.epoch, RUN);
+    assert_eq!(state.phase, Phase::Deleting);
+    assert_eq!(state.pending, None);
+    assert!(matches!(
+        next_step(&state),
+        SagaStep::Issue(DirectiveKind::DeleteVm { .. })
+    ));
+    assert!(kit.events(1).iter().any(|e| matches!(
+        e,
+        AttemptEvent::DirectiveObservedNotApplied(d) if d.directive_id == path::directive(1, 8)
+    )));
 }
 
 #[test]
@@ -752,19 +767,244 @@ fn should_report_and_never_touch_when_an_mf_vm_has_no_record() {
     assert!(kit.events(9).is_empty());
 }
 
+/// Attempt 1 driven along `path` with its last directive `k` sent (`DirectiveSent`) and
+/// unanswered when the run died, then a restart that reads `vms` (CP-04D).
+fn sent_before_the_crash(
+    mut path: Vec<AttemptCommand>,
+    k: u128,
+    vms: Vec<VmObservation>,
+) -> (Kit, Recovered) {
+    path.push(path::sent(1, k));
+    row(path, vms, None)
+}
+
+/// How many pending effects `mayfly status --json` counts as unknown
+/// (`attempts.unknown_effects`, from the `pending_effects` query).
+fn unknown_effects(kit: &Kit) -> usize {
+    block_on(queries::pending_effects(&kit.memory))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .1
+}
+
 #[test]
-fn should_rearm_the_deadline_of_a_directive_in_flight_when_its_attempt_is_adopted() {
-    // given a clone sent and not answered before the restart
+fn should_move_past_cloning_at_recovery_when_a_clone_sent_before_the_crash_is_listed() {
+    // given: a clone sent, not answered and not yet Unknown when the run died (its deadline is
+    // a minute away), and the restart's inventory lists the clone
+    // when it recovers
+    let (kit, recovered) =
+        sent_before_the_crash(path::cloning(1), 1, vec![listed(1, instance(), false)]);
+
+    // then: adopted, the outcome made Unknown by the adoption and resolved by the inventory
+    // with the listed instance id: past cloning at recovery, the boot next, one clone
+    assert_eq!(
+        decision(&recovered),
+        Decision::Adopt(Adoption::Clone(instance()))
+    );
+    assert_eq!(recovered.adopted, vec![attempt(1)]);
+    let state = kit.state(1);
+    assert_eq!(state.epoch, RUN);
+    assert_eq!(state.phase, Phase::Booting);
+    assert_eq!(state.instance_id, Some(instance()));
+    assert_eq!(state.pending, None);
+    assert_eq!(next_step(&state), SagaStep::Issue(DirectiveKind::StartVm));
+    let events = kit.events(1);
+    let unknown_at = events
+        .iter()
+        .position(|e| matches!(e, AttemptEvent::DirectiveOutcomeUnknown(..)));
+    let adopted_at = events
+        .iter()
+        .position(|e| matches!(e, AttemptEvent::AttemptAdopted(..)));
+    let cloned_at = events
+        .iter()
+        .position(|e| matches!(e, AttemptEvent::VmCloned(..)));
+    assert!(
+        adopted_at < unknown_at && unknown_at < cloned_at && adopted_at.is_some(),
+        "adopted, then Unknown, then resolved: {events:?}"
+    );
+    let clones = events
+        .iter()
+        .filter(|e| {
+            matches!(e, AttemptEvent::DirectiveIssued(d) if d.kind.tag() == DirectiveTag::CloneVm)
+        })
+        .count();
+    assert_eq!(clones, 1, "never cloned again");
+    assert_eq!(unknown_effects(&kit), 0, "nothing left unknown");
+}
+
+#[test]
+fn should_retry_by_the_same_name_at_recovery_when_a_clone_sent_before_the_crash_is_absent() {
+    // given: a clone sent and unanswered when the run died, and the restart's complete inventory
+    // does not list it
+    // when it recovers
+    let (kit, recovered) = sent_before_the_crash(path::cloning(1), 1, Vec::new());
+
+    // then: the adoption's Unknown resolved as not done at recovery, and the clone due again
+    // at once (the saga's next step) by the same name and generation (I13), within the budget
+    assert_eq!(decision(&recovered), Decision::RetryClone);
+    let state = kit.state(1);
+    assert!(matches!(
+        state.phase,
+        Phase::Backoff {
+            stage: Stage::Clone,
+            ..
+        }
+    ));
+    assert_eq!(state.instance_id, None);
+    assert_eq!(state.pending, None);
+    assert_eq!(next_step(&state), SagaStep::Issue(DirectiveKind::CloneVm));
+    let identity = state
+        .identity
+        .clone()
+        .unwrap_or_else(|| panic!("no identity"));
+    assert_eq!(identity.vm_name, crate::recovery_kit::vm_name(1));
+    assert!(kit.events(1).iter().any(|e| matches!(
+        e,
+        AttemptEvent::DirectiveObservedNotApplied(d) if d.directive_id == path::directive(1, 1)
+    )));
+    assert_eq!(unknown_effects(&kit), 0);
+}
+
+#[test]
+fn should_record_the_late_clone_by_observation_when_the_retry_finds_its_name_taken() {
+    // given: the clone sent before the crash was absent at recovery, so its retry (the last try
+    // of the budget) is issued and sent; meanwhile the orphaned `tart clone` of the killed run
+    // finishes, so the provider finds the name taken and the data plane answers Unknown
+    let (kit, _) = sent_before_the_crash(path::cloning(1), 1, Vec::new());
+    for body in [path::issue(1, 2), path::sent(1, 2)] {
+        assert!(matches!(
+            kit.command(1, RUN, body),
+            Outcome::Accepted { .. }
+        ));
+    }
+    let answered = kit.command(
+        1,
+        RUN,
+        AttemptCommand::RecordObservation(AttemptObservation {
+            observation_id: ObservationId::from_u128(0x0A15),
+            epoch: RUN,
+            generation: Generation::FIRST,
+            fact: Fact::OutcomeUnknown {
+                directive_id: path::directive(1, 2),
+            },
+        }),
+    );
+    let at_the_answer = kit.state(1);
+
+    // when the next inventory lists the clone the orphan made
+    block_on(Inbox::new(&kit.store, host(), RUN).record(&inventory(
+        0x5,
+        RUN,
+        vec![listed(1, other_instance(), false)],
+    )))
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    // then: the budget spent, yet nothing retired it; the observation records the VM under its
+    // name, and the attempt moves on with it (no VM left behind as an unrecorded name)
+    assert!(matches!(answered, Outcome::Accepted { .. }));
+    assert_eq!(at_the_answer.tries, 2);
+    assert!(
+        at_the_answer
+            .pending
+            .is_some_and(|p| matches!(p.outcome, PendingOutcome::Unknown { .. }))
+    );
+    let state = kit.state(1);
+    assert_eq!(state.phase, Phase::Booting);
+    assert_eq!(state.instance_id, Some(other_instance()));
+    assert!(
+        !kit.events(1)
+            .iter()
+            .any(|e| matches!(e, AttemptEvent::AttemptRetired(..))),
+        "never retired"
+    );
+}
+
+#[test]
+fn should_count_the_outcome_unknown_when_a_directive_sent_before_the_crash_has_no_inventory_answer()
+{
+    // given: a verification sent and unanswered when the run died; the restart lists the VM
+    // running, which says nothing of the guest's answer
+    // when it recovers
+    let mut p = path::verifying(1);
+    p.push(path::issue(1, 3));
+    let (kit, recovered) = sent_before_the_crash(p, 3, vec![listed(1, instance(), true)]);
+
+    // then: adopted with the outcome Unknown, which status counts until an observation
+    // resolves it (P19), and no deadline of the older run is waited for
+    assert_eq!(decision(&recovered), Decision::Adopt(Adoption::Reverify));
+    let state = kit.state(1);
+    assert_eq!(state.epoch, RUN);
+    assert!(
+        state
+            .pending
+            .is_some_and(|p| p.tag == DirectiveTag::VerifyGuest
+                && matches!(p.outcome, PendingOutcome::Unknown { .. }))
+    );
+    assert_eq!(unknown_effects(&kit), 1);
+}
+
+#[test]
+fn should_stop_again_at_recovery_when_a_stop_sent_before_the_crash_left_the_vm_running() {
+    // given: a retirement whose stop was sent and unanswered when the run died (P24 left the
+    // VM running under its shim), and the restart's inventory lists the VM still running
+    let mut p = path::prepared(1);
+    p.push(AttemptCommand::RequestRetirement {
+        reason: RetireReason::Drain,
+    });
+    p.push(path::issue(1, 4));
+    p.push(path::observe(
+        1,
+        4,
+        Fact::DiagnosticsExported {
+            directive_id: path::directive(1, 4),
+            bytes: 0,
+            sha256: [0; 32],
+        },
+    ));
+    p.push(path::issue(1, 5));
+
+    // when it recovers
+    let (kit, recovered) = sent_before_the_crash(p, 5, vec![listed(1, instance(), true)]);
+
+    // then: adopted, the stop made Unknown by the adoption and resolved as not applied by the
+    // listing, so the stop is due again at once under the new run: the retirement finishes
+    // without waiting for the old stop's deadline (the daemon-level
+    // `should_force_p24_when_ctrl_c_is_pressed_a_third_time_during_the_wait` waits for it)
+    assert_eq!(decision(&recovered), Decision::Adopt(Adoption::Continue));
+    let state = kit.state(1);
+    assert_eq!(state.epoch, RUN);
+    assert_eq!(state.phase, Phase::Retiring);
+    assert_eq!(state.pending, None);
+    assert!(matches!(
+        next_step(&state),
+        SagaStep::Issue(DirectiveKind::StopVm { .. })
+    ));
+    let events = kit.events(1);
+    let adopted_at = events
+        .iter()
+        .position(|e| matches!(e, AttemptEvent::AttemptAdopted(..)));
+    let unknown_at = events.iter().position(|e| {
+        matches!(e, AttemptEvent::DirectiveOutcomeUnknown(d) if d.directive_id == path::directive(1, 5))
+    });
+    let not_applied_at = events.iter().position(|e| {
+        matches!(e, AttemptEvent::DirectiveObservedNotApplied(d) if d.directive_id == path::directive(1, 5))
+    });
+    assert!(
+        adopted_at.is_some() && adopted_at < unknown_at && unknown_at < not_applied_at,
+        "adopted, then Unknown, then not applied: {events:?}"
+    );
+    assert_eq!(unknown_effects(&kit), 0, "nothing left unknown");
+}
+
+#[test]
+fn should_send_a_held_directive_under_the_new_epoch_when_its_attempt_is_adopted() {
+    // given: a clone issued and never recorded sent when the run died (the relay held it)
     let kit = kit();
     kit.previous_run();
-    let mut p = path::cloning(1);
-    p.push(path::sent(1, 1));
-    kit.drive(1, p);
+    kit.drive(1, path::cloning(1));
     let _ = kit.open(1);
     let saga = AttemptSaga::new(&kit.store, kit.sessions.clone(), SagaConfig::default());
-    assert_eq!(saga.next_due(), None);
 
-    // when the clone is listed (still in flight: a listing settles nothing in flight)
+    // when the clone is listed
     let recovery = block_on(kit.startup(false).recover(
         &inventory(0x2, RUN, vec![listed(1, instance(), false)]),
         &BTreeMap::new(),
@@ -772,14 +1012,16 @@ fn should_rearm_the_deadline_of_a_directive_in_flight_when_its_attempt_is_adopte
     ))
     .unwrap_or_else(|e| panic!("{e}"));
 
-    // then
+    // then: still in flight, never Unknown, for the relay to send now that the attempt is
+    // adopted (its answer, by the name, resolves it), and no deadline armed before that send
     assert!(matches!(recovery, Recovery::Completed(_)));
     let state = kit.state(1);
-    assert_eq!(state.pending.map(|p| p.tag), Some(DirectiveTag::CloneVm));
-    assert!(
-        saga.next_due().is_some(),
-        "the saga reconsidered the adopted attempt"
-    );
+    assert_eq!(state.epoch, RUN);
+    assert!(state.pending.is_some_and(|p| p.tag == DirectiveTag::CloneVm
+        && p.outcome == PendingOutcome::InFlight
+        && !p.sent));
+    assert_eq!(saga.next_due(), None);
+    assert_eq!(unknown_effects(&kit), 0);
 }
 
 #[test]

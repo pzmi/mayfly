@@ -168,6 +168,16 @@ pub fn is_hypervisor_limit(stderr: &str) -> bool {
         .contains("the number of vms exceeds the system limit")
 }
 
+/// Whether a refused `tart clone` refused because its target name exists: Tart validates the
+/// target first and, without `--overwrite`, exits 64 (the argument parser's validation code)
+/// printing `VM "<name>" already exists, use --overwrite to replace it` (`Commands/Clone.swift`;
+/// `mayfly-fake-tart` answers the same). Matched in lower case on the stable part; HW-01
+/// confirms it on real Tart.
+#[must_use]
+pub fn is_name_taken(code: i32, stderr: &str) -> bool {
+    code == 64 && stderr.to_ascii_lowercase().contains("already exists")
+}
+
 /// Output that does not have the pinned shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unparseable;
@@ -313,5 +323,26 @@ mod tests {
         // then
         assert!(limit);
         assert!(!is_hypervisor_limit("VM \"x\" is already running!"));
+    }
+
+    #[test]
+    fn should_read_the_name_taken_only_when_a_clone_is_refused_for_an_existing_vm() {
+        // given
+        let taken = "VM \"mf-x\" already exists, use --overwrite to replace it";
+
+        // when
+        let read = is_name_taken(64, taken);
+
+        // then
+        assert!(read);
+        assert!(!is_name_taken(1, taken), "another exit code");
+        assert!(!is_name_taken(
+            2,
+            "the specified VM \"mfb-x\" does not exist"
+        ));
+        assert!(!is_name_taken(
+            64,
+            "Error: Missing expected argument '<new-name>'"
+        ));
     }
 }

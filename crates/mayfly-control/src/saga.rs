@@ -18,9 +18,13 @@
 //! `tests/store/saga.rs::should_issue_one_directive_when_an_event_is_delivered_twice`).
 //!
 //! **Deadlines are memory.** The timers live in this consumer, armed whenever an event shows a
-//! directive in flight; a restart loses them. Startup recovery (CP-04) re-arms them with
-//! [`AttemptSaga::reconsider`] for every attempt it adopts, after resolving `Unknown` outcomes
-//! by inventory (plan §10).
+//! directive in flight; a restart loses them. Startup recovery (CP-04) calls
+//! [`AttemptSaga::reconsider`] for every attempt it adopts, after resolving `Unknown` outcomes by
+//! inventory (plan §10). Since CP-04D it finds no deadline of the older run to re-arm: the
+//! adoption records a directive that run sent `Unknown`, which no deadline moves, and one it
+//! never recorded sent has no deadline running until the relay sends it in this run (pinned by
+//! `tests/store/recovery.rs::should_send_a_held_directive_under_the_new_epoch_when_its_attempt_is_adopted`
+//! and `tests/store/saga.rs::should_keep_the_timer_armed_when_a_timeout_is_refused_for_another_reason`).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};

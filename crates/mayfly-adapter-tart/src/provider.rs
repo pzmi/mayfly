@@ -19,6 +19,8 @@
 //!   `tests/tart/calls.rs::should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning`).
 //!   A clone whose new MAC cannot be confirmed answers `Ambiguous` and its intent stays: the VM
 //!   may exist without a proven identity.
+//!   A clone Tart refuses because the name exists answers `Ambiguous` too and leaves that VM as
+//!   it is (`clone_failed`): it appeared after the executor's re-observation (VP-02).
 //! - **start**: refused when Tart lists the VM running; then `tart set --memory` and the shim
 //!   (ADR 0037). It returns once the shim is settled: `Ok` when the shim recorded this run and
 //!   Tart lists the VM running while the shim holds its lock; `Definite` (or `HypervisorLimit`)
@@ -85,6 +87,28 @@ pub(crate) fn effect_failed(err: &CallError) -> VmError {
         CallError::Refused { .. } | CallError::SpawnFailed => VmError::Definite,
         CallError::TimedOut => VmError::Ambiguous(Ambiguity::Deadline),
         CallError::Lost | CallError::Unparseable => VmError::Ambiguous(Ambiguity::ProcessLost),
+    }
+}
+
+/// What a failed `tart clone` means. A refusal because the name exists is not "nothing
+/// happened": the executor re-observed the name before the clone and did not find it, so a VM of
+/// this exact name appeared since, made by a process this call did not run (a clone left
+/// running by a killed `mayflyd` finishing late, CP-04D). Whose VM it is, and whether it is the
+/// one the attempt wanted, is for an observation to say: the answer is `Unknown`
+/// (`ProcessLost`), which the inventory resolves by the name, never `effect_failed`, which would
+/// back the attempt off and could retire it with that VM left behind. The VM is not touched
+/// (no `set --random-mac` on a VM this call did not make). Pinned by
+/// `tests/tart/calls.rs::should_answer_unknown_and_touch_nothing_when_the_clone_name_appeared_meanwhile`.
+pub(crate) fn clone_failed(err: &CallError) -> VmError {
+    match err {
+        CallError::Refused { code, stderr } if parse::is_name_taken(*code, stderr) => {
+            VmError::Ambiguous(Ambiguity::ProcessLost)
+        }
+        CallError::Refused { .. }
+        | CallError::TimedOut
+        | CallError::Lost
+        | CallError::SpawnFailed
+        | CallError::Unparseable => effect_failed(err),
     }
 }
 
@@ -443,7 +467,7 @@ impl VmProvider for TartProvider {
         self.tart
             .clone(base.as_str(), &name)
             .await
-            .map_err(|err| effect_failed(&err))?;
+            .map_err(|err| clone_failed(&err))?;
         let identity = if base_info.guest() == Some(GuestOs::Macos) {
             self.tart.set_random_mac_and_serial(&name).await
         } else {

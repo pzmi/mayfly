@@ -18,7 +18,7 @@ fn should_give_each_clone_a_fresh_mac_when_cloning_from_a_local_base() {
 }
 
 #[test]
-fn should_refuse_definite_when_cloning_onto_an_existing_name() {
+fn should_answer_unknown_and_keep_the_vm_when_cloning_onto_an_existing_name() {
     // given
     let world = FakeTartWorld::new;
 

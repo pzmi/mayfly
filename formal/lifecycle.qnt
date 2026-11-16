@@ -290,6 +290,12 @@ module lifecycle {
       { ...x, pending: NO_DIRECTIVE, unknown: false }
     else quarantine(x)
 
+  /// The attempt after `Adopt` under the next run epoch (`adopt`).
+  pure def adopted(x: Attempt): Attempt =
+    { ...x, epoch: x.epoch + 1, jit: if (x.jit == "issued") "orphaned" else x.jit,
+      jitLeaked: x.jitLeaked or x.jit == "issued",
+      unknown: x.unknown or (not(idle(x)) and x.sent) }
+
   pure def servedPhase(phase: str): bool = Set(LISTENING, BUSY, FINISHED).contains(phase)
 
   /// Records the history every action shares.
@@ -577,6 +583,45 @@ module lifecycle {
     replyLostWith(fresh, applied)
   }
 
+  /// The data plane executed the pending directive and its reply has not come: it may still
+  /// (`replySucceeded`), or never, when the run that sent it died before it (CP-04D). The
+  /// journal does not move; the guards are those of a reply. The relay's record may lag its
+  /// send, so the directive need not be recorded sent.
+  action effectAppliedWith(fresh: int): bool = all {
+    not(idle(a)),
+    not(w.applied),
+    not(Set(STOP_VM, DELETE_VM).contains(a.pending)) or (w.exists and w.instance == a.instance),
+    not(Set(VERIFY_GUEST, LAUNCH_RUNNER, EXPORT_DIAGNOSTICS).contains(a.pending)) or w.running,
+    a.pending != START_VM or w.exists,
+    commitWorld("world", a, applyEffect(a, w, fresh), g),
+  }
+
+  action effectApplied = {
+    nondet fresh = INSTANCES.oneOf()
+    effectAppliedWith(fresh)
+  }
+
+  /// A clone of an earlier, superseded directive lands late (CP-04D): a `tart clone` left
+  /// running by a killed daemon finishes after the restart's inventory found the name absent
+  /// and the attempt backed off. The VM appears under the attempt's name with no reply and no
+  /// record; the journal does not move. A retry the provider then finds the name taken for is
+  /// answered `Unknown` (`replyLost`), never refused, and the inventory records the VM by the
+  /// name (`lateCloneAdoptedByObservationTest`); found while nothing is pending, it is a VM of our
+  /// name never recorded, quarantined for ownership doubt as any (`inventoryPresent`).
+  action lateCloneLandsWith(fresh: int): bool = all {
+    not(w.exists),
+    g.clones >= 1,
+    a.instance == NONE,
+    not(terminal(a)),
+    commitWorld("world", a, { exists: true, instance: fresh, running: false, applied: w.applied },
+      g),
+  }
+
+  action lateCloneLands = {
+    nondet fresh = INSTANCES.oneOf()
+    lateCloneLandsWith(fresh)
+  }
+
   /// `DirectiveSent`: the relay put the pending directive on the link and recorded it (CP-02);
   /// from now on its deadline runs. A held directive (safe mode, no session, not adopted) is
   /// not sent, so it never reaches its timeout.
@@ -822,14 +867,21 @@ module lifecycle {
   /// construction, so a handle issued and not taken is orphaned and presumed leaked, even with
   /// its launch in flight (the launcher may have taken it); a late launch reply is still
   /// recorded, but that runner never gets a job. A verification from the old epoch is no
-  /// longer fresh. Adoption is allowed with a directive pending: it moves nothing.
+  /// longer fresh. Adoption is allowed with a directive pending, and moves no phase.
+  ///
+  /// A directive the relay sent under the older run (`sent`) and that is still in flight is
+  /// `Unknown` from the adoption on (CP-04D): the run that sent it is gone, its answer would be
+  /// stale, and the relay's checkpoint passed it, so nothing sends it again; only the inventory
+  /// resolves it (`inventoryPresent`, `inventoryAbsent`), at recovery rather than at its
+  /// deadline, as `recovery.qnt` reads every pending outcome after a restart. It *enters*
+  /// `Unknown`, so I10 is kept. A directive issued and not sent is still held by the relay,
+  /// which sends it under the new epoch once the attempt is adopted (`relaySend`): it stays in
+  /// flight, and a data plane that executed it before the restart answers the new send by
+  /// re-observing the name (ADR 0042, Decision 4).
   action adopt = all {
     not(terminal(a)),
     a.epoch < 3,
-    commit("command",
-      { ...a, epoch: a.epoch + 1, jit: if (a.jit == "issued") "orphaned" else a.jit,
-        jitLeaked: a.jitLeaked or a.jit == "issued" },
-      { ...g, leaked: g.leaked or a.jit == "issued" }),
+    commit("command", adopted(a), { ...g, leaked: g.leaked or a.jit == "issued" }),
   }
 
   /// `ResolveQuarantine` by an operator: delete with proof (the data plane re-checks it).
@@ -856,6 +908,8 @@ module lifecycle {
     replyTargetAbsent,
     replyGuestRejected,
     replyLost,
+    effectApplied,
+    lateCloneLands,
     relaySend,
     directiveTimeout,
     replyLaunchUnknown,
@@ -886,6 +940,7 @@ module lifecycle {
     issueNext,
     replySucceeded,
     replyLost,
+    effectApplied,
     relaySend,
     directiveTimeout,
     replyLaunchUnknown,
@@ -1140,6 +1195,85 @@ module lifecycle {
     initWith(1, 1).then(issueNext)
       .expect(not(canTimeOut(a)) and a.tries == 1)
       .then(relaySend).expect(canTimeOut(a) and a.tries == 1 and allInvariants)
+  }
+
+  // CP-04D: the run dies with a clone sent and cloned but not answered. The next run's
+  // adoption makes its outcome Unknown at once, and the recovery inventory, which lists the
+  // clone, resolves it: the attempt is past cloning at recovery, with the one clone, not at the
+  // clone's deadline.
+  run cloneInFlightAtCrashResolvedAtRecoveryTest = {
+    initWith(1, 1).then(issueNext).then(relaySend).then(effectAppliedWith(1))
+      .expect(a.pending == CLONE_VM and a.sent and not(a.unknown) and w.exists)
+      .then(adopt)
+      .expect(a.unknown and a.phase == CLONING and a.epoch == 2
+        and i10UnknownLeavesOnlyOnObservation)
+      .then(inventoryPresent)
+      .expect(not(a.unknown) and a.phase == BOOTING and a.instance == 1 and g.clones == 1)
+      .then(issueNext)
+      .expect(a.pending == START_VM and g.clones == 1 and allInvariants)
+  }
+
+  // CP-04D: the run dies with a clone sent that never took effect. The adoption makes it
+  // Unknown, the recovery inventory's absence backs it off, and the retry clones the same
+  // name and generation (I13).
+  run cloneInFlightAtCrashAbsentRetriesTest = {
+    initWith(1, 1).then(issueNext).then(relaySend)
+      .then(adopt).expect(a.unknown and a.phase == CLONING)
+      .then(inventoryAbsent)
+      .expect(not(a.unknown) and a.phase == BACKOFF and a.stage == "clone")
+      .then(issueNext)
+      .expect(a.phase == CLONING and a.tries == 2 and g.clones == 2
+        and retryKeepsNameAndGeneration and i13NoDuplicateClones and allInvariants)
+  }
+
+  // CP-04D: a clone issued and not recorded sent at the crash (held by the relay, or sent
+  // before its record) is not Unknown at the adoption: the relay sends it under the new
+  // epoch, and the data plane answers it by the name, one clone either way.
+  run heldCloneAtCrashSentAfterAdoptionTest = {
+    initWith(1, 1).then(issueNext).then(effectAppliedWith(1))
+      .then(adopt).expect(not(a.unknown) and not(a.sent) and a.epoch == 2)
+      .then(relaySend)
+      .then(ok)
+      .expect(a.phase == BOOTING and a.instance == 1 and g.clones == 1 and allInvariants)
+  }
+
+  // CP-04D: the clone sent before the crash was absent at recovery and backed off; its retry is
+  // issued, and then the clone the killed run left running lands under the name. The provider
+  // finds the name taken: the retry is answered Unknown (`replyLost`, the effect not applied by
+  // it), never refused, so the budget spent does not retire the attempt; the inventory records
+  // the late VM by the name, with its instance id, and the attempt moves on with one VM.
+  run lateCloneAdoptedByObservationTest = {
+    initWith(1, 1).then(issueNext).then(relaySend)
+      .then(adopt).then(inventoryAbsent).then(issueNext)
+      .expect(a.phase == CLONING and a.tries == BUDGET)
+      .then(lateCloneLandsWith(2)).then(replyLostWith(1, false))
+      .expect(a.unknown and a.phase == CLONING and w.exists and w.instance == 2)
+      .then(inventoryPresent)
+      .expect(a.phase == BOOTING and a.instance == 2 and not(a.unknown)
+        and i30GuestNeverDecidesOwnership and allInvariants)
+  }
+
+  // CP-04D, control: the same late clone answered as a definite refusal (what the provider
+  // answered before CP-04D) spends the last try and retires the attempt with no VM recorded,
+  // leaving the late VM under our name unrecorded.
+  run lateCloneRefusedRetiresTest = {
+    initWith(1, 1).then(issueNext).then(relaySend)
+      .then(adopt).then(inventoryAbsent).then(issueNext)
+      .then(lateCloneLandsWith(2))
+      .then(replyRefused)
+      .expect(a.phase == DELETED and a.instance == NONE and w.exists)
+  }
+
+  // CP-04D, negative control: the adoption before CP-04D, which kept the sent directive in
+  // flight (forced here: `adopt` no longer does), leaves the recovery inventory nothing to
+  // resolve; only the clone's deadline (`directiveTimeout`) would move it.
+  run adoptKeepingInFlightNeverResolvesAtRecoveryTest = {
+    initWith(1, 1).then(issueNext).then(relaySend).then(effectAppliedWith(1))
+      .then(commit("command", { ...adopted(a), unknown: false }, g))
+      .expect(a.epoch == 2 and not(a.unknown))
+      .then(inventoryPresent)
+      .expect(a.phase == CLONING and a.pending == CLONE_VM and not(a.unknown)
+        and a.instance == NONE and canTimeOut(a))
   }
 
   // U1: a lost clone reply whose effect did not happen: the inventory's absence backs off.
@@ -1626,6 +1760,8 @@ module lifecycle_traces {
   /// The success reply of the scenarios (`ok`: instance 1, a guest claiming 3).
   pure val OK = s("replySucceeded")
   pure def lost(applied: bool): Stim = { ...S0, kind: "replyLost", applied: applied }
+  /// The pending directive took effect with no reply (instance 1 for a clone).
+  pure val APPLIED = s("effectApplied")
   pure val SENT = s("relaySend")
   pure def timedOut(applied: bool): Stim = { ...S0, kind: "directiveTimeout", applied: applied }
   pure def replaced(other: int, removed: bool): Stim =
@@ -1646,6 +1782,24 @@ module lifecycle_traces {
     [ISSUE, SENT, timedOut(true), s("inventoryPresent")]
   pure val UNKNOWN_CLONE_RESOLVED_BY_INVENTORY =
     [ISSUE, lost(true), s("adopt"), s("inventoryPresent")]
+  /// CP-04D: a clone sent and cloned when the run died: the adoption makes it Unknown and the
+  /// recovery inventory resolves it, then the boot is issued.
+  pure val CLONE_IN_FLIGHT_AT_CRASH_RESOLVED_AT_RECOVERY =
+    [ISSUE, SENT, APPLIED, s("adopt"), s("inventoryPresent"), ISSUE]
+  /// CP-04D: a clone sent that never took effect: the recovery inventory's absence backs it
+  /// off and the retry clones the same name.
+  pure val CLONE_IN_FLIGHT_AT_CRASH_ABSENT_RETRIES =
+    [ISSUE, SENT, s("adopt"), s("inventoryAbsent"), ISSUE]
+  /// CP-04D: a clone not recorded sent when the run died stays in flight at the adoption; the
+  /// relay sends it under the new epoch and its answer is recorded.
+  pure val HELD_CLONE_AT_CRASH_SENT_AFTER_ADOPTION =
+    [ISSUE, APPLIED, s("adopt"), SENT, OK]
+  /// CP-04D: the retry after an absence finds the name taken by a clone of the killed run that
+  /// landed late; answered Unknown, it is resolved by the inventory, not retired.
+  pure val LATE_CLONE_ADOPTED_BY_OBSERVATION = [
+    ISSUE, SENT, s("adopt"), s("inventoryAbsent"), ISSUE, { ...S0, kind: "lateCloneLands", fresh: 2 },
+    lost(false), s("inventoryPresent"),
+  ]
   pure val STAGE_FAILURE_BACKS_OFF_THEN_RETIRES =
     [ISSUE, s("replyRefused"), ISSUE, s("replyRefused")]
   pure val GUEST_REJECTED_IS_QUARANTINED = [
@@ -1771,6 +1925,8 @@ module lifecycle_traces {
       all { x.kind == "replyTargetAbsent", L::replyTargetAbsent },
       all { x.kind == "replyGuestRejected", L::replyGuestRejected },
       all { x.kind == "replyLost", L::replyLostWith(fresh, applied) },
+      all { x.kind == "effectApplied", L::effectAppliedWith(fresh) },
+      all { x.kind == "lateCloneLands", L::lateCloneLandsWith(fresh) },
       all { x.kind == "relaySend", L::relaySend },
       all { x.kind == "directiveTimeout", L::directiveTimeoutWith(fresh, applied) },
       all { x.kind == "replyLaunchUnknown", L::replyLaunchUnknown },
@@ -1799,6 +1955,11 @@ module lifecycle_traces {
   action happyPath = script(HAPPY_PATH)
   action timeoutIsUnknownNeverSuccess = script(TIMEOUT_IS_UNKNOWN_NEVER_SUCCESS)
   action unknownCloneResolvedByInventory = script(UNKNOWN_CLONE_RESOLVED_BY_INVENTORY)
+  action cloneInFlightAtCrashResolvedAtRecovery =
+    script(CLONE_IN_FLIGHT_AT_CRASH_RESOLVED_AT_RECOVERY)
+  action cloneInFlightAtCrashAbsentRetries = script(CLONE_IN_FLIGHT_AT_CRASH_ABSENT_RETRIES)
+  action heldCloneAtCrashSentAfterAdoption = script(HELD_CLONE_AT_CRASH_SENT_AFTER_ADOPTION)
+  action lateCloneAdoptedByObservation = script(LATE_CLONE_ADOPTED_BY_OBSERVATION)
   action stageFailureBacksOffThenRetires = script(STAGE_FAILURE_BACKS_OFF_THEN_RETIRES)
   action guestRejectedIsQuarantined = script(GUEST_REJECTED_IS_QUARANTINED)
   action launchUnknownNeverServes = script(LAUNCH_UNKNOWN_NEVER_SERVES)

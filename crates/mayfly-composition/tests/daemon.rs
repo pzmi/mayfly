@@ -2479,20 +2479,73 @@ mod placement {
             "{events:?}"
         );
 
-        // and then: the next start adopts the retirement it left (`mayfly status --json`'s
-        // `attempts.by_phase`, read once its ready line is out). Finishing it waits for the
-        // left stop's two-minute directive deadline, beyond a test's bound, so this stops here.
+        // and then: the next start adopts the retirement it left and finishes it (CP-04D): the
+        // adoption makes the stop the old run sent Unknown, the inventory finds the VM still
+        // running, so the stop is sent again, then the delete. Its ready line promises the
+        // adoption, not how far the stop got by then (a read of `retiring` right after it raced
+        // the stop sent again), so the end is waited for by `mayfly status --json`'s
+        // `attempts.by_phase`, then read from the journal once the daemon is stopped.
         std::fs::remove_file(world.tart_home().join("faults.toml")).expect("the faults");
         let next = world.start();
-        next.ready();
-        let adopted = world.status();
+        let epoch = next.ready();
+        let finished = await_retirement_finished(&world);
+        assert_eq!(next.terminate(), Some(0), "{finished}");
+        let opened = open_journal(&world);
+        let events = events_of_vm(&opened, &host, &vm);
         assert!(
-            adopted["attempts"]["by_phase"]["retiring"]
-                .as_u64()
-                .is_some_and(|n| n >= 1),
-            "{adopted}"
+            events
+                .iter()
+                .any(|e| matches!(e, AttemptEvent::AttemptAdopted(a) if a.epoch == epoch)),
+            "adopted by the next run: {events:?}"
         );
-        assert_eq!(next.terminate(), Some(0));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AttemptEvent::AttemptClosed(_))),
+            "closed: {events:?}"
+        );
+        let retired = retirements(&opened, &host);
+        assert!(
+            retired.contains(&(vm.clone(), Some(RetireReason::Drain))),
+            "{retired:?}"
+        );
+        assert!(!world.names().contains(&vm), "{:?}", world.names());
+        assert!(deleted(&world).contains(&vm), "{:?}", deleted(&world));
+    }
+
+    /// Waits, by a bounded poll of `mayfly status --json`'s `attempts.by_phase`, until an
+    /// attempt is closed and none is retiring or deleting: the only retired attempt's
+    /// retirement finished.
+    fn await_retirement_finished(world: &World) -> Value {
+        let mut last = Value::Null;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            BOUND,
+            "the adopted retirement finished, in mayfly status",
+            || {
+                last = world.try_status();
+                let count = |phase: &str| last["attempts"]["by_phase"][phase].as_u64();
+                count("closed").is_some_and(|n| n >= 1)
+                    && count("retiring").unwrap_or(0) == 0
+                    && count("deleting").unwrap_or(0) == 0
+            },
+        );
+        if let Err(timed_out) = waited {
+            panic!("{timed_out}; status: {last}");
+        }
+        last
+    }
+
+    /// The events of the attempt whose VM is `vm`.
+    fn events_of_vm(journal: &SqliteJournal, host: &HostId, vm: &str) -> Vec<AttemptEvent> {
+        reserved_attempts(journal, host)
+            .into_iter()
+            .map(|a| attempt_events(journal, a))
+            .find(|events| {
+                events.iter().any(
+                    |e| matches!(e, AttemptEvent::AttemptStarted(s) if s.vm_name.to_string() == vm),
+                )
+            })
+            .unwrap_or_else(|| panic!("no attempt of {vm}"))
     }
 
     #[test]

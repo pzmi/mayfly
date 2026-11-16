@@ -124,7 +124,11 @@ module recovery {
     phase: str,
     // recorded from VmCloned; NONE before
     instance: int,
-    // the pending overlay; every pending outcome here is Unknown (replies are lost)
+    // the pending overlay; every pending outcome here is Unknown (replies are lost). That is the
+    // overlay of a directive the relay recorded sent: the adoption makes it Unknown
+    // (`lifecycle.qnt`'s `adopted`, CP-04D). One issued and not recorded sent is not modelled
+    // here: it stays in flight, and the relay's re-send under the new epoch resolves it (the data
+    // plane re-observes the name, ADR 0042 Decision 4)
     pending: str,
     unknown: bool,
     // the highest run epoch the attempt accepted (`AttemptAdopted`)

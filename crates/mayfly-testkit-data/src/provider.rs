@@ -1,7 +1,8 @@
 //! `FakeVmProvider`: an in-memory provider with scripted faults (ver §7.1).
 //!
-//! VMs live in a map by listed name, foreign names included. Like Tart, it refuses (`Definite`)
-//! a clone onto a name that exists and a start of a VM that runs; once a base is registered
+//! VMs live in a map by listed name, foreign names included. Like Tart, it refuses a clone onto
+//! a name that exists (answered `Ambiguous(ProcessLost)` as the port requires, VP-02) and a
+//! start of a VM that runs (`Definite`); once a base is registered
 //! ([`FakeVmProvider::allow_base`]) it also refuses a clone from any base not registered, as Tart
 //! refuses a clone from a base that is not local (ADR 0039). Each call is logged by [`Op`]; the
 //! next call of an op can carry a [`Fault`] (failed before acting, or ambiguous with or without
@@ -323,8 +324,11 @@ impl VmProvider for FakeVmProvider {
                 .bases
                 .as_ref()
                 .is_none_or(|bases| bases.contains(&base));
-            if state.vms.contains_key(&name) || !local {
+            if !local {
                 return Err(VmError::Definite);
+            }
+            if state.vms.contains_key(&name) {
+                return Err(VmError::Ambiguous(Ambiguity::ProcessLost));
             }
             state.cloned += 1;
             let mac = format!(

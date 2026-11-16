@@ -30,9 +30,22 @@ code outcome_unknown
 code quarantined
 code stale_run
 code terminal
+case adopt_keeps_held_clone_in_flight accepted
+  attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
+case adopt_makes_sent_clone_unknown accepted
+  attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
+  directive_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d001","since":1000}
+case adopt_makes_sent_delete_unknown accepted
+  attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
+  directive_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d008","since":1000}
+case adopt_makes_sent_launch_unknown_and_orphans_handle accepted
+  attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
+  directive_outcome_unknown/v1 {"directive_id":"0000000000000000000000000000d005","since":1000}
+  jit_handle_orphaned/v1 {"handle_id":"000000000000000000000000000005ec"}
 case adopt_orphans_handle accepted
   attempt_adopted/v1 {"epoch":2,"inventory_ref":"0000000000000000000000000000e003"}
   jit_handle_orphaned/v1 {"handle_id":"000000000000000000000000000005ec"}
+case adopt_sent_clone_already_current refused already_current
 case already_current refused already_current
 case already_quarantined refused already_quarantined
 case already_retiring refused already_retiring
@@ -54,6 +67,11 @@ case directive_pending refused directive_pending
 case guest_rejected_quarantines accepted
   guest_rejected/v1 {"directive_id":"0000000000000000000000000000d003","reason":"challenge_failed"}
   attempt_quarantined/v1 {"reason":"guest_identity_refused","vm":"running"}
+case inventory_absence_backs_off_adopted_clone accepted
+  directive_observed_not_applied/v1 {"directive_id":"0000000000000000000000000000d001"}
+  attempt_backed_off/v1 {"stage":"clone","n":1}
+case inventory_resolves_adopted_clone accepted
+  vm_cloned/v1 {"directive_id":"0000000000000000000000000000d001","instance_id":"0a:00:00:00:00:01"}
 case inventory_vanished_vm_closes accepted
   vm_vanished/v1 {"discovered_by":"inventory","instance_id":"0a:00:00:00:00:01","vm":"stopped"}
 case issue_clone accepted
@@ -80,6 +98,7 @@ case operator_only refused operator_only
 case operator_resolves_quarantine accepted
   attempt_retired/v1 {"reason":"quarantine_resolved"}
 case outcome_unknown refused outcome_unknown
+case outcome_unknown_after_adopting_a_sent_clone refused outcome_unknown
 case quarantine_requests_the_deregistration_before_its_stop accepted
   attempt_quarantined/v1 {"reason":"forensic_retention","vm":"running"}
   stop_deregistration_requested/v1 {}

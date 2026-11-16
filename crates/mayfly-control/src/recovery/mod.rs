@@ -33,10 +33,17 @@
 //!   `tests/store/recovery.rs::should_admit_and_delete_nothing_when_the_journal_was_restored_from_an_older_backup`).
 //! - **Trusted**: every attempt the host leases ([`host_attempts`]) is classified by the
 //!   recovery table ([`classify`]) against the state the journal holds, then: every attempt that can be adopted
-//!   is adopted under the run's epoch; the inventory is recorded through the [`Inbox`], so a
-//!   pending `Unknown` effect is resolved by the observation only (I10); the rows that act beyond
-//!   the inventory become ordinary commands (`RequestRetirement`, `Quarantine`); the saga
-//!   reconsiders each adopted attempt, re-arming the deadline of a directive still in flight;
+//!   is adopted under the run's epoch, which records a directive the older run sent and left
+//!   unanswered `Unknown` (CP-04D: its answer would be stale, and the relay does not send it
+//!   again); the inventory is recorded through the [`Inbox`], so a pending `Unknown` effect is
+//!   resolved by the observation only (I10), at recovery and not at the directive's deadline
+//!   (a clone the inventory lists records `VmCloned` with the listed instance id, the table's
+//!   `Adoption::Clone`; an absent one backs off for its retry by the same name and generation,
+//!   `RetryClone`); the rows that act beyond the inventory become ordinary commands
+//!   (`RequestRetirement`, `Quarantine`); the saga reconsiders each adopted attempt (its
+//!   consumer, woken by the events recovery recorded, issues the next directive, such as the
+//!   boot of a resolved clone or the retry of an absent one; a directive the older run issued
+//!   and never recorded sent is still the relay's to send, now under this run's epoch);
 //!   then, once every attempt was seen, `CompleteRecovery` and `OpenAdmission{recovering}` (the
 //!   model's `complete`). While a row waits (a listed VM whose instance id is unread),
 //!   recovery does not complete and admission stays closed ([`Recovery::Waiting`]; pinned by
@@ -80,7 +87,7 @@ use mayfly_control_domain::operations::hostrun::{
     SafeModeReason, Verification,
 };
 use mayfly_control_domain::operations::recovery::{
-    AttemptRecord, Decision, GithubView, JournalView, NameClass, ObservedVm, Proposal,
+    Adoption, AttemptRecord, Decision, GithubView, JournalView, NameClass, ObservedVm, Proposal,
     ProviderView, SafeModeCause, Subject, Trust, VmRun, classify,
 };
 use mayfly_control_domain::{Actor, Aggregate, Command, ControlAggregates, Rejection as _};
@@ -688,9 +695,17 @@ impl<'s, J: Journal, C: Clock, R: Rng, N: StoreNotifier> Startup<'s, J, C, R, N>
                 }
                 None
             }
+            // Applied by the pass before `act`, never by a command of its own: the adoption made
+            // a clone sent before the restart `Unknown` (CP-04D), and the inventory, recorded
+            // right after it, resolved it by observation (I10): `VmPresent` with the very
+            // instance id this row read records `VmCloned`, `VmAbsent` backs the clone off for
+            // its retry by the same name and generation (I13), which the saga issues on those
+            // events. Pinned by
+            // `tests/store/recovery.rs::should_move_past_cloning_at_recovery_when_a_clone_sent_before_the_crash_is_listed`
+            // and `should_retry_by_the_same_name_at_recovery_when_a_clone_sent_before_the_crash_is_absent`.
+            Decision::Adopt(Adoption::Clone(_)) | Decision::RetryClone => None,
             Decision::Wait
-            | Decision::Adopt(_)
-            | Decision::RetryClone
+            | Decision::Adopt(Adoption::Continue | Adoption::Reverify | Adoption::Monitor)
             | Decision::Keep
             | Decision::Report
             | Decision::Ignore

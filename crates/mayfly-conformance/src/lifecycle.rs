@@ -45,6 +45,10 @@
 //! - `vanished` is the model's flag, set with `Lost` and never cleared (its
 //!   `vanishedClosedForGood`, DEC-07), and the aggregate's recorded `VmVanished`; how the
 //!   absence was found (`VanishDiscovery`) is the driver's, not the model's.
+//! - `effectApplied` (the data plane executed the pending directive and its reply has not
+//!   come, or never will: the run that sent it died, CP-04D) changes only `w`, so it drives
+//!   nothing; the reply, the adoption or the inventory that follows is the stimulus. So does
+//!   `lateCloneLands` (a superseded clone's VM appearing under the name).
 //! - `listingIncomplete` is two stimuli in one: the inventory's `InventoryIncomplete`, which is
 //!   never routed to an attempt (I25), and the data plane's `Unknown{listing_incomplete}` for a
 //!   directive it re-observes. The driver sends the latter, `OutcomeUnknown`, only when the
@@ -771,8 +775,9 @@ impl<A: AttemptLike> crate::replay::Driver for LifecycleDriver<A> {
             "runnerExited" => {
                 self.observation(Fact::RunnerExited { code: 0 })?;
             }
-            // the provider changes behind the journal's back: no stimulus
-            "vmReplacedOrRemoved" => {}
+            // the provider changes behind the journal's back, or the data plane executed the
+            // pending directive and its reply has not come: no stimulus
+            "vmReplacedOrRemoved" | "effectApplied" | "lateCloneLands" => {}
             "beginActivation" => {
                 let grant = self.mint();
                 self.send(

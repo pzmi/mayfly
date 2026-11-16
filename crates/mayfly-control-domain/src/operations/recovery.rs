@@ -85,7 +85,12 @@ pub struct AttemptRecord {
     /// The instance id `VmCloned` recorded; `None` before.
     pub instance_id: Option<ProviderInstanceId>,
     /// The kind of the pending directive. After a restart its outcome is not known, whether it
-    /// was in flight or already `Unknown`: only the inventory resolves it.
+    /// was in flight or already `Unknown`: the adoption records a sent one `Unknown` (CP-04D),
+    /// and the inventory recorded after it resolves it. One the relay never recorded sent is
+    /// sent under the new epoch once adopted, and its answer resolves it instead (the data plane
+    /// re-observes the name, ADR 0042 Decision 4). Pinned by
+    /// `crates/mayfly-control/tests/store/recovery.rs::should_move_past_cloning_at_recovery_when_a_clone_sent_before_the_crash_is_listed`
+    /// and `should_send_a_held_directive_under_the_new_epoch_when_its_attempt_is_adopted`.
     pub pending: Option<DirectiveTag>,
 }
 

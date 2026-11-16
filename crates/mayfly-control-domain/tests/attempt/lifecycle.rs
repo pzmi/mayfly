@@ -1202,6 +1202,100 @@ fn should_wait_for_adoption_when_a_timeout_comes_from_a_newer_run() {
     assert_eq!(decided.err(), Some(AttemptRejection::NotAdopted));
 }
 
+/// `Adopt` under run epoch 2, issued at `at_ms`.
+fn adopt_at(at_ms: u64) -> Step {
+    mayfly_control_domain::Command::new(
+        mayfly_domain::CommandId::from_u128(0xC3),
+        mayfly_domain::Millis::new(at_ms),
+        mayfly_domain::Epoch::new(2),
+        Actor::Startup,
+        AttemptCommand::Adopt {
+            inventory_ref: event(3),
+        },
+    )
+}
+
+#[test]
+fn should_make_a_sent_directive_unknown_when_its_attempt_is_adopted() {
+    // given: the clone sent under run 1, unanswered when the run died
+    let (sent_clone, _) = reach(&then(cloning(), [sent(1, 600_000)]));
+
+    // when: the next run adopts it, long before the clone's deadline
+    let (adopted, events) = apply(&sent_clone, adopt_at(5_000)).unwrap_or_else(|r| panic!("{r:?}"));
+    let timed_out = apply(&adopted, timeout_at(600_000, 1));
+    let listed = apply(
+        &adopted,
+        at(
+            2,
+            SAGA,
+            observe_in(
+                2,
+                Fact::VmPresent {
+                    instance_id: instance(),
+                    running: false,
+                },
+            ),
+        ),
+    );
+    let absent = apply(&adopted, at(2, SAGA, observe_in(2, Fact::VmAbsent)));
+
+    // then: Unknown from the adoption's time; the inventory resolves it either way, and the
+    // retry after an absence keeps the name and generation (I13)
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AttemptEvent::AttemptAdopted(..),
+            AttemptEvent::DirectiveOutcomeUnknown(unknown),
+        ] if unknown.directive_id == directive(1)
+            && unknown.since == mayfly_domain::Millis::new(5_000)
+    ));
+    assert_eq!(adopted.phase, Phase::Cloning);
+    assert_eq!(
+        next_step(&adopted),
+        SagaStep::Idle,
+        "no deadline to wait for"
+    );
+    assert_eq!(timed_out.err(), Some(AttemptRejection::StaleRun));
+    let (booting, _) = listed.unwrap_or_else(|r| panic!("{r:?}"));
+    assert_eq!(booting.phase, Phase::Booting);
+    assert_eq!(booting.instance_id, Some(instance()));
+    assert_eq!(booting.pending, None);
+    let (backed_off, _) = absent.unwrap_or_else(|r| panic!("{r:?}"));
+    assert!(matches!(
+        backed_off.phase,
+        Phase::Backoff {
+            stage: Stage::Clone,
+            ..
+        }
+    ));
+    assert!(matches!(
+        next_step(&backed_off),
+        SagaStep::Issue(DirectiveKind::CloneVm)
+    ));
+    assert_eq!(backed_off.identity, sent_clone.identity);
+}
+
+#[test]
+fn should_keep_a_held_directive_in_flight_when_its_attempt_is_adopted() {
+    // given: the clone issued and never recorded sent (held by the relay) when the run died
+    let (held, _) = reach(&cloning());
+
+    // when
+    let (adopted, events) = apply(&held, adopt_at(5_000)).unwrap_or_else(|r| panic!("{r:?}"));
+
+    // then: still in flight, for the relay to send under the new epoch
+    assert!(matches!(
+        events.as_slice(),
+        [AttemptEvent::AttemptAdopted(..)]
+    ));
+    assert!(
+        adopted
+            .pending
+            .is_some_and(|p| p.outcome == Outcome::InFlight && !p.sent)
+    );
+    assert_eq!(adopted.epoch, mayfly_domain::Epoch::new(2));
+}
+
 /// A retirement requested while activating, after a restart orphaned the handle; then the
 /// fresh verification of the new epoch is refused, so the attempt backs off with the request
 /// still waiting for its deregistration.

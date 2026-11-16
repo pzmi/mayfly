@@ -139,7 +139,9 @@ fn decide_started(
     }
     match body {
         AttemptCommand::StartAttempt(..) => Err(AttemptRejection::AlreadyStarted),
-        AttemptCommand::Adopt { inventory_ref } => decide_adopt(state, run_epoch, inventory_ref),
+        AttemptCommand::Adopt { inventory_ref } => {
+            decide_adopt(state, issued_at, run_epoch, inventory_ref)
+        }
         AttemptCommand::RecordObservation(observation) => {
             decide_observation(state, issued_at, &observation)
         }
@@ -767,7 +769,24 @@ fn quarantined(state: &AttemptState, reason: QuarantineReason) -> Vec<AttemptEve
 /// Adoption under a newer run epoch launches nothing; a handle issued and not taken is
 /// orphaned (the broker is empty after a restart, U4), and the next JIT needs a fresh
 /// verification in the new epoch.
-fn decide_adopt(state: &AttemptState, run_epoch: Epoch, inventory_ref: EventId) -> Decision {
+///
+/// A directive the relay sent under the older run and still in flight is recorded
+/// `DirectiveOutcomeUnknown` at the adoption (CP-04D, `formal/lifecycle.qnt`'s `adopted`): the
+/// run that sent it is gone, its answer would be stale (ADR 0042), and the relay's checkpoint
+/// passed it, so nothing sends it again and only an observation resolves it (I10; it *enters*
+/// `Unknown`). The recovery inventory recorded right after the adoption is that observation,
+/// so a clone in flight at a crash moves on at recovery, not at its deadline. A directive
+/// issued and not recorded sent is still held by the relay, which sends it under the new epoch
+/// once the attempt is adopted: it stays in flight, and a data plane that executed it before
+/// the restart answers by re-observing the name (ADR 0042, Decision 4). Pinned by
+/// `tests/attempt/lifecycle.rs::should_make_a_sent_directive_unknown_when_its_attempt_is_adopted`
+/// and `should_keep_a_held_directive_in_flight_when_its_attempt_is_adopted`.
+fn decide_adopt(
+    state: &AttemptState,
+    issued_at: Millis,
+    run_epoch: Epoch,
+    inventory_ref: EventId,
+) -> Decision {
     match state.phase {
         Phase::Reserved
         | Phase::Cloning
@@ -789,6 +808,29 @@ fn decide_adopt(state: &AttemptState, run_epoch: Epoch, inventory_ref: EventId) 
                 epoch: run_epoch,
                 inventory_ref,
             })];
+            match state.pending {
+                Some(Pending {
+                    directive_id,
+                    outcome: Outcome::InFlight,
+                    sent: true,
+                    ..
+                }) => events.push(AttemptEvent::DirectiveOutcomeUnknown(
+                    DirectiveOutcomeUnknown {
+                        directive_id,
+                        since: issued_at,
+                    },
+                )),
+                Some(Pending {
+                    outcome: Outcome::InFlight,
+                    sent: false,
+                    ..
+                })
+                | Some(Pending {
+                    outcome: Outcome::Unknown { .. },
+                    ..
+                })
+                | None => {}
+            }
             match state.jit {
                 Jit::Issued(handle_id) => {
                     events.push(AttemptEvent::JitHandleOrphaned(JitHandleOrphaned {

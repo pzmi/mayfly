@@ -4,7 +4,7 @@
 //! `--random-serial` for a macOS base), and the version probe.
 
 use mayfly_adapter_tart::{ProbeError, TartProvider};
-use mayfly_data::{Inventory, InventoryGap, VmProvider};
+use mayfly_data::{Ambiguity, Inventory, InventoryGap, VmError, VmProvider};
 use mayfly_domain::Millis;
 use mayfly_testkit_data::provider_contract::{START_MEMORY, base, proof, vm};
 use serde_json::Value;
@@ -132,6 +132,46 @@ fn should_clone_from_the_local_base_then_draw_a_random_mac_when_cloning() {
                 .expect("get json");
         assert_eq!(info["MACAddress"].as_str(), Some(id.as_str()));
     }
+}
+
+#[test]
+fn should_answer_unknown_and_touch_nothing_when_the_clone_name_appeared_meanwhile() {
+    // given: the executor re-observed the name and found nothing; then a `tart clone` of that
+    // name left running by a killed daemon finished, before this clone runs
+    let fake = Fake::new();
+    fake.seed_base(base().as_str());
+    let name = vm(1).to_string();
+    let orphan = fake.tart(&["clone", base().as_str(), &name]);
+    assert!(orphan.status.success(), "{orphan:?}");
+    let before: Value =
+        serde_json::from_slice(&fake.tart(&["get", &name, "--format", "json"]).stdout)
+            .expect("get json");
+    let seeding = fake.events("invoke").len();
+    let provider = fake.provider();
+
+    // when
+    let answer = runtime().block_on(provider.clone_vm(&base(), &vm(1)));
+
+    // then: Unknown, which the inventory resolves by the name, never a definite refusal; and
+    // the VM it did not make is left as it was (no `set`, no overwrite)
+    assert_eq!(answer, Err(VmError::Ambiguous(Ambiguity::ProcessLost)));
+    let calls: Vec<Vec<String>> = fake
+        .events("invoke")
+        .iter()
+        .skip(seeding)
+        .map(argv)
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .all(|c| c[0] != "set" && !c.iter().any(|a| a == "--overwrite")),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|c| c[0] == "clone"), "{calls:?}");
+    let after: Value =
+        serde_json::from_slice(&fake.tart(&["get", &name, "--format", "json"]).stdout)
+            .expect("get json");
+    assert_eq!(after["MACAddress"], before["MACAddress"]);
 }
 
 #[test]

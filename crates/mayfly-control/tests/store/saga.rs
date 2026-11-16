@@ -426,13 +426,16 @@ fn should_keep_the_timer_armed_when_a_timeout_is_refused_for_another_reason() {
     h.clock.advance(config.reply_grace);
     let expired = block_on(saga.expire_due());
 
-    // then: the refusal kept the timer; once adopted, the timeout made the outcome Unknown
+    // then: the refusal kept the timer; once adopted, the retry was decided afresh against the
+    // moved stream, and found moot: the adoption had made the sent clone's outcome Unknown
+    // already
     assert_eq!(
         refused.failed,
         vec![(clone.directive_id, "timeout_refused")]
     );
     assert!(armed.is_some());
-    assert_eq!(expired.unknown, vec![clone.directive_id]);
+    assert_eq!(expired.moot, vec![clone.directive_id]);
+    assert!(expired.failed.is_empty(), "{expired:?}");
     assert!(matches!(
         h.state(1).pending.map(|p| p.outcome),
         Some(Outcome::Unknown { .. })

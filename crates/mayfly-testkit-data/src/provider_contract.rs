@@ -113,7 +113,9 @@ pub enum ProviderCase {
     /// clone and from its base's, and the listing shows it stopped with that id, its guest and
     /// its disk described (ADR 0052).
     CloneGivesFreshIdentity,
-    /// VP-02: a clone onto a name that exists is refused `Definite` and leaves that VM as it was.
+    /// VP-02: a clone onto a name that exists is answered `Ambiguous` (`ProcessLost`), never
+    /// `Definite` (the name appeared since the executor's re-observation, CP-04D), and leaves
+    /// that VM as it was.
     CloneOntoExistingRefused,
     /// VP-03: a clone from a base that is not a local base is refused `Definite` and creates
     /// nothing (ADR 0039).
@@ -471,7 +473,7 @@ async fn clone_onto_existing_refused<W: ProviderWorld>(w: &mut W) -> Check {
     eq(
         "clone onto an existing name",
         &again,
-        &Err(VmError::Definite),
+        &Err(VmError::Ambiguous(Ambiguity::ProcessLost)),
     )?;
     let vms = listing(w).await?;
     eq(

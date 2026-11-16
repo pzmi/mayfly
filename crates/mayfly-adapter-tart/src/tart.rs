@@ -218,8 +218,9 @@ impl TartCli {
     }
 
     /// `tart clone <base> <name>`, never `--overwrite`: Tart 2.41.1 refuses a name that exists
-    /// (exit 64), as the port requires (2.28.0 replaced it). Pinned over fake-tart by
-    /// `tests/tart/contract.rs::should_refuse_definite_when_cloning_onto_an_existing_name`.
+    /// (exit 64; 2.28.0 replaced it), which the provider answers `Ambiguous` as the port
+    /// requires ([`crate::provider`]'s `clone_failed`). Pinned over fake-tart by
+    /// `tests/tart/contract.rs::should_answer_unknown_and_keep_the_vm_when_cloning_onto_an_existing_name`.
     ///
     /// # Errors
     /// [`CallError`].
