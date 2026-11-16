@@ -2,7 +2,8 @@
 //!
 //! Nothing is spawned (`ARCH-detached-spawn`): the executor's one future, which the supervision
 //! tree runs, polls every in-flight future whenever it is woken. The set holds at most the
-//! executor's concurrency bound plus a listing, so polling each on a wake costs little, and a
+//! executor's concurrency bound plus a listing, a manifest read per pull being admitted, and a
+//! runner-status read per watched VM (DP-09), so polling each on a wake costs little, and a
 //! future dropped with the set is cancelled (its directive's deadline, or the session's end).
 
 use std::future::Future;

@@ -245,7 +245,7 @@ tags `checkpoint-<ID>` locally and reports to the owner. Checkpoints: **FND-04**
 | KER-06G | `ScaleSet` aggregate follows GH-00R's model: assigned-job classification, numbering restart, scale set re-created | KER-06, GH-00R | opus | |
 | GH-04 | Listener use case: inbox, statistics demand, acquire policy, ack after commit | GH-03, KER-06G, CP-04 | opus | |
 | GH-11 | GHES: plan the acquirable jobs listed when a session opens, model first | GH-04 | opus | |
-| GH-12 | P12's grace: a job ended whose runner never reports its exit, model first | GH-04, CP-05 | opus | |
+| GH-12 | P12's grace: a job ended whose runner never reports its exit, and an exit without a completed job, model first | GH-04, CP-05, DP-09 | opus | |
 | GH-10 | Workflow-run lookup of assigned jobs and the cancel of refused runs | GH-02, KER-06G | sonnet | |
 | GH-08 | Trust on github.com: the trust config, the start-up checks, refusals wired | GH-03, GH-10, KER-06G, RT-01 | opus | |
 | GH-09 | (Withdrawn by GH-00S) Operator release of a refusal and the release window | — | — | |
@@ -1431,6 +1431,49 @@ Accept: under `mayflyd` over fake-tart and fake-github, a launch whose fake-tart
 by id before its VM stops (P11: the daemon path RT-07 could not drive), the VM is deleted and the
 slot released; an unreadable status records nothing; after a restart a runner that ended during
 the outage is observed.
+*Amended at intake (owner, 2026-11-13): the P11 clause was wrong. An exited ephemeral runner needs
+no deregistration: from `Finished` a retirement stops the VM at once (`decide_request_retirement`;
+domain-model, KER-04G: "an exited runner leaves no idle runner"; `formal/lifecycle.qnt`'s
+`stopAfterRunnerExitedNeedsNoDeregistrationTest`), and GitHub removes a runner that ran a job
+when the job completes (`doc/github-scaleset.md` §6.3). The Accept is now:* under `mayflyd` over
+fake-tart and fake-github (Linux), a job started at the fake whose runner's launch rule sets
+`job_ms`: the exit is observed and `RunnerExited` recorded once, the job completed at the fake,
+the attempt retired `job_done`, its VM deleted with proof and its slot released, the fake listing
+no runner of that id; after a restart (SIGTERM, P24) a runner that ended during the outage is
+recorded exited; at component level, an unreadable status records nothing. A runner that exits
+without a completed job (Listening to `Finished`, or a `JobCompleted` that never arrives) leaves
+its attempt holding the VM and slot: GH-12's second part.
+Note (DP-09, as built): no model change: `formal/lifecycle.qnt`'s `runnerExited` already is a
+world stimulus in Listening, Busy, Activating with the JIT taken and Quarantined, a repeat is
+answered with no event by `decide`, and the link model loses and duplicates observations; DP-09
+gives the stimulus its data-plane source. The data plane's `RunnerWatch`
+(`mayfly-data-domain`'s `runners`, plain data) names the VMs whose launcher status is read: each
+VM a launch reached in this process (applied or of unknown outcome), and, after a restart, each of
+ours the process's first complete inventory lists running, VMs this process started before it
+included when the start's listing was incomplete (read once, dropped when its guest says no launch
+reached it); only a VM the ledger counts running, and a VM a complete inventory no
+longer lists is forgotten. The executor reads them every `Config::status_every` (`mayflyd`: 10 s)
+and as a session opens (the loop wakes for the period only while a VM is due; a period below
+`MIN_STATUS_EVERY`, 1 s, is read as it:
+`mayfly-data`'s `tests/executor/runners.rs::should_read_no_faster_than_the_least_period_when_status_every_is_zero`),
+one read per VM at a time (`should_read_a_vm_once_at_a_time_when_its_read_hangs`); no read starts
+on a VM a directive works on (`should_skip_the_read_when_a_directive_works_on_the_vm`), though a
+directive may start beside a read in flight (a read changes nothing). Reads take no room in the
+directive bound and are dropped at `listing_timeout`
+(`should_start_a_directive_when_a_status_read_hangs`) and, not awaited, when the session ends
+(`should_end_the_session_when_a_status_read_hangs`), so a guest that does not answer holds back
+neither an effect nor a stop.
+`Exited{code}` is an unsolicited `RunnerExited{vm_name, code}`, once per session
+(`should_report_an_exit_once_when_a_launched_runner_exits`) and sent again from memory when a
+new session opens, since the link accepts an observation without promising its delivery
+(`should_send_a_reported_exit_again_once_when_a_new_session_opens`); an answer that cannot be
+read records nothing (`should_record_nothing_when_the_status_cannot_be_read`); a VM no launch
+reached is never read (`should_read_no_runner_when_no_launch_reached_its_vm`); a restart reports
+an exit of the outage (`should_report_an_exit_during_an_outage_when_the_executor_restarts`).
+Under `mayflyd` (Linux, `tests/daemon.rs::placement`):
+`should_finish_delete_and_release_when_a_launched_runner_exits_after_its_job` and
+`should_record_an_exit_that_happened_while_mayflyd_was_down_when_it_restarts`. `RunnerStatus`
+moved to `mayfly-data-domain` beside the watch (re-exported by `mayfly_data`).
 #### CP-08 Terms policy P4
 Cites: dm P4, §6.2, §6.3; ADR 0024. Issue `ApplyPoolTerms` (`pool::terms`) to every host serving
 the pool on any `Pool` event that bumps `terms_revision` (configuration, pin, pause, resume, drain,
@@ -2155,9 +2198,11 @@ and, on Linux,
 on one guest launcher's stdin once, by SHA-256, and in no output: LNK-02's daemon-level launch).
 Not driven by a daemon test: the runner's removal on retirement (P11, pinned by CP-05's
 component tests), since nothing retires a listening attempt under `mayflyd` within the test
-runner's 120 s bound: no data-plane source of `RunnerExited` exists yet (fake-tart's `job_ms`
-ends a runner nobody observes), the online deadline is two minutes, and Ctrl-C spares a listening
-runner until RT-05b (DP-09 observes the exit). Also pinned:
+runner's 120 s bound: the online deadline is two minutes, and Ctrl-C spares a listening runner
+until RT-05b. *Corrected 2026-11-13 (DP-09's intake):* this note first said DP-09's observed exit
+would drive P11; it does not, since an exited runner is retired with no deregistration (KER-04G)
+and GitHub removes a runner that ran a job itself; DP-09 drives the job path's exit, retirement,
+delete and release instead. Also pinned:
 `github::should_list_once_when_a_second_run_starts_within_the_hour` (a link cut within the hour
 lists nothing more). The link's `DirectiveSender::configs_lost()` still has no reader (status or
 doctor: left for RT-04's metrics). Left open: recovery's GitHub
@@ -2432,6 +2477,7 @@ command; a listener component test over the fake's acquire flow: an offer made w
 lived is acquired once after the open, and not again when a message delivers it later.
 
 #### GH-12 P12's grace: a job ended whose runner never reports its exit
+*Extended 2026-11-13 (owner, at DP-09's intake): the second part at the end of this card.*
 Cites: dm P12, P11, I14, I21; `formal/lifecycle.qnt`, `formal/registration.qnt`; ADR 0038;
 `doc/github-scaleset.md` §4.1 (a held poll delivers `JobCompleted` up to a hold late), §6.3
 (a deregistered runner may keep running), GH-04's note. Found at GH-04 (2026-11-13): GH-04
@@ -2461,6 +2507,29 @@ first; a busy answer withdraws nothing it should not (I21).
 
 Note (RT-07's review): DP-09 observes a runner's exit from the guest's status; this grace is the
 fallback when that observation misses an exit (a lost status, a runner that lingers).
+**Second part (2026-11-13, DP-09's intake): an exit without a completed job.** The mirror case:
+DP-09 records `RunnerExited`, but the registration never completes, because the runner exited
+before binding any job (Listening to `Finished`: a runner that crashed or refused its config) or
+because the job's `JobCompleted` never arrives (lost, or one without a `runnerId`, GH-04's
+limitation). Today the registration manager retires a `Finished` attempt only once its
+registration is `Completed`, so such an attempt holds its VM and slot for good. Model first
+(`lifecycle.qnt` and `registration.qnt`: a finished attempt with no completed job is retired; a
+runner of its registration GitHub may still list, registered and offline since it took no job,
+is removed by its journaled id first; the negative control: a stop before that removal while the
+runner is listed), then the rule: retire it with an existing reason (no new `RetireReason`
+variant, so no event schema change; `GuestDied` or `VmStopped`, chosen when the card is picked
+up), after a deregistration by id when the registration holds a runner id and no job completed
+(P11's `retirement_step`; a busy answer is impossible for an exited runner and is reported as
+drift), at once when no job was bound, and after G when one was bound and its `JobCompleted` is
+missing (then the probe, as above). Also record and settle the domain model's mismatch: U7 says
+`RunnerExited` while `Busy` becomes `AttemptRetired{guest_died}`, while the code (and
+`lifecycle.qnt`) goes `Busy` to `Finished` and waits for the job's completion; the doc or the
+rule changes, on the record.
+Accept (second part): model scenarios and the negative control; the attempt's or the manager's
+rules with `DETERMINISM_CASES` where the attempt changes; component tests: a runner that exits
+listening is retired, its runner removed by id first; one whose job's completion never comes is
+probed after G and retired; under `mayflyd` over fake-tart, a launch whose `job_ms` ends with no
+job started is retired, its VM deleted and its slot released.
 #### GH-02H GitHub transport hardening
 Cites: `doc/github-scaleset.md` §1, §4.1, §6.3, §8, ADRs 0045, 0048. Code on GH-02's client:
 (1) when the API base is `https://api.github.com`, the Actions service URL and every queue URL

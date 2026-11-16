@@ -17,7 +17,9 @@ pub mod launch_store;
 pub mod ports;
 pub mod redaction;
 
-pub use executor::{Config, EnterError, Executor, Ports, SessionEnd, StartError, Stats};
+pub use executor::{
+    Config, EnterError, Executor, MIN_STATUS_EVERY, Ports, SessionEnd, StartError, Stats,
+};
 pub use launch_store::{AlreadyHeld, LaunchBinding, LaunchStore, USED_GRACE};
 /// The reading [`HostProbe::resources`] answers with, named apart from the port.
 pub use mayfly_data_domain::HostProbe as HostReading;

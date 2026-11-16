@@ -33,6 +33,19 @@
 //! - **The image listing.** A clean pass's inventory carries the image store's listing beside it
 //!   (its verified images and `Ready` bases, protocol 1.5), none when the store could not be
 //!   listed, so the control plane can resolve an unknown placement from it (DP-08, `beside`).
+//! - **Runner exits** (DP-09, [`RunnerWatch`]). Every [`Config::status_every`] of the
+//!   monotonic clock (at least [`MIN_STATUS_EVERY`]; the loop wakes for it only while a VM is
+//!   due), and when a session opens, the launcher's status is read in each VM the watch names
+//!   (a launch reached it in this process, or the process's first complete inventory listed it
+//!   running). One read per VM at a time; no read starts on a VM a directive works on, though a
+//!   directive may start beside a read in flight (a read changes nothing: one that fails records
+//!   nothing, an exit read beside a stop is a fact the attempt may ignore). Reads take no room
+//!   in the directive bound, are dropped at [`Config::listing_timeout`], and are dropped, not
+//!   awaited, when the session ends, so a guest that does not answer holds back neither an
+//!   effect nor the session's end. An exit is sent as an unsolicited
+//!   `RunnerExited{vm_name, code}` once per session (again in a new session, from memory: the
+//!   link may have lost it); an answer that cannot be read records nothing. Pinned by the
+//!   component tests of `tests/executor/runners.rs`.
 //! - **Session end.** When [`Executor::serve`] returns, the domain's session is ended (its
 //!   reservations held); the next session needs [`Executor::enter`].
 
@@ -43,7 +56,7 @@ use std::task::Poll;
 
 use mayfly_data_domain::{
     DataPlane, Inventory, Ledger, Link, LinkIgnored, LinkOutcome, LinkStimulus, Progress, Receipt,
-    Reply, Sizing, Stage, Stimulus,
+    Reply, RunnerStatus, RunnerWatch, Sizing, Stage, Stimulus,
 };
 use mayfly_domain::{Deadline, DirectiveId, Epoch, HostId, ImageDigest, Millis, OwnedVmName};
 use mayfly_protocol::{
@@ -71,13 +84,21 @@ pub struct Config {
     /// How often, on the monotonic clock, the observer lists the provider, the image store and
     /// the host.
     pub observe_every: Millis,
-    /// How long one observer pass may take before it is incomplete (`deadline`).
+    /// How long one observer pass may take before it is incomplete (`deadline`); also how long
+    /// one read of a runner's status may take before it is dropped, reading nothing.
     pub listing_timeout: Millis,
+    /// How often, on the monotonic clock, the launcher's status is read in each VM whose runner
+    /// the data plane watches (DP-09): the longest a runner's exit waits before it is seen. Read
+    /// as at least [`MIN_STATUS_EVERY`].
+    pub status_every: Millis,
     /// This process's boot id, for the hello.
     pub boot_id: String,
     /// This build's version, for the hello.
     pub dp_version: String,
 }
+
+/// The least period of the runner-status reads, whatever [`Config::status_every`] says.
+pub const MIN_STATUS_EVERY: Millis = Millis::new(1_000);
 
 /// The ports the executor drives.
 #[derive(Debug, Clone)]
@@ -259,6 +280,14 @@ enum Work {
         /// The guest of a base the effect made, as the image store listed it (CP-10).
         base_guest: Option<(BaseName, GuestOs)>,
         gated: bool,
+        /// The VM of a `LaunchRunner`: its runner is watched once the launch applied or its
+        /// outcome is unknown (DP-09).
+        launched: Option<OwnedVmName>,
+    },
+    /// A read of the runner's status in `vm`; `None` when it could not be read in time.
+    RunnerRead {
+        vm: OwnedVmName,
+        status: Option<RunnerStatus>,
     },
     Observed(Pass),
     /// A `PullImage` whose image's disk was measured (or not) before its admission.
@@ -310,6 +339,8 @@ impl Out {
 struct Run<'a> {
     epoch: Epoch,
     in_flight: InFlight<'a, Work>,
+    /// The runner-status reads in flight, apart from the effects: dropped when the session ends.
+    reads: InFlight<'a, Work>,
     done: Vec<Work>,
     queue: VecDeque<Queued>,
     busy: BTreeSet<Target>,
@@ -319,6 +350,13 @@ struct Run<'a> {
     passing: bool,
     observe_due: bool,
     next_tick: Millis,
+    /// The runners' statuses are to be read ([`Config::status_every`]).
+    status_due: bool,
+    next_status: Millis,
+    /// The VMs whose runner's status is being read.
+    polling: BTreeSet<OwnedVmName>,
+    /// A VM's runner is due a read: only then does the status cadence wake the loop.
+    watching: bool,
     waiters: Vec<Waiter>,
     outbox: Vec<Out>,
     closing: bool,
@@ -334,14 +372,18 @@ impl Run<'_> {
     }
 
     /// When the loop must wake without any other event, on the monotonic clock: the next
-    /// observer pass, the first `ReportInventory` due, or the first effect due.
+    /// observer pass, the next read of the runners' statuses, the first `ReportInventory` due,
+    /// or the first effect due.
     fn wake_at(&self) -> Millis {
         let effects = self.running.values().filter(|r| !r.overdue).map(|r| r.due);
-        self.waiters
-            .iter()
-            .map(|w| w.due)
-            .chain(effects)
-            .fold(self.next_tick, Millis::min)
+        self.waiters.iter().map(|w| w.due).chain(effects).fold(
+            if self.watching {
+                self.next_tick.min(self.next_status)
+            } else {
+                self.next_tick
+            },
+            Millis::min,
+        )
     }
 
     fn release(&mut self, key: Key) {
@@ -395,6 +437,8 @@ struct Core {
     stats: Stats,
     last_report: Option<CapacityReport>,
     deadlines: DeadlineClock,
+    /// The runners whose statuses are read and the exits reported, across sessions (DP-09).
+    runners: RunnerWatch,
 }
 
 impl<V, I, G, H, C, D> Executor<V, I, G, H, C, D>
@@ -431,6 +475,8 @@ where
                 reason: InventoryGap::Deadline,
             });
         ledger.apply_inventory(&inventory);
+        let mut runners = RunnerWatch::new();
+        runners.observed(&inventory, &ledger.vms);
         if let Some(Ok(mut listing)) = bounded(&ports.clock, due, ports.images.list()).await {
             if config.sizing.measures_disks() {
                 remeasure(&ports, due, &mut listing).await;
@@ -447,6 +493,7 @@ where
                 stats: Stats::default(),
                 last_report: None,
                 deadlines: DeadlineClock::WallAtReceipt,
+                runners,
             },
         })
     }
@@ -537,9 +584,11 @@ where
         let Some((epoch, version)) = core.open() else {
             return SessionEnd::NotOpen;
         };
+        let opened = ports.clock.monotonic();
         let mut run = Run {
             epoch,
             in_flight: InFlight::default(),
+            reads: InFlight::default(),
             done: Vec::new(),
             queue: VecDeque::new(),
             busy: BTreeSet::new(),
@@ -548,12 +597,22 @@ where
             jobs: 0,
             passing: false,
             observe_due: false,
-            next_tick: after(ports.clock.monotonic(), core.config.observe_every),
+            next_tick: after(opened, core.config.observe_every),
+            // read at once: an exit during an outage is seen as the session opens
+            status_due: true,
+            next_status: after(opened, core.status_every()),
+            polling: BTreeSet::new(),
+            watching: false,
             waiters: Vec::new(),
             outbox: Vec::new(),
             closing: false,
         };
         core.last_report = None;
+        // the session opens with its capacity report, then the exits an earlier session reported
+        core.capacity_on_change(&mut run);
+        for exited in core.runners.resend(epoch, &core.plane.ledger.vms) {
+            run.unsolicited(exited);
+        }
         let end = loop {
             for work in std::mem::take(&mut run.done) {
                 core.complete(ports, &mut run, work);
@@ -564,7 +623,7 @@ where
                 ports,
                 sink,
                 &mut run.outbox,
-                &mut run.in_flight,
+                [&mut run.in_flight, &mut run.reads],
                 &mut run.done,
             )
             .await;
@@ -574,12 +633,17 @@ where
             if !run.done.is_empty() {
                 continue;
             }
+            run.watching = core.runners.any_due(&core.plane.ledger.vms);
             let event = {
                 let mut recv = pin!(source.recv());
                 let mut timer = pin!(ports.clock.sleep_until(run.wake_at()));
                 let in_flight = &mut run.in_flight;
+                let reads = &mut run.reads;
                 poll_fn(|cx| {
                     if let Poll::Ready(work) = in_flight.poll_next(cx) {
+                        return Poll::Ready(Event::Done(work));
+                    }
+                    if let Poll::Ready(work) = reads.poll_next(cx) {
                         return Poll::Ready(Event::Done(work));
                     }
                     if timer.as_mut().poll(cx).is_ready() {
@@ -604,6 +668,10 @@ where
         run.closing = true;
         run.queue.clear();
         run.waiters.clear();
+        // reads change nothing: dropped, not awaited (the adapter stops what it started when a
+        // read is dropped), so a guest that does not answer never holds back the session's end
+        run.reads = InFlight::default();
+        run.polling.clear();
         for work in std::mem::take(&mut run.done) {
             core.complete(ports, &mut run, work);
         }
@@ -615,8 +683,15 @@ where
         core.plane.link(LinkStimulus::Hello);
         if let SessionEnd::SourceClosed(_) = end {
             // The source ended; the sink may still take what the drain settled.
-            let mut spare = InFlight::default();
-            let flushed = flush(ports, sink, &mut run.outbox, &mut spare, &mut run.done).await;
+            let (mut spare, mut none) = (InFlight::default(), InFlight::default());
+            let flushed = flush(
+                ports,
+                sink,
+                &mut run.outbox,
+                [&mut spare, &mut none],
+                &mut run.done,
+            )
+            .await;
             if let Err(error) = flushed {
                 return SessionEnd::SinkFailed(error);
             }
@@ -631,14 +706,14 @@ enum Event {
     Timer,
 }
 
-/// Sends the outbox, polling `in_flight` meanwhile so effects progress while the sink is full;
-/// what finishes goes to `done`. Pinned by
+/// Sends the outbox, polling the effects and reads in flight meanwhile so they progress while
+/// the sink is full; what finishes goes to `done`. Pinned by
 /// `tests/executor/session.rs::should_keep_effects_running_when_the_sink_is_full`.
 async fn flush<V, I, G, H, C, D, O>(
     ports: &Ports<V, I, G, H, C, D>,
     sink: &O,
     outbox: &mut Vec<Out>,
-    in_flight: &mut InFlight<'_, Work>,
+    mut in_flight: [&mut InFlight<'_, Work>; 2],
     done: &mut Vec<Work>,
 ) -> Result<(), LinkError>
 where
@@ -655,8 +730,12 @@ where
             kind: out.kind,
         };
         let mut send = pin!(sink.send(observation));
+        let [effects, reads] = &mut in_flight;
         poll_fn(|cx| {
-            while let Poll::Ready(work) = in_flight.poll_next(cx) {
+            while let Poll::Ready(work) = effects.poll_next(cx) {
+                done.push(work);
+            }
+            while let Poll::Ready(work) = reads.poll_next(cx) {
                 done.push(work);
             }
             send.as_mut().poll(cx)
@@ -861,6 +940,13 @@ where
 }
 
 impl Core {
+    /// [`Config::status_every`], at least [`MIN_STATUS_EVERY`]: a zero period would wake the
+    /// loop without end. Pinned by
+    /// `tests/executor/runners.rs::should_read_no_faster_than_the_least_period_when_status_every_is_zero`.
+    fn status_every(&self) -> Millis {
+        self.config.status_every.max(MIN_STATUS_EVERY)
+    }
+
     fn open(&self) -> Option<(Epoch, ProtocolVersion)> {
         match &self.plane.link {
             Link::Open(session) => Some((session.epoch, session.version)),
@@ -1003,6 +1089,10 @@ impl Core {
                 self.launch(ports, run, queued);
             }
         }
+        if run.status_due {
+            run.status_due = false;
+            self.read_runners(ports, run);
+        }
         if run.observe_due && !run.passing && self.gate.idle() {
             run.observe_due = false;
             run.passing = true;
@@ -1029,6 +1119,41 @@ impl Core {
                     images,
                     probe,
                 })
+            }));
+        }
+    }
+
+    /// Starts a read of the runner's status in each VM the watch names that the ledger counts
+    /// running, unless a read of it is in flight (pinned by
+    /// `tests/executor/runners.rs::should_read_a_vm_once_at_a_time_when_its_read_hangs`) or a
+    /// directive works on it (`should_skip_the_read_when_a_directive_works_on_the_vm`). A
+    /// directive may still start beside a read in flight. The reads take no room in the directive
+    /// bound and are dropped at [`Config::listing_timeout`]
+    /// (`should_start_a_directive_when_a_status_read_hangs`) and when the session ends
+    /// (`should_end_the_session_when_a_status_read_hangs`).
+    fn read_runners<'a, V, I, G, H, C, D>(
+        &self,
+        ports: &'a Ports<V, I, G, H, C, D>,
+        run: &mut Run<'a>,
+    ) where
+        V: VmProvider,
+        I: ImageStore,
+        G: GuestTransport,
+        H: HostProbe,
+        C: ProcessClock,
+        D: ObservationIds,
+    {
+        let due = after(ports.clock.monotonic(), self.config.listing_timeout);
+        for vm in self.runners.due(&self.plane.ledger.vms) {
+            if run.polling.contains(&vm) || run.busy.contains(&Target::Vm(vm.clone())) {
+                continue;
+            }
+            run.polling.insert(vm.clone());
+            run.reads.push(Box::pin(async move {
+                let status = bounded(&ports.clock, due, ports.guest.runner_status(&vm))
+                    .await
+                    .and_then(Result::ok);
+                Work::RunnerRead { vm, status }
             }));
         }
     }
@@ -1077,6 +1202,10 @@ impl Core {
             })),
             Stage::Effect => {
                 let gated = changes_listing(&kind);
+                let launched = match &kind {
+                    DirectiveKind::LaunchRunner { vm_name, .. } => Some(vm_name.clone()),
+                    _ => None,
+                };
                 if gated {
                     self.gate.begin_effect();
                 }
@@ -1094,6 +1223,7 @@ impl Core {
                         stimulus,
                         base_guest,
                         gated,
+                        launched,
                     }
                 }));
             }
@@ -1132,10 +1262,21 @@ impl Core {
                 stimulus,
                 base_guest,
                 gated,
+                launched,
             } => {
                 run.jobs -= 1;
                 if gated {
                     self.gate.end_effect();
+                }
+                // a runner may have started whether the launch applied or its outcome is
+                // unknown, so either way its status is read from now on (DP-09)
+                if let Some(vm) = &launched
+                    && matches!(
+                        stimulus,
+                        Stimulus::Applied(ObservationKind::RunnerLaunched) | Stimulus::Ambiguous(_)
+                    )
+                {
+                    self.runners.launched(vm);
                 }
                 let overdue = run.running.remove(&key).is_some_and(|r| r.overdue);
                 if !overdue {
@@ -1151,6 +1292,12 @@ impl Core {
             Work::Observed(pass) => {
                 run.passing = false;
                 self.apply_pass(run, pass);
+            }
+            Work::RunnerRead { vm, status } => {
+                run.polling.remove(&vm);
+                if let Some(exited) = self.runners.answered(&vm, status, run.epoch) {
+                    run.unsolicited(exited);
+                }
             }
             Work::Measured {
                 version,
@@ -1218,6 +1365,8 @@ impl Core {
         if let Some(listing) = &pass.images {
             ledger.apply_images(&listing.images, &listing.bases, &listing.disks);
         }
+        self.runners
+            .observed(&pass.inventory, &self.plane.ledger.vms);
         let observed = beside(pass.inventory.observation(), pass.images.as_ref());
         run.unsolicited(observed.clone());
         for waiter in std::mem::take(&mut run.waiters) {
@@ -1243,6 +1392,10 @@ impl Core {
         if now >= run.next_tick {
             run.observe_due = true;
             run.next_tick = after(now, self.config.observe_every);
+        }
+        if now >= run.next_status {
+            run.status_due = true;
+            run.next_status = after(now, self.status_every());
         }
         let (expired, waiting): (Vec<Waiter>, Vec<Waiter>) = std::mem::take(&mut run.waiters)
             .into_iter()

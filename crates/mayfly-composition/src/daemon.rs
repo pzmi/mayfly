@@ -208,6 +208,12 @@ const TERMS_FLOOR: Duration = Duration::from_secs(1);
 /// How long the data plane waits between two inventories while nothing asks.
 const OBSERVE_EVERY: Millis = Millis::new(30_000);
 
+/// How often the data plane reads the launcher's status in each VM it watches a runner in
+/// (DP-09): the longest a runner's exit waits before it is seen, so the most a finished job's
+/// VM and slot are held for it. One `tart exec` per watched VM each time; the guests answer from
+/// a file.
+const RUNNER_STATUS_EVERY: Millis = Millis::new(10_000);
+
 /// The deadline of the inventory asked for at the start of a run.
 const INVENTORY_DEADLINE: Millis = Millis::new(60_000);
 
@@ -715,6 +721,7 @@ async fn data_plane(
             concurrency: 4,
             observe_every: OBSERVE_EVERY,
             listing_timeout: Millis::new(30_000),
+            status_every: RUNNER_STATUS_EVERY,
             boot_id: boot_id.clone(),
             dp_version: options.version.clone(),
         },

@@ -2,6 +2,7 @@
 //! the data-plane kit's fakes, a fake clock and an in-memory link, on one task.
 
 mod effects;
+mod runners;
 mod session;
 mod support;
 

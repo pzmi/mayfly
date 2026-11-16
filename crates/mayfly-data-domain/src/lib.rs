@@ -4,7 +4,8 @@
 //! directive executor with its per-session outcome table, fencing, safe mode and ownership
 //! checks ([`executor`]), the resource ledger that refuses what does not fit (I33, ADR 0024;
 //! [`ledger`]), the VM supervisor derived from the provider's listing and the shim's files
-//! (ADR 0037; [`supervisor`]) and the inventory that is complete or not (I25; [`inventory`]).
+//! (ADR 0037; [`supervisor`]), the inventory that is complete or not (I25; [`inventory`]) and
+//! the watch of the runners whose exits the guests' launchers report (DP-09; [`runners`]).
 //! Pure: no clock, randomness, I/O or process; time and ids arrive as values. The rules follow
 //! `formal/link.qnt` (fencing, idempotency, safe mode), `formal/lifecycle.qnt` (the proof
 //! re-checked against the re-observed instance id) and `formal/scheduling.qnt` (`dpFits`).
@@ -13,6 +14,7 @@ pub mod executor;
 pub mod inventory;
 pub mod ledger;
 pub mod link;
+pub mod runners;
 pub mod supervisor;
 
 pub use executor::{
@@ -26,4 +28,5 @@ pub use ledger::{
     foreign_use, gaps,
 };
 pub use link::{Link, LinkIgnored, LinkOutcome, LinkStimulus, Session};
+pub use runners::{RunnerStatus, RunnerWatch, Watched};
 pub use supervisor::{Seen, Shim, Signal, VmFact, VmFacts, VmState};

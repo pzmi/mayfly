@@ -1,6 +1,6 @@
 //! The fake image store, guest transport, host probe and floor: scripted answers, shared state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -153,11 +153,16 @@ impl ImageStore for FakeImageStore {
 }
 
 /// A guest transport answering every call as scripted, for the executor's tests; the
-/// `GuestTransport` contract's world is [`crate::guest::MemoryGuests`].
+/// `GuestTransport` contract's world is [`crate::guest::MemoryGuests`]. A status read answers
+/// the VM's own status when one is set ([`FakeGuest::set_status`]), else the script's, and never
+/// answers for a VM set hanging ([`FakeGuest::hang_status`]); every read is counted by VM.
 #[derive(Debug, Clone)]
 pub struct FakeGuest {
     state: Arc<Mutex<GuestScript>>,
     launches: Arc<Mutex<usize>>,
+    statuses: Arc<Mutex<BTreeMap<OwnedVmName, Result<RunnerStatus, VmError>>>>,
+    hanging: Arc<Mutex<BTreeSet<OwnedVmName>>>,
+    status_reads: Arc<Mutex<Vec<OwnedVmName>>>,
 }
 
 /// What [`FakeGuest`] answers.
@@ -180,7 +185,34 @@ impl FakeGuest {
         Self {
             state: Arc::new(Mutex::new(script)),
             launches: Arc::new(Mutex::new(0)),
+            statuses: Arc::new(Mutex::new(BTreeMap::new())),
+            hanging: Arc::new(Mutex::new(BTreeSet::new())),
+            status_reads: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// A status read of `vm` answers `status` from now on, whatever the script says.
+    pub fn set_status(&self, vm: &OwnedVmName, status: Result<RunnerStatus, VmError>) {
+        lock(&self.statuses).insert(vm.clone(), status);
+    }
+
+    /// A status read of `vm` never answers from now on (`true`), or answers again (`false`).
+    pub fn hang_status(&self, vm: &OwnedVmName, hangs: bool) {
+        let mut hanging = lock(&self.hanging);
+        if hangs {
+            hanging.insert(vm.clone());
+        } else {
+            hanging.remove(vm);
+        }
+    }
+
+    /// How many status reads of `vm` were started.
+    #[must_use]
+    pub fn status_reads(&self, vm: &OwnedVmName) -> usize {
+        lock(&self.status_reads)
+            .iter()
+            .filter(|read| *read == vm)
+            .count()
     }
 
     /// Answers as `script` says from now on.
@@ -210,8 +242,14 @@ impl GuestTransport for FakeGuest {
         lock(&self.state).launch
     }
 
-    async fn runner_status(&self, _vm: &OwnedVmName) -> Result<RunnerStatus, VmError> {
-        lock(&self.state).status
+    async fn runner_status(&self, vm: &OwnedVmName) -> Result<RunnerStatus, VmError> {
+        lock(&self.status_reads).push(vm.clone());
+        let hangs = lock(&self.hanging).contains(vm);
+        if hangs {
+            return std::future::pending().await;
+        }
+        let own = lock(&self.statuses).get(vm).copied();
+        own.unwrap_or_else(|| lock(&self.state).status)
     }
 
     async fn export_diagnostics(&self, _vm: &OwnedVmName) -> Result<Diagnostics, VmError> {

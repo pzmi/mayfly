@@ -29,6 +29,8 @@ pub const DEADLINE: Millis = Millis::new(60_000);
 pub const OBSERVE: Millis = Millis::new(10_000);
 /// How long one observer pass may take.
 pub const LISTING: Millis = Millis::new(5_000);
+/// How often the runners' statuses are read (DP-09).
+pub const STATUS: Millis = Millis::new(3_000);
 
 pub type Exec =
     Executor<FakeVmProvider, FakeImageStore, FakeGuest, FakeHostProbe, FakeClock, SequentialIds>;
@@ -174,6 +176,7 @@ pub fn config(concurrency: usize) -> Config {
         concurrency,
         observe_every: OBSERVE,
         listing_timeout: LISTING,
+        status_every: STATUS,
         boot_id: "boot-1".to_owned(),
         dp_version: "0.1.0".to_owned(),
     }

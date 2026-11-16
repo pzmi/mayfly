@@ -327,6 +327,7 @@ impl Dp {
             concurrency: 2,
             observe_every: Millis::new(10_000),
             listing_timeout: Millis::new(5_000),
+            status_every: Millis::new(2_000),
             boot_id: "boot-1".to_owned(),
             dp_version: "0.1.0".to_owned(),
         };

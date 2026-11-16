@@ -12,12 +12,14 @@
 //! nothing it started still runs: a hung `tart` child is stopped and reaped first, and a
 //! `start` whose shim may still be bringing the VM up returns `Ambiguous` only once the shim is
 //! settled (ADR 0037 forbids signalling `tart run`, and no `Drop` can run `tart stop`). Reads
-//! (`inventory`, `list`, `resources`, `facts`) may be dropped at their deadline: they change
-//! nothing.
+//! (`inventory`, `list`, `resources`, `facts`, `runner_status`) may be dropped at their
+//! deadline: they change nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
+/// What the launcher's status file says, defined beside the watch that reads it (DP-09).
+pub use mayfly_data_domain::RunnerStatus;
 use mayfly_data_domain::{Inventory, MeasuredDisks};
 use mayfly_domain::{
     Epoch, ImageDigest, Millis, ObservationId, OwnedVmName, ProviderInstanceId, Secret,
@@ -214,21 +216,6 @@ pub enum LaunchAnswer {
     IdentityRefused,
 }
 
-/// What the launcher's status file in the guest says about the runner (plan §8.3: runner exit
-/// after a restart is read from it, never from `tart run`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunnerStatus {
-    /// No launch reached this guest's launcher.
-    NotLaunched,
-    /// The runner was started and has not exited.
-    Running,
-    /// The runner exited with `code`.
-    Exited {
-        /// Its exit code.
-        code: i32,
-    },
-}
-
 /// The JIT configs held for delivery on the data plane, by handle (ADR 0014, ADR 0082): the
 /// link's data-plane end puts each config it receives in the non-`Serialize` wire frame there,
 /// bound to its VM, instance id and deadline ([`crate::LaunchStore`]), in memory only, and the
@@ -280,7 +267,9 @@ pub trait GuestTransport: Send + Sync {
     ) -> impl Future<Output = Result<LaunchAnswer, VmError>> + Send;
 
     /// What the launcher's status file in the guest of `vm` says, readable by a data plane
-    /// restarted since the launch.
+    /// restarted since the launch. A read: the executor polls it for the VMs its runner watch
+    /// names (DP-09, `mayfly_data_domain::runners`) and may drop it at its deadline, so an
+    /// implementation stops what it started when dropped.
     ///
     /// # Errors
     /// [`VmError`]: the guest did not answer, or answered something that does not parse.

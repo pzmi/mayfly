@@ -2435,4 +2435,248 @@ mod placement {
             .unwrap_or_default();
         assert_no_secret(&tart_log, &github);
     }
+
+    // ---- a runner's exit (DP-09) -----------------------------------------------------------
+
+    /// What the runner tests may take, within the test runner's own bound (two minutes).
+    const RUNNER_TEST: Duration = Duration::from_secs(115);
+
+    /// What is left of [`RUNNER_TEST`] since `started`.
+    fn left(started: std::time::Instant) -> Duration {
+        RUNNER_TEST.saturating_sub(started.elapsed())
+    }
+
+    /// The fake-tart rule that makes every launched runner run for `job_ms` and exit 0 (the
+    /// launcher's `job_ms`, `mayfly-fake-tart`'s `guest`).
+    fn runner_rule(job_ms: u64) -> String {
+        format!(
+            "[[rule]]\nid = \"runner-job\"\ncommand = \"exec\"\narg0 = \"{}\"\njob_ms = {job_ms}\n",
+            mayfly_adapter_tart::guest::LAUNCHER
+        )
+    }
+
+    /// The attempt whose runner was launched, and its VM.
+    struct Launched {
+        attempt: AttemptId,
+        vm: String,
+    }
+
+    /// Waits, by a bounded poll of the journal, for an attempt of `host` that recorded `wanted`;
+    /// on a timeout, the world's status and the attempts' events name where it stopped.
+    fn await_attempt(
+        world: &World,
+        host: &HostId,
+        bound: Duration,
+        what: &str,
+        wanted: impl Fn(&AttemptEvent) -> bool,
+    ) -> Launched {
+        let mut found = None;
+        let waited = mayfly_testkit_shared::poll::try_wait_until(bound, what, || {
+            let journal = open_journal(world);
+            found = reserved_attempts(&journal, host).into_iter().find_map(|a| {
+                let events = attempt_events(&journal, a);
+                events.iter().any(&wanted).then(|| {
+                    let vm = events.iter().find_map(|e| match e {
+                        AttemptEvent::AttemptStarted(s) => Some(s.vm_name.to_string()),
+                        _ => None,
+                    });
+                    Launched {
+                        attempt: a,
+                        vm: vm.unwrap_or_default(),
+                    }
+                })
+            });
+            found.is_some()
+        });
+        if let Err(timed_out) = waited {
+            let journal = open_journal(world);
+            let attempts: Vec<_> = reserved_attempts(&journal, host)
+                .into_iter()
+                .map(|a| (a, attempt_events(&journal, a)))
+                .collect();
+            panic!(
+                "{timed_out}; status: {}; the attempts: {attempts:?}",
+                world.try_status()
+            );
+        }
+        found.expect("found")
+    }
+
+    /// The id the fake gave the runner registered under `name`.
+    fn runner_named(github: &ServedGithub, name: &str) -> u64 {
+        github
+            .fake
+            .world()
+            .runners
+            .values()
+            .find(|r| r.name == name)
+            .map(|r| r.id)
+            .unwrap_or_else(|| panic!("no runner named {name}: {:?}", github.fake.world().runners))
+    }
+
+    fn exits(journal: &SqliteJournal, attempt: AttemptId) -> usize {
+        attempt_events(journal, attempt)
+            .iter()
+            .filter(|e| matches!(e, AttemptEvent::RunnerExited(_)))
+            .count()
+    }
+
+    #[test]
+    fn should_finish_delete_and_release_when_a_launched_runner_exits_after_its_job() {
+        // given: the mint test's world (an offered job acquired for the pool, an attempt granted
+        // and its runner launched), each launched runner running its job for eight seconds
+        let started = std::time::Instant::now();
+        let (image, registry) = registry();
+        let github = ServedGithub::start(daemon_knobs());
+        let mut world = serving(&registry, &image, true);
+        world.serve_github(&github);
+        let _reaped = Reaped(&world);
+        std::fs::write(world.tart_home().join("faults.toml"), runner_rule(8_000))
+            .expect("the rule");
+        let job = github.fake.queue_job(pool_job(9));
+        let (daemon, host) = pinned_run(&world);
+        let launched = await_attempt(&world, &host, left(started), "a runner launched", |e| {
+            matches!(e, AttemptEvent::RunnerLaunched(_))
+        });
+
+        // when: the runner takes the job, its job ends (the launcher's status says exited, read
+        // by the data plane), and GitHub completes the job
+        let runner = runner_named(&github, &launched.vm);
+        github
+            .fake
+            .start_job(job, runner)
+            .expect("the runner takes the job");
+        await_attempt(
+            &world,
+            &host,
+            left(started),
+            "the runner's exit recorded",
+            |e| matches!(e, AttemptEvent::RunnerExited(_)),
+        );
+        github
+            .fake
+            .complete_job(job, "succeeded")
+            .expect("the job completes");
+        let waited = mayfly_testkit_shared::poll::try_wait_until(
+            left(started),
+            "the finished attempt's VM deleted and its slot released",
+            || released(&open_journal(&world), &host, launched.attempt),
+        );
+        if let Err(timed_out) = waited {
+            let journal = open_journal(&world);
+            panic!(
+                "{timed_out}; status: {}; the attempt: {:?}",
+                world.try_status(),
+                attempt_events(&journal, launched.attempt)
+            );
+        }
+        let exit = daemon.terminate();
+
+        // then: the exit recorded once; retired `job_done` with no deregistration (GitHub
+        // removed the runner that ran the job: KER-04G, DP-09's amended Accept); the VM deleted
+        // and gone; the slot released
+        assert_eq!(exit, Some(0));
+        let journal = open_journal(&world);
+        let events = attempt_events(&journal, launched.attempt);
+        assert_eq!(exits(&journal, launched.attempt), 1, "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AttemptEvent::AttemptRetired(r) if r.reason == RetireReason::JobDone
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AttemptEvent::VmDeleted(_))),
+            "{events:?}"
+        );
+        assert!(
+            deleted(&world).contains(&launched.vm),
+            "{:?}",
+            deleted(&world)
+        );
+        assert!(!world.names().contains(&launched.vm), "{:?}", world.names());
+        assert!(
+            !github.fake.world().runners.contains_key(&runner),
+            "{:?}",
+            github.fake.world().runners
+        );
+    }
+
+    #[test]
+    fn should_record_an_exit_that_happened_while_mayflyd_was_down_when_it_restarts() {
+        // given: a runner launched and recorded listening, whose job would run for an hour;
+        // `mayflyd` stopped by SIGTERM (P24: the VM left running, adoptable)
+        let started = std::time::Instant::now();
+        let (image, registry) = registry();
+        let github = ServedGithub::start(daemon_knobs());
+        let mut world = serving(&registry, &image, true);
+        world.serve_github(&github);
+        let _reaped = Reaped(&world);
+        std::fs::write(
+            world.tart_home().join("faults.toml"),
+            runner_rule(3_600_000),
+        )
+        .expect("the rule");
+        github.fake.queue_job(pool_job(9));
+        let (daemon, host) = pinned_run(&world);
+        let launched = await_attempt(&world, &host, left(started), "a runner launched", |e| {
+            matches!(e, AttemptEvent::RunnerLaunched(_))
+        });
+        assert_eq!(daemon.terminate(), Some(0));
+        let before = exits(&open_journal(&world), launched.attempt);
+
+        // when: the runner's job ends while nothing runs (the test ends it in the fake guest's
+        // record, which the launcher's status reads), then `mayflyd` starts again
+        end_runner_job(&world, &launched.vm);
+        let launcher = mayfly_adapter_tart::guest::LAUNCHER;
+        let status = world.tart(&["exec", &launched.vm, launcher, "status"]);
+        let next = world.start();
+        next.ready();
+        await_attempt(
+            &world,
+            &host,
+            left(started),
+            "the exit recorded after the restart",
+            |e| matches!(e, AttemptEvent::RunnerExited(_)),
+        );
+        let exit = next.terminate();
+
+        // then: the runner could not have exited before the stop, and nothing recorded an exit
+        // then; the restarted data plane read the adopted VM's status (no launch reached it in
+        // that process) and recorded the exit once
+        assert_eq!(before, 0);
+        assert!(
+            String::from_utf8_lossy(&status.stdout).contains("\"exited\""),
+            "{status:?}"
+        );
+        assert_eq!(exit, Some(0));
+        assert_eq!(exits(&open_journal(&world), launched.attempt), 1);
+    }
+
+    /// Ends the job of the runner launched in `vm` now, exit code 0, in the fake guest's record
+    /// (`$TART_HOME/vms/<name>.json`'s `runner`, which `mayfly-fake-tart`'s launcher reads its
+    /// status from), while nothing else writes it (`mayflyd` is stopped).
+    fn end_runner_job(world: &World, vm: &str) {
+        let dir = world.tart_home().join("vms");
+        let path = std::fs::read_dir(&dir)
+            .expect("the fake's VM records")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .find(|p| {
+                std::fs::read(p)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                    .is_some_and(|r| r["name"] == vm)
+            })
+            .unwrap_or_else(|| panic!("no record of {vm} in {}", dir.display()));
+        let mut record: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("the record")).expect("json");
+        assert!(record["runner"].is_object(), "no runner launched: {record}");
+        record["runner"]["job"] = serde_json::json!([0, 0]);
+        std::fs::write(&path, serde_json::to_vec(&record).expect("json")).expect("the record");
+    }
 }
