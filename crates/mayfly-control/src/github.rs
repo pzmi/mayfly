@@ -1,10 +1,12 @@
 //! The GitHub ports (plan §4, §7.2, §7.3): [`ScaleSetApi`], the Runner Scale Set protocol as
-//! the listener and the registration manager use it, and [`RunnerRegistry`], the runner
-//! endpoints of `doc/github-scaleset.md` §2 and §7.
+//! the listener and the registration manager use it, [`RunnerRegistry`], the runner
+//! endpoints of `doc/github-scaleset.md` §2 and §7, and [`WorkflowRuns`], the REST workflow-run
+//! lookup and cancel of ADR 0090's per-job check (spec §6.2, GH-10).
 //!
-//! The adapter (`mayfly-adapter-github`, GH-03) speaks the wire; the in-memory fake lives in
-//! `mayfly-testkit::github`; both pass the contract suite `mayfly_testkit::contracts::scaleset`
-//! (ver §5). What crosses these ports is already the domain's language: messages arrive as
+//! The adapter (`mayfly-adapter-github`, GH-03, GH-10) speaks the wire; the in-memory fake lives
+//! in `mayfly-testkit::github`; both pass the contract suites
+//! `mayfly_testkit::contracts::scaleset` and `mayfly_testkit::contracts::runs` (ver §5). What
+//! crosses these ports is already the domain's language: messages arrive as
 //! [`MessageItem`]s in arrival order, unknown types kept as [`MessageItem::Unknown`] (protocol
 //! drift, plan §7.2 step 6), statistics as [`Statistics`], offers as [`Offer`]s. Strings from
 //! GitHub are bounded by the adapter before they get here (dm §9.1).
@@ -34,10 +36,13 @@ use mayfly_domain::Secret;
 
 pub use mayfly_control_domain::attempt::RunnerRequestId;
 pub use mayfly_control_domain::demand::{
-    AssignedJob, EventName, JobKey, Offer, RepositoryName, Statistics, WorkflowJobId, WorkflowRunId,
+    AssignedJob, EventName, JobKey, Offer, RepositoryName, RunFacts, RunLookup, Statistics,
+    WorkflowJobId, WorkflowRunId,
 };
 pub use mayfly_control_domain::registration::{JobResult, RunnerId, ScaleSetId};
-pub use mayfly_control_domain::scaleset::{JobFact, MessageId, MessageItem, SessionId};
+pub use mayfly_control_domain::scaleset::{
+    CancelAnswer, JobFact, MessageId, MessageItem, ScaleSetCommand, SessionId,
+};
 
 /// What mayfly asks of the scale set it ensures for a pool (spec §3.1 "Ensure").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +121,86 @@ pub enum RemovalOutcome {
     Gone,
     /// `JobStillRunningException` (400 or 409): the runner is busy; nothing changed.
     Busy,
+}
+
+/// A workflow run as the lookup answered it (`GET /repos/{owner}/{repo}/actions/runs/{run_id}`,
+/// spec §2, §6.2), every string bounded by the adapter. Its classifying part is
+/// [`WorkflowRun::facts`]; the actor is kept for the operator's view of a call and never enters
+/// the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRun {
+    /// `id`: the run asked for (an answer for another run is protocol drift).
+    pub id: WorkflowRunId,
+    /// `repository.full_name`: the base repository.
+    pub repository: RepositoryName,
+    /// `head_repository.full_name`: a fork's when it is not the base.
+    pub head_repository: RepositoryName,
+    /// `event`; one the ACL cannot name is [`EventName::Unknown`] (unclassifiable, A5).
+    pub event: EventName,
+    /// `actor.login`, when the answer carried one.
+    pub actor: Option<String>,
+}
+
+impl WorkflowRun {
+    /// What the classification reads of it ([`mayfly_control_domain::demand::classify_assigned`]).
+    #[must_use]
+    pub fn facts(&self) -> RunFacts {
+        RunFacts {
+            repository: Some(self.repository.clone()),
+            head_repository: Some(self.head_repository.clone()),
+            event_name: self.event,
+        }
+    }
+}
+
+/// The observation a lookup's result makes: its facts, or [`RunLookup::Failed`] for every
+/// failure (an error, a timeout, an absent run, a missing field, a throttle), so the domain
+/// refuses the job `lookup_failed` (ADR 0090: a failed lookup refuses; fail closed). Pinned by
+/// `github::tests::should_answer_failed_when_a_lookup_fails_in_any_way`.
+#[must_use]
+pub fn run_lookup(result: &Result<WorkflowRun, GitHubCallError>) -> RunLookup {
+    match result {
+        Ok(run) => RunLookup::Found(run.facts()),
+        Err(_) => RunLookup::Failed,
+    }
+}
+
+/// The observation a cancel's result makes, if any (ADR 0090, spec §6.2): an answer (202, 409 or
+/// any other answered error) is `RecordCancelAnswer`, recorded once and never asked again; a lost
+/// answer (no response, a deadline, no token to send) records nothing, so the cancel stays due
+/// and is asked again (`ScaleSetState::refusal_action`). Pinned by
+/// `github::tests::should_record_only_an_answer_when_a_cancel_is_answered_or_lost`.
+#[must_use]
+pub fn cancel_observation(
+    job: &JobKey,
+    result: &Result<CancelAnswer, GitHubCallError>,
+) -> Option<ScaleSetCommand> {
+    result
+        .as_ref()
+        .ok()
+        .map(|answer| ScaleSetCommand::RecordCancelAnswer {
+            job: job.clone(),
+            answer: *answer,
+        })
+}
+
+/// Asks GitHub to cancel a refused job's run and answers the observation to record, if any
+/// (`RefusalAction::CancelRun`, GH-08 drives it). `repository` is the assignment's; a refused job
+/// whose assignment named none can never be cancelled, so its cancel is recorded
+/// [`CancelAnswer::Refused`] at once, with no request: a cancel that can never be sent never
+/// stays due, so it can neither come back on every pass nor hold back the next refused job's
+/// cancel. Otherwise as [`cancel_observation`]. Pinned by
+/// `tests/store/listener.rs::should_record_refused_without_a_call_when_a_cancel_can_never_be_sent`.
+pub async fn cancel_refused<W: WorkflowRuns>(
+    runs: &W,
+    job: &JobKey,
+    repository: Option<&RepositoryName>,
+) -> Option<ScaleSetCommand> {
+    let answer = match repository {
+        Some(repository) => runs.cancel_run(repository, job.run_id).await,
+        None => Ok(CancelAnswer::Refused),
+    };
+    cancel_observation(job, &answer)
 }
 
 /// The class of a failed call (spec §2, §3, §8).
@@ -345,4 +430,118 @@ pub trait RunnerRegistry: Send + Sync {
         &self,
         id: RunnerId,
     ) -> impl Future<Output = Result<RemovalOutcome, GitHubCallError>> + Send;
+}
+
+/// The REST workflow-run endpoints of ADR 0090's per-job check (spec §2, §6.2), on the
+/// installation token: the lookup of an assigned job's run ("Actions: Read") and the cancel of a
+/// refused run (`cancel_refused_runs` only, "Actions: Write", ADR 0045). Every call has a
+/// deadline. `repository` is the assignment's `owner/name`; one that is not a plain
+/// `owner/name` is never put in a URL ([`Failure::ProtocolDrift`]).
+pub trait WorkflowRuns: Send + Sync {
+    /// The run `run` of `repository`. Any failure is for the caller to read as
+    /// [`RunLookup::Failed`] ([`run_lookup`]): an absent run, a timeout, a 200 without a field
+    /// the classification needs, a `repository` that is not a plain `owner/name`.
+    ///
+    /// # Errors
+    /// [`GitHubCallError`].
+    fn workflow_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> impl Future<Output = Result<WorkflowRun, GitHubCallError>> + Send;
+
+    /// Asks GitHub to cancel the run `run` of `repository`, once: never retried past an
+    /// answered attempt (a 401, which did nothing, is resent once with a fresh token). 202 is
+    /// [`CancelAnswer::Accepted`]; 409 (the run is over) and any other answered error are
+    /// [`CancelAnswer::Refused`], and so is a `repository` that is not a plain `owner/name`,
+    /// which no request can ever name: nothing is sent, and it never stays due.
+    ///
+    /// # Errors
+    /// [`GitHubCallError`] when nothing answered (a lost answer, a deadline) or nothing could be
+    /// sent this time (the credentials): the cancel's outcome is not known and nothing is
+    /// recorded ([`cancel_observation`]), so it is asked again.
+    fn cancel_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> impl Future<Output = Result<CancelAnswer, GitHubCallError>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run() -> WorkflowRun {
+        WorkflowRun {
+            id: WorkflowRunId(7),
+            repository: RepositoryName("acme/app".to_owned()),
+            head_repository: RepositoryName("contributor/app".to_owned()),
+            event: EventName::PullRequest,
+            actor: Some("contributor".to_owned()),
+        }
+    }
+
+    fn job() -> JobKey {
+        JobKey {
+            job_id: WorkflowJobId("11".to_owned()),
+            run_id: WorkflowRunId(7),
+        }
+    }
+
+    #[test]
+    fn should_answer_failed_when_a_lookup_fails_in_any_way() {
+        // given
+        let failures = [
+            Failure::Refused { status: 404 },
+            Failure::Unavailable,
+            Failure::Throttled,
+            Failure::ProtocolDrift,
+            Failure::Credentials,
+        ];
+
+        // when
+        let found = run_lookup(&Ok(run()));
+        let failed: Vec<RunLookup> = failures
+            .iter()
+            .map(|f| run_lookup(&Err(GitHubCallError::new(*f, "synthetic"))))
+            .collect();
+
+        // then: the facts carry the fork's head; every failure refuses
+        assert_eq!(
+            found,
+            RunLookup::Found(RunFacts {
+                repository: Some(RepositoryName("acme/app".to_owned())),
+                head_repository: Some(RepositoryName("contributor/app".to_owned())),
+                event_name: EventName::PullRequest,
+            })
+        );
+        assert!(failed.iter().all(|l| *l == RunLookup::Failed));
+    }
+
+    #[test]
+    fn should_record_only_an_answer_when_a_cancel_is_answered_or_lost() {
+        // given
+        let answers = [
+            Ok(CancelAnswer::Accepted),
+            Ok(CancelAnswer::Refused),
+            Err(GitHubCallError::new(Failure::Unavailable, "lost")),
+        ];
+
+        // when
+        let observed: Vec<Option<ScaleSetCommand>> = answers
+            .iter()
+            .map(|a| cancel_observation(&job(), a))
+            .collect();
+
+        // then
+        let record = |answer| Some(ScaleSetCommand::RecordCancelAnswer { job: job(), answer });
+        assert_eq!(
+            observed,
+            [
+                record(CancelAnswer::Accepted),
+                record(CancelAnswer::Refused),
+                None
+            ]
+        );
+    }
 }

@@ -126,6 +126,38 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
         attempt_timeout: Millis,
         build: impl Fn() -> HttpRequest,
     ) -> Result<HttpResponse, GitHubError> {
+        let retries = self.policy.retry.max_retries;
+        self.attempts(op, phase, deadline, attempt_timeout, retries, build)
+            .await
+    }
+
+    /// One attempt, never repeated, under the policy's attempt timeout and `deadline`: for a
+    /// request whose answer, whatever it is, must not be asked for again (the cancel of a
+    /// refused run, spec §6.2). Pinned by
+    /// `tests/client/retry.rs::should_send_once_when_a_call_is_made_once`.
+    ///
+    /// # Errors
+    /// As [`Self::call`].
+    pub async fn call_once(
+        &self,
+        op: Operation,
+        phase: Phase,
+        deadline: Deadline,
+        build: impl Fn() -> HttpRequest,
+    ) -> Result<HttpResponse, GitHubError> {
+        let timeout = self.policy.attempt_timeout;
+        self.attempts(op, phase, deadline, timeout, 0, build).await
+    }
+
+    async fn attempts(
+        &self,
+        op: Operation,
+        phase: Phase,
+        deadline: Deadline,
+        attempt_timeout: Millis,
+        max_retries: u32,
+        build: impl Fn() -> HttpRequest,
+    ) -> Result<HttpResponse, GitHubError> {
         let mut attempts = 0;
         loop {
             let request = build();
@@ -172,7 +204,7 @@ impl<T: Transport, C: Clock, R: Rng> ApiClient<T, C, R> {
                     (Some(verdict), failure)
                 }
             };
-            if attempts > self.policy.retry.max_retries {
+            if attempts > max_retries {
                 return Err(fail(op, failure));
             }
             let now = self.clock.now();

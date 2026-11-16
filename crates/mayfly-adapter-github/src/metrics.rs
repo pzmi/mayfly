@@ -41,6 +41,10 @@ pub enum Operation {
     RunnerRead,
     /// A runner removal (spec §7).
     RunnerRemove,
+    /// A workflow-run lookup (REST, spec §6.2).
+    RunLookup,
+    /// A workflow-run cancel (REST, spec §6.2).
+    RunCancel,
 }
 
 impl Operation {
@@ -64,6 +68,8 @@ impl Operation {
             Self::JitConfig => "jit_config",
             Self::RunnerRead => "runner_read",
             Self::RunnerRemove => "runner_remove",
+            Self::RunLookup => "run_lookup",
+            Self::RunCancel => "run_cancel",
         }
     }
 }

@@ -1,0 +1,39 @@
+{
+  "fixture": "CR-02",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a76.2: a cancel whose answer is lost took effect; asked again it answers 409",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://api.github.com/repos/acme/app/actions/runs/17/cancel",
+        "auth": "installation",
+        "headers": {
+          "accept": "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28"
+        }
+      },
+      "response": {
+        "lost": true
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://api.github.com/repos/acme/app/actions/runs/17/cancel",
+        "auth": "installation",
+        "headers": {
+          "accept": "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28"
+        }
+      },
+      "response": {
+        "status": 409,
+        "json": {
+          "message": "Cannot cancel a workflow run that is completed."
+        }
+      }
+    }
+  ]
+}

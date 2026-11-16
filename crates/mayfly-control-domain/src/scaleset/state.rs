@@ -585,7 +585,9 @@ pub enum ScaleSetCommand {
 pub enum CancelAnswer {
     /// 202: GitHub accepted the cancel; a `JobCompleted` follows.
     Accepted,
-    /// 409 or an error answer: nothing changed at GitHub; its release fails the job.
+    /// 409, another error answer, or a cancel that can never be sent (no usable repository):
+    /// mayfly asks no more and GitHub's release fails the job. A 409 to a cancel asked again
+    /// after a lost answer may follow a first cancel that took effect.
     Refused,
 }
 

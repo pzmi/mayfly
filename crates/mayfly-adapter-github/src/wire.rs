@@ -7,10 +7,12 @@
 use mayfly_control::github::{
     AssignedJob, EventName, JobFact, JobKey, JobResult, MessageId, MessageItem, Offer,
     PolledMessage, RepositoryName, RunnerId, RunnerInfo, RunnerRequestId, ScaleSetId, ScaleSetInfo,
-    SessionId, Statistics, WorkflowJobId, WorkflowRunId,
+    SessionId, Statistics, WorkflowJobId, WorkflowRun, WorkflowRunId,
 };
 use mayfly_domain::OwnedVmName;
 use serde_json::Value;
+
+use crate::config::split_full_name;
 
 /// The longest string kept from GitHub (a name, a label, a job id); a longer one is dropped.
 pub const MAX_TEXT_BYTES: usize = 256;
@@ -207,6 +209,31 @@ pub fn decode_runner(value: &Value) -> Option<RunnerInfo> {
             .and_then(Value::as_str)
             .map(|s| s.eq_ignore_ascii_case("online")),
         busy: value.get("busy").and_then(Value::as_bool),
+    })
+}
+
+/// A workflow run's lookup answer (spec §2, §6.2) for the run `asked`; `None` when it lacks
+/// what the classification needs, so the lookup fails and the job is refused (ADR 0090: a
+/// missing field refuses). Required: `id` equal to `asked`, a non-empty `event`, and
+/// `repository.full_name` and `head_repository.full_name`, each a plain `owner/name` (a deleted
+/// fork's `null` head is missing too). `actor.login` is kept when present. Every string is
+/// bounded ([`MAX_TEXT_BYTES`]); an `event` the domain does not name is
+/// [`EventName::Unknown`], which the domain refuses as unclassifiable. Pinned by
+/// `wire::tests::should_decode_a_fork_and_refuse_the_run_when_a_field_is_missing`.
+#[must_use]
+pub fn decode_workflow_run(value: &Value, asked: WorkflowRunId) -> Option<WorkflowRun> {
+    let id = value.get("id").and_then(id).filter(|i| *i == asked.0)?;
+    let full_name = |field: &str| {
+        let name = value.get(field).and_then(|r| text(r, "full_name"))?;
+        split_full_name(&name)?;
+        Some(RepositoryName(name))
+    };
+    Some(WorkflowRun {
+        id: WorkflowRunId(id),
+        repository: full_name("repository")?,
+        head_repository: full_name("head_repository")?,
+        event: event_name(&text(value, "event")?),
+        actor: value.get("actor").and_then(|a| text(a, "login")),
     })
 }
 
@@ -417,6 +444,70 @@ mod tests {
 
         // then: drift is one Unknown; an empty batch has none; no body or no id is transient
         assert_eq!(decoded, [Some(1), Some(1), Some(0), None, None]);
+    }
+
+    #[test]
+    fn should_decode_a_fork_and_refuse_the_run_when_a_field_is_missing() {
+        // given
+        let repo = |full: &str| json!({"full_name": full, "owner": {"login": "x"}});
+        let fork = json!({
+            "id": 7,
+            "event": "pull_request",
+            "actor": {"login": "contributor"},
+            "repository": repo("acme/app"),
+            "head_repository": repo("contributor/app"),
+        });
+        let mut broken = Vec::new();
+        for field in ["id", "event", "repository", "head_repository"] {
+            let mut run = fork.clone();
+            if let Some(fields) = run.as_object_mut() {
+                fields.remove(field);
+            }
+            broken.push(run);
+        }
+        let with = |field: &str, value: Value| {
+            let mut run = fork.clone();
+            run[field] = value;
+            run
+        };
+        broken.push(with("id", json!(8)));
+        broken.push(with("head_repository", Value::Null));
+        broken.push(with("repository", repo("acme/app/extra")));
+        broken.push(with(
+            "repository",
+            repo(&format!("acme/{}", "a".repeat(300))),
+        ));
+        broken.push(with("event", json!("")));
+        let odd = with("event", json!("repository_dispatch"));
+        let anonymous = with("actor", Value::Null);
+
+        // when
+        let decoded = decode_workflow_run(&fork, WorkflowRunId(7));
+        let refused: Vec<Option<WorkflowRun>> = broken
+            .iter()
+            .map(|r| decode_workflow_run(r, WorkflowRunId(7)))
+            .collect();
+
+        // then: the fork's head is not its base; any missing or malformed field fails the lookup
+        assert_eq!(
+            decoded,
+            Some(WorkflowRun {
+                id: WorkflowRunId(7),
+                repository: RepositoryName("acme/app".to_owned()),
+                head_repository: RepositoryName("contributor/app".to_owned()),
+                event: EventName::PullRequest,
+                actor: Some("contributor".to_owned()),
+            })
+        );
+        assert!(refused.iter().all(Option::is_none), "{refused:?}");
+        assert_eq!(
+            decode_workflow_run(&odd, WorkflowRunId(7)).map(|r| r.event),
+            Some(EventName::Unknown)
+        );
+        assert_eq!(
+            decode_workflow_run(&anonymous, WorkflowRunId(7)).map(|r| r.actor),
+            Some(None)
+        );
     }
 
     #[test]

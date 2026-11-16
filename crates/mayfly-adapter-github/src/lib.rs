@@ -13,6 +13,11 @@
 //!   `aws-lc-rs` and the platform verifier (ADR 0064).
 //! - [`check_permissions`]: the installation's grants against the published list (ADR 0045).
 //!
+//! GH-10 adds the REST half of ADR 0090's per-job check on the same client: the `WorkflowRuns`
+//! port (the lookup of an assigned job's workflow run, decoded by [`decode_workflow_run`], and
+//! the cancel of a refused run, sent once), on an installation token held until shortly before
+//! it expires. Its contract is `mayfly_testkit::contracts::runs`.
+//!
 //! GH-03 adds [`ScaleSetClient`], the `ScaleSetApi` and `RunnerRegistry` ports of
 //! `mayfly_control::github` over that chain (spec §2–§7), and the wire's anti-corruption layer
 //! ([`decode_message`] and its siblings): GitHub's JSON in, bounded domain values out. Its
@@ -39,7 +44,10 @@ mod wire;
 
 pub use auth::{AdminConnection, AppAuth, InstallationToken, REFRESH_MARGIN};
 pub use client::{ApiClient, CallPolicy, DEFAULT_CALL_POLICY};
-pub use config::{AppConfig, BaseProblem, ConfigError, Scope, credential_base_problem, parse_base};
+pub use config::{
+    AppConfig, BaseProblem, ConfigError, Scope, credential_base_problem, parse_base,
+    split_full_name,
+};
 pub use error::{ErrorClass, ErrorKind, GitHubError, redacted_endpoint};
 pub use http::{HttpRequest, HttpResponse, MAX_RESPONSE_BYTES, Method, Transport, TransportError};
 pub use jwt::{AppKey, JWT_BACKDATE_SECS, JWT_LIFETIME_SECS, JwtError, app_jwt, token_expiry};
@@ -62,6 +70,6 @@ pub use transport::{CONNECT_TIMEOUT, ReqwestTransport, TlsSetupError, USER_AGENT
 pub use url::Url;
 pub use wire::{
     JOB_MESSAGES, MAX_LABELS, MAX_TEXT_BYTES, decode_job, decode_message, decode_offer,
-    decode_runner, decode_scale_set, decode_statistics, event_name, job_result,
-    session_id_from_wire, session_id_to_wire,
+    decode_runner, decode_scale_set, decode_statistics, decode_workflow_run, event_name,
+    job_result, session_id_from_wire, session_id_to_wire,
 };

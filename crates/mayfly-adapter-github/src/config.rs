@@ -152,6 +152,40 @@ impl AppConfig {
     pub fn config_url(&self) -> Url {
         join(&self.web_base, &self.scope.names())
     }
+
+    /// `GET {api}/repos/{owner}/{repo}/actions/runs/{run_id}` (spec §2, §6.2), for a
+    /// `repository` written `owner/name`; `None` when it is not one ([`split_full_name`]), so
+    /// nothing from GitHub's message is ever put in a path unchecked.
+    #[must_use]
+    pub fn workflow_run_url(&self, repository: &str, run: u64) -> Option<Url> {
+        let (owner, name) = split_full_name(repository)?;
+        let run = run.to_string();
+        Some(join(
+            &self.api_base,
+            &["repos", owner, name, "actions", "runs", &run],
+        ))
+    }
+
+    /// `POST {api}/repos/{owner}/{repo}/actions/runs/{run_id}/cancel` (spec §2, §6.2), as
+    /// [`Self::workflow_run_url`].
+    #[must_use]
+    pub fn cancel_run_url(&self, repository: &str, run: u64) -> Option<Url> {
+        let (owner, name) = split_full_name(repository)?;
+        let run = run.to_string();
+        Some(join(
+            &self.api_base,
+            &["repos", owner, name, "actions", "runs", &run, "cancel"],
+        ))
+    }
+}
+
+/// A repository's full name `owner/name` as its two parts, each `[A-Za-z0-9._-]{1,100}` and
+/// neither `.` nor `..` (GitHub's own alphabet for both), or `None`. Pinned by
+/// `config::tests::should_build_each_endpoint_when_the_base_has_a_path`.
+#[must_use]
+pub fn split_full_name(full_name: &str) -> Option<(&str, &str)> {
+    let (owner, name) = full_name.split_once('/')?;
+    (valid_name(owner) && valid_name(name)).then_some((owner, name))
 }
 
 fn check_base(field: &'static str, base: &Url) -> Result<(), ConfigError> {
@@ -283,7 +317,23 @@ mod tests {
             repo.registration_token_url().to_string(),
             repo.config_url().to_string(),
             ghes.config_url().to_string(),
+            ghes.workflow_run_url("acme/app", 7)
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
+            repo.cancel_run_url("acme/app.js", 7)
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
         ];
+        let refused = [
+            "acme",
+            "acme/",
+            "/app",
+            "a/b/c",
+            "acme/..",
+            "acme/a?b",
+            "acme/a%2F",
+        ]
+        .map(|name| repo.workflow_run_url(name, 7));
 
         // then
         assert_eq!(
@@ -295,8 +345,11 @@ mod tests {
                 "https://api.github.com/repos/acme/widgets/actions/runners/registration-token",
                 "https://github.com/acme/widgets",
                 "https://github.com/acme",
+                "https://ghes.example/api/v3/repos/acme/app/actions/runs/7",
+                "https://api.github.com/repos/acme/app.js/actions/runs/7/cancel",
             ]
         );
+        assert!(refused.iter().all(Option::is_none), "{refused:?}");
     }
 
     #[test]

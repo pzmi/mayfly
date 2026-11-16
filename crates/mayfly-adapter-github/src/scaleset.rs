@@ -13,15 +13,20 @@
 //! - Errors are classed by `typeName`, never by status (spec §2); a scale-set-scoped 404 without
 //!   a class is [`Failure::ScaleSetGone`] (spec §3.1).
 //! - Nothing here deletes a scale set (ADR 0040) or removes a runner other than by its id.
+//! - The REST calls of the per-job check (`WorkflowRuns`, spec §6.2, GH-10) carry the held
+//!   installation token; a 401 drops it and the call is made once more with a fresh one. The
+//!   lookup is retried by spec §8; the cancel is sent once, and any answer ends it. One
+//!   deadline covers a call's mint, attempts and resend.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
 use mayfly_control::github::{
-    Failure, GitHubCallError, JitConfig, MessageId, Offer, OpenedSession, PolledMessage,
-    RemovalOutcome, RunnerId, RunnerInfo, RunnerRegistry, RunnerRequestId, ScaleSetApi, ScaleSetId,
-    ScaleSetInfo, ScaleSetSpec, SessionId, Statistics,
+    CancelAnswer, Failure, GitHubCallError, JitConfig, MessageId, Offer, OpenedSession,
+    PolledMessage, RemovalOutcome, RepositoryName, RunnerId, RunnerInfo, RunnerRegistry,
+    RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetInfo, ScaleSetSpec, SessionId, Statistics,
+    WorkflowRun, WorkflowRunId, WorkflowRuns,
 };
 use mayfly_control::secrets::SecretProvider;
 use mayfly_control::store::{Clock, Rng};
@@ -30,7 +35,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::auth::AppAuth;
+use crate::auth::{AppAuth, rest_headers};
 use crate::config::credential_base_problem;
 use crate::error::{ErrorClass, ErrorKind, GitHubError};
 use crate::http::{HttpRequest, HttpResponse, Method, Transport};
@@ -38,7 +43,7 @@ use crate::metrics::Operation;
 use crate::retry::Phase;
 use crate::wire::{
     decode_message, decode_offer, decode_runner, decode_scale_set, decode_statistics,
-    session_id_from_wire, session_id_to_wire,
+    decode_workflow_run, session_id_from_wire, session_id_to_wire,
 };
 
 /// The Actions service's API version, in every service call's query (spec §2) and in the
@@ -132,6 +137,50 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> ScaleSetClient<T, C, R, 
                 Err(error) if status_of(&error) == Some(401) && !renewed => {
                     self.auth.invalidate(&connection).await;
                     connection = self.auth.admin_connection().await?;
+                    renewed = true;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// One REST call on the held installation token (spec §6.2), resent once with a fresh token
+    /// after a 401 (a token revoked before its expiry: nothing was done). `once` sends each
+    /// attempt without the retries of spec §8. One deadline, the call policy's, covers it all:
+    /// a mint, the call and the resend after a 401 (a wait on a refresh another caller started
+    /// is bounded by that caller's own deadline). Pinned by
+    /// `tests/client/runs.rs::should_share_one_deadline_when_the_mint_and_the_lookup_wait`.
+    async fn rest(
+        &self,
+        op: Operation,
+        method: Method,
+        url: &Url,
+        once: bool,
+    ) -> Result<HttpResponse, GitHubError> {
+        let client = self.auth.client();
+        let deadline = client.deadline();
+        let mut token = self.auth.rest_token(deadline).await?;
+        let mut renewed = false;
+        loop {
+            let held = Arc::clone(&token);
+            let build = || HttpRequest {
+                method,
+                url: url.clone(),
+                authorization: Some(Secret::new(format!("Bearer {}", held.token.expose()))),
+                headers: rest_headers(),
+                body: None,
+            };
+            let result = if once {
+                client.call_once(op, Phase::Ordinary, deadline, build).await
+            } else {
+                client
+                    .call_until(op, Phase::Ordinary, deadline, build)
+                    .await
+            };
+            match result {
+                Err(error) if status_of(&error) == Some(401) && !renewed => {
+                    self.auth.invalidate_rest(&token).await;
+                    token = self.auth.rest_token(deadline).await?;
                     renewed = true;
                 }
                 other => return other,
@@ -750,6 +799,58 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> RunnerRegistry
                 Some(ErrorClass::JobStillRunning) => Ok(RemovalOutcome::Busy),
                 _ => Err(call_error(&error)),
             },
+        }
+    }
+}
+
+impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> WorkflowRuns
+    for ScaleSetClient<T, C, R, P>
+{
+    /// Pinned by `tests/client/runs.rs` and the `runs` contract (WR-01..WR-04).
+    async fn workflow_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<WorkflowRun, GitHubCallError> {
+        let url = self
+            .auth
+            .config()
+            .workflow_run_url(&repository.0, run.0)
+            .ok_or_else(|| drift("the repository is not a plain owner/name"))?;
+        let answer = self
+            .rest(Operation::RunLookup, Method::Get, &url, false)
+            .await
+            .map_err(|e| call_error(&e))?;
+        decode_workflow_run(&body_json(&answer)?, run)
+            .ok_or_else(|| drift("the workflow run lacks a field the check needs"))
+    }
+
+    /// Any answer to the cancel's one attempt is its answer: a 2xx accepted, any other status
+    /// (409 for a run that is over, 404, 403, a rate limit, a 5xx) refused, never asked again;
+    /// a 401 is resent once with a fresh token, since it did nothing. A repository no path can
+    /// name is refused with no request. Only no answer is an error. Pinned by
+    /// `tests/client/runs.rs` and the `runs` contract (CR-01..CR-03).
+    async fn cancel_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<CancelAnswer, GitHubCallError> {
+        // No request can ever name this repository: the cancel is over, never due again.
+        let Some(url) = self.auth.config().cancel_run_url(&repository.0, run.0) else {
+            return Ok(CancelAnswer::Refused);
+        };
+        match self
+            .rest(Operation::RunCancel, Method::Post, &url, true)
+            .await
+        {
+            Ok(_) => Ok(CancelAnswer::Accepted),
+            Err(error)
+                if error.op == Operation::RunCancel
+                    && matches!(error.kind, ErrorKind::Status { .. }) =>
+            {
+                Ok(CancelAnswer::Refused)
+            }
+            Err(error) => Err(call_error(&error)),
         }
     }
 }

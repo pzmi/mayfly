@@ -1,0 +1,48 @@
+{
+  "fixture": "WR-02",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a76.2: a fork's pull request, head_repository other than repository",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/acme/app/actions/runs/12",
+        "auth": "installation",
+        "headers": {
+          "accept": "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28"
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "id": 12,
+          "event": "pull_request",
+          "status": "in_progress",
+          "conclusion": null,
+          "actor": {
+            "login": "contributor"
+          },
+          "triggering_actor": {
+            "login": "contributor"
+          },
+          "repository": {
+            "full_name": "acme/app",
+            "name": "app",
+            "owner": {
+              "login": "acme"
+            }
+          },
+          "head_repository": {
+            "full_name": "contributor/app",
+            "name": "app",
+            "owner": {
+              "login": "contributor"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

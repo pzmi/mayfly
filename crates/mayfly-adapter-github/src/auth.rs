@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,6 +32,14 @@ const REST_HEADERS: [(&str, &str); 2] = [
     ("accept", "application/vnd.github+json"),
     ("x-github-api-version", "2022-11-28"),
 ];
+
+/// The headers of every REST call (spec §1, §2).
+pub(crate) fn rest_headers() -> Vec<(&'static str, String)> {
+    REST_HEADERS
+        .iter()
+        .map(|(n, v)| (*n, (*v).to_owned()))
+        .collect()
+}
 
 /// An installation token (spec §1 step 2) and what its answer says about the installation.
 #[derive(Debug)]
@@ -84,6 +93,98 @@ impl AdminConnection {
     }
 }
 
+/// The installation token the REST calls of the per-job check use (spec §1 step 2, §6.2),
+/// held until [`REFRESH_MARGIN`] before its `expires_at`. Its `Debug` never prints the token.
+#[derive(Debug)]
+pub(crate) struct RestToken {
+    /// The token.
+    pub(crate) token: Secret<String>,
+    /// When it expires; `None` when the answer's `expires_at` did not parse, and then it is used
+    /// for one call and never held.
+    expires_at: Option<Millis>,
+}
+
+impl RestToken {
+    fn fresh_at(&self, now: Millis) -> bool {
+        self.expires_at
+            .is_some_and(|e| e.get() > now.get().saturating_add(REFRESH_MARGIN.get()))
+    }
+}
+
+/// A credential refreshed lazily, once for every caller waiting on the refresh (spec §1
+/// "Refresh"): the admin connection and the REST installation token.
+///
+/// One refresh runs at a time, and callers that waited on it share its outcome, success or
+/// failure: N callers during a refresh cause one chain of requests, never N in turn. A caller
+/// that arrives after a refresh ended starts its own. The lock is Tokio's, held across the
+/// refresh's awaits on purpose; no std lock is.
+struct SingleFlight<T> {
+    slot: Mutex<Slot<T>>,
+    /// Refreshes finished, successful or not; written under `slot`'s lock, read before it so a
+    /// caller can tell that a refresh ended while it waited.
+    refreshes: AtomicU64,
+}
+
+/// The held credential and how the last refresh ended.
+struct Slot<T> {
+    current: Option<Arc<T>>,
+    last_failure: Option<GitHubError>,
+}
+
+impl<T> Default for SingleFlight<T> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(Slot {
+                current: None,
+                last_failure: None,
+            }),
+            refreshes: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<T> SingleFlight<T> {
+    /// The held credential when `fresh` says it is, else the outcome of one refresh shared with
+    /// every caller that waited on it.
+    async fn get<F: Future<Output = Result<T, GitHubError>>>(
+        &self,
+        fresh: impl Fn(&T) -> bool,
+        refresh: impl FnOnce() -> F,
+    ) -> Result<Arc<T>, GitHubError> {
+        let seen = self.refreshes.load(Ordering::Acquire);
+        let mut slot = self.slot.lock().await;
+        if let Some(current) = slot.current.as_ref()
+            && fresh(current)
+        {
+            return Ok(Arc::clone(current));
+        }
+        if self.refreshes.load(Ordering::Acquire) != seen
+            && let Some(failure) = &slot.last_failure
+        {
+            return Err(failure.clone());
+        }
+        let outcome = refresh().await.map(Arc::new);
+        match &outcome {
+            Ok(fresh) => {
+                slot.current = Some(Arc::clone(fresh));
+                slot.last_failure = None;
+            }
+            Err(failure) => slot.last_failure = Some(failure.clone()),
+        }
+        self.refreshes.fetch_add(1, Ordering::Release);
+        outcome
+    }
+
+    /// Drops `stale` so the next [`Self::get`] refreshes; one another caller already replaced
+    /// is left alone, so racing callers refresh once.
+    async fn invalidate(&self, stale: &Arc<T>) {
+        let mut slot = self.slot.lock().await;
+        if slot.current.as_ref().is_some_and(|c| Arc::ptr_eq(c, stale)) {
+            slot.current = None;
+        }
+    }
+}
+
 /// The GitHub App's credentials for one installation.
 ///
 /// The App key is asked of its [`SecretProvider`] on every refresh and dropped after signing,
@@ -97,22 +198,13 @@ pub struct AppAuth<T, C, R, P> {
     config: AppConfig,
     client: ApiClient<T, C, R>,
     secrets: P,
-    admin: Mutex<AdminSlot>,
-    /// Refreshes finished, successful or not; written under `admin`'s lock, read before it so
-    /// a caller can tell that a refresh ended while it waited.
-    refreshes: AtomicU64,
-}
-
-/// The admin connection and how the last refresh ended.
-#[derive(Default)]
-struct AdminSlot {
-    current: Option<Arc<AdminConnection>>,
-    last_failure: Option<GitHubError>,
+    admin: SingleFlight<AdminConnection>,
+    rest: SingleFlight<RestToken>,
 }
 
 impl<T, C, R, P> fmt::Debug for AppAuth<T, C, R, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let admin = match self.admin.try_lock() {
+        let admin = match self.admin.slot.try_lock() {
             Ok(slot) => match &slot.current {
                 Some(c) => format!("{c:?}"),
                 None => "none".to_owned(),
@@ -157,9 +249,15 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> AppAuth<T, C, R, P> {
             config,
             client,
             secrets,
-            admin: Mutex::new(AdminSlot::default()),
-            refreshes: AtomicU64::new(0),
+            admin: SingleFlight::default(),
+            rest: SingleFlight::default(),
         })
+    }
+
+    /// The configuration the chain was built with (its bases build the REST URLs).
+    #[must_use]
+    pub const fn config(&self) -> &AppConfig {
+        &self.config
     }
 
     /// The client every call of this installation goes through (the Scale Set client's too).
@@ -187,43 +285,56 @@ impl<T: Transport, C: Clock, R: Rng, P: SecretProvider> AppAuth<T, C, R, P> {
     /// # Errors
     /// The first step of the chain that failed.
     pub async fn admin_connection(&self) -> Result<Arc<AdminConnection>, GitHubError> {
-        let seen = self.refreshes.load(Ordering::Acquire);
-        let mut slot = self.admin.lock().await;
-        if let Some(current) = slot.current.as_ref()
-            && current.fresh_at(self.client.clock().now())
-        {
-            return Ok(Arc::clone(current));
-        }
-        if self.refreshes.load(Ordering::Acquire) != seen
-            && let Some(failure) = &slot.last_failure
-        {
-            return Err(failure.clone());
-        }
-        let outcome = self.exchange().await.map(Arc::new);
-        match &outcome {
-            Ok(fresh) => {
-                slot.current = Some(Arc::clone(fresh));
-                slot.last_failure = None;
-            }
-            Err(failure) => slot.last_failure = Some(failure.clone()),
-        }
-        self.refreshes.fetch_add(1, Ordering::Release);
-        outcome
+        let clock = self.client.clock();
+        self.admin
+            .get(|c| c.fresh_at(clock.now()), || self.exchange())
+            .await
     }
 
     /// Drops `stale` so the next [`Self::admin_connection`] refreshes: for a caller whose
     /// request the service refused with 401 before the token's expiry. A connection another
     /// caller already replaced is left alone, so racing callers refresh once.
     pub async fn invalidate(&self, stale: &Arc<AdminConnection>) {
-        let mut slot = self.admin.lock().await;
-        if slot.current.as_ref().is_some_and(|c| Arc::ptr_eq(c, stale)) {
-            slot.current = None;
-        }
+        self.admin.invalidate(stale).await;
     }
 
-    /// A fresh installation token (spec §1 step 2), never cached; its answer carries the
-    /// installation's permissions, which [`crate::check_permissions`] compares with the
-    /// published list (ADR 0045).
+    /// The installation token the REST calls of the per-job check send (spec §6.2), held until
+    /// [`REFRESH_MARGIN`] before it expires and refreshed once for all callers, as the admin
+    /// connection is: a lookup per assigned job would otherwise sign a JWT, ask the key's
+    /// provider and mint a token each time. A mint runs under the caller's `deadline`, so the
+    /// mint and the call it serves share one budget. Pinned by
+    /// `tests/client/runs.rs::should_mint_one_installation_token_when_runs_are_looked_up_again`.
+    ///
+    /// # Errors
+    /// As [`Self::installation_token`].
+    pub(crate) async fn rest_token(
+        &self,
+        deadline: Deadline,
+    ) -> Result<Arc<RestToken>, GitHubError> {
+        let clock = self.client.clock();
+        self.rest
+            .get(
+                |t| t.fresh_at(clock.now()),
+                || async {
+                    let minted = self.installation_token_until(deadline).await?;
+                    Ok(RestToken {
+                        token: minted.token,
+                        expires_at: minted.expires_at,
+                    })
+                },
+            )
+            .await
+    }
+
+    /// Drops `stale` after a REST call answered 401 with it (a token revoked before its expiry).
+    pub(crate) async fn invalidate_rest(&self, stale: &Arc<RestToken>) {
+        self.rest.invalidate(stale).await;
+    }
+
+    /// A fresh installation token (spec §1 step 2), minted for this caller alone (the REST
+    /// calls of the per-job check hold their own); its answer carries the installation's
+    /// permissions, which [`crate::check_permissions`] compares with the published list (ADR
+    /// 0045).
     ///
     /// # Errors
     /// The key's resolution, the JWT, or the call.
@@ -347,10 +458,7 @@ fn rest(url: &Url, authorization: String) -> HttpRequest {
         method: Method::Post,
         url: url.clone(),
         authorization: Some(Secret::new(authorization)),
-        headers: REST_HEADERS
-            .iter()
-            .map(|(n, v)| (*n, (*v).to_owned()))
-            .collect(),
+        headers: rest_headers(),
         body: None,
     }
 }

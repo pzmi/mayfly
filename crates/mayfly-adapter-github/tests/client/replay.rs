@@ -1,9 +1,11 @@
 //! The recorded-fixture replayer (spec §10, plan §7.4): the fixtures in
-//! `tests/fixtures/github-scaleset/` are the contract's wire, one file per case of
-//! `mayfly_testkit::contracts::scaleset`. The replayer answers the client's requests from a
-//! case's exchanges, in order, and refuses any request the recording does not hold (method, URL,
-//! query, credential kind, the headers and JSON body it names), so the client passes the suite
-//! here only by sending exactly the recorded requests.
+//! `tests/fixtures/github-scaleset/` are the contracts' wire, one file per case of
+//! `mayfly_testkit::contracts::scaleset` and of `mayfly_testkit::contracts::runs` (the REST
+//! workflow-run lookup and cancel, on the installation token: `"auth": "installation"`). The
+//! replayer answers the client's requests from a case's exchanges, in order, and refuses any
+//! request the recording does not hold (method, URL, query, credential kind, the headers and
+//! JSON body it names), so the client passes the suite here only by sending exactly the
+//! recorded requests.
 //!
 //! The fixtures are **synthetic**: written from `doc/github-scaleset.md`, never captured from
 //! GitHub and never copied from upstream (ADR 0048); each says so in its `synthetic` and `note`
@@ -23,6 +25,9 @@ use mayfly_adapter_github::{HttpRequest, HttpResponse, Transport, TransportError
 use mayfly_control::github::{RunnerId, WorkflowJobId};
 use mayfly_domain::Millis;
 use mayfly_testkit::clock::FakeClock;
+use mayfly_testkit::contracts::runs::{
+    CASES as RUNS_CASES, RunFault, RunSpec, RunsCase, RunsWorld, check_runs_contract,
+};
 use mayfly_testkit::contracts::scaleset::{
     CASES, ScaleSetCase, ScaleSetWorld, WorldFault, check_scaleset_contract,
 };
@@ -77,6 +82,11 @@ pub struct Replay {
     tokens: Arc<BTreeMap<String, String>>,
 }
 
+/// The installation token the replayer's auth chain mints, built from its parts.
+fn installation_token() -> String {
+    ["replay", "installation", "credential"].join("-")
+}
+
 /// The run-time secret a placeholder `<token-N>` stands for (a queue token, a JIT config): built
 /// from its parts, so no token-shaped literal is in the repository.
 fn run_time_token(n: &str) -> String {
@@ -123,7 +133,7 @@ impl Replay {
         let registration = format!("/orgs/{ORG}/actions/runners/registration-token");
         let body = if path == installation {
             json!({
-                "token": (["replay", "installation", "credential"].join("-")),
+                "token": installation_token(),
                 "expires_at": "2026-11-10T13:00:00Z",
                 "permissions": {"organization_self_hosted_runners": "write"},
             })
@@ -151,6 +161,7 @@ impl Replay {
     fn expected_credential(&self, auth: &str, admin: &str) -> Option<String> {
         match auth {
             "admin" => Some(format!("Bearer {admin}")),
+            "installation" => Some(format!("Bearer {}", installation_token())),
             "none" => None,
             queue => Some(format!(
                 "Bearer {}",
@@ -377,6 +388,50 @@ impl ScaleSetWorld for ReplayWorld {
     }
 }
 
+impl RunsWorld for ReplayWorld {
+    type Runs = Client<Replay>;
+
+    fn runs(&self) -> &Client<Replay> {
+        &self.client
+    }
+
+    // A recording already holds what GitHub's users did: the script is its exchanges.
+    async fn start_run(&self, _run: &RunSpec) {}
+
+    async fn inject(&self, _fault: RunFault) {}
+}
+
+#[tokio::test(start_paused = true)]
+async fn should_pass_the_runs_contract_when_the_recordings_are_replayed() {
+    // given
+    let problems = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&problems);
+    let world = move |case: RunsCase| {
+        let seen = Arc::clone(&seen);
+        async move {
+            let world = ReplayWorld::new(case.id);
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((case.id, world.replay.clone()));
+            world
+        }
+    };
+
+    // when
+    let report = check_runs_contract(world).await;
+
+    // then
+    assert!(report.failed.is_empty(), "{:#?}", report.failed);
+    let unmatched: Vec<(&str, Vec<String>)> = problems
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|(id, replay)| (*id, replay.problems()))
+        .filter(|(_, p)| !p.is_empty())
+        .collect();
+    assert!(unmatched.is_empty(), "{unmatched:#?}");
+}
+
 #[tokio::test(start_paused = true)]
 async fn should_pass_the_ports_contract_when_the_recordings_are_replayed() {
     // given
@@ -436,11 +491,14 @@ fn should_label_every_recording_synthetic_when_no_capture_has_replaced_it() {
 
     // then: every case has its recording, and every recording is labelled
     assert!(unlabelled.is_empty(), "{unlabelled:?}");
-    for case in CASES {
+    let ids = CASES
+        .iter()
+        .map(|c| c.id)
+        .chain(RUNS_CASES.iter().map(|c| c.id));
+    for id in ids {
         assert!(
-            names.contains(&format!("{}.json", file_name(case.id))),
-            "no recording for {}",
-            case.id
+            names.contains(&format!("{}.json", file_name(id))),
+            "no recording for {id}"
         );
     }
 }

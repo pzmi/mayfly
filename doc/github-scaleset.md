@@ -63,7 +63,11 @@ App private key ──sign──▶ App JWT ──▶ installation token ──�
    as a step of the admin-token refresh, and does not cache it [scaleset: client.go,
    getRunnerRegistrationToken]; mayfly also reads the `permissions` its answer lists for the App
    permission probe (ADR 0045, GH-02) [docs], and uses it for the workflow-run lookup of each
-   assigned job (section 6.2).
+   assigned job and the cancel of a refused run (section 6.2). For those REST calls it holds one
+   token until 60 s before its `expires_at`, refreshed once for all callers like the admin token
+   and dropped after a 401, so a lookup per assigned job does not sign a JWT and mint a token
+   each time; one call deadline covers a call's mint, its attempts and its resend after a 401
+   (GH-10).
 3. **Registration token.** `POST {api}/orgs/{org}/actions/runners/registration-token` (repository
    scope: `/repos/{owner}/{repo}/...`), `Authorization: Bearer <installation token>`, empty body;
    201 with `token` and `expires_at` [scaleset: client.go, getRunnerRegistrationToken,
@@ -157,7 +161,7 @@ And on the REST API, with the installation token, for the trust check of section
 | Operation | Request | Success | Permission |
 |:--|:--|:--|:--|
 | Workflow run of an assigned job | `GET {api}/repos/{owner}/{repo}/actions/runs/{run_id}` | 200 run: `event`, `actor`, `triggering_actor`, `repository`, `head_repository` | repository "Actions: Read" |
-| Cancel a refused run (`cancel_refused_runs` only) | `POST {api}/repos/{owner}/{repo}/actions/runs/{run_id}/cancel` | 202; 409 when the run cannot be cancelled | repository "Actions: Write" |
+| Cancel a refused run (`cancel_refused_runs` only) | `POST {api}/repos/{owner}/{repo}/actions/runs/{run_id}/cancel` | 202; 409 when the run cannot be cancelled. One attempt, never retried past an answer; a 401 (nothing done) is resent once with a fresh token (GH-10) | repository "Actions: Write" |
 | Fork-PR setting (`check_fork_pr_setting` only) | `GET {api}/orgs/{org}/actions/permissions/fork-pr-workflows-private-repos` | 200 `run_workflows_from_fork_pull_requests`, `send_write_tokens_to_workflows`, `send_secrets_and_variables`, `require_approval_for_fork_pr_workflows` | organisation "Administration: Read" |
 
 mayfly never calls the delete-scale-set endpoint (ADR 0040), and the fake need not implement it.
@@ -508,6 +512,15 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
      `job_refused` with `repository`, `event`, `reason` and `run_id` and nothing more.
    That `workflowRunId` in a `JobAssigned` names the run the REST API knows, and that the lookup
    works with "Actions: Read" alone, are [open: HW-02, item 8].
+   **The lookup's answer (GH-10).** The path is built only from an `owner/name` whose parts are
+   GitHub's alphabet (`[A-Za-z0-9._-]`, not `.` or `..`); a 200 must carry the asked `id`, an
+   `event`, and `repository.full_name` and `head_repository.full_name` (a deleted fork's `null`
+   head included), every string bounded, or the lookup fails; `actor.login` is read when present
+   and never journaled. Head and base are compared by full name, never by id: the message names
+   its repository without an id, and both names come from one answer, in which full names are
+   unique. A rename between the assignment and the lookup therefore refuses the job (the
+   message's name no longer matches, or the lookup is not found or redirected, and a redirect is
+   not followed): the safe side; a later assignment of the job is classified afresh.
 3. **In the guest: the hard boundary** (owner, 2026-11-12). Runners of a set are
    interchangeable and GitHub, not mayfly, picks the job a runner gets, so only a check on the
    job a runner actually received binds a refusal to it. Every image's job-started hook
@@ -536,8 +549,15 @@ the set (ADR 0027). With no offer to decline, the owner decided (2026-11-11 and 
      jobs ask for macOS labels receives them, the sink's latency and whether the pin holds with a
      backlog are [open: HW-02, item 12] (IMG-03);
    - **`cancel_refused_runs`** (per pool, default false, "Actions: Write"): mayfly asks GitHub to
-     cancel the refused run instead (section 2). A cancel that fails (409, an error) or whose
-     answer is lost changes nothing at GitHub (GH-10);
+     cancel the refused run instead (section 2). A cancel answered 409 or another error changes
+     nothing at GitHub; one whose answer is lost may have taken effect (GH-10). Any answer to its
+     one attempt (202 accepted; 409, another error status or a rate limit refused) is recorded,
+     `CancelAnswered`, and the run is never asked again; a 401 did nothing and is resent once
+     with a fresh token. A lost answer records nothing, so the cancel stays due and is asked
+     again; if the lost one took effect, that second cancel answers 409 and is recorded refused
+     although the run was cancelled (bookkeeping only: a refused job holds nothing). A cancel
+     that can never be sent (the job's repository is unknown or not a plain `owner/name`) is
+     recorded refused at once, with no request, so it never stays due;
    - **fallback**: when neither acts (no capacity for a sink, a failed cancel), GitHub's own
      release and requeue (section 4.3) fails the job at its third release. Nothing waits on it.
    The hold, `refusal_release_window` and `mayfly pool release-refusal` of the first decision are
@@ -692,6 +712,8 @@ effect, a stalled poll, a restarted message numbering). Every behaviour marked c
 [open: HW-02] is a knob or a named assumption until it is server-observed. GH-03's recorded,
 redacted fixtures (`tests/fixtures/github-scaleset/`) are the contract; the same suite runs
 against the fake and, owner-gated, against a live disposable organisation (ADR 0015, HW-02).
+The REST lookup and cancel have their own suite, `mayfly_testkit::contracts::runs` (WR-01..WR-05,
+CR-01..CR-03, GH-10), run the same three ways, with a recording per case.
 
 ## 11. Attribution
 

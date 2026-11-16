@@ -2585,6 +2585,31 @@ a cancel's 202, 409 and lost answer each recorded; no token in an error.
 Note (KER-06G review): the domain compares head and base repositories by full name; a rename
 between assignment and lookup reads as a mismatch (refused, the safe side). Decoding and comparing
 `head_repository.id` against `repository.id` as well would close that; decide it here.
+Note (GH-10, as built): decided to keep full names: the message carries no repository id, and
+head and base come from one answer in which full names are unique, so ids would close nothing; a
+rename still refuses (the safe side, `doc/github-scaleset.md` §6.2). The port is
+`mayfly_control::github::WorkflowRuns` (`workflow_run`, `cancel_run`, the value `WorkflowRun`),
+with `run_lookup` (any failure is `RunLookup::Failed`), `cancel_observation` (an answer is
+`RecordCancelAnswer`, a lost one nothing) and `cancel_refused` (the call and its observation for
+a `RefusalAction::CancelRun`). `ScaleSetClient` implements it on an installation token held until
+60 s before its expiry (single-flight, dropped after a 401); one call deadline covers a call's
+mint, its attempts and its resend after a 401. The lookup is retried by spec §8; the cancel is
+one attempt (`ApiClient::call_once`): any status answer is its answer (2xx accepted, any other
+refused), a 401, which did nothing, is resent once with a fresh token, and only no answer is an
+error. A cancel that can never be sent is final, never due again: a repository that is not a
+plain `owner/name` is refused with no request (a lookup of it fails as drift), and a refused job
+whose assignment named no repository (an unclassifiable refusal) leaves the cancel queue through
+`cancel_refused(…, None)`, which records `CancelAnswered{refused}` at once without a call. The
+refused set holds only job keys, so GH-08 takes the repository from the job's `JobAssigned`. The
+aggregate's behaviour is unchanged (no model change). `actor` is decoded into `WorkflowRun` only,
+never into `RunFacts` or the journal. The contract is `mayfly_testkit::contracts::runs`
+(WR-01..WR-05, CR-01..CR-03) over `FakeScaleSetApi` (its `start_run`, `inject_run`;
+`ForkBlindRuns` fails WR-02, `RetryingCancelRuns` CR-02), the adapter over fake-github and the
+recordings `wr-*.json`, `cr-*.json`; component tests in
+`crates/mayfly-control/tests/store/listener.rs` record lookups and cancel answers through the
+aggregate. Left to GH-08: calling them from the listener for each pending assignment and each
+`RefusalAction::CancelRun`, with GH-04's call backoff on `Unavailable` and `Throttled`, and the
+`job_refused` log.
 
 #### GH-07 Several organisations
 Cites: ADR 0040 (amended 2026-11-11), `doc/github-scaleset.md` §1. One daemon serves pools in

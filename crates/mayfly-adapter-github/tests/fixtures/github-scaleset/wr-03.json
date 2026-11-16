@@ -1,0 +1,42 @@
+{
+  "fixture": "WR-03",
+  "synthetic": true,
+  "note": "Synthetic: written from doc/github-scaleset.md, never captured from GitHub and never copied from upstream (ADR 0048); GH-00's redacting capture (HW-02) replaces it. Placeholders <token-N> stand for secrets minted at run time.",
+  "source": "spec \u00a76.2: an absent run, and a run asked under another repository, answer 404",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/acme/app/actions/runs/14",
+        "auth": "installation",
+        "headers": {
+          "accept": "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28"
+        }
+      },
+      "response": {
+        "status": 404,
+        "json": {
+          "message": "Not Found"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/acme/other/actions/runs/13",
+        "auth": "installation",
+        "headers": {
+          "accept": "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28"
+        }
+      },
+      "response": {
+        "status": 404,
+        "json": {
+          "message": "Not Found"
+        }
+      }
+    }
+  ]
+}

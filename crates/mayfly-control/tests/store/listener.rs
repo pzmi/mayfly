@@ -3,33 +3,37 @@
 //! F44): each message recorded with its inbox key before it is acked, duplicates told only by
 //! the cursor, the wire max read from the stream, acquisitions made exactly as journaled and asked
 //! again after a lost answer, sessions lost, deleted, re-opened and re-created, and protocol
-//! drift degrading the session, never more.
+//! drift degrading the session, never more. GH-10: an assigned job's workflow-run lookup and a
+//! refused run's cancel, over the in-memory `WorkflowRuns` port, recorded as the observations
+//! the aggregate classifies (the listener's wiring of them is GH-08's).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
 
 use mayfly_control::delivery::Kicks;
 use mayfly_control::github::{
-    Failure, GitHubCallError, JitConfig, MessageId, MessageItem, Offer, OpenedSession,
-    PolledMessage, RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetInfo, ScaleSetSpec, SessionId,
-    Statistics,
+    CancelAnswer, Failure, GitHubCallError, JitConfig, JobKey, MessageId, MessageItem, Offer,
+    OpenedSession, PolledMessage, RepositoryName, RunnerRequestId, ScaleSetApi, ScaleSetId,
+    ScaleSetInfo, ScaleSetSpec, SessionId, Statistics, WorkflowRuns as _, cancel_observation,
+    cancel_refused, run_lookup,
 };
 use mayfly_control::journal::{Journal as _, StreamId};
 use mayfly_control::listener::{
     JobFacts, Listener, ListenerConfig, ListenerError, Polled, Recorded, Tick, gap_of, inbox_key,
 };
 use mayfly_control::store::{Clock as _, Outcome, SaveRequest, decode_event};
-use mayfly_control_domain::demand::{Capacity, RunLookup, WireMode};
+use mayfly_control_domain::demand::{Capacity, RefusalReason, RunLookup, TrustPolicy, WireMode};
 use mayfly_control_domain::pool::TrustTier;
 use mayfly_control_domain::scaleset::{
-    DegradedCause, LossCause, MessageOrigin, MessageRecorded, Phase, ScaleSet, ScaleSetCommand,
-    ScaleSetEvent, ScaleSetRejection, ScaleSetState,
+    AssignedJobRefused, DegradedCause, LossCause, MessageOrigin, MessageRecorded, Phase,
+    RefusalAction, ScaleSet, ScaleSetCommand, ScaleSetEvent, ScaleSetRejection, ScaleSetState,
 };
 use mayfly_control_domain::{Actor, Command};
 use mayfly_domain::{CommandId, Epoch, Millis, PoolName, Sample};
 use mayfly_testkit::block_on;
 use mayfly_testkit::clock::{FakeClock, SeededRng};
 use mayfly_testkit::contracts::journal::InjectedFault;
+use mayfly_testkit::contracts::runs::{RunFault, RunSpec};
 use mayfly_testkit::contracts::scaleset::{Flow, WorldFault};
 use mayfly_testkit::github::{DEFAULT_GROUP, FIRST_MESSAGE_ID, FakeScaleSetApi};
 use mayfly_testkit::journal::MemoryJournal;
@@ -1319,5 +1323,197 @@ fn should_ask_a_throttled_acquire_at_most_once_per_backoff_when_messages_keep_co
         w.state().acquiring.len(),
         1,
         "pending until an answer names it (A4)"
+    );
+}
+
+/// The pool's trust policy (GH-08's settings): `acme/app` allowed, the default events.
+fn trust(bench: &Bench, cancel_refused_runs: bool) {
+    let policy = TrustPolicy {
+        scale_set_name: LABEL.to_owned(),
+        allowed_repositories: BTreeSet::from([RepositoryName("acme/app".to_owned())]),
+        allowed_events: TrustPolicy::default_events(),
+        cancel_refused_runs,
+    };
+    let outcome = bench.command(0x7700, ScaleSetCommand::ApplyTrustPolicy(policy));
+    assert!(matches!(outcome, Outcome::Accepted { .. }), "{outcome:?}");
+}
+
+/// Looks up every pending assignment's run over the port and records what it answered.
+fn look_up_pending(bench: &Bench, first_id: u128) {
+    let pending: Vec<(JobKey, RepositoryName)> = bench
+        .state()
+        .pending
+        .iter()
+        .map(|(key, a)| {
+            let repository = a.job.repository.clone().unwrap_or_else(|| panic!("named"));
+            (key.clone(), repository)
+        })
+        .collect();
+    for (at, (job, repository)) in (first_id..).zip(pending) {
+        let answer = block_on(bench.api.workflow_run(&repository, job.run_id));
+        let lookup = ScaleSetCommand::RecordRunLookup {
+            job,
+            lookup: run_lookup(&answer),
+        };
+        let outcome = bench.command(at, lookup);
+        assert!(matches!(outcome, Outcome::Accepted { .. }), "{outcome:?}");
+    }
+}
+
+fn refusals(bench: &Bench) -> Vec<RefusalReason> {
+    bench
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ScaleSetEvent::AssignedJobRefused(AssignedJobRefused { reason, .. }) => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn should_trust_a_push_and_refuse_a_forks_run_when_their_lookups_are_recorded() {
+    // given: GH-10, a push and a fork's pull request to the allowed repository, both assigned
+    let w = bench(Flow::Direct);
+    let l = w.listener();
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    trust(&w, false);
+    w.api.start_run(&RunSpec::push(42), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(43), 1, LABEL);
+    polled(tick(&l));
+    assert_eq!(w.state().pending.len(), 2);
+
+    // when
+    look_up_pending(&w, 0x7710);
+
+    // then: the push backs a runner; the fork's run is refused as a fork and backs none
+    let s = w.state();
+    assert!(s.pending.is_empty());
+    let trusted: Vec<u64> = s.trusted.keys().map(|k| k.run_id.0).collect();
+    let refused: Vec<u64> = s.refused.iter().map(|k| k.run_id.0).collect();
+    assert_eq!((trusted, refused), (vec![42], vec![43]));
+    assert_eq!(refusals(&w), [RefusalReason::Fork]);
+    assert!(s.runner_may_start(0));
+    assert!(!s.runner_may_start(1));
+}
+
+#[test]
+fn should_record_each_answer_once_and_ask_again_when_a_cancel_answer_is_lost() {
+    // given: GH-10 with `cancel_refused_runs`, two forks' runs refused; the first cancel's
+    // answer is lost after its effect
+    let w = bench(Flow::Direct);
+    let l = w.listener();
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    trust(&w, true);
+    w.api.start_run(&RunSpec::fork_pull_request(43), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(44), 1, LABEL);
+    polled(tick(&l));
+    look_up_pending(&w, 0x7720);
+    let base = RepositoryName("acme/app".to_owned());
+    let cancel = |job: &JobKey| block_on(w.api.cancel_run(&base, job.run_id));
+    let due = |s: &ScaleSetState| match s.refusal_action() {
+        Some(RefusalAction::CancelRun(job)) => Some(job),
+        _ => None,
+    };
+    let record = |id: u128, job: &JobKey, answer: Result<CancelAnswer, GitHubCallError>| {
+        let body = cancel_observation(job, &answer).unwrap_or_else(|| panic!("answered"));
+        let outcome = w.command(id, body);
+        assert!(matches!(outcome, Outcome::Accepted { .. }), "{outcome:?}");
+    };
+    let first = due(&w.state()).unwrap_or_else(|| panic!("a cancel is due"));
+    let second = w
+        .state()
+        .refused
+        .iter()
+        .find(|k| **k != first)
+        .cloned()
+        .unwrap_or_else(|| panic!("two refused"));
+    w.api.inject_run(RunFault::CancelAnswerLost {
+        run: first.run_id.0,
+    });
+
+    // when: the lost answer, then the same cancel asked again (409: the run is over), then the
+    // other run's cancel (202)
+    let lost = cancel(&first);
+    let still_due = due(&w.state());
+    let over = cancel(&first);
+    record(0x7730, &first, over.clone());
+    let accepted = cancel(&second);
+    record(0x7731, &second, accepted.clone());
+
+    // then: a lost answer records nothing and the cancel stays due; each answer is recorded
+    // once, and nothing is due after
+    assert_eq!(cancel_observation(&first, &lost), None);
+    assert_eq!(still_due.as_ref(), Some(&first));
+    assert_eq!(over, Ok(CancelAnswer::Refused));
+    assert_eq!(accepted, Ok(CancelAnswer::Accepted));
+    let answers: Vec<(u64, CancelAnswer)> = w
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ScaleSetEvent::CancelAnswered(c) => Some((c.job.run_id.0, c.answer)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            (first.run_id.0, CancelAnswer::Refused),
+            (second.run_id.0, CancelAnswer::Accepted)
+        ]
+    );
+    let s = w.state();
+    assert_eq!(s.cancel_tried.len(), 2);
+    assert_eq!(due(&s), None);
+    let again = ScaleSetCommand::RecordCancelAnswer {
+        job: second,
+        answer: CancelAnswer::Accepted,
+    };
+    assert!(matches!(w.command(0x7732, again), Outcome::Refused { .. }));
+}
+
+#[test]
+fn should_record_refused_without_a_call_when_a_cancel_can_never_be_sent() {
+    // given: GH-10 with `cancel_refused_runs`, two forks' runs refused; the first due one's
+    // repository is unknown (an unclassifiable assignment that named none)
+    let w = bench(Flow::Direct);
+    let l = w.listener();
+    w.live(&l);
+    w.capacity(1, 2, 2, WireMode::Open);
+    trust(&w, true);
+    w.api.start_run(&RunSpec::fork_pull_request(45), 1, LABEL);
+    w.api.start_run(&RunSpec::fork_pull_request(46), 1, LABEL);
+    polled(tick(&l));
+    look_up_pending(&w, 0x7740);
+    let due = |s: &ScaleSetState| match s.refusal_action() {
+        Some(RefusalAction::CancelRun(job)) => Some(job),
+        _ => None,
+    };
+    let first = due(&w.state()).unwrap_or_else(|| panic!("a cancel is due"));
+
+    // when
+    let observed = block_on(cancel_refused(&w.api, &first, None));
+    let body = observed.unwrap_or_else(|| panic!("recorded at once"));
+    let outcome = w.command(0x7750, body);
+
+    // then: refused with no request, and the next refused job's cancel is due, not this one
+    assert!(matches!(outcome, Outcome::Accepted { .. }), "{outcome:?}");
+    let answered: Vec<CancelAnswer> = w
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            ScaleSetEvent::CancelAnswered(c) if c.job == first => Some(c.answer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, [CancelAnswer::Refused]);
+    let next = due(&w.state()).unwrap_or_else(|| panic!("the other cancel is due"));
+    assert_ne!(next, first);
+    assert_eq!(
+        w.api.statistics(w.set()).total_assigned_jobs,
+        2,
+        "nothing was cancelled at GitHub"
     );
 }

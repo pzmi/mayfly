@@ -29,20 +29,31 @@
 //! without statistics; F10, F44), and it shows the `maxCapacity` the last poll advertised and how
 //! many polls it answered. A `JobStarted` names its runner when the name is one of mayfly's VM
 //! names, as the adapter's ACL does.
+//!
+//! It is also the `WorkflowRuns` port of the same GitHub (GH-10): every queued job belongs to a
+//! workflow run ([`FakeScaleSetApi::start_run`] starts one as a [`RunSpec`] says, a fork's pull
+//! request included; [`FakeScaleSetApi::queue_jobs`] a push to `acme/app`), its `JobAssigned`
+//! carries the run's repository and event, the lookup answers the run, and a cancel ends the
+//! run's jobs (a `JobCompleted` `canceled` for each one a scale set held) and answers accepted,
+//! or refused once the run is over or absent; a repository is matched without regard to case,
+//! as GitHub's paths are. A [`RunFault`] stalls a run's lookups or loses a
+//! cancel's answer after its effect. It passes `mayfly_testkit::contracts::runs`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mayfly_control::github::{
-    AssignedJob, EventName, Failure, GitHubCallError, JitConfig, JobFact, JobKey, JobResult,
-    MessageId, MessageItem, Offer, OpenedSession, PolledMessage, RemovalOutcome, RepositoryName,
-    RunnerId, RunnerInfo, RunnerRegistry, RunnerRequestId, ScaleSetApi, ScaleSetId, ScaleSetInfo,
-    ScaleSetSpec, SessionId, Statistics, WorkflowJobId, WorkflowRunId,
+    AssignedJob, CancelAnswer, EventName, Failure, GitHubCallError, JitConfig, JobFact, JobKey,
+    JobResult, MessageId, MessageItem, Offer, OpenedSession, PolledMessage, RemovalOutcome,
+    RepositoryName, RunnerId, RunnerInfo, RunnerRegistry, RunnerRequestId, ScaleSetApi, ScaleSetId,
+    ScaleSetInfo, ScaleSetSpec, SessionId, Statistics, WorkflowJobId, WorkflowRun, WorkflowRunId,
+    WorkflowRuns,
 };
 use mayfly_control::store::Clock;
 use mayfly_domain::{Millis, OwnedVmName, Secret};
 
 use crate::clock::FakeClock;
+use crate::contracts::runs::{RunFault, RunSpec};
 use crate::contracts::scaleset::{Flow, WorldFault};
 
 /// The most job messages one message holds (spec §5).
@@ -69,6 +80,12 @@ pub enum Broken {
     /// `StaleListingRegistry`: keeps listing a runner after its removal, as a cached listing
     /// would. Fails RR-05.
     StaleListingRegistry,
+    /// `ForkBlindRuns`: answers every run's base repository as its head, so a fork's pull
+    /// request looks like the base's own. Fails WR-02.
+    ForkBlindRuns,
+    /// `RetryingCancelRuns`: resends a cancel whose answer was lost and answers the resend
+    /// (409, the run is over: refused), so a lost cancel reads as answered. Fails CR-02.
+    RetryingCancelRuns,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +164,12 @@ struct World {
     lose_acquire_answer: bool,
     /// Polls answered (a message, a 202 or a fault).
     polls: u32,
+    /// Workflow runs by id: every queued job's.
+    runs: BTreeMap<u64, RunSpec>,
+    /// Runs cancelled through the REST port.
+    cancelled: BTreeSet<u64>,
+    /// Faults of the REST port, pending.
+    run_faults: Vec<RunFault>,
 }
 
 impl World {
@@ -229,7 +252,7 @@ impl World {
                     let job = &self.jobs[&job_id];
                     let item = MessageItem::Fact(JobFact::Assigned {
                         request_id: RunnerRequestId(0),
-                        job: Some(assigned(job_id, job)),
+                        job: Some(assigned(job_id, job, self.runs.get(&job.run_id))),
                     });
                     if let Some(j) = self.jobs.get_mut(&job_id) {
                         j.state = JobState::Assigned { set, request: 0 };
@@ -241,9 +264,13 @@ impl World {
                     if let Some(j) = self.jobs.get_mut(&job_id) {
                         j.state = JobState::Offered { set, request };
                     }
+                    let event_name = self
+                        .runs
+                        .get(&self.jobs[&job_id].run_id)
+                        .map_or(EventName::Push, |r| r.event);
                     MessageItem::Offer(Offer {
                         request_id: RunnerRequestId(request),
-                        event_name: EventName::Push,
+                        event_name,
                     })
                 }
             };
@@ -288,11 +315,16 @@ fn polled(m: &Message) -> PolledMessage {
     }
 }
 
-fn assigned(job_id: u64, job: &Job) -> AssignedJob {
+/// A `JobAssigned` as GitHub writes it: its run's base repository and event (a push to
+/// `acme/app` for a job of no started run).
+fn assigned(job_id: u64, job: &Job, run: Option<&RunSpec>) -> AssignedJob {
     AssignedJob {
         key: key(job_id, job),
-        repository: Some(RepositoryName("acme/app".to_owned())),
-        event_name: EventName::Push,
+        repository: Some(run.map_or_else(
+            || RepositoryName("acme/app".to_owned()),
+            |r| r.repository.clone(),
+        )),
+        event_name: run.map_or(EventName::Push, |r| r.event),
         labels: vec![job.label.clone()],
     }
 }
@@ -362,6 +394,9 @@ impl FakeScaleSetApi {
                 drop_poll: false,
                 lose_acquire_answer: false,
                 polls: 0,
+                runs: BTreeMap::new(),
+                cancelled: BTreeSet::new(),
+                run_faults: Vec::new(),
             })),
             clock,
         }
@@ -387,6 +422,10 @@ impl FakeScaleSetApi {
     /// they are assigned or offered on the next poll that has room. Returns their ids.
     pub fn queue_jobs(&self, count: usize, label: &str, run_id: u64) -> Vec<WorkflowJobId> {
         let mut world = self.world();
+        world
+            .runs
+            .entry(run_id)
+            .or_insert_with(|| RunSpec::push(run_id));
         (0..count)
             .map(|_| {
                 let id = world.next();
@@ -401,6 +440,19 @@ impl FakeScaleSetApi {
                 WorkflowJobId(id.to_string())
             })
             .collect()
+    }
+
+    /// Starts the workflow run `run` with `count` jobs asking for `label`, queued as
+    /// [`Self::queue_jobs`] queues them; their `JobAssigned` carries the run's repository and
+    /// event, and the REST port answers the run. Returns the jobs' ids.
+    pub fn start_run(&self, run: &RunSpec, count: usize, label: &str) -> Vec<WorkflowJobId> {
+        self.world().runs.insert(run.id, run.clone());
+        self.queue_jobs(count, label, run.id)
+    }
+
+    /// Queues `fault` for the REST port.
+    pub fn inject_run(&self, fault: RunFault) {
+        self.world().run_faults.push(fault);
     }
 
     /// The runner `runner` takes the assigned job `job`: `JobStarted` follows.
@@ -961,6 +1013,114 @@ impl ScaleSetApi for FakeScaleSetApi {
             runner: info,
             encoded: Secret::new(format!("fake-jit-config-{id:08}")),
         })
+    }
+}
+
+impl World {
+    /// The run `run` of `repository`, if it was started there; owner and name match without
+    /// regard to case, as GitHub's paths do.
+    fn run_of(&self, repository: &RepositoryName, run: WorkflowRunId) -> Option<&RunSpec> {
+        self.runs
+            .get(&run.0)
+            .filter(|r| r.repository.0.eq_ignore_ascii_case(&repository.0))
+    }
+
+    /// Ends every job of `run`, as GitHub's cancel does: a job a scale set held completes
+    /// `canceled` there (its runner goes idle), a queued one is dropped. Answers whether any job
+    /// was open.
+    fn cancel(&mut self, run: u64) -> bool {
+        let open: Vec<u64> = self
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.run_id == run)
+            .map(|(id, _)| *id)
+            .collect();
+        for job_id in &open {
+            let Some(job) = self.jobs.remove(job_id) else {
+                continue;
+            };
+            let (set, request) = match job.state {
+                JobState::Queued => continue,
+                JobState::Offered { set, request }
+                | JobState::Assigned { set, request }
+                | JobState::Running { set, request } => (set, request),
+            };
+            let runner = self
+                .runners
+                .iter_mut()
+                .find(|(_, r)| r.job == Some(*job_id))
+                .map(|(id, r)| {
+                    r.job = None;
+                    RunnerId(*id)
+                });
+            if let Some(s) = self.sets.get_mut(&set) {
+                s.pending.push(MessageItem::Fact(JobFact::Completed {
+                    request_id: RunnerRequestId(request),
+                    result: JobResult::Canceled,
+                    runner_id: runner,
+                    job: Some(key(*job_id, &job)),
+                }));
+            }
+        }
+        !open.is_empty()
+    }
+}
+
+impl WorkflowRuns for FakeScaleSetApi {
+    async fn workflow_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<WorkflowRun, GitHubCallError> {
+        let world = self.world();
+        if world
+            .run_faults
+            .contains(&RunFault::LookupStalls { run: run.0 })
+        {
+            return Err(fail(Failure::Unavailable, "the lookup's deadline passed"));
+        }
+        let spec = world
+            .run_of(repository, run)
+            .ok_or_else(|| fail(Failure::Refused { status: 404 }, "the run was not found"))?;
+        let head = if world.broken == Some(Broken::ForkBlindRuns) {
+            spec.repository.clone()
+        } else {
+            spec.head_repository.clone()
+        };
+        Ok(WorkflowRun {
+            id: run,
+            repository: spec.repository.clone(),
+            head_repository: head,
+            event: spec.event,
+            actor: Some(spec.actor.clone()),
+        })
+    }
+
+    async fn cancel_run(
+        &self,
+        repository: &RepositoryName,
+        run: WorkflowRunId,
+    ) -> Result<CancelAnswer, GitHubCallError> {
+        let mut world = self.world();
+        if world.run_of(repository, run).is_none()
+            || world.cancelled.contains(&run.0)
+            || !world.cancel(run.0)
+        {
+            return Ok(CancelAnswer::Refused);
+        }
+        world.cancelled.insert(run.0);
+        let lost = RunFault::CancelAnswerLost { run: run.0 };
+        if let Some(at) = world.run_faults.iter().position(|f| *f == lost) {
+            world.run_faults.remove(at);
+            if world.broken == Some(Broken::RetryingCancelRuns) {
+                return Ok(CancelAnswer::Refused);
+            }
+            return Err(fail(
+                Failure::Unavailable,
+                "the cancel's answer was lost after its effect",
+            ));
+        }
+        Ok(CancelAnswer::Accepted)
     }
 }
 

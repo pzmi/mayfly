@@ -4,8 +4,8 @@
 use std::sync::Mutex;
 
 use mayfly_adapter_github::{
-    CallPolicy, DEFAULT_CALL_POLICY, ErrorKind, HttpRequest, HttpResponse, Operation, Transport,
-    TransportError,
+    CallPolicy, DEFAULT_CALL_POLICY, ErrorKind, HttpRequest, HttpResponse, Method, Operation,
+    Phase, Transport, TransportError,
 };
 use mayfly_domain::Millis;
 use mayfly_fake_github::{Fault, Route};
@@ -316,4 +316,56 @@ async fn should_end_on_the_last_transport_error_when_retries_run_out() {
             ..
         }
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn should_send_once_when_a_call_is_made_once() {
+    // given: answers the full policy would retry, a 503 and a dropped connection
+    let answered = harness(3600);
+    answered.fake.fail_next(Route::CancelRun, respond(503, &[]));
+    let dropped = harness_with(3600, DEFAULT_CALL_POLICY, flaky(vec![TransportError::Io]));
+    let request = || HttpRequest {
+        method: Method::Post,
+        url: url::Url::parse("https://api.github.com/repos/acme/app/actions/runs/1/cancel")
+            .unwrap_or_else(|e| panic!("url: {e}")),
+        authorization: None,
+        headers: Vec::new(),
+        body: None,
+    };
+
+    // when
+    let first = answered.auth.client();
+    let refused = first
+        .call_once(
+            Operation::RunCancel,
+            Phase::Ordinary,
+            first.deadline(),
+            request,
+        )
+        .await;
+    let second = dropped.auth.client();
+    let lost = second
+        .call_once(
+            Operation::RunCancel,
+            Phase::Ordinary,
+            second.deadline(),
+            request,
+        )
+        .await;
+
+    // then: one attempt each, no wait
+    assert!(matches!(
+        refused.expect_err("503").kind,
+        ErrorKind::Status {
+            status: 503,
+            attempts: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        lost.expect_err("dropped").kind,
+        ErrorKind::Transport { attempts: 1, .. }
+    ));
+    assert!(answered.clock.sleeps().is_empty());
+    assert!(dropped.clock.sleeps().is_empty());
 }

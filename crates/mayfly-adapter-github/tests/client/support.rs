@@ -89,6 +89,7 @@ pub fn fake_config(api_web_base: &str, admin_lifetime_secs: u64) -> FakeConfig {
         admin_token_lifetime_secs: admin_lifetime_secs,
         admin_token_key_pem: keys().private_pem.clone(),
         permissions: BTreeMap::from([
+            ("actions".to_owned(), "write".to_owned()),
             ("metadata".to_owned(), "read".to_owned()),
             (
                 "organization_self_hosted_runners".to_owned(),
