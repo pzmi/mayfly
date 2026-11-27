@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -256,6 +257,8 @@ pub struct Gate {
 #[derive(Debug)]
 struct GateInner {
     arrived: Notify,
+    /// Requests that reached the gate, held or let through.
+    arrivals: AtomicU64,
     open: Semaphore,
 }
 
@@ -263,6 +266,13 @@ impl Gate {
     /// Waits until a request has reached the gate.
     pub async fn arrived(&self) {
         self.inner.arrived.notified().await;
+    }
+
+    /// How many requests have reached the gate so far, held or let through: a request asked of
+    /// the route, whether or not its client waited for the answer.
+    #[must_use]
+    pub fn arrivals(&self) -> u64 {
+        self.inner.arrivals.load(Ordering::SeqCst)
     }
 
     /// Lets every held and later request through.
@@ -418,6 +428,7 @@ impl FakeGithub {
         let gate = Gate {
             inner: Arc::new(GateInner {
                 arrived: Notify::new(),
+                arrivals: AtomicU64::new(0),
                 open: Semaphore::new(0),
             }),
         };
@@ -449,6 +460,7 @@ impl FakeGithub {
         params.query.extend(query);
         let gate = self.state().gates.get(&route).cloned();
         if let Some(gate) = gate {
+            gate.inner.arrivals.fetch_add(1, Ordering::SeqCst);
             gate.inner.arrived.notify_one();
             // A closed semaphore is an open gate: acquire fails at once.
             let _ = gate.inner.open.acquire().await;

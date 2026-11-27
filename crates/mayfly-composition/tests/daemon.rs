@@ -1535,6 +1535,52 @@ mod github {
         );
     }
 
+    #[test]
+    fn should_list_once_when_a_run_is_cut_while_its_listing_is_in_flight() {
+        // given: the fake serves the App's organisation and holds every listing of runners at a
+        // gate, unanswered; the daemon runs in this process, its key read from a file
+        let github = ServedGithub::start(daemon_knobs());
+        let gate = github.fake.hold(mayfly_fake_github::Route::ListRunners);
+        let mut world = World::new(true);
+        world.serve_github(&github);
+        world.key_in_file();
+        let (cut, shutdown) = (SessionCut::default(), Shutdown::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let seen = std::sync::Mutex::new(None);
+
+        // when: the first run's run-start listing reaches GitHub and is held there; its link is
+        // cut with the listing in flight and a second run starts within the hour; then the gate
+        // opens and `doctor` asks
+        let script = async {
+            let Some(first) = next_ready(&mut rx).await else {
+                return;
+            };
+            gate.arrived().await;
+            cut.cut();
+            let Some(second) = next_ready(&mut rx).await else {
+                return;
+            };
+            gate.release();
+            let config = world.config();
+            let doctor = tokio::task::spawn_blocking(move || doctor_of(&config))
+                .await
+                .expect("doctor");
+            *seen.lock().expect("seen") = Some((first, second, doctor));
+            shutdown.cancel();
+        };
+        let ran = in_process(&world, &cut, &shutdown, script, tx);
+
+        // then: two runs, one listing asked of GitHub over the daemon's whole life: the cancelled
+        // run's listing spent P14's budget for the process, answered or not
+        let (first, second, doctor) = seen
+            .into_inner()
+            .expect("seen")
+            .unwrap_or_else(|| panic!("the daemon stopped early: {ran:?}"));
+        assert!(ran.is_ok(), "{ran:?}");
+        assert!(second.epoch > first.epoch, "a second run");
+        assert_eq!(gate.arrivals(), 1, "{doctor}");
+    }
+
     // ---- GH-08: the start-up trust checks ------------------------------------------------
 
     #[test]
