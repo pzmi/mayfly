@@ -447,6 +447,19 @@ impl Drop for ListenerLease<'_> {
     }
 }
 
+/// Hands the manager's last listing to the desk when dropped, so a sweep cancelled mid-listing
+/// still spends P14's budget for the whole process (see `GithubRun::sweep`).
+struct ListingCarry<'a, F: Fn() -> Option<Millis>> {
+    desk: &'a ReaperDesk,
+    listed: F,
+}
+
+impl<F: Fn() -> Option<Millis>> Drop for ListingCarry<'_, F> {
+    fn drop(&mut self) {
+        self.desk.listed((self.listed)());
+    }
+}
+
 /// What one run's GitHub loops need from the daemon.
 #[derive(Clone, Copy)]
 pub struct RunInputs<'r> {
@@ -1019,10 +1032,18 @@ impl<'r> GithubRun<'r> {
         }
     }
 
+    /// One sweep, its listing handed to the desk however it ends: P14's budget is spent once
+    /// GitHub is asked, answered or not, so a run cancelled while the listing is in flight still
+    /// carries it to the next run. Pinned by
+    /// `tests/daemon.rs::github::should_list_once_when_a_run_is_cut_while_its_listing_is_in_flight`.
     async fn sweep(&self, trigger: SweepTrigger) {
         let desk = &self.inputs.side.reaper;
+        let carry = ListingCarry {
+            desk,
+            listed: || self.manager.last_listing(),
+        };
         let swept = self.manager.sweep(trigger).await;
-        desk.listed(self.manager.last_listing());
+        drop(carry);
         match swept {
             Ok(report) => desk.record(&report),
             Err(SweepError::BudgetSpent { .. }) => {}
